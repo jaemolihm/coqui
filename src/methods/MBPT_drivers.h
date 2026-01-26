@@ -147,5 +147,28 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
 
 void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt);
 
+/**
+ * @brief Linear response Dyson equation calculation
+ *
+ * Computes the linear response Green's function ΔG from an external perturbation ΔH0.
+ * Requires a previous HF/GW calculation to provide the unperturbed Green's function.
+ *
+ * The LR Dyson equation solved is:
+ *   ΔG(k,iω) = G(k+q,iω) · ΔH0(k) · G(k,iω)
+ *
+ * Required parameters in pt:
+ *  - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+ *  - output: Output checkpoint prefix (default: same as prefix)
+ *
+ * @param eri          - [INPUT] ERI handler (provides MPI, MF)
+ * @param pt           - [INPUT] Parameters as property tree
+ * @param q_vec        - [INPUT] Perturbation wavevector in crystal coords (3,)
+ * @param DeltaH0_skij - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ */
+template<typename eri_t>
+void lr_dyson_calc(eri_t &eri, ptree const& pt,
+                   nda::array<double, 1> const& q_vec,
+                   nda::array<ComplexType, 4> const& DeltaH0_skij);
+
 }
 #endif

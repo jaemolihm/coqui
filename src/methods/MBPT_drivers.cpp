@@ -40,6 +40,8 @@
 #include "methods/ERI/div_treatment_e.hpp"
 #include "methods/SCF/dca_dyson.h"
 #include "methods/SCF/simple_dyson.h"
+#include "methods/SCF/lr_dyson.hpp"
+#include "methods/SCF/scf_common.hpp"
 #include "methods/embedding/embed_t.h"
 #include "methods/embedding/embed_eri_t.h"
 #include "numerics/imag_axes_ft/IAFT.hpp"
@@ -1063,6 +1065,104 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt) {
   embed.dmft_embed(mb_state, &iter_solver, qp_approx_mbpt, corr_only);
 }
 
+
+/**
+ * Linear response Dyson equation calculation.
+ *
+ * Computes ΔG(k,iω) = G(k+q,iω) · ΔH0(k) · G(k,iω)
+ *
+ * This function:
+ * 1. Reads the unperturbed solution (F, Σ) from a previous HF/GW checkpoint
+ * 2. Recomputes G from F and Σ via the Dyson equation
+ * 3. Creates lr_dyson and solves the LR Dyson equation
+ * 4. Writes ΔG and ΔDm to the checkpoint file
+ */
+template<typename eri_t>
+void lr_dyson_calc(eri_t &eri, ptree const& pt,
+                   nda::array<double, 1> const& q_vec,
+                   nda::array<ComplexType, 4> const& DeltaH0_skij) {
+  auto mf = eri.corr_eri->get().MF();
+  auto& mpi = eri.corr_eri->get().mpi();
+
+  std::string err = std::string("lr_dyson_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto output = io::get_value_with_default<std::string>(pt, "output", prefix);
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_dyson_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Banner
+  app_log(1, "\n"
+             "╔═╗╔═╗╔═╗ ╦ ╦╦  ┬  ┬─┐   ┌┬┐┬ ┬┌─┐┌─┐┌┐┌\n"
+             "║  ║ ║║═╬╗║ ║║  │  ├┬┘───│││└┬┘└─┐│ ││││\n"
+             "╚═╝╚═╝╚═╝╚╚═╝╩  ┴─┘┴└─   ─┴┘ ┴ └─┘└─┘┘└┘\n");
+  app_log(1, "  Linear Response Dyson Equation Solver");
+  app_log(1, "  Input checkpoint:  {}", input_file);
+  app_log(1, "  Output checkpoint: {}.mbpt.h5", output);
+  app_log(1, "  q-vector:          ({:.6f}, {:.6f}, {:.6f})\n",
+          q_vec(0), q_vec(1), q_vec(2));
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  // Create simple_dyson
+  simple_dyson dyson(mf.get(), &ft);
+
+  // Allocate shared arrays
+  auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  // Read F and Sigma from checkpoint
+  double mu = 0.0;
+  chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
+                  prefix, input_grp, input_iter);
+  mpi->comm.barrier();
+
+  // Compute G from F and Sigma via Dyson equation
+  app_log(2, "Computing unperturbed Green's function from checkpoint...");
+  update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+  mpi->comm.barrier();
+
+  // Allocate LR arrays
+  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  // Copy DeltaH0 to shared array
+  if (mpi->node_comm.root()) {
+    sDeltaH0_skij.local() = DeltaH0_skij;
+  }
+  mpi->comm.barrier();
+
+  // Create lr_dyson and solve
+  lr_dyson lr(dyson, q_vec);
+  app_log(2, "Solving LR Dyson equation...");
+  lr.solve_lr_dyson_fixed_sigma(sDeltaG_tskij, sG_tskij, sDeltaH0_skij);
+
+  // Compute LR density matrix
+  lr.compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
+  mpi->comm.barrier();
+
+  // Write results
+  chkpt::dump_lr_dyson(mpi->comm, output + ".mbpt.h5", q_vec,
+                       sDeltaG_tskij, sDeltaDm_skij);
+
+  app_log(1, "\nLR Dyson calculation completed.");
+}
+
+
 // instantiations
 using mpi3::communicator;
 
@@ -1131,5 +1231,31 @@ template void mbpt(std::string, \
   MBPT_INST(chol_reader_t, chol_reader_t, chol_reader_t, chol_reader_t)
 
 #undef MBPT_INST
+
+// lr_dyson_calc instantiations
+#define LR_DYSON_INST(HF, HARTREE, EXCHANGE, CORR) \
+template void lr_dyson_calc(mb_eri_t<HF, HARTREE, EXCHANGE, CORR>&, \
+                            ptree const&, \
+                            nda::array<double, 1> const&, \
+                            nda::array<ComplexType, 4> const&);
+
+LR_DYSON_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
+LR_DYSON_INST(thc_reader_t, thc_reader_t, thc_reader_t, chol_reader_t)
+LR_DYSON_INST(thc_reader_t, thc_reader_t, chol_reader_t, thc_reader_t)
+LR_DYSON_INST(thc_reader_t, thc_reader_t, chol_reader_t, chol_reader_t)
+LR_DYSON_INST(thc_reader_t, chol_reader_t, thc_reader_t, thc_reader_t)
+LR_DYSON_INST(thc_reader_t, chol_reader_t, thc_reader_t, chol_reader_t)
+LR_DYSON_INST(thc_reader_t, chol_reader_t, chol_reader_t, thc_reader_t)
+LR_DYSON_INST(thc_reader_t, chol_reader_t, chol_reader_t, chol_reader_t)
+LR_DYSON_INST(chol_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
+LR_DYSON_INST(chol_reader_t, thc_reader_t, thc_reader_t, chol_reader_t)
+LR_DYSON_INST(chol_reader_t, thc_reader_t, chol_reader_t, thc_reader_t)
+LR_DYSON_INST(chol_reader_t, thc_reader_t, chol_reader_t, chol_reader_t)
+LR_DYSON_INST(chol_reader_t, chol_reader_t, thc_reader_t, thc_reader_t)
+LR_DYSON_INST(chol_reader_t, chol_reader_t, thc_reader_t, chol_reader_t)
+LR_DYSON_INST(chol_reader_t, chol_reader_t, chol_reader_t, thc_reader_t)
+LR_DYSON_INST(chol_reader_t, chol_reader_t, chol_reader_t, chol_reader_t)
+
+#undef LR_DYSON_INST
 
 }

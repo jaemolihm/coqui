@@ -119,6 +119,56 @@ namespace methods {
   bool read_pi_local(shared_array_t &sPi_imp, shared_array_t &sPi_dc,
                      std::string filename, long weiss_b_iter=-1);
 
+  /**
+   * Read linear response perturbation ΔH0 from HDF5 file.
+   *
+   * Expected HDF5 structure:
+   *   /linear_response/
+   *     q_vec              # (3,) perturbation wavevector in crystal coords
+   *     DeltaH0_skij       # (ns, nk, nb, nb) complex perturbation matrix
+   *
+   * @param node_comm      - [INPUT] MPI shared communicator
+   * @param filename       - [INPUT] HDF5 file path
+   * @param q_vec          - [OUTPUT] perturbation wavevector
+   * @param sDeltaH0_skij  - [OUTPUT] perturbation matrix
+   * @return true if read successful, false otherwise
+   */
+  template<typename shared_array_t>
+  bool read_DeltaH0(mpi3::shared_communicator node_comm,
+                    std::string filename,
+                    nda::array<double, 1>& q_vec,
+                    shared_array_t& sDeltaH0_skij);
+
+  /**
+   * Write linear response perturbation ΔH0 to HDF5 file.
+   *
+   * @param comm           - [INPUT] MPI communicator
+   * @param filename       - [INPUT] HDF5 file path
+   * @param q_vec          - [INPUT] perturbation wavevector
+   * @param sDeltaH0_skij  - [INPUT] perturbation matrix
+   */
+  template<typename communicator_t, typename shared_array_t>
+  void write_DeltaH0(communicator_t& comm,
+                     std::string filename,
+                     nda::array<double, 1> const& q_vec,
+                     shared_array_t const& sDeltaH0_skij);
+
+  /**
+   * Write LR Dyson results to HDF5 checkpoint file.
+   *
+   * @param comm              - [INPUT] MPI communicator
+   * @param filename          - [INPUT] HDF5 file path (e.g., "coqui.mbpt.h5")
+   * @param q_vec             - [INPUT] perturbation wavevector
+   * @param sDeltaG_tskij     - [INPUT] LR Green's function
+   * @param sDeltaDm_skij     - [INPUT] LR density matrix
+   */
+  template<typename communicator_t, typename G_t, typename Dm_t>
+  void dump_lr_dyson(communicator_t& comm,
+                     std::string filename,
+                     nda::array<double, 1> const& q_vec,
+                     G_t const& sDeltaG_tskij,
+                     Dm_t const& sDeltaDm_skij);
+
   }; // chkpt
 
 } // methods

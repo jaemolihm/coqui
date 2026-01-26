@@ -71,3 +71,37 @@ def run_qpg0w0(params, h_int,
     _run_mbpt("evgw0", params, h_int,
               h_int_hf = h_int_hf, h_int_hartree = h_int_hartree, h_int_exchange = h_int_exchange,
               projector_info = None, local_polarizabilities = None)
+
+
+def run_lr_dyson(params, h_int, q_vec, DeltaH0_skij):
+    """
+    Run linear response Dyson equation calculation.
+
+    Computes ΔG in response to a perturbation ΔH0 at wavevector q.
+    Requires a previous HF/GW calculation to provide the unperturbed G.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+        - output: Output checkpoint prefix (default: same as prefix)
+    h_int : ThcCoulomb or CholCoulomb
+        ERI handler from the original calculation
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaH0_skij : np.ndarray
+        Perturbation matrix, shape (ns, nk, nb, nb)
+
+    Notes
+    -----
+    Results (ΔG, ΔDm) are written to {output}.mbpt.h5 under
+    the "linear_response" group.
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_dyson as lr_dyson_cxx
+
+    q_vec = np.asarray(q_vec, dtype=np.float64)
+    DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
+
+    lr_dyson_cxx(json.dumps(params), h_int, q_vec, DeltaH0_skij)
