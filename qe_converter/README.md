@@ -1,6 +1,6 @@
 Quantum ESPRESSO Converter for CoQuí
 ------------------------------------
-**Last Updated:** Sep. 1, 2025
+**Last Updated:** Jan. 25, 2026
 
 This directory provides the Fortran source code `pw2coqui.f90` required to 
 interface **Quantum ESPRESSO (QE)** with **CoQuí**. The converter extracts 
@@ -20,11 +20,15 @@ QE suite) of your QE source tree:
 cp -r pw2coqui.f90 /path/to/qe-source/PP/src/
 ```
 
-### Step 2: Modify QE’s CMakeLists.txt
-Update the QE build system so that the converter is compiled. Inside the
-`PostProc` package folder within your QE source tree (e.g. `/path/to/qe-source/PP/`):
-1. Open the `CMakeLists.txt` file.
-2. Insert the following block: 
+### Step 2: Modify QE's build system
+
+Choose the appropriate option based on your QE build system:
+
+#### Option A: CMake
+
+Edit `PP/CMakeLists.txt` in your QE source tree:
+
+1. Insert the following block above the `PP_EXE_TARGETS` definition:
    ```cmake
    ###########################################################
    # pw2coqui.x
@@ -42,13 +46,8 @@ Update the QE build system so that the converter is compiled. Inside the
            qe_mpi_fortran
            qe_xclib)
    ```
-   above the section where `PP_EXE_TARGETS` is defined: 
-   ```cmake 
-   set(PP_EXE_TARGETS
-       ...
-   ) 
-   ```
-3. Add the new executable target to the list of `PP_EXE_TARGETS`:
+
+2. Add the new executable target to `PP_EXE_TARGETS`:
    ```cmake
    set(PP_EXE_TARGETS
        ...
@@ -57,10 +56,31 @@ Update the QE build system so that the converter is compiled. Inside the
    )
    ```
 
+#### Option B: Autotools (Makefile)
+
+Edit `PP/src/Makefile` in your QE source tree:
+
+1. Add `pw2coqui.x` to the `all` target list:
+   ```makefile
+   all : tldeps open_grid.x average.x ... pw2coqui.x
+   ```
+
+2. Add the build rule (e.g., before the `clean` target):
+   ```makefile
+   pw2coqui.x : pw2coqui.o libpp.a $(MODULES)
+      $(LD) $(LDFLAGS) -o $@ \
+         pw2coqui.o libpp.a $(MODULES) $(QELIBS)
+      - ( cd ../../bin ; ln -fs ../PP/src/$@ . )
+   ```
+
 ### Step 3: Recompile QE
-Rebuild QE with the modified source and CMake configuration.
+
+Rebuild QE with the modified configuration:
+- **CMake**: Run `make` from your CMake build directory
+- **Autotools**: Run `make pp` from the QE root directory
+
 After successful compilation, the executable `pw2coqui.x` will be available
-in your QE build directory (typically `bin/` inside the build tree).
+in your QE `bin/` directory.
 
 
 ## Usage
