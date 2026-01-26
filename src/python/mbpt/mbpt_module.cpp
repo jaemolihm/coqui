@@ -22,11 +22,59 @@
 #include <c2py/c2py.hpp>
 #include "IO/app_loggers.h"
 #include "methods/MBPT_drivers.h"
+#include "utilities/lr_utils.hpp"
 
 #include "python/interaction/eri_module.hpp"
 #include "python/interaction/eri_module.wrap.hxx"
 
 namespace coqui_py {
+
+  /**
+   * @brief Run LR Dyson calculation
+   *
+   * This calls the C++ lr_dyson_calc function which:
+   * 1. Reads unperturbed G from checkpoint
+   * 2. Solves: ΔG(k,iω) = G(k+q,iω) · ΔH0(k) · G(k,iω)
+   * 3. Writes ΔG and ΔDm to checkpoint
+   *
+   * @param lr_params     - [INPUT] JSON string with params (prefix, output)
+   * @param h_int         - [INPUT] ERI handler
+   * @param q_vec         - [INPUT] Perturbation wavevector (3,)
+   * @param DeltaH0_skij  - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+   */
+  template<typename eri_handler>
+  void lr_dyson(const std::string &lr_params, eri_handler &h_int,
+                nda::array<double, 1> const& q_vec,
+                nda::array<ComplexType, 4> const& DeltaH0_skij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    methods::lr_dyson_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij);
+  }
+
+  template void lr_dyson(const std::string&, ThcCoulomb&,
+                         nda::array<double, 1> const&,
+                         nda::array<ComplexType, 4> const&);
+  template void lr_dyson(const std::string&, CholCoulomb&,
+                         nda::array<double, 1> const&,
+                         nda::array<ComplexType, 4> const&);
+
+
+  /**
+   * @brief Compute k+q mapping for linear response calculations
+   *
+   * @param kpts_crys   - [INPUT] k-points in crystal coordinates (nkpts, 3)
+   * @param q_vec       - [INPUT] perturbation wavevector in crystal coordinates (3,)
+   * @return            - [OUTPUT] k → k+q index mapping (nkpts,)
+   */
+  nda::array<long, 1> calculate_kpq_map(
+      nda::array<double, 2> const& kpts_crys,
+      nda::array<double, 1> const& q_vec) {
+
+    long nkpts = kpts_crys.shape(0);
+    nda::array<long, 1> kpq_map(nkpts);
+    utils::calculate_kpq_map(kpts_crys, q_vec, kpq_map);
+    return kpq_map;
+  }
 
   template<typename eri_handler>
   void mbpt(const std::string &solver_type, const std::string &mbpt_params, eri_handler &h_int,

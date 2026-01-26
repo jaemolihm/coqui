@@ -185,11 +185,86 @@ static auto const fun_0 = c2py::dispatcher_f_kw_t{
         "h_int_exchange")};
 
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
+
+// lr_dyson - run LR Dyson calculation
+static auto const fun_lr_dyson = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_vec,
+           nda::array<ComplexType, 4> const& DeltaH0_skij) {
+          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij);
+        },
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij"),
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::CholCoulomb &h_int,
+           nda::array<double, 1> const& q_vec,
+           nda::array<ComplexType, 4> const& DeltaH0_skij) {
+          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij);
+        },
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij")};
+
+static const auto doc_lr_dyson = fun_lr_dyson.doc(R"DOC(
+Run linear response Dyson equation calculation.
+
+Solves: ΔG(k,iω) = G(k+q,iω) · ΔH0(k) · G(k,iω)
+
+This function reads the unperturbed Green's function from a previous HF/GW
+checkpoint, solves the LR Dyson equation, and writes the results (ΔG, ΔDm)
+back to the checkpoint file.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    - output: Output checkpoint prefix (default: same as prefix)
+h_int : ThcCoulomb or CholCoulomb
+    ERI handler from the original calculation
+q_vec : np.ndarray
+    Perturbation wavevector in crystal coordinates, shape (3,)
+DeltaH0_skij : np.ndarray
+    Perturbation matrix, shape (ns, nk, nb, nb)
+)DOC");
+
+// calculate_kpq_map
+static auto const fun_kpq_map = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](nda::array<double, 2> const& kpts_crys,
+           nda::array<double, 1> const& q_vec) {
+          return coqui_py::calculate_kpq_map(kpts_crys, q_vec);
+        },
+        "kpts_crys", "q_vec")};
+
+static const auto doc_kpq_map = fun_kpq_map.doc(R"DOC(
+Compute k+q mapping for linear response calculations.
+
+Given a k-point grid and a perturbation wavevector q, compute the mapping
+kpq_map[ik] = ik' where k[ik] + q = k[ik'] (mod G).
+
+Parameters
+----------
+kpts_crys : np.ndarray
+    k-points in crystal coordinates, shape (nkpts, 3)
+q_vec : np.ndarray
+    Perturbation wavevector in crystal coordinates, shape (3,)
+
+Returns
+-------
+np.ndarray
+    k → k+q index mapping, shape (nkpts,)
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
     {"mbpt", (PyCFunction)c2py::pyfkw<fun_0>, METH_VARARGS | METH_KEYWORDS,
      doc_d_0.c_str()},
+    {"lr_dyson", (PyCFunction)c2py::pyfkw<fun_lr_dyson>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_dyson.c_str()},
+    {"calculate_kpq_map_cpp", (PyCFunction)c2py::pyfkw<fun_kpq_map>,
+     METH_VARARGS | METH_KEYWORDS, doc_kpq_map.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
