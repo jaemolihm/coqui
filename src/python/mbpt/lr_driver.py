@@ -54,32 +54,16 @@ def calculate_kpq_map(kpts_crys: np.ndarray, q_vec: np.ndarray,
         Perturbation wavevector in crystal coordinates, shape (3,)
     threshold : float, optional
         Tolerance for k-point matching, default 1e-6
+        Note: Currently not passed to C++ (uses default 1e-6)
 
     Returns
     -------
     np.ndarray
         k → k+q index mapping, shape (nkpts,)
     """
-    nkpts = kpts_crys.shape[0]
-    kpq_map = np.full(nkpts, -1, dtype=np.int32)
-
-    for ik in range(nkpts):
-        kpq = kpts_crys[ik] + q_vec
-
-        for ikp in range(nkpts):
-            diff = kpts_crys[ikp] - kpq
-            # Apply periodic boundary conditions
-            diff = diff - np.floor(diff)
-            diff = diff - np.round(diff)
-
-            if np.sum(diff**2) < threshold**2:
-                assert kpq_map[ik] == -1, f"Duplicate k+q mapping for ik={ik}"
-                kpq_map[ik] = ikp
-                break
-
-        assert kpq_map[ik] >= 0, f"Could not find k+q for ik={ik}"
-
-    return kpq_map
+    kpts_crys = np.asarray(kpts_crys, dtype=np.float64)
+    q_vec = np.asarray(q_vec, dtype=np.float64)
+    return calculate_kpq_map_cpp(kpts_crys, q_vec)
 
 
 def is_q_commensurate(kpts_crys: np.ndarray, q_vec: np.ndarray,

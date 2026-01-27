@@ -1094,6 +1094,25 @@ void lr_dyson_calc(eri_t &eri, ptree const& pt,
   utils::check(std::filesystem::exists(input_file),
                "lr_dyson_calc: Input checkpoint {} does not exist!", input_file);
 
+  // Validate checkpoint contains required data
+  {
+    h5::file file(input_file, 'r');
+    auto root = h5::group(file);
+    utils::check(root.has_subgroup(input_grp),
+                 "lr_dyson_calc: Checkpoint {} does not contain '{}/' group. "
+                 "Run HF or GW calculation first.", input_file, input_grp);
+    auto grp = root.open_group(input_grp);
+    if (input_iter == -1) {
+      utils::check(grp.has_dataset("final_iter"),
+                   "lr_dyson_calc: Checkpoint {}/{}/ missing 'final_iter'. "
+                   "SCF calculation may not have completed.", input_file, input_grp);
+    } else {
+      utils::check(grp.has_subgroup("iter" + std::to_string(input_iter)),
+                   "lr_dyson_calc: Checkpoint {}/{}/ does not contain 'iter{}'. "
+                   "Check input_iter parameter.", input_file, input_grp, input_iter);
+    }
+  }
+
   // Banner
   app_log(1, "\n"
              "╔═╗╔═╗╔═╗ ╦ ╦╦  ┬  ┬─┐   ┌┬┐┬ ┬┌─┐┌─┐┌┐┌\n"
@@ -1139,6 +1158,16 @@ void lr_dyson_calc(eri_t &eri, ptree const& pt,
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  // Validate DeltaH0 dimensions
+  utils::check(DeltaH0_skij.shape(0) == mf->nspin() &&
+               DeltaH0_skij.shape(1) == mf->nkpts_ibz() &&
+               DeltaH0_skij.shape(2) == mf->nbnd() &&
+               DeltaH0_skij.shape(3) == mf->nbnd(),
+               "lr_dyson_calc: DeltaH0_skij shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+               mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
+               DeltaH0_skij.shape(0), DeltaH0_skij.shape(1),
+               DeltaH0_skij.shape(2), DeltaH0_skij.shape(3));
 
   // Copy DeltaH0 to shared array
   if (mpi->node_comm.root()) {

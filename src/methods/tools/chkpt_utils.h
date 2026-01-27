@@ -127,14 +127,14 @@ namespace methods {
    *     q_vec              # (3,) perturbation wavevector in crystal coords
    *     DeltaH0_skij       # (ns, nk, nb, nb) complex perturbation matrix
    *
-   * @param node_comm      - [INPUT] MPI shared communicator
+   * @param comm           - [INPUT] MPI communicator (shared or regular)
    * @param filename       - [INPUT] HDF5 file path
    * @param q_vec          - [OUTPUT] perturbation wavevector
    * @param sDeltaH0_skij  - [OUTPUT] perturbation matrix
    * @return true if read successful, false otherwise
    */
-  template<typename shared_array_t>
-  bool read_DeltaH0(mpi3::shared_communicator node_comm,
+  template<typename communicator_t, typename shared_array_t>
+  bool read_DeltaH0(communicator_t& comm,
                     std::string filename,
                     nda::array<double, 1>& q_vec,
                     shared_array_t& sDeltaH0_skij);

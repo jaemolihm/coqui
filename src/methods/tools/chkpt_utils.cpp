@@ -20,6 +20,9 @@
 
 
 #include "chkpt_utils.h"
+#include "utilities/check.hpp"
+
+#include <filesystem>
 
 namespace methods {
   namespace chkpt {
@@ -512,13 +515,13 @@ template void read_qp_hamilt_components(
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
 
-template<typename shared_array_t>
-bool read_DeltaH0(mpi3::shared_communicator node_comm,
+template<typename communicator_t, typename shared_array_t>
+bool read_DeltaH0(communicator_t& comm,
                   std::string filename,
                   nda::array<double, 1>& q_vec,
                   shared_array_t& sDeltaH0_skij) {
   bool success = false;
-  if (node_comm.root()) {
+  if (comm.root()) {
     try {
       h5::file file(filename, 'r');
       auto root_grp = h5::group(file);
@@ -538,8 +541,8 @@ bool read_DeltaH0(mpi3::shared_communicator node_comm,
       success = false;
     }
   }
-  node_comm.broadcast_n(&success, 1, 0);
-  node_comm.barrier();
+  comm.broadcast_n(&success, 1, 0);
+  comm.barrier();
   return success;
 }
 
@@ -549,6 +552,8 @@ void write_DeltaH0(communicator_t& comm,
                    nda::array<double, 1> const& q_vec,
                    shared_array_t const& sDeltaH0_skij) {
   if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "write_DeltaH0: File {} does not exist. Cannot append.", filename);
     h5::file file(filename, 'a');
     h5::group grp(file);
     auto lr_grp = grp.has_subgroup("linear_response") ?
@@ -569,6 +574,8 @@ void dump_lr_dyson(communicator_t& comm,
                    G_t const& sDeltaG_tskij,
                    Dm_t const& sDeltaDm_skij) {
   if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_lr_dyson: File {} does not exist. Cannot append.", filename);
     h5::file file(filename, 'a');
     h5::group grp(file);
     auto lr_grp = grp.has_subgroup("linear_response") ?
@@ -587,7 +594,7 @@ void dump_lr_dyson(communicator_t& comm,
 }
 
 // LR template instantiations
-template bool read_DeltaH0(mpi3::shared_communicator, std::string,
+template bool read_DeltaH0(mpi3::shared_communicator&, std::string,
                            nda::array<double, 1>&, sArray_t<Array_view_4D_t>&);
 
 template void write_DeltaH0(mpi3::communicator&, std::string,
