@@ -192,27 +192,33 @@ static auto const fun_lr_dyson = c2py::dispatcher_f_kw_t{
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_vec,
-           nda::array<ComplexType, 4> const& DeltaH0_skij) {
-          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij);
+           nda::array<ComplexType, 4> const& DeltaH0_skij,
+           bool fix_density) {
+          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij, fix_density);
         },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij"),
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "fix_density"),
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::CholCoulomb &h_int,
            nda::array<double, 1> const& q_vec,
-           nda::array<ComplexType, 4> const& DeltaH0_skij) {
-          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij);
+           nda::array<ComplexType, 4> const& DeltaH0_skij,
+           bool fix_density) {
+          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij, fix_density);
         },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij")};
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "fix_density")};
 
 static const auto doc_lr_dyson = fun_lr_dyson.doc(R"DOC(
 Run linear response Dyson equation calculation.
 
-Solves: ΔG(k,iω) = G(k+q,iω) · ΔH0(k) · G(k,iω)
+Solves: ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) - Δμ·S(k)] · G(k,iω)
 
 This function reads the unperturbed Green's function from a previous HF/GW
 checkpoint, solves the LR Dyson equation, and writes the results (ΔG, ΔDm)
 back to the checkpoint file.
+
+Two modes are available:
+- fix_density=False: Use Δμ=0 (chemical potential fixed)
+- fix_density=True: Compute Δμ to enforce ΔN=0 (particle number fixed)
 
 Parameters
 ----------
@@ -226,6 +232,13 @@ q_vec : np.ndarray
     Perturbation wavevector in crystal coordinates, shape (3,)
 DeltaH0_skij : np.ndarray
     Perturbation matrix, shape (ns, nk, nb, nb)
+fix_density : bool
+    If True, compute Δμ to enforce ΔN=0 (default False)
+
+Returns
+-------
+float
+    The Δμ value used (computed if fix_density=True, otherwise 0.0)
 )DOC");
 
 // calculate_kpq_map
@@ -256,6 +269,93 @@ np.ndarray
     k → k+q index mapping, shape (nkpts,)
 )DOC");
 
+// lr_hf - compute LR Fock matrix from LR density matrix
+static auto const fun_lr_hf = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_vec,
+           nda::array<ComplexType, 4> const& DeltaDm_skij,
+           nda::array<ComplexType, 4> const& S_skij,
+           bool compute_hartree,
+           bool compute_exchange) {
+          return coqui_py::lr_hf(h_int, q_vec, DeltaDm_skij, S_skij,
+                                 compute_hartree, compute_exchange);
+        },
+        "h_int", "q_vec", "DeltaDm_skij", "S_skij", "compute_hartree", "compute_exchange")};
+
+static const auto doc_lr_hf = fun_lr_hf.doc(R"DOC(
+Compute linear response Fock matrix from LR density matrix.
+
+Computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm using THC-ERI.
+
+Parameters
+----------
+h_int : ThcCoulomb
+    THC ERI handler
+q_vec : np.ndarray
+    Perturbation wavevector in crystal coordinates, shape (3,)
+DeltaDm_skij : np.ndarray
+    LR density matrix, shape (ns, nk, nb, nb)
+S_skij : np.ndarray
+    Overlap matrix, shape (ns, nk, nb, nb)
+compute_hartree : bool
+    Whether to compute the Hartree (Coulomb) term
+compute_exchange : bool
+    Whether to compute the Exchange term
+
+Returns
+-------
+np.ndarray
+    LR Fock matrix, shape (ns, nk, nb, nb)
+)DOC");
+
+// hf_evaluate - compute HF self-energy (Fock matrix) from density matrix
+static auto const fun_hf_evaluate = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 4> const& Dm_skij,
+           nda::array<ComplexType, 4> const& S_skij,
+           bool compute_hartree,
+           bool compute_exchange) {
+          return coqui_py::hf_evaluate(h_int, Dm_skij, S_skij,
+                                       compute_hartree, compute_exchange);
+        },
+        "h_int", "Dm_skij", "S_skij", "compute_hartree", "compute_exchange"),
+    c2py::cfun(
+        [](coqui_py::CholCoulomb &h_int,
+           nda::array<ComplexType, 4> const& Dm_skij,
+           nda::array<ComplexType, 4> const& S_skij,
+           bool compute_hartree,
+           bool compute_exchange) {
+          return coqui_py::hf_evaluate(h_int, Dm_skij, S_skij,
+                                       compute_hartree, compute_exchange);
+        },
+        "h_int", "Dm_skij", "S_skij", "compute_hartree", "compute_exchange")};
+
+static const auto doc_hf_evaluate = fun_hf_evaluate.doc(R"DOC(
+Compute HF self-energy (Fock matrix) from density matrix.
+
+Computes F = J + K from the density matrix Dm.
+
+Parameters
+----------
+h_int : ThcCoulomb or CholCoulomb
+    ERI handler (THC or Cholesky)
+Dm_skij : np.ndarray
+    Density matrix, shape (ns, nk, nb, nb)
+S_skij : np.ndarray
+    Overlap matrix, shape (ns, nk, nb, nb)
+compute_hartree : bool
+    Whether to compute the Hartree (Coulomb) term
+compute_exchange : bool
+    Whether to compute the Exchange term
+
+Returns
+-------
+np.ndarray
+    Fock matrix F, shape (ns, nk, nb, nb)
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -265,6 +365,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_dyson.c_str()},
     {"calculate_kpq_map_cpp", (PyCFunction)c2py::pyfkw<fun_kpq_map>,
      METH_VARARGS | METH_KEYWORDS, doc_kpq_map.c_str()},
+    {"lr_hf_cpp", (PyCFunction)c2py::pyfkw<fun_lr_hf>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_hf.c_str()},
+    {"hf_evaluate_cpp", (PyCFunction)c2py::pyfkw<fun_hf_evaluate>,
+     METH_VARARGS | METH_KEYWORDS, doc_hf_evaluate.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
