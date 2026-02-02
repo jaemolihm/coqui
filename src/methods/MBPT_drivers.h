@@ -164,11 +164,14 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt);
  * @param pt           - [INPUT] Parameters as property tree
  * @param q_vec        - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_skij - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ * @param fix_density  - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: false)
+ * @return The Δμ value used (computed if fix_density=true, otherwise 0.0)
  */
 template<typename eri_t>
-void lr_dyson_calc(eri_t &eri, ptree const& pt,
-                   nda::array<double, 1> const& q_vec,
-                   nda::array<ComplexType, 4> const& DeltaH0_skij);
+double lr_dyson_calc(eri_t &eri, ptree const& pt,
+                     nda::array<double, 1> const& q_vec,
+                     nda::array<ComplexType, 4> const& DeltaH0_skij,
+                     bool fix_density = false);
 
 }
 #endif

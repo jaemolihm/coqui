@@ -114,6 +114,21 @@ public:
   std::optional<sArray_t<nda::array_view<ComplexType, 5> > > sPi_imp_wabcd;
   std::optional<sArray_t<nda::array_view<ComplexType, 5> > > sPi_dc_wabcd;
 
+  // ============ Linear Response Extension ============
+  // Note: Use "Delta" prefix (not "d") since "d" means distributed array
+  //
+  // Perturbation info
+  std::optional<nda::array<double, 1>> q_vec;                          // (3,) perturbation wavevector in crystal coords
+  std::optional<nda::array<int, 1>> kpq_map;                           // (nkpts,) k → k+q index mapping
+
+  // LR quantities (indexed by k for (k+q,k) block)
+  std::optional<sArray_t<nda::array_view<ComplexType, 4>>> sDeltaH0_skij;    // Input perturbation (ns, nk, nb, nb)
+  std::optional<sArray_t<nda::array_view<ComplexType, 5>>> sDeltaG_tskij;    // LR Green's function (nt, ns, nk, nb, nb)
+  std::optional<sArray_t<nda::array_view<ComplexType, 4>>> sDeltaDm_skij;    // LR density matrix (ns, nk, nb, nb)
+  std::optional<sArray_t<nda::array_view<ComplexType, 5>>> sDeltaSigma_tskij;// LR self-energy (nt, ns, nk, nb, nb)
+  std::optional<sArray_t<nda::array_view<ComplexType, 4>>> sDeltaF_skij;     // LR Fock matrix (ns, nk, nb, nb)
+  std::optional<double> Delta_mu;                                      // Chemical potential shift (q=0 only)
+
 };
 
 } // methods

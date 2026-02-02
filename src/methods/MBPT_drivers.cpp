@@ -1078,9 +1078,10 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt) {
  * 4. Writes ΔG and ΔDm to the checkpoint file
  */
 template<typename eri_t>
-void lr_dyson_calc(eri_t &eri, ptree const& pt,
-                   nda::array<double, 1> const& q_vec,
-                   nda::array<ComplexType, 4> const& DeltaH0_skij) {
+double lr_dyson_calc(eri_t &eri, ptree const& pt,
+                     nda::array<double, 1> const& q_vec,
+                     nda::array<ComplexType, 4> const& DeltaH0_skij,
+                     bool fix_density) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1121,8 +1122,9 @@ void lr_dyson_calc(eri_t &eri, ptree const& pt,
   app_log(1, "  Linear Response Dyson Equation Solver");
   app_log(1, "  Input checkpoint:  {}", input_file);
   app_log(1, "  Output checkpoint: {}.mbpt.h5", output);
-  app_log(1, "  q-vector:          ({:.6f}, {:.6f}, {:.6f})\n",
+  app_log(1, "  q-vector:          ({:.6f}, {:.6f}, {:.6f})",
           q_vec(0), q_vec(1), q_vec(2));
+  app_log(1, "  fix_density:       {}\n", fix_density ? "true" : "false");
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -1178,10 +1180,21 @@ void lr_dyson_calc(eri_t &eri, ptree const& pt,
   // Create lr_dyson and solve
   lr_dyson lr(dyson, q_vec);
   app_log(2, "Solving LR Dyson equation...");
-  lr.solve_lr_dyson_fixed_sigma(sDeltaG_tskij, sG_tskij, sDeltaH0_skij);
 
-  // Compute LR density matrix
-  lr.compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
+  // Create zero ΔF and ΔΣ arrays
+  auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  if (mpi->node_comm.root()) {
+    sDeltaF_skij.local() = ComplexType(0.0);
+    sDeltaSigma_tskij.local() = ComplexType(0.0);
+  }
+  mpi->comm.barrier();
+
+  // solve_lr_dyson now returns the Δμ used and computes ΔDm internally
+  double Delta_mu = lr.solve_lr_dyson(sDeltaG_tskij, sDeltaDm_skij, sG_tskij, sDeltaH0_skij,
+                                      sDeltaF_skij, sDeltaSigma_tskij, fix_density);
   mpi->comm.barrier();
 
   // Write results
@@ -1189,6 +1202,11 @@ void lr_dyson_calc(eri_t &eri, ptree const& pt,
                        sDeltaG_tskij, sDeltaDm_skij);
 
   app_log(1, "\nLR Dyson calculation completed.");
+  if (fix_density) {
+    app_log(1, "  Computed Δμ = {:.6e}", Delta_mu);
+  }
+
+  return Delta_mu;
 }
 
 
@@ -1263,10 +1281,11 @@ template void mbpt(std::string, \
 
 // lr_dyson_calc instantiations
 #define LR_DYSON_INST(HF, HARTREE, EXCHANGE, CORR) \
-template void lr_dyson_calc(mb_eri_t<HF, HARTREE, EXCHANGE, CORR>&, \
-                            ptree const&, \
-                            nda::array<double, 1> const&, \
-                            nda::array<ComplexType, 4> const&);
+template double lr_dyson_calc(mb_eri_t<HF, HARTREE, EXCHANGE, CORR>&, \
+                              ptree const&, \
+                              nda::array<double, 1> const&, \
+                              nda::array<ComplexType, 4> const&, \
+                              bool);
 
 LR_DYSON_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
 LR_DYSON_INST(thc_reader_t, thc_reader_t, thc_reader_t, chol_reader_t)
