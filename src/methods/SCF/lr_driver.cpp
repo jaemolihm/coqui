@@ -23,6 +23,7 @@
 
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
+#include "utilities/check.hpp"
 #include "nda/nda.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
@@ -68,18 +69,38 @@ std::tuple<int, double> lr_driver::run_lr_hf(
     THC_t& thc,
     int max_iter,
     double tol,
-    bool fix_density) {
+    bool fix_density,
+    const lr_iter_params& iter_params) {
 
   _Timer.start("LR_HF_SCF");
+
+  utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS",
+               "lr_driver::run_lr_hf: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
+               iter_params.alg);
+
+  bool use_diis = (iter_params.alg == "DIIS");
+  double mixing = iter_params.mixing;
 
   app_log(1, "Starting LR-HF SCF loop:");
   app_log(1, "  max_iter = {}", max_iter);
   app_log(1, "  tol = {:.2e}", tol);
   app_log(1, "  fix_density = {}", fix_density ? "true" : "false");
+  app_log(1, "  iter_alg = {}", iter_params.alg);
+  app_log(1, "  mixing = {:.2f}", mixing);
+  if (use_diis) {
+    app_log(1, "  max_subsp_size = {}", iter_params.max_subsp_size);
+    app_log(1, "  diis_warmup = {}", iter_params.diis_warmup);
+  }
 
   // Initialize lr_hf solver if not already done
   if (!_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
+  }
+
+  // Initialize DIIS if requested
+  if (use_diis) {
+    _lr_diis = std::make_unique<lr_diis>(
+        iter_params.max_subsp_size, iter_params.diis_warmup, mixing);
   }
 
   // Get overlap matrix from dyson
@@ -97,6 +118,10 @@ std::tuple<int, double> lr_driver::run_lr_hf(
   auto sDeltaDm_prev_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
 
+  // Allocate array for previous Fock matrix (for damping)
+  auto sDeltaF_prev_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+
   // Initialize ΔF = 0
   if (_mpi->node_comm.root()) {
     sDeltaF_skij.local() = ComplexType(0.0);
@@ -108,14 +133,15 @@ std::tuple<int, double> lr_driver::run_lr_hf(
   bool converged = false;
 
   // SCF iteration header
-  app_log(1, "\n  iter    ||ΔDm||         ||ΔDm-ΔDm_prev||  ||ΔF||          Δμ");
-  app_log(1, "  " + std::string(75, '-'));
+  app_log(1, "\n  iter    ||ΔDm||         ||ΔDm-ΔDm_prev||  ||ΔF||          ||ΔF-ΔF_prev||   Δμ");
+  app_log(1, "  " + std::string(92, '-'));
 
   for (iter = 1; iter <= max_iter; ++iter) {
 
-    // Save previous density matrix for convergence check
+    // Save previous density matrix and Fock matrix
     if (_mpi->node_comm.root() && iter > 1) {
       sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
+      sDeltaF_prev_skij.local() = sDeltaF_skij.local();
     }
     _mpi->comm.barrier();
 
@@ -160,26 +186,50 @@ std::tuple<int, double> lr_driver::run_lr_hf(
     _Timer.stop("LR_HF");
     _mpi->comm.barrier();
 
-    // Compute norm of ΔF for logging
+    // Apply iteration algorithm: DIIS or damping
+    if (iter > 1) {
+      if (_mpi->node_comm.root()) {
+        if (use_diis) {
+          nda::array<ComplexType, 4> DeltaF_new = sDeltaF_skij.local();
+          nda::array<ComplexType, 4> DeltaF_prev = sDeltaF_prev_skij.local();
+          sDeltaF_skij.local() = _lr_diis->next_step(DeltaF_new, DeltaF_prev, iter);
+        } else if (mixing < 1.0) {
+          sDeltaF_skij.local() = mixing * sDeltaF_skij.local()
+                                 + (1.0 - mixing) * sDeltaF_prev_skij.local();
+        }
+      }
+      _mpi->comm.barrier();
+    }
+
+    // Compute norms of ΔF and ΔF-ΔF_prev for logging
     double norm_DeltaF = 0.0;
+    double norm_DeltaF_diff = 0.0;
     if (_mpi->node_comm.root()) {
       for (int is = 0; is < _ns; ++is) {
         for (int ik = 0; ik < _nkpts_ibz; ++ik) {
           auto DeltaF_k = sDeltaF_skij.local()(is, ik, nda::range::all, nda::range::all);
           norm_DeltaF += std::pow(nda::frobenius_norm(DeltaF_k), 2);
+
+          if (iter > 1) {
+            auto DeltaF_prev_k = sDeltaF_prev_skij.local()(is, ik, nda::range::all, nda::range::all);
+            nda::matrix<ComplexType> diff_F = DeltaF_k - DeltaF_prev_k;
+            norm_DeltaF_diff += std::pow(nda::frobenius_norm(diff_F), 2);
+          }
         }
       }
       norm_DeltaF = std::sqrt(norm_DeltaF);
+      norm_DeltaF_diff = std::sqrt(norm_DeltaF_diff);
     }
     _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
+    _mpi->comm.broadcast_n(&norm_DeltaF_diff, 1, 0);
 
     // Log iteration
     if (iter == 1) {
-      app_log(1, "  {:4d}    {:.6e}     {:13s}   {:.6e}   {:.3e}",
-              iter, norm_DeltaDm, "---", norm_DeltaF, Delta_mu);
+      app_log(1, "  {:4d}    {:.6e}     {:13s}   {:.6e}   {:13s}   {:.3e}",
+              iter, norm_DeltaDm, "---", norm_DeltaF, "---", Delta_mu);
     } else {
-      app_log(1, "  {:4d}    {:.6e}     {:.6e}      {:.6e}   {:.3e}",
-              iter, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, Delta_mu);
+      app_log(1, "  {:4d}    {:.6e}     {:.6e}      {:.6e}   {:.6e}    {:.3e}",
+              iter, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
     }
 
     // Step 3: Check convergence
@@ -224,6 +274,6 @@ template std::tuple<int, double> lr_driver::run_lr_hf(
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     thc_reader_t&,
-    int, double, bool);
+    int, double, bool, const lr_iter_params&);
 
 } // namespace methods

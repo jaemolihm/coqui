@@ -36,6 +36,7 @@
 
 #include "mean_field/MF.hpp"
 #include "methods/mb_state/mb_state.hpp"
+#include "methods/SCF/lr_diis.hpp"
 
 namespace mpi3 = boost::mpi3;
 namespace methods
@@ -205,7 +206,8 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
                                         nda::array<ComplexType, 4> const& DeltaH0_skij,
                                         int max_iter = 50,
                                         double tol = 1e-8,
-                                        bool fix_density = true);
+                                        bool fix_density = true,
+                                        const lr_iter_params& iter_params = {});
 
 }
 #endif

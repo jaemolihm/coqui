@@ -1271,7 +1271,8 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
                                         nda::array<ComplexType, 4> const& DeltaH0_skij,
                                         int max_iter,
                                         double tol,
-                                        bool fix_density) {
+                                        bool fix_density,
+                                        const lr_iter_params& iter_params) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1363,7 +1364,7 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
   auto [niter, Delta_mu] = driver.run_lr_hf(
       sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
       sG_tskij, sDeltaH0_skij, thc,
-      max_iter, tol, fix_density);
+      max_iter, tol, fix_density, iter_params);
   mpi->comm.barrier();
 
   // Write results
@@ -1476,6 +1477,6 @@ template std::tuple<int, double> lr_hf_scf_calc(
     ptree const&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 4> const&,
-    int, double, bool);
+    int, double, bool, const lr_iter_params&);
 
 }

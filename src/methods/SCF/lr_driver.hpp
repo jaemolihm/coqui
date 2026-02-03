@@ -31,6 +31,7 @@
 #include "numerics/shared_array/nda.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
+#include "methods/SCF/lr_diis.hpp"
 #include "methods/HF/lr_hf.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 
@@ -101,7 +102,8 @@ public:
       THC_t& thc,
       int max_iter = 50,
       double tol = 1e-8,
-      bool fix_density = true);
+      bool fix_density = true,
+      const lr_iter_params& iter_params = {});
 
   void print_timers();
 
@@ -117,6 +119,7 @@ private:
 
   lr_dyson _lr_dyson;
   std::unique_ptr<solvers::lr_hf> _lr_hf;
+  std::unique_ptr<lr_diis> _lr_diis;
 
   int _nts;
   int _ns;
