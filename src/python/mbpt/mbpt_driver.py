@@ -52,6 +52,30 @@ def _run_mbpt(solver_type, params, h_int,
 
 
 def run_hf(params, h_int, h_int_exchange=None):
+    """
+    Run Hartree-Fock calculation.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - beta : float
+            Inverse temperature in a.u. (default: 1000)
+        - niter : int
+            Maximum number of SCF iterations (default: 1)
+        - conv_thr : float
+            Convergence threshold (default: 1e-8)
+        - output : str
+            Output checkpoint prefix (default: "bdft.mbpt")
+        - h0_source : str, optional
+            Source of H0 matrix. Options:
+            - "compute" (default): Calculate H0 from plane-wave orbitals
+            - "checkpoint": Read H0 from {output}.mbpt.h5 checkpoint
+    h_int : ThcCoulomb or CholCoulomb
+        ERI handler
+    h_int_exchange : optional
+        Separate ERI for exchange (if different from h_int)
+    """
     args = ["hf", json.dumps(params), h_int]
     if h_int_exchange is not None:
         args.append(h_int_exchange)
@@ -61,6 +85,38 @@ def run_hf(params, h_int, h_int_exchange=None):
 def run_gw(params, h_int,
            h_int_hf = None, h_int_hartree = None, h_int_exchange = None,
            *, projector_info = None, local_polarizabilities = None):
+    """
+    Run GW calculation.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - beta : float
+            Inverse temperature in a.u. (default: 1000)
+        - niter : int
+            Maximum number of SCF iterations (default: 1)
+        - conv_thr : float
+            Convergence threshold (default: 1e-8)
+        - output : str
+            Output checkpoint prefix (default: "bdft.mbpt")
+        - h0_source : str, optional
+            Source of H0 matrix. Options:
+            - "compute" (default): Calculate H0 from plane-wave orbitals
+            - "checkpoint": Read H0 from {output}.mbpt.h5 checkpoint
+    h_int : ThcCoulomb or CholCoulomb
+        ERI handler
+    h_int_hf : optional
+        Separate ERI for HF (if different from h_int)
+    h_int_hartree : optional
+        Separate ERI for Hartree (if different from h_int)
+    h_int_exchange : optional
+        Separate ERI for exchange (if different from h_int)
+    projector_info : dict, optional
+        Projector information for GW+EDMFT calculations
+    local_polarizabilities : dict, optional
+        Local polarizabilities for GW+EDMFT calculations
+    """
     _run_mbpt("gw", params, h_int,
               h_int_hf = h_int_hf, h_int_hartree = h_int_hartree, h_int_exchange = h_int_exchange,
               projector_info = projector_info, local_polarizabilities = local_polarizabilities)
@@ -204,3 +260,56 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     S_skij = np.asarray(S_skij, dtype=np.complex128)
 
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
+
+
+def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True):
+    """
+    Run full linear response Hartree-Fock SCF calculation.
+
+    Runs the LR-HF SCF loop:
+        ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
+
+    The converged effective perturbation is ΔH_eff = ΔH0 + ΔF - Δμ·S.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+        - output: Output checkpoint prefix (default: same as prefix)
+        - input_type: HDF5 group to read checkpoint from (default: "scf").
+          Specifies which calculation's data to use as starting point.
+          Options: "scf" (standard SCF), "embed" (embedding), etc.
+        - input_iter: Iteration number to read (default: -1 = use final_iter)
+    h_int : ThcCoulomb
+        THC ERI handler (currently only THC is supported)
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaH0_skij : np.ndarray
+        External perturbation matrix, shape (ns, nk, nb, nb)
+    max_iter : int, optional
+        Maximum number of SCF iterations (default: 50)
+    tol : float, optional
+        Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default: 1e-8)
+    fix_density : bool, optional
+        If True, compute Δμ to enforce particle conservation ΔN=0 (default: True).
+        Only meaningful for q=0 perturbations.
+
+    Returns
+    -------
+    tuple[int, float]
+        (niter, Delta_mu) - number of iterations and final chemical potential shift
+
+    Notes
+    -----
+    Results (ΔG, ΔDm, ΔF, Delta_mu, niter) are written to {output}.mbpt.h5
+    under the "linear_response" group.
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_hf_scf_cpp
+
+    q_vec = np.asarray(q_vec, dtype=np.float64)
+    DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
+
+    return lr_hf_scf_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
+                         int(max_iter), float(tol), bool(fix_density))

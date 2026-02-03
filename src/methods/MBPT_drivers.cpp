@@ -21,6 +21,7 @@
 
 
 #include <string>
+#include <string_view>
 
 #include "configuration.hpp"
 #include "mpi3/environment.hpp"
@@ -41,6 +42,7 @@
 #include "methods/SCF/dca_dyson.h"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
+#include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/embedding/embed_t.h"
 #include "methods/embedding/embed_eri_t.h"
@@ -53,6 +55,30 @@
 namespace mpi3 = boost::mpi3;
 namespace methods
 {
+
+/**
+ * Factory function for creating simple_dyson with conditional H0 source.
+ *
+ * @param h0_source     - [INPUT] Source of H0: "compute" or "checkpoint"
+ * @param mf_ptr        - [INPUT] Mean-field object pointer
+ * @param ft_ptr        - [INPUT] IAFT pointer
+ * @param chkpt_prefix  - [INPUT] Checkpoint file prefix (used if h0_source="checkpoint")
+ * @return simple_dyson object
+ */
+inline simple_dyson make_dyson_with_h0_source(
+    std::string_view h0_source,
+    mf::MF* mf_ptr,
+    imag_axes_ft::IAFT* ft_ptr,
+    const std::string& chkpt_prefix) {
+  if (h0_source == "checkpoint") {
+    app_log(1, "  H0 source                = checkpoint ({}.mbpt.h5)", chkpt_prefix);
+    return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix);  // chkpt::read_H0 adds ".mbpt.h5"
+  } else {
+    app_log(1, "  H0 source                = computed from orbitals");
+    return simple_dyson(mf_ptr, ft_ptr);
+  }
+}
+
 /**
  * Many-body perturbation calculations from a given mean-field and ERI objects with arguments in property tree.
  * Optional arguments (with default values):
@@ -67,6 +93,9 @@ namespace methods
  *  - output: "bdft.mbpt" Prefix of the output h5 file.
  *  - restart: "false" Restart from a previous bdft.scf calculation.
  *  - t_prescreen_thresh: "0.0" Threshold for prescreening in time (GF2 only for now)
+ *  - h0_source: "compute" Source of H0 matrix. {choices: "compute", "checkpoint"}
+ *               "compute" (default) - Calculate H0 from plane-wave orbitals
+ *               "checkpoint" - Read H0 from {output}.mbpt.h5 checkpoint
  */
 template<typename eri_t>
 void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
@@ -95,6 +124,12 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto wmax = io::get_value_with_default<double>(pt,"wmax",12.0);
   auto iaft_prec = io::get_value_with_default<std::string>(pt, "iaft_prec", "high");
 
+  // Parse h0_source parameter
+  auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
+  io::tolower(h0_source);
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+      "mbpt: unknown h0_source=\"{}\". Valid options: \"compute\", \"checkpoint\"", h0_source);
+
   bool chkpt_exist = std::filesystem::exists(output + ".mbpt.h5");
   if (restart and !chkpt_exist) {
     restart = false;
@@ -122,15 +157,15 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
 
   using namespace solvers;
   hf_t hf(string_to_div_enum(hf_div_treatment));
+
   if(solver_type == "rpa") {
-    simple_dyson dyson(mf.get(), &ft);
-    //solvers::scr_coulomb_t scr_eri(&ft, "rpa", string_to_div_enum(div_treatment));
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output);
     gw_t gw(&ft, string_to_div_enum(div_treatment), output);
     MBState mb_state(mpi, ft, output);
     rpa_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf,&gw));
   } else if(solver_type == "hf") {
 
-    simple_dyson dyson(mf.get(), &ft);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output);
     auto iter_solver = iter_scf::make_iter_scf(pt);
     MBState mb_state(mpi, ft, output);
     scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf),
@@ -140,7 +175,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   } else if(solver_type == "gw") {
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson(mf.get(), &ft);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output);
     auto iter_solver = iter_scf::make_iter_scf(pt);
     solvers::scr_coulomb_t scr_eri(&ft, screen_type, string_to_div_enum(div_treatment));
     solvers::gw_t gw(&ft, string_to_div_enum(div_treatment), output);
@@ -196,7 +231,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     auto gf2_sosex_save_memory = io::get_value_with_default<bool>(pt,"gf2_sosex_save_memory",true);
     auto t_prescreen_thresh = io::get_value_with_default<double>(pt,"t_prescreen_thresh",0.0);
 
-    simple_dyson dyson(mf.get(), &ft);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output);
     auto iter_solver = iter_scf::make_iter_scf(pt);
     solvers::gf2_t gf2(mf.get(), &ft, string_to_div_enum(div_treatment),
                        gf2_direct_type, gf2_exchange_alg, gf2_exchange_type, output,
@@ -327,17 +362,25 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto beta = io::get_value_with_default<double>(pt,"beta",1000.0);
   auto wmax = io::get_value_with_default<double>(pt,"wmax",12.0);
   auto iaft_prec = io::get_value_with_default<std::string>(pt, "iaft_prec", "high");
+
+  // Parse h0_source parameter
+  auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
+  io::tolower(h0_source);
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+      "mbpt: unknown h0_source=\"{}\". Valid options: \"compute\", \"checkpoint\"", h0_source);
+
   imag_axes_ft::IAFT ft = (!restart)?
                           imag_axes_ft::IAFT(beta, wmax, imag_axes_ft::ir_source, iaft_prec) :
                           imag_axes_ft::read_iaft(output+".mbpt.h5");
 
   using namespace solvers;
   hf_t hf(string_to_div_enum(hf_div_treatment));
+
   if (solver_type == "gw") {
 
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson(mf.get(), &ft);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output);
     auto iter_solver = iter_scf::make_iter_scf(pt);
     solvers::scr_coulomb_t scr_eri(&ft, screen_type, string_to_div_enum(div_treatment));
     solvers::gw_t gw(&ft, string_to_div_enum(div_treatment), output);
@@ -1210,6 +1253,127 @@ double lr_dyson_calc(eri_t &eri, ptree const& pt,
 }
 
 
+/**
+ * Linear response Hartree-Fock SCF calculation.
+ *
+ * Runs the full LR-HF SCF loop:
+ *   ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
+ *
+ * This function:
+ * 1. Reads the unperturbed solution (F, Σ) from a previous HF/GW checkpoint
+ * 2. Recomputes G from F and Σ via the Dyson equation
+ * 3. Creates lr_driver and runs the LR-HF SCF loop
+ * 4. Writes ΔG, ΔDm, ΔF, and Δμ to the checkpoint file
+ */
+template<typename eri_t>
+std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
+                                        nda::array<double, 1> const& q_vec,
+                                        nda::array<ComplexType, 4> const& DeltaH0_skij,
+                                        int max_iter,
+                                        double tol,
+                                        bool fix_density) {
+  auto mf = eri.corr_eri->get().MF();
+  auto& mpi = eri.corr_eri->get().mpi();
+
+  std::string err = std::string("lr_hf_scf_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto output = io::get_value_with_default<std::string>(pt, "output", prefix);
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_hf_scf_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Validate checkpoint contains required data
+  {
+    h5::file file(input_file, 'r');
+    auto root = h5::group(file);
+    utils::check(root.has_subgroup(input_grp),
+                 "lr_hf_scf_calc: Checkpoint {} does not contain '{}/' group. "
+                 "Run HF or GW calculation first.", input_file, input_grp);
+    auto grp = root.open_group(input_grp);
+    if (input_iter == -1) {
+      utils::check(grp.has_dataset("final_iter"),
+                   "lr_hf_scf_calc: Checkpoint {}/{}/ missing 'final_iter'. "
+                   "SCF calculation may not have completed.", input_file, input_grp);
+    } else {
+      utils::check(grp.has_subgroup("iter" + std::to_string(input_iter)),
+                   "lr_hf_scf_calc: Checkpoint {}/{}/ does not contain 'iter{}'. "
+                   "Check input_iter parameter.", input_file, input_grp, input_iter);
+    }
+  }
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  // Create simple_dyson
+  simple_dyson dyson(mf.get(), &ft);
+
+  // Allocate shared arrays
+  auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  // Read F and Sigma from checkpoint
+  double mu = 0.0;
+  chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
+                  prefix, input_grp, input_iter);
+  mpi->comm.barrier();
+
+  // Compute G from F and Sigma via Dyson equation
+  app_log(2, "Computing unperturbed Green's function from checkpoint...");
+  update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+  mpi->comm.barrier();
+
+  // Allocate LR arrays
+  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  // Validate DeltaH0 dimensions
+  utils::check(DeltaH0_skij.shape(0) == mf->nspin() &&
+               DeltaH0_skij.shape(1) == mf->nkpts_ibz() &&
+               DeltaH0_skij.shape(2) == mf->nbnd() &&
+               DeltaH0_skij.shape(3) == mf->nbnd(),
+               "lr_hf_scf_calc: DeltaH0_skij shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+               mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
+               DeltaH0_skij.shape(0), DeltaH0_skij.shape(1),
+               DeltaH0_skij.shape(2), DeltaH0_skij.shape(3));
+
+  // Copy DeltaH0 to shared array
+  if (mpi->node_comm.root()) {
+    sDeltaH0_skij.local() = DeltaH0_skij;
+  }
+  mpi->comm.barrier();
+
+  // Create lr_driver and run SCF loop
+  lr_driver driver(dyson, q_vec);
+  auto& thc = eri.corr_eri->get();
+  auto [niter, Delta_mu] = driver.run_lr_hf(
+      sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
+      sG_tskij, sDeltaH0_skij, thc,
+      max_iter, tol, fix_density);
+  mpi->comm.barrier();
+
+  // Write results
+  chkpt::dump_lr_hf(mpi->comm, output + ".mbpt.h5", q_vec,
+                    sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, Delta_mu, niter);
+
+  return std::make_tuple(niter, Delta_mu);
+}
+
+
 // instantiations
 using mpi3::communicator;
 
@@ -1305,5 +1469,13 @@ LR_DYSON_INST(chol_reader_t, chol_reader_t, chol_reader_t, thc_reader_t)
 LR_DYSON_INST(chol_reader_t, chol_reader_t, chol_reader_t, chol_reader_t)
 
 #undef LR_DYSON_INST
+
+// lr_hf_scf_calc instantiations (only thc_reader_t for now since lr_hf requires THC)
+template std::tuple<int, double> lr_hf_scf_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    nda::array<ComplexType, 4> const&,
+    int, double, bool);
 
 }

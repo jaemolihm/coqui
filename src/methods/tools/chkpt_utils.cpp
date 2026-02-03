@@ -606,5 +606,47 @@ template void dump_lr_dyson(mpi3::communicator&, std::string,
                             sArray_t<Array_view_5D_t> const&,
                             sArray_t<Array_view_4D_t> const&);
 
+
+template<typename communicator_t, typename G_t, typename Dm_t, typename F_t>
+void dump_lr_hf(communicator_t& comm,
+                std::string filename,
+                nda::array<double, 1> const& q_vec,
+                G_t const& sDeltaG_tskij,
+                Dm_t const& sDeltaDm_skij,
+                F_t const& sDeltaF_skij,
+                double Delta_mu,
+                int niter) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_lr_hf: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    auto lr_grp = grp.has_subgroup("linear_response") ?
+                  grp.open_group("linear_response") :
+                  grp.create_group("linear_response");
+
+    nda::h5_write(lr_grp, "q_vec", q_vec, false);
+    auto DeltaG_loc = sDeltaG_tskij.local();
+    auto DeltaDm_loc = sDeltaDm_skij.local();
+    auto DeltaF_loc = sDeltaF_skij.local();
+    nda::h5_write(lr_grp, "DeltaG_tskij", DeltaG_loc, false);
+    nda::h5_write(lr_grp, "DeltaDm_skij", DeltaDm_loc, false);
+    nda::h5_write(lr_grp, "DeltaF_skij", DeltaF_loc, false);
+    h5::h5_write(lr_grp, "Delta_mu", Delta_mu);
+    h5::h5_write(lr_grp, "niter", niter);
+
+    app_log(2, "LR-HF SCF results written to \"linear_response/\" in {}", filename);
+    app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
+  }
+  comm.barrier();
+}
+
+template void dump_lr_hf(mpi3::communicator&, std::string,
+                         nda::array<double, 1> const&,
+                         sArray_t<Array_view_5D_t> const&,
+                         sArray_t<Array_view_4D_t> const&,
+                         sArray_t<Array_view_4D_t> const&,
+                         double, int);
+
   } // chkpt
 } // methods

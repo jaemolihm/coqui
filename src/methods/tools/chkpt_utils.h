@@ -169,6 +169,28 @@ namespace methods {
                      G_t const& sDeltaG_tskij,
                      Dm_t const& sDeltaDm_skij);
 
+  /**
+   * Write LR-HF SCF results to HDF5 checkpoint file.
+   *
+   * @param comm              - [INPUT] MPI communicator
+   * @param filename          - [INPUT] HDF5 file path (e.g., "coqui.mbpt.h5")
+   * @param q_vec             - [INPUT] perturbation wavevector
+   * @param sDeltaG_tskij     - [INPUT] LR Green's function
+   * @param sDeltaDm_skij     - [INPUT] LR density matrix
+   * @param sDeltaF_skij      - [INPUT] LR Fock matrix
+   * @param Delta_mu          - [INPUT] chemical potential shift
+   * @param niter             - [INPUT] number of SCF iterations
+   */
+  template<typename communicator_t, typename G_t, typename Dm_t, typename F_t>
+  void dump_lr_hf(communicator_t& comm,
+                  std::string filename,
+                  nda::array<double, 1> const& q_vec,
+                  G_t const& sDeltaG_tskij,
+                  Dm_t const& sDeltaDm_skij,
+                  F_t const& sDeltaF_skij,
+                  double Delta_mu,
+                  int niter);
+
   }; // chkpt
 
 } // methods

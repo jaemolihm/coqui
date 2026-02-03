@@ -116,6 +116,8 @@ double lr_dyson::solve_lr_dyson(
     if (fix_density && !_is_q_gamma) {
       app_log(2, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
     }
+    // For q≠0, Δμ is meaningless — force to zero to prevent silent pollution
+    if (!_is_q_gamma) Delta_mu = 0.0;
     solve_lr_dyson_impl(sDeltaG_tskij, sG_tskij, sDeltaH0_skij,
                         sDeltaF_skij, sDeltaSigma_tskij, Delta_mu);
     compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
@@ -139,6 +141,11 @@ void lr_dyson::solve_lr_dyson_impl(
 
   using math::nda::make_distributed_array;
   using Array_5D_t = nda::array<ComplexType, 5>;
+
+  // Δμ·S term is only meaningful at q=0; assert no accidental nonzero value at q≠0
+  utils::check(_is_q_gamma || std::abs(Delta_mu) < 1e-15,
+               "solve_lr_dyson_impl: Delta_mu = {:.6e} but q≠0. "
+               "Delta_mu must be zero for q≠0 perturbations.", Delta_mu);
 
   app_log(2, "Solving LR Dyson equation:");
   app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
@@ -306,9 +313,8 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
   // Broadcast result
   _context->comm.broadcast_n(&DeltaN, 1, 0);
 
-  if (std::abs(DeltaN.imag()) > 1e-10 * std::abs(DeltaN.real())) {
-    app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN)/Re(ΔN) = {:.2e}",
-            DeltaN.imag() / (std::abs(DeltaN.real()) + 1e-15));
+  if (std::abs(DeltaN.imag()) > 1e-10) {
+    app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN) = {:.2e}", DeltaN.imag());
   }
 
   app_log(2, "compute_lr_Nelec: ΔN = {:.6e}", DeltaN.real());

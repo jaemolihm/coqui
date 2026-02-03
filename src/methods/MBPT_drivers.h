@@ -23,6 +23,7 @@
 #define METHODS_MBPT_DRIVERS_H
 
 #include <string>
+#include <tuple>
 
 #include "configuration.hpp"
 #include "mpi3/environment.hpp"
@@ -172,6 +173,39 @@ double lr_dyson_calc(eri_t &eri, ptree const& pt,
                      nda::array<double, 1> const& q_vec,
                      nda::array<ComplexType, 4> const& DeltaH0_skij,
                      bool fix_density = false);
+
+/**
+ * @brief Linear response Hartree-Fock SCF calculation
+ *
+ * Runs the full LR-HF SCF loop:
+ *   ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
+ *
+ * Required parameters in pt:
+ *  - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+ *  - output: Output checkpoint prefix (default: same as prefix)
+ *
+ * Optional parameters in pt:
+ *  - input_type: HDF5 group to read checkpoint from (default: "scf")
+ *                Specifies which calculation's data to use as starting point.
+ *                Options: "scf" (standard SCF), "embed" (embedding), etc.
+ *  - input_iter: Iteration number to read (default: -1 = use final_iter)
+ *
+ * @param eri          - [INPUT] ERI handler (must be THC)
+ * @param pt           - [INPUT] Parameters as property tree
+ * @param q_vec        - [INPUT] Perturbation wavevector in crystal coords (3,)
+ * @param DeltaH0_skij - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ * @param max_iter     - [INPUT] Maximum SCF iterations (default: 50)
+ * @param tol          - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default: 1e-8)
+ * @param fix_density  - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
+ * @return Tuple of (number of iterations, final Δμ)
+ */
+template<typename eri_t>
+std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
+                                        nda::array<double, 1> const& q_vec,
+                                        nda::array<ComplexType, 4> const& DeltaH0_skij,
+                                        int max_iter = 50,
+                                        double tol = 1e-8,
+                                        bool fix_density = true);
 
 }
 #endif
