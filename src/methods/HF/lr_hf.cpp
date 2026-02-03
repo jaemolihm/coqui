@@ -32,7 +32,7 @@ namespace methods {
 namespace solvers {
 
 lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
-             std::shared_ptr<mf::MF> MF,
+             const mf::MF* MF,
              nda::array<double, 1> const& q_vec)
     : _mpi(mpi),
       _MF(MF),
@@ -416,9 +416,20 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                Arr4D const&,
                                bool, bool);
 
+template void lr_hf::evaluate(sArray_t<Arrv4D>&,
+                               const sArray_t<Arrv4D>&,
+                               thc_reader_t&,
+                               Arrv4D const&,
+                               bool, bool);
+
 template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
                                          Arrv4D const&,
                                          Arr4D const&,
+                                         double);
+
+template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
+                                         Arrv4D const&,
+                                         Arrv4D const&,
                                          double);
 
 } // namespace solvers

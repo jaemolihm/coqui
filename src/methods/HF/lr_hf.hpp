@@ -71,11 +71,11 @@ public:
    * @brief Constructor
    *
    * @param mpi        - [INPUT] MPI context
-   * @param MF         - [INPUT] Mean-field object
+   * @param MF         - [INPUT] Mean-field object (non-owning pointer, caller manages lifetime)
    * @param q_vec      - [INPUT] Perturbation wavevector in crystal coordinates (3,)
    */
   lr_hf(std::shared_ptr<mpi_context_t> mpi,
-        std::shared_ptr<mf::MF> MF,
+        const mf::MF* MF,
         nda::array<double, 1> const& q_vec);
 
   lr_hf(lr_hf const&) = delete;
@@ -83,7 +83,7 @@ public:
   lr_hf & operator=(const lr_hf &) = delete;
   lr_hf & operator=(lr_hf &&) = delete;
 
-  ~lr_hf() {}
+  ~lr_hf() = default;
 
   /**
    * @brief Compute LR Fock matrix from LR density matrix using THC-ERI
@@ -123,7 +123,7 @@ public:
 
 private:
   std::shared_ptr<mpi_context_t> _mpi;
-  std::shared_ptr<mf::MF> _MF;
+  const mf::MF* _MF;
 
   int _ns;
   int _nkpts;

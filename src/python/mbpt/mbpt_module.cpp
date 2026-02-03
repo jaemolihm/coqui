@@ -68,6 +68,39 @@ namespace coqui_py {
 
 
   /**
+   * @brief Run LR-HF SCF calculation
+   *
+   * This calls the C++ lr_hf_scf_calc function which:
+   * 1. Reads unperturbed G from checkpoint
+   * 2. Runs the LR-HF SCF loop:
+   *    ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... until convergence
+   * 3. Writes ΔG, ΔDm, ΔF, Δμ to checkpoint
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix, output)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param q_vec          - [INPUT] Perturbation wavevector (3,)
+   * @param DeltaH0_skij   - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+   * @param max_iter       - [INPUT] Maximum SCF iterations (default: 50)
+   * @param tol            - [INPUT] Convergence tolerance (default: 1e-8)
+   * @param fix_density    - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
+   * @return               - [OUTPUT] Tuple of (niter, Delta_mu)
+   */
+  std::tuple<int, double> lr_hf_scf(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_vec,
+      nda::array<ComplexType, 4> const& DeltaH0_skij,
+      int max_iter,
+      double tol,
+      bool fix_density) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_hf_scf_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
+                                    max_iter, tol, fix_density);
+  }
+
+
+  /**
    * @brief Compute LR Fock matrix from LR density matrix
    *
    * This function computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm.
@@ -113,7 +146,7 @@ namespace coqui_py {
     mpi->comm.barrier();
 
     // Create lr_hf solver and compute ΔF
-    methods::solvers::lr_hf lr_hf_solver(mpi, mf, q_vec);
+    methods::solvers::lr_hf lr_hf_solver(mpi, mf.get(), q_vec);
     lr_hf_solver.evaluate(sDeltaF_skij, sDeltaDm_skij, thc, S_skij,
                           compute_hartree, compute_exchange);
 

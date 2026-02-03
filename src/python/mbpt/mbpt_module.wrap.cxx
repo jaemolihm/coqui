@@ -356,6 +356,57 @@ np.ndarray
     Fock matrix F, shape (ns, nk, nb, nb)
 )DOC");
 
+// lr_hf_scf - run LR-HF SCF calculation
+static auto const fun_lr_hf_scf = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_vec,
+           nda::array<ComplexType, 4> const& DeltaH0_skij,
+           int max_iter,
+           double tol,
+           bool fix_density) {
+          return coqui_py::lr_hf_scf(lr_params, h_int, q_vec, DeltaH0_skij,
+                                      max_iter, tol, fix_density);
+        },
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "max_iter", "tol", "fix_density")};
+
+static const auto doc_lr_hf_scf = fun_lr_hf_scf.doc(R"DOC(
+Run linear response Hartree-Fock SCF calculation.
+
+Runs the full LR-HF SCF loop:
+    ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
+
+This function reads the unperturbed Green's function from a previous HF/GW
+checkpoint, runs the LR-HF SCF loop, and writes the results (ΔG, ΔDm, ΔF, Δμ)
+back to the checkpoint file.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    - output: Output checkpoint prefix (default: same as prefix)
+h_int : ThcCoulomb
+    THC ERI handler from the original calculation
+q_vec : np.ndarray
+    Perturbation wavevector in crystal coordinates, shape (3,)
+DeltaH0_skij : np.ndarray
+    Perturbation matrix, shape (ns, nk, nb, nb)
+max_iter : int
+    Maximum SCF iterations (default 50)
+tol : float
+    Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
+fix_density : bool
+    If True, compute Δμ to enforce ΔN=0 (default True)
+
+Returns
+-------
+tuple
+    (niter, Delta_mu) where niter is the number of iterations and
+    Delta_mu is the computed chemical potential shift.
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -369,6 +420,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_hf.c_str()},
     {"hf_evaluate_cpp", (PyCFunction)c2py::pyfkw<fun_hf_evaluate>,
      METH_VARARGS | METH_KEYWORDS, doc_hf_evaluate.c_str()},
+    {"lr_hf_scf_cpp", (PyCFunction)c2py::pyfkw<fun_lr_hf_scf>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_hf_scf.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
