@@ -365,11 +365,17 @@ static auto const fun_lr_hf_scf = c2py::dispatcher_f_kw_t{
            nda::array<ComplexType, 4> const& DeltaH0_skij,
            int max_iter,
            double tol,
-           bool fix_density) {
+           bool fix_density,
+           std::string iter_alg,
+           double mixing,
+           int max_subsp_size,
+           int diis_warmup) {
           return coqui_py::lr_hf_scf(lr_params, h_int, q_vec, DeltaH0_skij,
-                                      max_iter, tol, fix_density);
+                                      max_iter, tol, fix_density,
+                                      iter_alg, mixing, max_subsp_size, diis_warmup);
         },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "max_iter", "tol", "fix_density")};
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "max_iter", "tol", "fix_density",
+        "iter_alg", "mixing", "max_subsp_size", "diis_warmup")};
 
 static const auto doc_lr_hf_scf = fun_lr_hf_scf.doc(R"DOC(
 Run linear response Hartree-Fock SCF calculation.
@@ -399,6 +405,17 @@ tol : float
     Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
 fix_density : bool
     If True, compute Δμ to enforce ΔN=0 (default True)
+iter_alg : str
+    Iteration algorithm: "damping" or "DIIS" (default "damping")
+mixing : float
+    Damping/mixing parameter (default 1.0 = no damping).
+    For damping: ΔF = mixing*ΔF_new + (1-mixing)*ΔF_prev.
+    For DIIS: used during warmup iterations.
+max_subsp_size : int
+    Maximum DIIS subspace size (default 5). Only used when iter_alg="DIIS".
+diis_warmup : int
+    Number of warmup iterations using damping before DIIS starts (default 3).
+    Only used when iter_alg="DIIS".
 
 Returns
 -------

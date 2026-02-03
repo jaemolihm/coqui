@@ -262,7 +262,7 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
 
 
-def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True):
+def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True, iter_alg=None):
     """
     Run full linear response Hartree-Fock SCF calculation.
 
@@ -294,6 +294,19 @@ def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix
     fix_density : bool, optional
         If True, compute Δμ to enforce particle conservation ΔN=0 (default: True).
         Only meaningful for q=0 perturbations.
+    iter_alg : dict or None, optional
+        Iteration algorithm configuration. If None, uses damping with mixing=1.0.
+        Keys:
+        - alg : str
+            "damping" (default) or "DIIS"
+        - mixing : float
+            Damping/mixing parameter (default: 1.0 = no damping).
+            For damping: ΔF = mixing*ΔF_new + (1-mixing)*ΔF_prev.
+            For DIIS: used during warmup iterations.
+        - max_subsp_size : int
+            Maximum DIIS subspace size (default: 5). Only for DIIS.
+        - diis_warmup : int
+            Warmup iterations before DIIS extrapolation (default: 3). Only for DIIS.
 
     Returns
     -------
@@ -311,5 +324,16 @@ def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix
     q_vec = np.asarray(q_vec, dtype=np.float64)
     DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
 
+    # Parse iter_alg dict with defaults
+    if iter_alg is None:
+        iter_alg = {}
+    alg = str(iter_alg.get("alg", "damping"))
+    if alg not in ("damping", "DIIS"):
+        raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
+    mixing = float(iter_alg.get("mixing", 1.0))
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
+    diis_warmup = int(iter_alg.get("diis_warmup", 3))
+
     return lr_hf_scf_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
-                         int(max_iter), float(tol), bool(fix_density))
+                         int(max_iter), float(tol), bool(fix_density),
+                         alg, mixing, max_subsp_size, diis_warmup)

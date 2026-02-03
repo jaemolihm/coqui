@@ -76,14 +76,18 @@ namespace coqui_py {
    *    ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... until convergence
    * 3. Writes ΔG, ΔDm, ΔF, Δμ to checkpoint
    *
-   * @param lr_params      - [INPUT] JSON string with params (prefix, output)
-   * @param h_int          - [INPUT] THC ERI handler
-   * @param q_vec          - [INPUT] Perturbation wavevector (3,)
-   * @param DeltaH0_skij   - [INPUT] Perturbation matrix (ns, nk, nb, nb)
-   * @param max_iter       - [INPUT] Maximum SCF iterations (default: 50)
-   * @param tol            - [INPUT] Convergence tolerance (default: 1e-8)
-   * @param fix_density    - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
-   * @return               - [OUTPUT] Tuple of (niter, Delta_mu)
+   * @param lr_params       - [INPUT] JSON string with params (prefix, output)
+   * @param h_int           - [INPUT] THC ERI handler
+   * @param q_vec           - [INPUT] Perturbation wavevector (3,)
+   * @param DeltaH0_skij    - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+   * @param max_iter        - [INPUT] Maximum SCF iterations (default: 50)
+   * @param tol             - [INPUT] Convergence tolerance (default: 1e-8)
+   * @param fix_density     - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
+   * @param iter_alg        - [INPUT] Iteration algorithm: "damping" or "DIIS" (default: "damping")
+   * @param mixing          - [INPUT] Damping/mixing parameter (default: 1.0)
+   * @param max_subsp_size  - [INPUT] DIIS subspace size (default: 5)
+   * @param diis_warmup     - [INPUT] DIIS warmup iterations (default: 3)
+   * @return                - [OUTPUT] Tuple of (niter, Delta_mu)
    */
   std::tuple<int, double> lr_hf_scf(
       const std::string &lr_params,
@@ -92,11 +96,20 @@ namespace coqui_py {
       nda::array<ComplexType, 4> const& DeltaH0_skij,
       int max_iter,
       double tol,
-      bool fix_density) {
+      bool fix_density,
+      std::string iter_alg,
+      double mixing,
+      int max_subsp_size,
+      int diis_warmup) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
+    methods::lr_iter_params iter_params;
+    iter_params.alg = iter_alg;
+    iter_params.mixing = mixing;
+    iter_params.max_subsp_size = static_cast<size_t>(max_subsp_size);
+    iter_params.diis_warmup = static_cast<size_t>(diis_warmup);
     return methods::lr_hf_scf_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
-                                    max_iter, tol, fix_density);
+                                    max_iter, tol, fix_density, iter_params);
   }
 
 
