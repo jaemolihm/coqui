@@ -132,8 +132,12 @@ private:
   int _npol;
 
   nda::array<double, 1> _q_vec;     // Perturbation wavevector (3,)
-  nda::array<int, 1> _kpq_map;      // k → k+q index mapping (nkpts,)
+  nda::array<int, 1> _kpq_map;      // k → k+q index mapping in full BZ (nkpts,)
   bool _is_q_gamma;                 // True if q is approximately zero
+
+  long _q_ibz_idx;                  // IBZ index of perturbation q-vector (for V(q) lookup)
+  nda::array<int, 1> _kpq_ibz_map;  // IBZ k → IBZ k+q mapping (nkpts_ibz,)
+  nda::array<bool, 1> _kpq_ibz_trev; // Whether k+q reaches its IBZ rep via time-reversal
 
   utils::TimerManager _Timer;
 
@@ -150,7 +154,7 @@ private:
   /**
    * @brief LR finite-size correction for K based on "PRB 80, 085114(2009)"
    *
-   * Computes: ΔDelta_ij = -madelung * S_ia * ΔDm_ab * S_bj
+   * Computes: ΔDelta_ij = -madelung * S(k+q)_ia * ΔDm_ab * S(k)_bj
    *
    * @param sDeltaF_skij - [OUTPUT] LR Fock matrix (accumulated)
    * @param DeltaDm_skij - [INPUT] LR density matrix
@@ -162,6 +166,7 @@ private:
                           const nda::MemoryArrayOfRank<4> auto& DeltaDm_skij,
                           const nda::MemoryArrayOfRank<4> auto& S_skij,
                           double madelung);
+
 };
 
 } // namespace solvers

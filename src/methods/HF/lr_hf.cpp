@@ -20,7 +20,7 @@
 
 
 #include "methods/HF/lr_hf.hpp"
-#include "methods/HF/thc_solver_comm.hpp"
+#include "methods/HF/lr_thc_comm.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 
 #include "nda/nda.hpp"
@@ -52,10 +52,27 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   // Check if q is approximately gamma
   _is_q_gamma = utils::is_q_gamma(_q_vec);
 
+  // Find IBZ index of perturbation q (for V(q) lookup)
+  _q_ibz_idx = utils::find_q_ibz_index(kpts_crys, _q_vec, MF->qp_to_ibz());
+
+  // Precompute IBZ k → IBZ k+q mapping (for Madelung correction)
+  _kpq_ibz_map.resize(_nkpts_ibz);
+  _kpq_ibz_trev.resize(_nkpts_ibz);
+  auto ks_to_k = MF->ks_to_k(0);     // IBZ → full BZ (identity symmetry)
+  auto kp_to_ibz = MF->kp_to_ibz();   // full BZ → IBZ
+  auto kp_trev = MF->kp_trev();       // time-reversal flag per full BZ k
+  for (int ik = 0; ik < _nkpts_ibz; ++ik) {
+    int ik_full = ks_to_k(ik);
+    int ikq_full = _kpq_map(ik_full);
+    _kpq_ibz_map(ik) = kp_to_ibz(ikq_full);
+    _kpq_ibz_trev(ik) = kp_trev(ikq_full);
+  }
+
   app_log(2, "LR-HF initialized:");
   app_log(2, "  - Perturbation wavevector q = ({:.6f}, {:.6f}, {:.6f})",
           _q_vec(0), _q_vec(1), _q_vec(2));
   app_log(2, "  - q is Gamma point: {}", _is_q_gamma ? "yes" : "no");
+  app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM"}) {
     _Timer.add(v);
@@ -134,13 +151,13 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   auto Q_origin = dDeltaDm_skPQ.origin()[3];
   _Timer.stop("ALLOC");
 
-  // Get Coulomb kernel (q=0 for Hartree)
+  // Get Coulomb kernel
   auto dU_qPQ = thc.dZ({1, np_P, np_Q});
   auto dU_qPQ_loc = dU_qPQ.local();
 
-  // Keep a copy of U(q=0) for Hartree
-  nda::array<ComplexType, 2> Uq0_PQ(NP_loc, NQ_loc);
-  Uq0_PQ() = dU_qPQ_loc(0, nda::ellipsis{});
+  // Keep a copy of V(q) for Hartree (V(q=0) when q is Gamma, V(q) otherwise)
+  nda::array<ComplexType, 2> Uq_PQ(NP_loc, NQ_loc);
+  Uq_PQ() = dU_qPQ_loc(_q_ibz_idx, nda::ellipsis{});
 
   // Accumulate diagonal indices of ΔDm for the Hartree term
   nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
@@ -157,9 +174,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // Hartree-only computation
     for (auto ip : nda::range(npol)) {
       _Timer.start("PRIM_TO_AUX");
-      // ΔDm_skij -> ΔDm_skPQ
-      thc_solver_comm::primary_to_aux(ip, ip, sDeltaDm_skij.local(), dDeltaDm_skPQ,
-                                      thc, _MF->kp_to_ibz(), _MF->kp_trev());
+      // ΔDm_skij -> ΔDm_skPQ (LR transform: left=k+q, right=k)
+      lr_thc_comm::primary_to_aux<AF_t>(ip, ip, sDeltaDm_skij.local(), dDeltaDm_skPQ, thc,
+                                              _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map);
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
@@ -191,7 +208,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
     // ΔJ_P = U_PQ * ΔDm_QQ
     nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-    nda::blas::gemv(Uq0_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
     auto F_skPQ = dDeltaF_skPQ.local();
@@ -206,7 +223,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     _Timer.stop("COULOMB");
     _Timer.start("AUX_TO_PRIM");
     for (auto ip : nda::range(npol))
-      thc_solver_comm::aux_to_primary(ip, ip, ComplexType(1.0), dDeltaF_skPQ, sDeltaF_skij, thc, _MF->ks_to_k(0));
+      lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0), dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                _MF->ks_to_k(0), _kpq_map);
     _Timer.stop("AUX_TO_PRIM");
 
   } else {
@@ -228,10 +246,10 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       for (auto iq : nda::range(ip, npol)) {
         dDeltaF_skPQ.local() = ComplexType(0.0);
 
-        // Transform ΔDm to auxiliary basis
+        // Transform ΔDm to auxiliary basis (LR transform: left=k+q, right=k)
         _Timer.start("PRIM_TO_AUX");
-        thc_solver_comm::primary_to_aux(ip, iq, sDeltaDm_skij.local(), dDeltaDm_skPQ,
-                                        thc, _MF->kp_to_ibz(), _MF->kp_trev());
+        lr_thc_comm::primary_to_aux<AF_t>(ip, iq, sDeltaDm_skij.local(), dDeltaDm_skPQ, thc,
+                                                _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map);
         _Timer.stop("PRIM_TO_AUX");
 
         // FT ΔDm from k-space to R-space
@@ -263,7 +281,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
             // Add Coulomb contribution to ΔF_skPQ here
             dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
             nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-            nda::blas::gemv(Uq0_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+            nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
             dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
             auto F_skPQ = dDeltaF_skPQ.local();
@@ -305,8 +323,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.stop("EXCHANGE");
 
         _Timer.start("AUX_TO_PRIM");
-        thc_solver_comm::aux_to_primary(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
-                                        dDeltaF_skPQ, sDeltaF_skij, thc, _MF->ks_to_k(0));
+        lr_thc_comm::aux_to_primary<AF_t>(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
+                                                dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                _MF->ks_to_k(0), _kpq_map);
         _Timer.stop("AUX_TO_PRIM");
       } // iq
     } // ip
@@ -317,7 +336,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.start("COULOMB");
         dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
         nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-        nda::blas::gemv(Uq0_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+        nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
         dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
         auto F_skPQ = dDeltaF_skPQ.local();
@@ -332,7 +351,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.stop("COULOMB");
         _Timer.start("AUX_TO_PRIM");
         for (auto ip : nda::range(npol))
-          thc_solver_comm::aux_to_primary(ip, ip, ComplexType(1.0), dDeltaF_skPQ, sDeltaF_skij, thc, _MF->ks_to_k(0));
+          lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0), dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                    _MF->ks_to_k(0), _kpq_map);
         _Timer.stop("AUX_TO_PRIM");
       }
 
@@ -365,7 +385,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 /**
  * LR finite-size correction for K based on "PRB 80, 085114(2009)"
  *
- * Computes: ΔDelta_ij = -madelung * S_ia * ΔDm_ab * S_bj
+ * Computes: ΔDelta_ij(k) = -madelung * S(k+q)_ia * ΔDm_ab(k) * S(k)_bj
+ *
+ * For q=0: S(k+q) = S(k), recovering the original formula.
  */
 template<nda::MemoryArray AF_t>
 void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
@@ -390,12 +412,22 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
   for (int i = rank; i < ns * nkpts_ibz; i += size) {
     int is = i / nkpts_ibz;
     int ik = i % nkpts_ibz;
-    // ΔDelta_ij = (-1.0) * madelung * S_ia * ΔDm_ab * S_bj
+    // ΔDelta_ij(k) = -madelung * S(k+q)_ia * ΔDm_ab(k) * S(k)_bj
     auto Delta_sk = sDelta_skij.local()(is, ik, all, all);
     auto DeltaDm_sk = DeltaDm_skij(is, ik, all, all);
-    auto S_sk = S_skij(is, ik, all, all);
-    nda::blas::gemm(ComplexType(-1.0 * madelung), S_sk, DeltaDm_sk, ComplexType(0.0), buffer);
-    nda::blas::gemm(ComplexType(1.0), buffer, S_sk, ComplexType(0.0), Delta_sk);
+    auto S_k = S_skij(is, ik, all, all);               // S at k (right)
+
+    // S at k+q (left): may need complex conjugation if reached via time-reversal
+    int ikq_ibz = _kpq_ibz_map(ik);
+    auto S_kq_raw = S_skij(is, ikq_ibz, all, all);
+
+    if (_kpq_ibz_trev(ik)) {
+      nda::matrix<ComplexType> S_kq = nda::conj(S_kq_raw);
+      nda::blas::gemm(ComplexType(-1.0 * madelung), S_kq, DeltaDm_sk, ComplexType(0.0), buffer);
+    } else {
+      nda::blas::gemm(ComplexType(-1.0 * madelung), S_kq_raw, DeltaDm_sk, ComplexType(0.0), buffer);
+    }
+    nda::blas::gemm(ComplexType(1.0), buffer, S_k, ComplexType(0.0), Delta_sk);
   }
   sDelta_skij.win().fence();
   sDelta_skij.all_reduce();
