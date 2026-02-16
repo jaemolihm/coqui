@@ -369,13 +369,15 @@ static auto const fun_lr_hf_scf = c2py::dispatcher_f_kw_t{
            std::string iter_alg,
            double mixing,
            int max_subsp_size,
-           int diis_warmup) {
+           int diis_warmup,
+           bool compute_exchange) {
           return coqui_py::lr_hf_scf(lr_params, h_int, q_vec, DeltaH0_skij,
                                       max_iter, tol, fix_density,
-                                      iter_alg, mixing, max_subsp_size, diis_warmup);
+                                      iter_alg, mixing, max_subsp_size, diis_warmup,
+                                      compute_exchange);
         },
         "lr_params", "h_int", "q_vec", "DeltaH0_skij", "max_iter", "tol", "fix_density",
-        "iter_alg", "mixing", "max_subsp_size", "diis_warmup")};
+        "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "compute_exchange")};
 
 static const auto doc_lr_hf_scf = fun_lr_hf_scf.doc(R"DOC(
 Run linear response Hartree-Fock SCF calculation.
@@ -416,12 +418,82 @@ max_subsp_size : int
 diis_warmup : int
     Number of warmup iterations using damping before DIIS starts (default 3).
     Only used when iter_alg="DIIS".
+compute_exchange : bool
+    Whether to compute exchange term in LR Fock matrix (default True).
+    Set to False for Hartree-only calculations (e.g., phonon benchmarks).
 
 Returns
 -------
 tuple
     (niter, Delta_mu) where niter is the number of iterations and
     Delta_mu is the computed chemical potential shift.
+)DOC");
+
+// lr_gw_sigma - compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr
+static auto const fun_lr_gw_sigma = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_pert,
+           nda::array<ComplexType, 5> const& DeltaG_tskij) {
+          return coqui_py::lr_gw_sigma(lr_params, h_int, q_pert, DeltaG_tskij);
+        },
+        "lr_params", "h_int", "q_pert", "DeltaG_tskij")};
+
+static const auto doc_lr_gw_sigma = fun_lr_gw_sigma.doc(R"DOC(
+Compute linear response GW self-energy with fixed W.
+
+Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product) + q→0 divergence correction.
+Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+q_pert : np.ndarray
+    LR perturbation wavevector in crystal coordinates, shape (3,)
+DeltaG_tskij : np.ndarray
+    LR Green's function, shape (nt, ns, nk, nb, nb)
+
+Returns
+-------
+np.ndarray
+    LR self-energy ΔΣ, shape (nt, ns, nk, nb, nb)
+)DOC");
+
+// gw_evaluate_sigma - evaluate GW self-energy Σ = -G ⊙ W_c + div_corr
+static auto const fun_gw_evaluate_sigma = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 5> const& G_tskij) {
+          return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij);
+        },
+        "lr_params", "h_int", "G_tskij")};
+
+static const auto doc_gw_evaluate_sigma = fun_gw_evaluate_sigma.doc(R"DOC(
+Evaluate GW self-energy Σ = -G ⊙ W_c + divergence correction using W from file.
+
+Same R-space computation as lr_gw_sigma but for a full (non-LR) Green's function.
+Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+G_tskij : np.ndarray
+    Green's function, shape (nt, ns, nk, nb, nb)
+
+Returns
+-------
+np.ndarray
+    Self-energy Σ, shape (nt, ns, nk, nb, nb)
 )DOC");
 
 //--------------------- module function table  -----------------------------
@@ -439,6 +511,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_hf_evaluate.c_str()},
     {"lr_hf_scf_cpp", (PyCFunction)c2py::pyfkw<fun_lr_hf_scf>,
      METH_VARARGS | METH_KEYWORDS, doc_lr_hf_scf.c_str()},
+    {"lr_gw_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_sigma>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma.c_str()},
+    {"gw_evaluate_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma>,
+     METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_sigma.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

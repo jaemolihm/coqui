@@ -262,7 +262,7 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
 
 
-def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True, iter_alg=None):
+def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True, iter_alg=None, compute_exchange=True):
     """
     Run full linear response Hartree-Fock SCF calculation.
 
@@ -307,6 +307,9 @@ def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix
             Maximum DIIS subspace size (default: 5). Only for DIIS.
         - diis_warmup : int
             Warmup iterations before DIIS extrapolation (default: 3). Only for DIIS.
+    compute_exchange : bool, optional
+        Whether to compute exchange term in LR Fock matrix (default: True).
+        Set to False for Hartree-only calculations (e.g., phonon benchmarks).
 
     Returns
     -------
@@ -336,4 +339,67 @@ def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix
 
     return lr_hf_scf_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
                          int(max_iter), float(tol), bool(fix_density),
-                         alg, mixing, max_subsp_size, diis_warmup)
+                         alg, mixing, max_subsp_size, diis_warmup,
+                         bool(compute_exchange))
+
+
+def run_lr_gw_sigma(params, h_int, q_pert, DeltaG_tskij):
+    """
+    Compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space).
+
+    Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaG_tskij : np.ndarray
+        LR Green's function, shape (nt, ns, nk, nb, nb)
+
+    Returns
+    -------
+    np.ndarray
+        LR self-energy ΔΣ, shape (nt, ns, nk, nb, nb)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_gw_sigma_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+
+    return lr_gw_sigma_cpp(json.dumps(params), h_int, q_pert, DeltaG_tskij)
+
+
+def gw_evaluate_sigma(params, h_int, G_tskij):
+    """
+    Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file.
+
+    Same R-space computation as lr_gw_sigma but for a full Green's function.
+    Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray
+        Green's function, shape (nt, ns, nk, nb, nb)
+
+    Returns
+    -------
+    np.ndarray
+        Self-energy Σ, shape (nt, ns, nk, nb, nb)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import gw_evaluate_sigma_cpp
+
+    G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+
+    return gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij)

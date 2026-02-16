@@ -100,7 +100,8 @@ namespace coqui_py {
       std::string iter_alg,
       double mixing,
       int max_subsp_size,
-      int diis_warmup) {
+      int diis_warmup,
+      bool compute_exchange) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     methods::lr_iter_params iter_params;
@@ -109,7 +110,7 @@ namespace coqui_py {
     iter_params.max_subsp_size = static_cast<size_t>(max_subsp_size);
     iter_params.diis_warmup = static_cast<size_t>(diis_warmup);
     return methods::lr_hf_scf_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
-                                    max_iter, tol, fix_density, iter_params);
+                                    max_iter, tol, fix_density, iter_params, compute_exchange);
   }
 
 
@@ -257,6 +258,44 @@ namespace coqui_py {
     nda::array<long, 1> kpq_map(nkpts);
     utils::calculate_kpq_map(kpts_crys, q_vec, kpq_map);
     return kpq_map;
+  }
+
+
+  /**
+   * @brief Compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space)
+   *
+   * @param lr_params     - [INPUT] JSON string with params (prefix)
+   * @param h_int         - [INPUT] THC ERI handler
+   * @param q_pert        - [INPUT] LR perturbation wavevector (3,)
+   * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> lr_gw_sigma(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      nda::array<ComplexType, 5> const& DeltaG_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_sigma_calc(mb_eri, parser.get_root(), q_pert, DeltaG_tskij);
+  }
+
+
+  /**
+   * @brief Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @return           - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> gw_evaluate_sigma(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<ComplexType, 5> const& G_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_sigma_calc(mb_eri, parser.get_root(), G_tskij);
   }
 
 

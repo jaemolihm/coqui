@@ -70,7 +70,8 @@ std::tuple<int, double> lr_driver::run_lr_hf(
     int max_iter,
     double tol,
     bool fix_density,
-    const lr_iter_params& iter_params) {
+    const lr_iter_params& iter_params,
+    bool compute_exchange) {
 
   _Timer.start("LR_HF_SCF");
 
@@ -85,6 +86,7 @@ std::tuple<int, double> lr_driver::run_lr_hf(
   app_log(1, "  max_iter = {}", max_iter);
   app_log(1, "  tol = {:.2e}", tol);
   app_log(1, "  fix_density = {}", fix_density ? "true" : "false");
+  app_log(1, "  compute_exchange = {}", compute_exchange ? "true" : "false");
   app_log(1, "  iter_alg = {}", iter_params.alg);
   app_log(1, "  mixing = {:.2f}", mixing);
   if (use_diis) {
@@ -182,7 +184,7 @@ std::tuple<int, double> lr_driver::run_lr_hf(
     _Timer.start("LR_HF");
     _lr_hf->evaluate(sDeltaF_skij, sDeltaDm_skij, thc, sS_skij.local(),
                      true,   // compute_hartree
-                     true);  // compute_exchange
+                     compute_exchange);
     _Timer.stop("LR_HF");
     _mpi->comm.barrier();
 
@@ -274,6 +276,6 @@ template std::tuple<int, double> lr_driver::run_lr_hf(
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     thc_reader_t&,
-    int, double, bool, const lr_iter_params&);
+    int, double, bool, const lr_iter_params&, bool);
 
 } // namespace methods

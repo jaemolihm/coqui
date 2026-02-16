@@ -103,7 +103,8 @@ public:
       int max_iter = 50,
       double tol = 1e-8,
       bool fix_density = true,
-      const lr_iter_params& iter_params = {});
+      const lr_iter_params& iter_params = {},
+      bool compute_exchange = true);
 
   void print_timers();
 

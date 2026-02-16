@@ -239,7 +239,42 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
                                         int max_iter = 50,
                                         double tol = 1e-8,
                                         bool fix_density = true,
-                                        const lr_iter_params& iter_params = {});
+                                        const lr_iter_params& iter_params = {},
+                                        bool compute_exchange = true);
+
+/**
+ * @brief Linear response GW self-energy with fixed W
+ *
+ * Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product) + divergence correction.
+ * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+ *
+ * @param eri          - [INPUT] THC ERI handler
+ * @param pt           - [INPUT] Parameters as property tree (prefix, output)
+ * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& DeltaG_tskij);
+
+/**
+ * @brief Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file
+ *
+ * Same R-space computation as lr_gw but for a full (non-LR) Green's function.
+ * Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix, output)
+ * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij);
 
 }
 #endif

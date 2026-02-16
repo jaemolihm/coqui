@@ -54,53 +54,76 @@ namespace methods {
       using shape_t = std::array<long, N>;
 
       /**
-       * LR primary→aux wrapper. Matches thc_solver_comm::primary_to_aux (rank-4
-       * distributed array overload, lines 118-153) line-by-line.
-       *
-       * IBZ → full BZ: O_skab is indexed by IBZ k-points, O_skPQ by full BZ k-points.
+       * LR primary→aux wrapper (rank-4 and rank-5 distributed array overload).
+       * Matches thc_solver_comm::primary_to_aux (lines 118-153) using if constexpr
+       * to branch on rank.
        *
        * @param ip         - [INPUT] left polarization index
        * @param iq         - [INPUT] right polarization index
-       * @param O_skab     - [INPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd)
-       * @param O_skPQ     - [OUTPUT] tensor in auxiliary basis (ns, nkpts, NP, NP)
+       * @param O_Iab      - [INPUT] tensor in primary basis
+       *                     rank-5: (nt_half, ns, nkpts_ibz, nbnd, nbnd)
+       *                     rank-4: (ns, nkpts_ibz, nbnd, nbnd)
+       * @param O_IPQ      - [OUTPUT] tensor in auxiliary basis
+       *                     rank-5: (nt_half, ns, nkpts, NP, NP)
+       *                     rank-4: (ns, nkpts, NP, NP)
        * @param thc        - [INPUT] THC-ERI handler
        * @param kp_to_ibz  - [INPUT] full BZ k → IBZ k mapping (nkpts,)
        * @param kp_trev    - [INPUT] time-reversal flag per full BZ k-point (nkpts,)
        * @param kpq_map    - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        */
-      template<nda::MemoryArray AF_t>
+      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void primary_to_aux(int ip, int iq,
-                                 const nda::MemoryArrayOfRank<4> auto& O_skab,
-                                 dArray_t<nda::array<ComplexType, 4>>& O_skPQ,
+                                 const Array_primary_t &O_Iab,
+                                 memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_to_ibz,
                                  nda::ArrayOfRank<1> auto const& kp_trev,
                                  nda::ArrayOfRank<1> auto const& kpq_map) {
-        // Matches thc_solver_comm::primary_to_aux rank-4 case (lines 139-149)
-        auto P_offset = O_skPQ.origin()[2];
-        auto Q_offset = O_skPQ.origin()[3];
+        constexpr int rank = nda::get_rank<Array_primary_t>;
+        static_assert(rank == 4 || rank == 5,
+                      "lr_thc_comm::primary_to_aux: rank must be 4 or 5");
 
-        auto O_skPQ_loc = O_skPQ.local();
-        utils::check(O_skPQ.global_shape()[1] == O_skPQ.local_shape()[1],
-                     "lr_thc_comm::primary_to_aux: Does not support mpi distributed along k-axis.");
+        if constexpr (rank == 5) {
+          auto t_loc_rng = O_IPQ.local_range(0);
+          auto P_offset = O_IPQ.origin()[3];
+          auto Q_offset = O_IPQ.origin()[4];
 
-        _primary_to_aux_impl(ip, iq, O_skab, O_skPQ_loc, thc,
-                             kp_to_ibz, kp_trev, kpq_map,
-                             1, 0, 1, P_offset, Q_offset);
+          auto O_Iab_loc = O_Iab(t_loc_rng, nda::ellipsis{});
+          auto O_IPQ_loc = O_IPQ.local();
+          utils::check(O_IPQ.global_shape()[2] == O_IPQ.local_shape()[2],
+                       "lr_thc_comm::primary_to_aux(rank-5): Does not support mpi distributed along k-axis.");
+
+          _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
+                               kp_to_ibz, kp_trev, kpq_map,
+                               1, 0, 1, P_offset, Q_offset);
+        } else if constexpr (rank == 4) {
+          auto P_offset = O_IPQ.origin()[2];
+          auto Q_offset = O_IPQ.origin()[3];
+
+          auto O_IPQ_loc = O_IPQ.local();
+          utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
+                       "lr_thc_comm::primary_to_aux: Does not support mpi distributed along k-axis.");
+
+          _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
+                               kp_to_ibz, kp_trev, kpq_map,
+                               1, 0, 1, P_offset, Q_offset);
+        }
       }
 
       /**
-       * LR aux→primary wrapper. Matches thc_solver_comm::aux_to_primary (rank-4
-       * distributed→shared overload, lines 260-325) line-by-line.
-       *
-       * IBZ → IBZ: both O_skPQ and O_skab are indexed by IBZ k-points.
-       * The full BZ k-index for X lookup is obtained via kp_map (= ks_to_k(0)).
+       * LR aux→primary wrapper (rank-4 and rank-5 distributed→shared overload).
+       * Matches thc_solver_comm::aux_to_primary (lines 260-325) using if constexpr
+       * to branch on rank.
        *
        * @param ip       - [INPUT] left polarization index
        * @param iq       - [INPUT] right polarization index
        * @param scl      - [INPUT] scaling factor for accumulation
-       * @param O_skPQ   - [INPUT] tensor in auxiliary basis (ns, nkpts_ibz, NP, NP)
-       * @param O_skab   - [OUTPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd), accumulated
+       * @param O_IPQ    - [INPUT] tensor in auxiliary basis
+       *                   rank-5: (nt_half, ns, nkpts_ibz, NP, NP)
+       *                   rank-4: (ns, nkpts_ibz, NP, NP)
+       * @param O_Iab    - [OUTPUT] tensor in primary basis, accumulated
+       *                   rank-5: (nt_half, ns, nkpts_ibz, nbnd, nbnd)
+       *                   rank-4: (ns, nkpts_ibz, nbnd, nbnd)
        * @param thc      - [INPUT] THC-ERI handler
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
@@ -108,49 +131,79 @@ namespace methods {
       template<nda::MemoryArray AF_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq,
                                  ComplexType scl,
-                                 const memory::darray_t<Array_aux_t, communicator_t>& O_skPQ,
-                                 sArray_t<AF_t>& O_skab,
+                                 const memory::darray_t<Array_aux_t, communicator_t>& O_IPQ,
+                                 sArray_t<AF_t>& O_Iab,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_map,
                                  nda::ArrayOfRank<1> auto const& kpq_map) {
+        constexpr int rank = nda::get_rank<Array_aux_t>;
+        static_assert(nda::get_rank<AF_t> == rank,
+                      "lr_thc_comm::aux_to_primary: rank mismatch between darray and sarray");
+        static_assert(rank == 4 || rank == 5,
+                      "lr_thc_comm::aux_to_primary: rank must be 4 or 5");
         using value_type = typename std::decay_t<AF_t>::value_type;
 
-        // Matches thc_solver_comm::aux_to_primary rank-4 case (lines 267-324)
-
         // to compensate for reduction
-        O_skab.win().fence();
-        O_skab.communicator()->barrier();
-        if(O_skab.node_comm()->root())
-          O_skab.local() /= value_type(O_skab.internode_comm()->size());
-        O_skab.node_comm()->barrier();
+        O_Iab.win().fence();
+        O_Iab.communicator()->barrier();
+        if(O_Iab.node_comm()->root())
+          O_Iab.local() /= value_type(O_Iab.internode_comm()->size());
+        O_Iab.node_comm()->barrier();
 
-        auto pgrid = O_skPQ.grid();
-        auto s_rng = O_skPQ.local_range(0);
-        auto k_rng = O_skPQ.local_range(1);
+        if constexpr (rank == 5) {
+          auto pgrid = O_IPQ.grid();
+          auto t_rng = O_IPQ.local_range(0);
+          auto s_rng = O_IPQ.local_range(1);
+          auto k_rng = O_IPQ.local_range(2);
 
-        auto [s_org, k_org, P_org, Q_org] = O_skPQ.origin();
-        auto [ns, nkpts, NP, NQ] = O_skPQ.global_shape();
-        utils::check(nkpts == O_skPQ.local_shape()[1],
-                     "lr_thc_comm::aux_to_primary: Does not support mpi distributed along k-axis.");
+          auto [t_org, s_org, k_org, P_org, Q_org] = O_IPQ.origin();
+          auto [nt, ns, nkpts, NP, NQ] = O_IPQ.global_shape();
+          utils::check(nkpts == O_IPQ.local_shape()[2],
+                       "lr_thc_comm::aux_to_primary(rank-5): Does not support mpi distributed along k-axis.");
 
-        auto O_skab_loc = O_skab.local()(s_rng, k_rng, nda::ellipsis{});
-        auto O_skPQ_loc = O_skPQ.local();
+          auto O_Iab_loc = O_Iab.local()(t_rng, s_rng, k_rng, nda::ellipsis{});
+          auto O_IPQ_loc = O_IPQ.local();
 
-        // Setup q_intra_comm
-        communicator_t *gcomm = O_skPQ.communicator();
-        int color = s_org * nkpts + k_org;
-        int key = gcomm->rank();
-        communicator_t dim0_intra_comm = gcomm->split(color, key);
-        utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
-                     "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
+          // Setup wq_intra_comm
+          communicator_t *gcomm = O_IPQ.communicator();
+          int color = t_org * ns * nkpts + s_org * nkpts + k_org;
+          int key = gcomm->rank();
+          communicator_t dim0_intra_comm = gcomm->split(color, key);
+          utils::check(dim0_intra_comm.size() == pgrid[3] * pgrid[4],
+                       "dim0_intra_comm.size() != pgrid[3]*pgrid[4]");
 
-        _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
-                             O_skPQ_loc, O_skab_loc, thc,
-                             kp_map, kpq_map, k_org, P_org, Q_org);
+          _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
+                               O_IPQ_loc, O_Iab_loc, thc,
+                               kp_map, kpq_map, k_org, P_org, Q_org);
+        } else if constexpr (rank == 4) {
+          auto pgrid = O_IPQ.grid();
+          auto s_rng = O_IPQ.local_range(0);
+          auto k_rng = O_IPQ.local_range(1);
+
+          auto [s_org, k_org, P_org, Q_org] = O_IPQ.origin();
+          auto [ns, nkpts, NP, NQ] = O_IPQ.global_shape();
+          utils::check(nkpts == O_IPQ.local_shape()[1],
+                       "lr_thc_comm::aux_to_primary: Does not support mpi distributed along k-axis.");
+
+          auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
+          auto O_IPQ_loc = O_IPQ.local();
+
+          // Setup q_intra_comm
+          communicator_t *gcomm = O_IPQ.communicator();
+          int color = s_org * nkpts + k_org;
+          int key = gcomm->rank();
+          communicator_t dim0_intra_comm = gcomm->split(color, key);
+          utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
+                       "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
+
+          _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
+                               O_IPQ_loc, O_Iab_loc, thc,
+                               kp_map, kpq_map, k_org, P_org, Q_org);
+        }
 
         // reduce
-        O_skab.win().fence();
-        O_skab.all_reduce();
+        O_Iab.win().fence();
+        O_Iab.all_reduce();
       }
 
     private:

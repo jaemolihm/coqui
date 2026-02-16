@@ -151,13 +151,19 @@ namespace methods {
                           int batch_size = -1,
                           bool print_mpi = false);
 
+      template<nda::MemoryArray Array_view_5D_t>
+      void Sigma_div_correction(sArray_t<Array_view_5D_t> &sSigma_tskij,
+                                const nda::MemoryArrayOfRank<5> auto &G_tskij,
+                                THC_ERI auto &thc,
+                                const nda::array<ComplexType, 1> &eps_inv_head);
+
       void print_thc_gw_timers();
- 
-      void print_thc_rpa_timers(); 
 
-      void print_chol_gw_timers(); 
+      void print_thc_rpa_timers();
 
-      void print_rpa_gw_timers(); 
+      void print_chol_gw_timers();
+
+      void print_rpa_gw_timers();
 
       //void set_MF(mf::MF *MF) { _MF = MF; }
 
@@ -216,12 +222,6 @@ namespace methods {
                                  const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
                                  memory::darray_t<Array_4D_t, communicator_t> &dSigma_skPQ,
                                  THC_ERI auto &thc, long isym);
-
-      template<nda::MemoryArray Array_view_5D_t>
-      void Sigma_div_correction(sArray_t<Array_view_5D_t> &sSigma_tskij,
-                                const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                                THC_ERI auto &thc,
-                                const nda::array<ComplexType, 1> &eps_inv_head);
 
       double thc_rpa_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij, THC_ERI auto &thc);
 

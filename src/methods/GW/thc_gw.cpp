@@ -215,7 +215,12 @@ namespace methods {
     template void gw_t::eval_Sigma_all(const Arrv &, memory::darray_t<Arr4D, mpi3::communicator> &, sArray_t<Arrv> &,
           thc_reader_t&, std::string); 
     template void gw_t::eval_Sigma_all(const Arrv2 &, memory::darray_t<Arr4D, mpi3::communicator> &, sArray_t<Arrv> &,
-          thc_reader_t&, std::string); 
+          thc_reader_t&, std::string);
+
+    template void gw_t::Sigma_div_correction(sArray_t<Arrv> &, const Arr &, thc_reader_t &,
+          const nda::array<ComplexType, 1> &);
+    template void gw_t::Sigma_div_correction(sArray_t<Arrv> &, const Arrv &, thc_reader_t &,
+          const nda::array<ComplexType, 1> &);
 
   }
 }

@@ -50,6 +50,7 @@
 #include "numerics/iter_scf/iter_scf_utils.hpp"
 
 #include "SCF/scf_driver.hpp"
+#include "methods/GW/lr_gw.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -243,8 +244,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
-          h5::file file("thc_screened_interaction.h5", 'w');
+          h5::file file(w_path, 'w');
           h5::group grp(file);
           math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
         } else {
@@ -262,8 +264,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
-          h5::file file("thc_screened_interaction.h5", 'w');
+          h5::file file(w_path, 'w');
           h5::group grp(file);
           math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
         } else {
@@ -1025,16 +1028,11 @@ double lr_dyson_calc(eri_t &eri, ptree const& pt,
   lr_dyson lr(dyson, q_vec);
   app_log(2, "Solving LR Dyson equation...");
 
-  // Create zero ΔF and ΔΣ arrays
+  // Create zero ΔF and ΔΣ arrays (shared_array constructor initializes to zero)
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  if (mpi->node_comm.root()) {
-    sDeltaF_skij.local() = ComplexType(0.0);
-    sDeltaSigma_tskij.local() = ComplexType(0.0);
-  }
-  mpi->comm.barrier();
 
   // solve_lr_dyson now returns the Δμ used and computes ΔDm internally
   double Delta_mu = lr.solve_lr_dyson(sDeltaG_tskij, sDeltaDm_skij, sG_tskij, sDeltaH0_skij,
@@ -1073,7 +1071,8 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
                                         int max_iter,
                                         double tol,
                                         bool fix_density,
-                                        const lr_iter_params& iter_params) {
+                                        const lr_iter_params& iter_params,
+                                        bool compute_exchange) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1082,6 +1081,7 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
   auto output = io::get_value_with_default<std::string>(pt, "output", prefix);
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+  auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1110,7 +1110,13 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
   // Create simple_dyson
-  simple_dyson dyson(mf.get(), &ft);
+  // h0_source = "compute": H0 from plane-wave orbitals (default, standard HF/GW workflow)
+  // h0_source = "checkpoint": H0 from /system/H0_skij in checkpoint (e.g., for bare DFT G0)
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+               "lr_hf_scf_calc: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
+  simple_dyson dyson = (h0_source == "checkpoint")
+      ? simple_dyson(mf.get(), &ft, prefix)
+      : simple_dyson(mf.get(), &ft);
 
   // Allocate shared arrays
   auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -1130,6 +1136,8 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
 
   // Compute G from F and Sigma via Dyson equation
   app_log(2, "Computing unperturbed Green's function from checkpoint...");
+  app_log(2, "  h0_source = {}", h0_source);
+  app_log(2, "  mu = {:.8f}", mu);
   update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
   mpi->comm.barrier();
 
@@ -1165,7 +1173,7 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
   auto [niter, Delta_mu] = driver.run_lr_hf(
       sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
       sG_tskij, sDeltaH0_skij, thc,
-      max_iter, tol, fix_density, iter_params);
+      max_iter, tol, fix_density, iter_params, compute_exchange);
   mpi->comm.barrier();
 
   // Write results
@@ -1173,6 +1181,181 @@ std::tuple<int, double> lr_hf_scf_calc(eri_t &eri, ptree const& pt,
                     sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, Delta_mu, niter);
 
   return std::make_tuple(niter, Delta_mu);
+}
+
+
+/**
+ * Linear response GW self-energy with fixed W.
+ *
+ * Computes ΔΣ = -ΔG ⊙ W_c (R-space) + divergence correction.
+ * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& DeltaG_tskij) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_sigma_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_sigma_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  // Read W from thc_screened_interaction.h5 (same directory as checkpoint)
+  auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
+  app_log(2, "Reading W from {}...", w_file);
+  // W is stored as a distributed array — read on root, then create distributed array
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, {nkpts, nt_half, NP, NP});
+  if (mpi->comm.root()) {
+    h5::file file(w_file, 'r');
+    h5::group grp(file);
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+  } else {
+    h5::group grp;
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+  }
+  mpi->comm.barrier();
+
+  // Read eps_inv_head from checkpoint
+  nda::array<ComplexType, 1> eps_inv_head(nt_half);
+  if (mpi->comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root = h5::group(file);
+    auto scf_grp = root.open_group(input_grp);
+    long iter = input_iter;
+    if (iter == -1) {
+      h5::h5_read(scf_grp, "final_iter", iter);
+    }
+    auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
+    nda::h5_read(iter_grp, "eps_inv_head_t", eps_inv_head);
+  }
+  mpi->comm.broadcast_n(eps_inv_head.data(), eps_inv_head.size(), 0);
+  mpi->comm.barrier();
+
+  // Create lr_gw solver and compute ΔΣ
+  solvers::lr_gw lr(& ft, q_pert);
+
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  lr.evaluate_sigma_fixed_W(sDeltaSigma_tskij, DeltaG_tskij, dW_qtPQ, thc, eps_inv_head);
+  mpi->comm.barrier();
+
+  // Copy result
+  nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
+  if (mpi->node_comm.root()) {
+    DeltaSigma_tskij = sDeltaSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return DeltaSigma_tskij;
+}
+
+
+/**
+ * Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file.
+ *
+ * Uses the standard gw_t code path (thc_solver_comm, not lr_thc_comm).
+ * Used for finite-difference testing of LR-GW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_sigma_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_sigma_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  // Read W from thc_screened_interaction.h5 (same directory as checkpoint)
+  auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
+  app_log(2, "Reading W from {}...", w_file);
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, {nkpts, nt_half, NP, NP});
+  if (mpi->comm.root()) {
+    h5::file file(w_file, 'r');
+    h5::group grp(file);
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+  } else {
+    h5::group grp;
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+  }
+  mpi->comm.barrier();
+
+  // Read eps_inv_head from checkpoint
+  nda::array<ComplexType, 1> eps_inv_head(nt_half);
+  if (mpi->comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root = h5::group(file);
+    auto scf_grp = root.open_group(input_grp);
+    long iter = input_iter;
+    if (iter == -1) {
+      h5::h5_read(scf_grp, "final_iter", iter);
+    }
+    auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
+    nda::h5_read(iter_grp, "eps_inv_head_t", eps_inv_head);
+  }
+  mpi->comm.broadcast_n(eps_inv_head.data(), eps_inv_head.size(), 0);
+  mpi->comm.barrier();
+
+  // Use standard gw_t code path
+  solvers::gw_t gw(&ft);
+
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  gw.eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc, "R");
+  gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+  mpi->comm.barrier();
+
+  // Copy result
+  nda::array<ComplexType, 5> Sigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
+  if (mpi->node_comm.root()) {
+    Sigma_tskij = sSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return Sigma_tskij;
 }
 
 
@@ -1265,6 +1448,19 @@ template std::tuple<int, double> lr_hf_scf_calc(
     ptree const&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 4> const&,
-    int, double, bool, const lr_iter_params&);
+    int, double, bool, const lr_iter_params&, bool);
+
+// lr_gw_sigma_calc instantiations (THC only — lr_gw requires THC)
+template nda::array<ComplexType, 5> lr_gw_sigma_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    nda::array<ComplexType, 5> const&);
+
+// gw_evaluate_sigma_calc instantiations (THC only)
+template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<ComplexType, 5> const&);
 
 }

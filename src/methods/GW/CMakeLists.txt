@@ -3,10 +3,11 @@
 
 SET(SRCS
   gw_t.cpp
-  cholesky_rpa.cpp  
-  cholesky_gw.cpp  
+  lr_gw.cpp
+  cholesky_rpa.cpp
+  cholesky_gw.cpp
   thc_rpa.cpp
-  thc_gw.cpp  
+  thc_gw.cpp
   )
 
 if(USE_DEVICE_COMPILER)

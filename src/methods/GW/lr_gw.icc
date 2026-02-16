@@ -1,0 +1,361 @@
+#ifndef COQUI_LR_GW_ICC
+#define COQUI_LR_GW_ICC
+
+#include "mpi3/communicator.hpp"
+#include "nda/nda.hpp"
+#include "nda/blas.hpp"
+#include "numerics/shared_array/nda.hpp"
+#include "numerics/distributed_array/nda.hpp"
+#include "numerics/nda_functions.hpp"
+
+#include "IO/app_loggers.h"
+#include "utilities/Timer.hpp"
+#include "utilities/kpoint_utils.hpp"
+#include "utilities/lr_utils.hpp"
+
+#include "mean_field/MF.hpp"
+#include "methods/ERI/detail/concepts.hpp"
+#include "methods/HF/lr_thc_comm.hpp"
+#include "methods/ERI/div_treatment_e.hpp"
+
+namespace methods {
+  namespace solvers {
+
+    template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
+    void lr_gw::evaluate_sigma_fixed_W(
+        sArray_t<Array_5D_t>& sDeltaSigma_tskij,
+        const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
+        memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+        THC_ERI auto& thc,
+        const nda::array<ComplexType, 1>& eps_inv_head) {
+
+      _init_kpq_map(thc);
+
+      app_log(1, "\n  LR-GW self-energy: ΔΣ = -ΔG ⊙ W_c (R-space) + div_corr");
+      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+
+      auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
+      app_log(2, "    processor grid for W: (t, q, P, Q) = ({}, {}, {}, {})", tpools, qpools, np_P, np_Q);
+
+      sDeltaSigma_tskij.set_zero();
+
+      // τ ∈ [0, β/2]
+      eval_DeltaSigma_Rspace<false, true>(DeltaG_tskij, dW_qtPQ, sDeltaSigma_tskij, thc, false);
+      // τ ∈ [β/2, β]
+      eval_DeltaSigma_Rspace<true, false>(DeltaG_tskij, dW_qtPQ, sDeltaSigma_tskij, thc, true);
+
+      // q→0 divergence correction with LR-aware T matrices (T^L at k+q, T^R at k)
+      _sigma_div_correction(sDeltaSigma_tskij, DeltaG_tskij, thc, eps_inv_head);
+
+      app_log(1, "  LR-GW self-energy done.\n");
+    }
+
+
+    /**
+     * R-space convolution adapted from gw_t::eval_Sigma_all_Rspace (thc_gw.icc:67-213).
+     *
+     * Only 3 changes from the standard version:
+     * 1. primary_to_aux uses lr_thc_comm with _kpq_map
+     * 2. aux_to_primary uses lr_thc_comm with _kpq_map
+     * 3. setup_Sigma_primary is replaced by lr_thc_comm::aux_to_primary directly
+     */
+    template<bool Winp_in_Rspace, bool Wout_in_Rspace,
+        nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
+        typename communicator_t>
+    void lr_gw::eval_DeltaSigma_Rspace(const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
+                                       memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+                                       sArray_t<Array_5D_t>& sDeltaSigma_tskij,
+                                       THC_ERI auto& thc,
+                                       bool minus_t) {
+      _Timer.start("EVALUATE_SIGMA_R");
+      auto MF = thc.MF();
+      auto mpi = thc.mpi();
+      utils::check(MF->nqpts() == MF->nqpts_ibz() and MF->nqpts() == MF->nkpts(),
+                   "lr_gw::eval_DeltaSigma_Rspace: Symmetry not allowed. nqpts={}, nqpts_ibz={}, nkpts={}",
+                   MF->nqpts(), MF->nqpts_ibz(), MF->nkpts());
+      auto ns = DeltaG_tskij.shape(1);
+      auto [nk_loc, nt_loc, NP_loc, NQ_loc] = dW_qtPQ.local_shape();
+      auto [nkpts, nt_half, NP, NQ] = dW_qtPQ.global_shape();
+      auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
+      auto bsize = dW_qtPQ.block_size();
+      utils::check(dW_qtPQ.local_shape()[0] == nkpts,
+                   "lr_gw::eval_DeltaSigma_Rspace: nq_loc = {} != nkpts", dW_qtPQ.local_shape()[0]);
+      utils::check(qpools == 1, "lr_gw::eval_DeltaSigma_Rspace: qpools = {} != 1", qpools);
+
+      using local_Array_5D_t = memory::array<HOST_MEMORY, ComplexType, 5>;
+      using local_Arrayv_5D_t = memory::array_view<HOST_MEMORY, ComplexType, 5>;
+      using math::nda::make_distributed_array;
+
+      // === Step 1: Primary → auxiliary basis using lr_thc_comm ===
+      //     Input: DeltaG_tskij, Output: dDeltaG_sktPQ
+      _Timer.start("SIGMA_ALLOC_R");
+      auto dDeltaG_sktPQ = make_distributed_array<local_Array_5D_t>(
+          mpi->comm, {1, qpools, tpools, np_P, np_Q}, {ns, nkpts, nt_half, NP, NQ},
+          {1, bsize[0], bsize[1], bsize[2], bsize[3]});
+      {
+        auto dDeltaG_tskPQ = make_distributed_array<local_Array_5D_t>(
+            mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ},
+            {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
+        _Timer.stop("SIGMA_ALLOC_R");
+
+        _Timer.start("SIGMA_PRIM_TO_AUX");
+        if (minus_t) {
+          // ΔG_ij(τ) → ΔG_ij(β-τ)
+          auto sDeltaG_ttskij = math::shm::make_shared_array<local_Arrayv_5D_t>(
+              *mpi, DeltaG_tskij.shape());
+          size_t nt = DeltaG_tskij.shape()[0];
+          auto DeltaGtt_loc = sDeltaG_ttskij.local();
+          sDeltaG_ttskij.win().fence();
+          for (size_t it=mpi->node_comm.rank(); it<nt; it+=mpi->node_comm.size()) {
+            DeltaGtt_loc(it, nda::ellipsis{}) = DeltaG_tskij(nt-it-1, nda::ellipsis{});
+          }
+          sDeltaG_ttskij.win().fence();
+          // ΔG_ij(β-τ) → ΔG_PQ(β-τ) via lr_thc_comm
+          lr_thc_comm::primary_to_aux(0, 0, sDeltaG_ttskij.local(), dDeltaG_tskPQ, thc,
+                                      MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        } else {
+          lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij, dDeltaG_tskPQ, thc,
+                                      MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        }
+        _Timer.stop("SIGMA_PRIM_TO_AUX");
+
+        // Transpose: (t,s,k,P,Q) → (s,k,t,P,Q) locally
+        _Timer.start("SIGMA_ALLOC_R");
+        auto DeltaG_tskPQ = dDeltaG_tskPQ.local();
+        auto DeltaG_sktPQ = dDeltaG_sktPQ.local();
+        for (size_t skt = 0; skt < ns * nkpts * nt_loc; ++skt) {
+          size_t is = skt / (nkpts * nt_loc);
+          size_t ik = (skt / nt_loc) % nkpts;
+          size_t it = skt % nt_loc;
+          DeltaG_sktPQ(is, ik, it, nda::ellipsis{}) = DeltaG_tskPQ(it, is, ik, nda::ellipsis{});
+        }
+      }
+      _Timer.stop("SIGMA_ALLOC_R");
+
+      // === Step 2: ΔG^k_{PQ}(τ) → ΔG^R_{PQ}(τ),  W^q_{PQ}(τ) → W^R_{PQ}(τ)  [k→R FT] ===
+      //     Input: dDeltaG_sktPQ, dW_qtPQ. Output: in-place (aliased as dDeltaG_sRtPQ, dW_RtPQ)
+      math::shm::shared_array<nda::array_view<ComplexType,2>> sf_Rk(*mpi, {nkpts,nkpts});
+
+      if (nkpts != 1) {
+        _Timer.start("SIGMA_FT_R");
+        auto f_Rk = sf_Rk.local();
+        utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+        auto DeltaG_3D = nda::reshape(dDeltaG_sktPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
+        nda::matrix<ComplexType> R_buffer(nkpts, nt_loc*NP_loc*NQ_loc);
+        for (long s = 0; s < ns; ++s) {
+          nda::blas::gemm(f_Rk, DeltaG_3D(s, nda::ellipsis{}), R_buffer);
+          DeltaG_3D(s, nda::ellipsis{}) = R_buffer;
+        }
+
+        if constexpr (!Winp_in_Rspace) {
+          utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+          auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+          nda::blas::gemm(f_Rk, WR_2D, R_buffer);
+          WR_2D = R_buffer;
+        }
+        _Timer.stop("SIGMA_FT_R");
+      }
+      // After FT: dDeltaG_sktPQ and dW_qtPQ are now in R-space
+      auto& dDeltaG_sRtPQ = dDeltaG_sktPQ;
+      auto& dW_RtPQ = dW_qtPQ;
+
+      // === Step 3: ΔΣ^R_{PQ}(τ) = -ΔG^R_{PQ}(τ) ⊙ W^R_{PQ}(τ)  [Hadamard product] ===
+      //     Input: dDeltaG_sRtPQ, dW_RtPQ. Output: dDeltaSigma_sRtPQ
+      auto dDeltaSigma_sRtPQ = make_distributed_array<local_Array_5D_t>(
+          mpi->comm, {1, qpools, tpools, np_P, np_Q}, {ns, nkpts, nt_half, NP, NQ},
+          {1, bsize[0], bsize[1], bsize[2], bsize[3]});
+      _Timer.start("SIGMA_HADPROD_R");
+      auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y) ; });
+      auto W_RtPQ = dW_RtPQ.local();
+      for (long s = 0; s < ns; ++s) {
+        auto DeltaG_RtPQ = dDeltaG_sRtPQ.local()(s, nda::ellipsis{});
+        auto Sigma_RtPQ = dDeltaSigma_sRtPQ.local()(s, nda::ellipsis{});
+        Sigma_RtPQ = had_prod2(DeltaG_RtPQ, W_RtPQ);
+      }
+      _Timer.stop("SIGMA_HADPROD_R");
+      dDeltaG_sRtPQ.reset();
+
+      // === Step 4: ΔΣ^R_{PQ}(τ) → ΔΣ^k_{PQ}(τ),  W^R_{PQ}(τ) → W^q_{PQ}(τ)  [R→k FT] ===
+      //     Input: dDeltaSigma_sRtPQ, dW_RtPQ. Output: in-place (aliased as dDeltaSigma_sktPQ, dW_qtPQ)
+      if (nkpts != 1) {
+        auto f_kR = sf_Rk.local();
+        utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+
+        _Timer.start("SIGMA_FT_R");
+        auto Sigma_3D = nda::reshape(dDeltaSigma_sRtPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
+        nda::matrix<ComplexType> buffer(nkpts, nt_loc*NP_loc*NQ_loc);
+        for (long s = 0; s < ns; ++s) {
+          nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), buffer);
+          Sigma_3D(s, nda::ellipsis{}) = buffer;
+        }
+
+        if constexpr (!Wout_in_Rspace) {
+          utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+          auto WR_2D = nda::reshape(dW_RtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+          nda::blas::gemm(f_kR, WR_2D, buffer);
+          WR_2D = buffer;
+        }
+        _Timer.stop("SIGMA_FT_R");
+      }
+      // After FT: dDeltaSigma_sRtPQ is now in k-space
+      auto& dDeltaSigma_sktPQ = dDeltaSigma_sRtPQ;
+
+      // === Step 5: ΔΣ^k_{PQ}(τ) → ΔΣ^k_{ij}(τ)  [aux → primary via lr_thc_comm] ===
+      //     Input: dDeltaSigma_sktPQ. Output: sDeltaSigma_tskij
+      _Timer.start("SIGMA_ALLOC_R");
+      auto dDeltaSigma_tskPQ = make_distributed_array<local_Array_5D_t>(
+          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ},
+          {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
+      {
+        // Transpose: (s,k,t,P,Q) → (t,s,k,P,Q)
+        auto Sigma_tskPQ = dDeltaSigma_tskPQ.local();
+        auto Sigma_sktPQ = dDeltaSigma_sktPQ.local();
+        for (size_t tsk = 0; tsk < nt_loc * ns * nkpts; ++tsk) {
+          size_t it = tsk / (ns * nkpts);
+          size_t is = (tsk / nkpts) % ns;
+          size_t ik = tsk % nkpts;
+          Sigma_tskPQ(it, is, ik, nda::ellipsis{}) = Sigma_sktPQ(is, ik, it, nda::ellipsis{});
+        }
+      }
+      dDeltaSigma_sktPQ.reset();
+      _Timer.stop("SIGMA_ALLOC_R");
+
+      _Timer.start("SIGMA_AUX_TO_PRIM");
+      if (!minus_t) {
+        sDeltaSigma_tskij.set_zero();
+        lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dDeltaSigma_tskPQ,
+                                    sDeltaSigma_tskij, thc, MF->ks_to_k(0), _kpq_map);
+      } else {
+        auto [nt, ns_s, nkpts_ibz, nbnd_i, nbnd_j] = sDeltaSigma_tskij.shape();
+        auto nt_half_val = (nt % 2 == 0)? nt / 2 : nt / 2 + 1;
+        auto sSigma_mtskij = math::shm::make_shared_array<Array_5D_t>(
+            *mpi, {nt_half_val, ns_s, nkpts_ibz, nbnd_i, nbnd_j});
+        sSigma_mtskij.set_zero();
+        lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dDeltaSigma_tskPQ,
+                                    sSigma_mtskij, thc, MF->ks_to_k(0), _kpq_map);
+        // Sigma(β-τ) → Sigma(τ)
+        int node_rank = sDeltaSigma_tskij.node_comm()->rank();
+        int node_size = sDeltaSigma_tskij.node_comm()->size();
+        auto Sigma_t_loc = sDeltaSigma_tskij.local();
+        auto Sigma_mt_loc = sSigma_mtskij.local();
+        sDeltaSigma_tskij.win().fence();
+        for (size_t it = node_rank; it < nt/2; it += node_size) {
+          Sigma_t_loc(nt-it-1, nda::ellipsis{}) = Sigma_mt_loc(it, nda::ellipsis{});
+        }
+        sDeltaSigma_tskij.win().fence();
+      }
+      _Timer.stop("SIGMA_AUX_TO_PRIM");
+
+      _Timer.stop("EVALUATE_SIGMA_R");
+    }
+
+    /**
+     * LR-aware divergence correction, adapted from gw_t::Sigma_div_correction.
+     *
+     * For q_pert≠0 the THC basis transforms use X(k+q) on the left and X(k) on
+     * the right, so the T matrix that absorbs X and chi_head must be split:
+     *   T^L_{ia}(k) = Σ_P conj(X^{k+q}(P,i)) · X^{k+q}(P,a) · conj(χ(P))
+     *   T^R_{jb}(k) = Σ_P conj(X^k(P,j))     · X^k(P,b)     · conj(χ(P))
+     *
+     * ΔΣ^div_{ij}(k,τ) = factor(τ) · [T^L · ΔG · (T^R)†]_{ij}
+     */
+    template<nda::MemoryArray Array_view_5D_t>
+    void lr_gw::_sigma_div_correction(sArray_t<Array_view_5D_t>& sDeltaSigma_tskij,
+                                       const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
+                                       THC_ERI auto& thc,
+                                       const nda::array<ComplexType, 1>& eps_inv_head) {
+      auto div_treatment = _gw.div_treatmemnt();
+      app_log(1, "  LR divergence correction: {}", div_enum_to_string(div_treatment));
+
+      if (thc.MF()->nqpts_ibz() == 1 and div_treatment != ignore_g0) {
+        app_log(2, "    nqpts_ibz == 1, taking div_treatment = ignore_g0");
+        div_treatment = ignore_g0;
+      }
+
+      if (div_treatment == ignore_g0) {
+        return;
+      } else if (div_treatment == gygi or div_treatment == gygi_extrplt or div_treatment == gygi_extrplt_2d) {
+        auto MF = thc.MF();
+        auto mpi = thc.mpi();
+        app_log(1, "    - madelung = {}", MF->madelung());
+        using math::shm::make_shared_array;
+        auto [nts, ns, nkpts, nbnd, nbnd2] = sDeltaSigma_tskij.shape();
+        auto nt_half = (nts % 2 == 0) ? nts / 2 : nts / 2 + 1;
+        auto NP = thc.Np();
+
+        int rank = mpi->comm.rank();
+        int size = mpi->comm.size();
+
+        using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+        auto chi_head = thc.basis_head()(0, nda::range::all);
+
+        // T^L_{ia}(k) = Σ_P conj(X^{k+q}_{Pi}) · X^{k+q}_{Pa} · conj(χ_P)
+        auto TL_skia = make_shared_array<Array_view_4D_t>(*mpi, {ns, nkpts, nbnd, nbnd});
+        auto TL_loc = TL_skia.local();
+        TL_skia.win().fence();
+        for (size_t skia = rank; skia < ns * nkpts * nbnd * nbnd; skia += size) {
+          size_t is = skia / (nkpts * nbnd * nbnd);
+          size_t ik = (skia / (nbnd * nbnd)) % nkpts;
+          size_t i = (skia / nbnd) % nbnd;
+          size_t a = skia % nbnd;
+          auto Xsk = thc.X(is, 0, _kpq_map(ik));  // X at k+q_pert
+          for (size_t P = 0; P < NP; ++P) {
+            TL_loc(is, ik, i, a) += nda::conj(Xsk(P, i)) * Xsk(P, a) * nda::conj(chi_head(P));
+          }
+        }
+        TL_skia.win().fence();
+        TL_skia.all_reduce();
+
+        // T^R_{jb}(k) = Σ_P conj(X^k_{Pj}) · X^k_{Pb} · conj(χ_P)
+        auto TR_skia = make_shared_array<Array_view_4D_t>(*mpi, {ns, nkpts, nbnd, nbnd});
+        auto TR_loc = TR_skia.local();
+        TR_skia.win().fence();
+        for (size_t skia = rank; skia < ns * nkpts * nbnd * nbnd; skia += size) {
+          size_t is = skia / (nkpts * nbnd * nbnd);
+          size_t ik = (skia / (nbnd * nbnd)) % nkpts;
+          size_t i = (skia / nbnd) % nbnd;
+          size_t a = skia % nbnd;
+          auto Xsk = thc.X(is, 0, ik);  // X at k
+          for (size_t P = 0; P < NP; ++P) {
+            TR_loc(is, ik, i, a) += nda::conj(Xsk(P, i)) * Xsk(P, a) * nda::conj(chi_head(P));
+          }
+        }
+        TR_skia.win().fence();
+        TR_skia.all_reduce();
+
+        // ΔΣ^div_{ij} = factor · T^L · ΔG · (T^R)†
+        nda::array<ComplexType, 2> buffer_ib(nbnd, nbnd);
+        auto sDelta_tskij = make_shared_array<Array_view_5D_t>(*mpi, sDeltaSigma_tskij.shape());
+        auto Delta_loc = sDelta_tskij.local();
+        sDelta_tskij.win().fence();
+        for (size_t tsk = rank; tsk < nts * ns * nkpts; tsk += size) {
+          size_t it = tsk / (ns * nkpts);
+          size_t is = (tsk / nkpts) % ns;
+          size_t ik = tsk % nkpts;
+
+          size_t it_pos = (it < nt_half) ? it : nts - it - 1;
+          RealType factor = -1.0 * MF->madelung() * eps_inv_head(it_pos).real();
+
+          auto G_ab = DeltaG_tskij(it, is, ik, nda::ellipsis{});
+          auto Delta_ij = Delta_loc(it, is, ik, nda::ellipsis{});
+          auto TL_ia = TL_loc(is, ik, nda::ellipsis{});
+          nda::blas::gemm(TL_ia, G_ab, buffer_ib);
+          nda::blas::gemm(ComplexType(factor), buffer_ib, nda::dagger(TR_loc(is, ik, nda::ellipsis{})),
+                     ComplexType(0.0), Delta_ij);
+        }
+        sDelta_tskij.win().fence();
+        sDelta_tskij.all_reduce();
+
+        if (sDeltaSigma_tskij.node_comm()->root())
+          sDeltaSigma_tskij.local() += sDelta_tskij.local();
+        sDeltaSigma_tskij.communicator()->barrier();
+      } else {
+        utils::check(false, "Unsupported divergence treatment: {}", div_enum_to_string(div_treatment));
+      }
+      app_log(1, "");
+    }
+
+  } // solvers
+} // methods
+
+#endif //COQUI_LR_GW_ICC

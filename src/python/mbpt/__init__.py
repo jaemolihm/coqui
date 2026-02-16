@@ -18,7 +18,10 @@ limitations under the License.
 ==========================================================================
 """
 
-from .mbpt_driver import run_hf, run_gw, run_qpg0w0, run_lr_dyson, run_lr_hf, run_lr_hf_scf, hf_evaluate
+from .mbpt_driver import (
+    run_hf, run_gw, run_qpg0w0, run_lr_dyson, run_lr_hf, run_lr_hf_scf,
+    hf_evaluate, run_lr_gw_sigma, gw_evaluate_sigma,
+)
 from .lr_driver import (
     calculate_kpq_map,
     is_q_commensurate,
@@ -40,6 +43,9 @@ __all__ = [
     "read_DeltaH0",
     "write_DeltaH0",
     "read_lr_results",
+    # LR-GW
+    "run_lr_gw_sigma",
+    "gw_evaluate_sigma",
     # JML: Temporarily exposed for debugging
     "hf_evaluate",
 ]
