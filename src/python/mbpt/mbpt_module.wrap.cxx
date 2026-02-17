@@ -186,39 +186,40 @@ static auto const fun_0 = c2py::dispatcher_f_kw_t{
 
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 
-// lr_dyson - run LR Dyson calculation
-static auto const fun_lr_dyson = c2py::dispatcher_f_kw_t{
+// run_lr - unified linear response calculation
+static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_vec,
            nda::array<ComplexType, 4> const& DeltaH0_skij,
-           bool fix_density) {
-          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij, fix_density);
+           bool include_hartree,
+           bool include_exchange,
+           bool include_gw_sigma,
+           int max_iter,
+           double tol,
+           bool fix_density,
+           std::string iter_alg,
+           double mixing,
+           int max_subsp_size,
+           int diis_warmup) {
+          return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
+                                  include_hartree, include_exchange, include_gw_sigma,
+                                  max_iter, tol, fix_density,
+                                  iter_alg, mixing, max_subsp_size, diis_warmup);
         },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "fix_density"),
-    c2py::cfun(
-        [](const std::string &lr_params,
-           coqui_py::CholCoulomb &h_int,
-           nda::array<double, 1> const& q_vec,
-           nda::array<ComplexType, 4> const& DeltaH0_skij,
-           bool fix_density) {
-          return coqui_py::lr_dyson(lr_params, h_int, q_vec, DeltaH0_skij, fix_density);
-        },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "fix_density")};
+        "lr_params", "h_int", "q_vec", "DeltaH0_skij",
+        "include_hartree", "include_exchange", "include_gw_sigma",
+        "max_iter", "tol", "fix_density",
+        "iter_alg", "mixing", "max_subsp_size", "diis_warmup")};
 
-static const auto doc_lr_dyson = fun_lr_dyson.doc(R"DOC(
-Run linear response Dyson equation calculation.
+static const auto doc_run_lr = fun_run_lr.doc(R"DOC(
+Run unified linear response calculation.
 
-Solves: ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) - Δμ·S(k)] · G(k,iω)
+Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
+    ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
 
-This function reads the unperturbed Green's function from a previous HF/GW
-checkpoint, solves the LR Dyson equation, and writes the results (ΔG, ΔDm)
-back to the checkpoint file.
-
-Two modes are available:
-- fix_density=False: Use Δμ=0 (chemical potential fixed)
-- fix_density=True: Compute Δμ to enforce ΔN=0 (particle number fixed)
+Subsumes both lr_dyson (one-shot, all flags false) and lr_hf_scf (HF only).
 
 Parameters
 ----------
@@ -226,19 +227,38 @@ lr_params : str
     JSON string with parameters:
     - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
     - output: Output checkpoint prefix (default: same as prefix)
-h_int : ThcCoulomb or CholCoulomb
-    ERI handler from the original calculation
+h_int : ThcCoulomb
+    THC ERI handler from the original calculation
 q_vec : np.ndarray
     Perturbation wavevector in crystal coordinates, shape (3,)
 DeltaH0_skij : np.ndarray
     Perturbation matrix, shape (ns, nk, nb, nb)
+include_hartree : bool
+    Include Hartree (Coulomb) term in SCF loop
+include_exchange : bool
+    Include Exchange term in SCF loop
+include_gw_sigma : bool
+    Include GW self-energy in SCF loop
+max_iter : int
+    Maximum SCF iterations (1 = one-shot)
+tol : float
+    Convergence tolerance for ||ΔDm_new - ΔDm_old||
 fix_density : bool
-    If True, compute Δμ to enforce ΔN=0 (default False)
+    If True, compute Δμ to enforce ΔN=0
+iter_alg : str
+    Iteration algorithm: "damping" or "DIIS"
+mixing : float
+    Damping/mixing parameter
+max_subsp_size : int
+    Maximum DIIS subspace size
+diis_warmup : int
+    Number of warmup iterations before DIIS
 
 Returns
 -------
-float
-    The Δμ value used (computed if fix_density=True, otherwise 0.0)
+tuple
+    (niter, Delta_mu) where niter is the number of iterations and
+    Delta_mu is the computed chemical potential shift.
 )DOC");
 
 // calculate_kpq_map
@@ -356,78 +376,6 @@ np.ndarray
     Fock matrix F, shape (ns, nk, nb, nb)
 )DOC");
 
-// lr_hf_scf - run LR-HF SCF calculation
-static auto const fun_lr_hf_scf = c2py::dispatcher_f_kw_t{
-    c2py::cfun(
-        [](const std::string &lr_params,
-           coqui_py::ThcCoulomb &h_int,
-           nda::array<double, 1> const& q_vec,
-           nda::array<ComplexType, 4> const& DeltaH0_skij,
-           int max_iter,
-           double tol,
-           bool fix_density,
-           std::string iter_alg,
-           double mixing,
-           int max_subsp_size,
-           int diis_warmup,
-           bool compute_exchange) {
-          return coqui_py::lr_hf_scf(lr_params, h_int, q_vec, DeltaH0_skij,
-                                      max_iter, tol, fix_density,
-                                      iter_alg, mixing, max_subsp_size, diis_warmup,
-                                      compute_exchange);
-        },
-        "lr_params", "h_int", "q_vec", "DeltaH0_skij", "max_iter", "tol", "fix_density",
-        "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "compute_exchange")};
-
-static const auto doc_lr_hf_scf = fun_lr_hf_scf.doc(R"DOC(
-Run linear response Hartree-Fock SCF calculation.
-
-Runs the full LR-HF SCF loop:
-    ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
-
-This function reads the unperturbed Green's function from a previous HF/GW
-checkpoint, runs the LR-HF SCF loop, and writes the results (ΔG, ΔDm, ΔF, Δμ)
-back to the checkpoint file.
-
-Parameters
-----------
-lr_params : str
-    JSON string with parameters:
-    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
-    - output: Output checkpoint prefix (default: same as prefix)
-h_int : ThcCoulomb
-    THC ERI handler from the original calculation
-q_vec : np.ndarray
-    Perturbation wavevector in crystal coordinates, shape (3,)
-DeltaH0_skij : np.ndarray
-    Perturbation matrix, shape (ns, nk, nb, nb)
-max_iter : int
-    Maximum SCF iterations (default 50)
-tol : float
-    Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
-fix_density : bool
-    If True, compute Δμ to enforce ΔN=0 (default True)
-iter_alg : str
-    Iteration algorithm: "damping" or "DIIS" (default "damping")
-mixing : float
-    Damping/mixing parameter (default 1.0 = no damping).
-    For damping: ΔF = mixing*ΔF_new + (1-mixing)*ΔF_prev.
-    For DIIS: used during warmup iterations.
-max_subsp_size : int
-    Maximum DIIS subspace size (default 5). Only used when iter_alg="DIIS".
-diis_warmup : int
-    Number of warmup iterations using damping before DIIS starts (default 3).
-    Only used when iter_alg="DIIS".
-compute_exchange : bool
-    Whether to compute exchange term in LR Fock matrix (default True).
-    Set to False for Hartree-only calculations (e.g., phonon benchmarks).
-
-Returns
--------
-tuple
-    (niter, Delta_mu) where niter is the number of iterations and
-    Delta_mu is the computed chemical potential shift.
-)DOC");
 
 // lr_gw_sigma - compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr
 static auto const fun_lr_gw_sigma = c2py::dispatcher_f_kw_t{
@@ -501,16 +449,14 @@ np.ndarray
 static PyMethodDef module_methods[] = {
     {"mbpt", (PyCFunction)c2py::pyfkw<fun_0>, METH_VARARGS | METH_KEYWORDS,
      doc_d_0.c_str()},
-    {"lr_dyson", (PyCFunction)c2py::pyfkw<fun_lr_dyson>,
-     METH_VARARGS | METH_KEYWORDS, doc_lr_dyson.c_str()},
+    {"run_lr_cpp", (PyCFunction)c2py::pyfkw<fun_run_lr>,
+     METH_VARARGS | METH_KEYWORDS, doc_run_lr.c_str()},
     {"calculate_kpq_map_cpp", (PyCFunction)c2py::pyfkw<fun_kpq_map>,
      METH_VARARGS | METH_KEYWORDS, doc_kpq_map.c_str()},
     {"lr_hf_cpp", (PyCFunction)c2py::pyfkw<fun_lr_hf>,
      METH_VARARGS | METH_KEYWORDS, doc_lr_hf.c_str()},
     {"hf_evaluate_cpp", (PyCFunction)c2py::pyfkw<fun_hf_evaluate>,
      METH_VARARGS | METH_KEYWORDS, doc_hf_evaluate.c_str()},
-    {"lr_hf_scf_cpp", (PyCFunction)c2py::pyfkw<fun_lr_hf_scf>,
-     METH_VARARGS | METH_KEYWORDS, doc_lr_hf_scf.c_str()},
     {"lr_gw_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_sigma>,
      METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma.c_str()},
     {"gw_evaluate_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma>,

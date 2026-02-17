@@ -22,6 +22,7 @@
 #define COQUI_LR_DIIS_HPP
 
 #include <string>
+#include <tuple>
 #include <vector>
 #include <numeric>
 #include <cmath>
@@ -70,6 +71,7 @@ struct lr_iter_params {
 class lr_diis {
 public:
   using Array_4D = nda::array<ComplexType, 4>;
+  using Array_5D = nda::array<ComplexType, 5>;
 
   lr_diis(size_t max_subsp_size, size_t warmup_iter, double mixing)
       : _max_subsp_size(max_subsp_size),
@@ -78,58 +80,67 @@ public:
         _B(0, 0) {}
 
   /**
-   * @brief Perform one DIIS step
-   *
-   * Handles warmup (damping) -> DIIS transition internally.
-   *
-   * @param DeltaF_new   - [INPUT] Newly computed ΔF from lr_hf
-   * @param DeltaF_prev  - [INPUT] ΔF from previous iteration
-   * @param iter         - [INPUT] Current iteration number (1-based)
-   * @return Mixed/extrapolated ΔF
+   * @brief Perform one DIIS step (ΔF only, backward-compatible)
    */
   Array_4D next_step(const Array_4D& DeltaF_new,
                      const Array_4D& DeltaF_prev, int iter) {
+    Array_5D empty;
+    auto [F, _] = next_step_combined(DeltaF_new, DeltaF_prev, empty, empty, iter);
+    return F;
+  }
 
-    // Compute residual
-    Array_4D res = DeltaF_new - DeltaF_prev;
+  /**
+   * @brief Perform one combined DIIS step on (ΔF, ΔΣ)
+   *
+   * Combined residual: B(i,j) = <res_F_i, res_F_j> + <res_Sigma_i, res_Sigma_j>
+   * When DeltaSigma arrays are empty (size 0), reduces to ΔF-only DIIS.
+   *
+   * @param DeltaF_new       - [INPUT] Newly computed ΔF
+   * @param DeltaF_prev      - [INPUT] ΔF from previous iteration
+   * @param DeltaSigma_new   - [INPUT] Newly computed ΔΣ (empty if no GW)
+   * @param DeltaSigma_prev  - [INPUT] ΔΣ from previous iteration (empty if no GW)
+   * @param iter             - [INPUT] Current iteration number (1-based)
+   * @return (mixed ΔF, mixed ΔΣ)
+   */
+  std::tuple<Array_4D, Array_5D> next_step_combined(
+      const Array_4D& DeltaF_new, const Array_4D& DeltaF_prev,
+      const Array_5D& DeltaSigma_new, const Array_5D& DeltaSigma_prev,
+      int iter) {
+
+    bool has_sigma = (DeltaSigma_new.size() > 0);
+
+    // Compute residuals
+    Array_4D res_F = DeltaF_new - DeltaF_prev;
+    Array_5D res_Sigma;
+    if (has_sigma) {
+      res_Sigma = Array_5D{DeltaSigma_new - DeltaSigma_prev};
+    }
 
     // During warmup or with insufficient subspace: use damping
     if (iter <= static_cast<int>(_warmup_iter) + 1 || _x_vectors.size() < 2) {
-      // Store trial vector and residual
-      _x_vectors.push_back(DeltaF_new);
-      _res_vectors.push_back(res);
-      update_B(res);
-
-      // Purge if over capacity
-      if (_x_vectors.size() > _max_subsp_size) {
-        purge_oldest();
-      }
+      store_vectors(DeltaF_new, res_F, DeltaSigma_new, res_Sigma, has_sigma);
 
       app_log(2, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
               iter, _mixing, _x_vectors.size());
 
-      // Apply damping
       if (_mixing < 1.0) {
-        return Array_4D{_mixing * DeltaF_new + (1.0 - _mixing) * DeltaF_prev};
+        Array_4D F_mixed{_mixing * DeltaF_new + (1.0 - _mixing) * DeltaF_prev};
+        Array_5D Sigma_mixed;
+        if (has_sigma) {
+          Sigma_mixed = Array_5D{_mixing * DeltaSigma_new + (1.0 - _mixing) * DeltaSigma_prev};
+        }
+        return {std::move(F_mixed), std::move(Sigma_mixed)};
       }
-      return Array_4D{DeltaF_new};
+      Array_5D Sigma_out;
+      if (has_sigma) Sigma_out = Array_5D{DeltaSigma_new};
+      return {Array_4D{DeltaF_new}, std::move(Sigma_out)};
     }
 
     // DIIS extrapolation
-    // Store trial vector and residual
-    _x_vectors.push_back(DeltaF_new);
-    _res_vectors.push_back(res);
-    update_B(res);
+    store_vectors(DeltaF_new, res_F, DeltaSigma_new, res_Sigma, has_sigma);
 
-    // Purge if over capacity
-    if (_x_vectors.size() > _max_subsp_size) {
-      purge_oldest();
-    }
-
-    // Solve for coefficients
     auto C = compute_coefs();
 
-    // Check for failure (all zeros means ill-conditioned)
     double c_norm = 0.0;
     for (long i = 0; i < C.size(); ++i) {
       c_norm += std::abs(C(i));
@@ -138,17 +149,27 @@ public:
     if (c_norm < 1e-14) {
       app_log(2, "    DIIS: extrapolation failed (ill-conditioned B) -> fallback to damping");
       if (_mixing < 1.0) {
-        return Array_4D{_mixing * DeltaF_new + (1.0 - _mixing) * DeltaF_prev};
+        Array_4D F_mixed{_mixing * DeltaF_new + (1.0 - _mixing) * DeltaF_prev};
+        Array_5D Sigma_mixed;
+        if (has_sigma) {
+          Sigma_mixed = Array_5D{_mixing * DeltaSigma_new + (1.0 - _mixing) * DeltaSigma_prev};
+        }
+        return {std::move(F_mixed), std::move(Sigma_mixed)};
       }
-      return Array_4D{DeltaF_new};
+      Array_5D Sigma_out;
+      if (has_sigma) Sigma_out = Array_5D{DeltaSigma_new};
+      return {Array_4D{DeltaF_new}, std::move(Sigma_out)};
     }
 
-    // Build extrapolated vector: ΔF = Σ c_i * x_i
-    Array_4D result = make_linear_comb(C);
+    Array_4D result_F = make_linear_comb_4d(C);
+    Array_5D result_Sigma;
+    if (has_sigma) {
+      result_Sigma = make_linear_comb_5d(C);
+    }
 
     app_log(2, "    DIIS: extrapolation with subspace size {}", _x_vectors.size());
 
-    return result;
+    return {std::move(result_F), std::move(result_Sigma)};
   }
 
 private:
@@ -157,13 +178,16 @@ private:
   double _mixing;
   std::vector<Array_4D> _x_vectors;
   std::vector<Array_4D> _res_vectors;
+  std::vector<Array_5D> _x_vectors_5d;
+  std::vector<Array_5D> _res_vectors_5d;
   nda::matrix<ComplexType> _B;
 
   /**
-   * @brief Dot product (Frobenius inner product) of two 4D arrays
+   * @brief Frobenius inner product of two arrays (works for any rank via reshape)
    */
-  ComplexType dot_prod(const Array_4D& a, const Array_4D& b) const {
-    // <a, b> = Σ conj(a_i) * b_i
+  template<int N>
+  ComplexType dot_prod(const nda::array<ComplexType, N>& a,
+                       const nda::array<ComplexType, N>& b) const {
     auto a_flat = nda::reshape(a, a.size());
     auto b_flat = nda::reshape(b, b.size());
     ComplexType result = 0.0;
@@ -174,27 +198,62 @@ private:
   }
 
   /**
-   * @brief Expand B-matrix by one row/column for new residual
+   * @brief Combined overlap: <res_F_a, res_F_b> + <res_Sigma_a, res_Sigma_b>
    */
-  void update_B(const Array_4D& new_res) {
-    size_t n_old = _B.shape()[0];
-    size_t n_new = n_old + 1;
-    nda::matrix<ComplexType> Bnew(n_new, n_new);
+  ComplexType combined_overlap(size_t i, size_t j) const {
+    ComplexType result = dot_prod(_res_vectors[i], _res_vectors[j]);
+    if (!_res_vectors_5d.empty() && _res_vectors_5d[i].size() > 0) {
+      result += dot_prod(_res_vectors_5d[i], _res_vectors_5d[j]);
+    }
+    return result;
+  }
+
+  /**
+   * @brief Store trial vectors and residuals, update B-matrix
+   */
+  void store_vectors(const Array_4D& x_4d, const Array_4D& res_4d,
+                     const Array_5D& x_5d, const Array_5D& res_5d,
+                     bool has_sigma) {
+    _x_vectors.push_back(x_4d);
+    _res_vectors.push_back(res_4d);
+    if (has_sigma) {
+      _x_vectors_5d.push_back(x_5d);
+      _res_vectors_5d.push_back(res_5d);
+    } else if (!_x_vectors_5d.empty()) {
+      // Keep vectors aligned: store empty
+      _x_vectors_5d.push_back(Array_5D{});
+      _res_vectors_5d.push_back(Array_5D{});
+    }
+
+    update_B();
+
+    if (_x_vectors.size() > _max_subsp_size) {
+      purge_oldest();
+    }
+  }
+
+  /**
+   * @brief Rebuild last row/column of B-matrix using combined overlap
+   */
+  void update_B() {
+    size_t n = _x_vectors.size();
+    nda::matrix<ComplexType> Bnew(n, n);
     Bnew() = 0;
 
     // Copy existing entries
+    size_t n_old = n - 1;
     for (size_t i = 0; i < n_old; ++i) {
       for (size_t j = 0; j < n_old; ++j) {
         Bnew(i, j) = _B(i, j);
       }
     }
 
-    // Compute new overlaps
+    // Compute new overlaps using combined overlap
     for (size_t i = 0; i < n_old; ++i) {
-      Bnew(i, n_old) = dot_prod(_res_vectors[i], new_res);
-      Bnew(n_old, i) = std::conj(Bnew(i, n_old));
+      Bnew(i, n - 1) = combined_overlap(i, n - 1);
+      Bnew(n - 1, i) = std::conj(Bnew(i, n - 1));
     }
-    Bnew(n_old, n_old) = dot_prod(new_res, new_res);
+    Bnew(n - 1, n - 1) = combined_overlap(n - 1, n - 1);
 
     _B = Bnew;
   }
@@ -203,7 +262,6 @@ private:
    * @brief Remove oldest vector from subspace and shrink B-matrix
    */
   void purge_oldest() {
-    // Remove row/col 0 from B
     size_t n = _B.shape()[0];
     nda::matrix<ComplexType> Bnew(n - 1, n - 1);
     for (size_t i = 0; i < n - 1; ++i) {
@@ -215,6 +273,10 @@ private:
 
     _x_vectors.erase(_x_vectors.begin());
     _res_vectors.erase(_res_vectors.begin());
+    if (!_x_vectors_5d.empty()) {
+      _x_vectors_5d.erase(_x_vectors_5d.begin());
+      _res_vectors_5d.erase(_res_vectors_5d.begin());
+    }
   }
 
   /**
@@ -276,13 +338,25 @@ private:
   }
 
   /**
-   * @brief Build linear combination of trial vectors
+   * @brief Build linear combination of 4D trial vectors
    */
-  Array_4D make_linear_comb(const nda::array<double, 1>& C) const {
+  Array_4D make_linear_comb_4d(const nda::array<double, 1>& C) const {
     Array_4D result(_x_vectors[0].shape());
     result() = 0.0;
     for (size_t i = 0; i < _x_vectors.size(); ++i) {
       result += C(i) * _x_vectors[i];
+    }
+    return result;
+  }
+
+  /**
+   * @brief Build linear combination of 5D trial vectors
+   */
+  Array_5D make_linear_comb_5d(const nda::array<double, 1>& C) const {
+    Array_5D result(_x_vectors_5d[0].shape());
+    result() = 0.0;
+    for (size_t i = 0; i < _x_vectors_5d.size(); ++i) {
+      result += C(i) * _x_vectors_5d[i];
     }
     return result;
   }

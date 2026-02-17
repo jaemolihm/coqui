@@ -67,7 +67,7 @@ double lr_dyson::solve_lr_dyson(
     const G_t& sG_tskij,
     const DeltaH0_t& sDeltaH0_skij,
     const DeltaF_t& sDeltaF_skij,
-    const DeltaSigma_t& sDeltaSigma_tskij,
+    const DeltaSigma_t* sDeltaSigma_tskij,
     bool fix_density,
     double Delta_mu) {
 
@@ -136,7 +136,7 @@ void lr_dyson::solve_lr_dyson_impl(
     const G_t& sG_tskij,
     const DeltaH0_t& sDeltaH0_skij,
     const DeltaF_t& sDeltaF_skij,
-    const DeltaSigma_t& sDeltaSigma_tskij,
+    const DeltaSigma_t* sDeltaSigma_tskij,
     double Delta_mu) {
 
   using math::nda::make_distributed_array;
@@ -148,7 +148,11 @@ void lr_dyson::solve_lr_dyson_impl(
                "Delta_mu must be zero for q≠0 perturbations.", Delta_mu);
 
   app_log(2, "Solving LR Dyson equation:");
-  app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
+  if (sDeltaSigma_tskij) {
+    app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
+  } else {
+    app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) - Δμ·S(k+q,k)] · G(k,iω)");
+  }
   app_log(2, "  Δμ = {:.6e}", Delta_mu);
 
   // Processor grid
@@ -172,11 +176,16 @@ void lr_dyson::solve_lr_dyson_impl(
                  "lr_dyson: pgrid mismatches!");
   }
 
-  // Transform G and ΔΣ from tau to frequency
+  // Transform G (and ΔΣ if present) from tau to frequency
   _Timer.start("G_TAU_TO_W");
   auto dG_wskij = distributed_tau_to_w(_context->comm, sG_tskij, *_dyson.FT(), w_pgrid, w_bsize);
-  auto dDeltaSigma_wskij = distributed_tau_to_w(_context->comm, sDeltaSigma_tskij,
-                                                 *_dyson.FT(), w_pgrid, w_bsize);
+  // Only FT the ΔΣ array when it's actually populated (saves a full 5D FT when no GW)
+  using dArray_5D_t = decltype(dG_wskij);
+  std::optional<dArray_5D_t> opt_dDeltaSigma_wskij;
+  if (sDeltaSigma_tskij) {
+    opt_dDeltaSigma_wskij.emplace(
+        distributed_tau_to_w(_context->comm, *sDeltaSigma_tskij, *_dyson.FT(), w_pgrid, w_bsize));
+  }
   _Timer.stop("G_TAU_TO_W");
 
   auto dDeltaG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
@@ -186,7 +195,6 @@ void lr_dyson::solve_lr_dyson_impl(
   auto [w_org, s_org, k_org, i_org, j_org] = dG_wskij.origin();
 
   auto G_w_loc = dG_wskij.local();
-  auto DeltaSigma_w_loc = dDeltaSigma_wskij.local();
   auto DeltaG_w_loc = dDeltaG_wskij.local();
   auto DeltaH0_loc = sDeltaH0_skij.local();
   auto DeltaF_loc = sDeltaF_skij.local();
@@ -209,11 +217,15 @@ void lr_dyson::solve_lr_dyson_impl(
         auto G_k = G_w_loc(n, s, k, nda::range::all, nda::range::all);
         auto DeltaH0_k = DeltaH0_loc(is, ik, nda::range::all, nda::range::all);
         auto DeltaF_k = DeltaF_loc(is, ik, nda::range::all, nda::range::all);
-        auto DeltaSigma_k = DeltaSigma_w_loc(n, s, k, nda::range::all, nda::range::all);
 
-        // Build X = ΔH0 + ΔF + ΔΣ - Δμ·S (Δμ is nonzero only for q=0)
+        // Build X = ΔH0 + ΔF [+ ΔΣ] - Δμ·S
         auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
-        X_ij = DeltaH0_k + DeltaF_k + DeltaSigma_k - Delta_mu * S_k;
+        X_ij = DeltaH0_k + DeltaF_k - Delta_mu * S_k;
+        if (sDeltaSigma_tskij) {
+          auto DeltaSigma_w_loc = opt_dDeltaSigma_wskij->local();
+          auto DeltaSigma_k = DeltaSigma_w_loc(n, s, k, nda::range::all, nda::range::all);
+          X_ij += DeltaSigma_k;
+        }
 
         if (ikq >= k_org && ikq < k_org + nk_loc) {
           auto G_kq = G_w_loc(n, s, ikq - k_org, nda::range::all, nda::range::all);
@@ -235,7 +247,7 @@ void lr_dyson::solve_lr_dyson_impl(
   _Timer.stop("LR_DYSON_LOOP");
 
   dG_wskij.reset();
-  dDeltaSigma_wskij.reset();
+  opt_dDeltaSigma_wskij.reset();
   _context->comm.barrier();
 
   // Convert ΔG(w) -> ΔG(tau)
@@ -503,7 +515,7 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
-    const sArray_t<Array_view_5D_t>&,
+    const sArray_t<Array_view_5D_t>*,
     bool,
     double);
 
@@ -512,7 +524,7 @@ template void lr_dyson::solve_lr_dyson_impl(
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
-    const sArray_t<Array_view_5D_t>&,
+    const sArray_t<Array_view_5D_t>*,
     double);
 
 template void lr_dyson::compute_lr_dm(

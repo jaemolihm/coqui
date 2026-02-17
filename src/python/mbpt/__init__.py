@@ -19,7 +19,7 @@ limitations under the License.
 """
 
 from .mbpt_driver import (
-    run_hf, run_gw, run_qpg0w0, run_lr_dyson, run_lr_hf, run_lr_hf_scf,
+    run_hf, run_gw, run_qpg0w0, run_lr, run_lr_hf,
     hf_evaluate, run_lr_gw_sigma, gw_evaluate_sigma,
 )
 from .lr_driver import (
@@ -34,9 +34,8 @@ from .lr_driver import (
 __all__ = [
     "run_hf", "run_gw", "run_qpg0w0",
     # Linear response
-    "run_lr_dyson",
+    "run_lr",
     "run_lr_hf",
-    "run_lr_hf_scf",
     "calculate_kpq_map",
     "is_q_commensurate",
     "is_q_gamma",

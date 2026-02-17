@@ -33,75 +33,45 @@
 namespace coqui_py {
 
   /**
-   * @brief Run LR Dyson calculation
+   * @brief Unified linear response calculation
    *
-   * This calls the C++ lr_dyson_calc function which:
+   * This calls the C++ run_lr_calc function which:
    * 1. Reads unperturbed G from checkpoint
-   * 2. Solves: ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) - Δμ·S(k)] · G(k,iω)
-   * 3. Writes ΔG and ΔDm to checkpoint
+   * 2. Runs the LR SCF loop with configurable components:
+   *    ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence
+   * 3. Writes results to checkpoint
    *
-   * @param lr_params     - [INPUT] JSON string with params (prefix, output)
-   * @param h_int         - [INPUT] ERI handler
-   * @param q_vec         - [INPUT] Perturbation wavevector (3,)
-   * @param DeltaH0_skij  - [INPUT] Perturbation matrix (ns, nk, nb, nb)
-   * @param fix_density   - [INPUT] If true, compute Δμ to enforce ΔN=0 (default false)
-   * @return              - [OUTPUT] The Δμ value used (computed if fix_density=true)
+   * @param lr_params         - [INPUT] JSON string with params (prefix, output)
+   * @param h_int             - [INPUT] THC ERI handler
+   * @param q_vec             - [INPUT] Perturbation wavevector (3,)
+   * @param DeltaH0_skij      - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+   * @param include_hartree   - [INPUT] Include ΔJ in SCF loop
+   * @param include_exchange  - [INPUT] Include ΔK in SCF loop
+   * @param include_gw_sigma  - [INPUT] Include ΔΣ_GW in SCF loop
+   * @param max_iter          - [INPUT] Maximum SCF iterations (1 = one-shot)
+   * @param tol               - [INPUT] Convergence tolerance
+   * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
+   * @param iter_alg          - [INPUT] Iteration algorithm: "damping" or "DIIS"
+   * @param mixing            - [INPUT] Damping/mixing parameter
+   * @param max_subsp_size    - [INPUT] DIIS subspace size
+   * @param diis_warmup       - [INPUT] DIIS warmup iterations
+   * @return                  - [OUTPUT] Tuple of (niter, Delta_mu)
    */
-  template<typename eri_handler>
-  double lr_dyson(const std::string &lr_params, eri_handler &h_int,
-                  nda::array<double, 1> const& q_vec,
-                  nda::array<ComplexType, 4> const& DeltaH0_skij,
-                  bool fix_density) {
-    auto parser = InputParser(lr_params);
-    methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::lr_dyson_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij, fix_density);
-  }
-
-  template double lr_dyson(const std::string&, ThcCoulomb&,
-                           nda::array<double, 1> const&,
-                           nda::array<ComplexType, 4> const&,
-                           bool);
-  template double lr_dyson(const std::string&, CholCoulomb&,
-                           nda::array<double, 1> const&,
-                           nda::array<ComplexType, 4> const&,
-                           bool);
-
-
-  /**
-   * @brief Run LR-HF SCF calculation
-   *
-   * This calls the C++ lr_hf_scf_calc function which:
-   * 1. Reads unperturbed G from checkpoint
-   * 2. Runs the LR-HF SCF loop:
-   *    ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... until convergence
-   * 3. Writes ΔG, ΔDm, ΔF, Δμ to checkpoint
-   *
-   * @param lr_params       - [INPUT] JSON string with params (prefix, output)
-   * @param h_int           - [INPUT] THC ERI handler
-   * @param q_vec           - [INPUT] Perturbation wavevector (3,)
-   * @param DeltaH0_skij    - [INPUT] Perturbation matrix (ns, nk, nb, nb)
-   * @param max_iter        - [INPUT] Maximum SCF iterations (default: 50)
-   * @param tol             - [INPUT] Convergence tolerance (default: 1e-8)
-   * @param fix_density     - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
-   * @param iter_alg        - [INPUT] Iteration algorithm: "damping" or "DIIS" (default: "damping")
-   * @param mixing          - [INPUT] Damping/mixing parameter (default: 1.0)
-   * @param max_subsp_size  - [INPUT] DIIS subspace size (default: 5)
-   * @param diis_warmup     - [INPUT] DIIS warmup iterations (default: 3)
-   * @return                - [OUTPUT] Tuple of (niter, Delta_mu)
-   */
-  std::tuple<int, double> lr_hf_scf(
+  std::tuple<int, double> run_lr(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_vec,
       nda::array<ComplexType, 4> const& DeltaH0_skij,
+      bool include_hartree,
+      bool include_exchange,
+      bool include_gw_sigma,
       int max_iter,
       double tol,
       bool fix_density,
       std::string iter_alg,
       double mixing,
       int max_subsp_size,
-      int diis_warmup,
-      bool compute_exchange) {
+      int diis_warmup) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     methods::lr_iter_params iter_params;
@@ -109,8 +79,9 @@ namespace coqui_py {
     iter_params.mixing = mixing;
     iter_params.max_subsp_size = static_cast<size_t>(max_subsp_size);
     iter_params.diis_warmup = static_cast<size_t>(diis_warmup);
-    return methods::lr_hf_scf_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
-                                    max_iter, tol, fix_density, iter_params, compute_exchange);
+    return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
+                                include_hartree, include_exchange, include_gw_sigma,
+                                max_iter, tol, fix_density, iter_params);
   }
 
 

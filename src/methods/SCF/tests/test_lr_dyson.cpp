@@ -148,19 +148,17 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    // Create zero ΔF and ΔΣ for LR Dyson call
+    // Create zero ΔF for LR Dyson call (no ΔΣ)
     sArray_t<Array_view_4D_t> DeltaF(math::shm::make_shared_array<Array_view_4D_t>(
         *context, {ns, nk, nb, nb}));
-    sArray_t<Array_view_5D_t> DeltaSigma(math::shm::make_shared_array<Array_view_5D_t>(
-        *context, {nt, ns, nk, nb, nb}));
     if (context->node_comm.root()) {
       DeltaF.local() = ComplexType(0.0);
-      DeltaSigma.local() = ComplexType(0.0);
     }
     context->comm.barrier();
 
-    // Compute ΔG using LR Dyson (fix_density=false, Delta_mu=0.0)
-    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, G, DeltaH0, DeltaF, DeltaSigma, false, 0.0);
+    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
+    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, G, DeltaH0, DeltaF,
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
     context->comm.barrier();
 
     // Compute ΔG using finite difference

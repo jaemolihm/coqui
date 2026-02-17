@@ -33,27 +33,21 @@
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_diis.hpp"
 #include "methods/HF/lr_hf.hpp"
+#include "methods/GW/lr_gw.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
 
 /**
  * @class lr_driver
- * @brief Driver for self-consistent Linear Response Hartree-Fock (LR-HF) calculations
+ * @brief Driver for self-consistent Linear Response calculations
  *
- * This class coordinates the LR-HF SCF loop:
+ * Coordinates the unified LR SCF loop with configurable components:
  *
- *   ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
+ *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
  *
- * The algorithm is:
- * 1. Initialize: ΔF = 0, Δμ = 0
- * 2. For iter = 1, ..., max_iter:
- *    a. Solve LR Dyson: ΔG = G_{k+q} · [ΔH0 + ΔF - Δμ·S] · G_k
- *    b. Compute LR density: ΔDm = -ΔG(τ=β⁻)
- *    c. If q=0: Update Δμ to enforce ΔN=0
- *    d. Compute LR Fock: ΔF = lr_hf(ΔDm)
- *    e. Check convergence: ||ΔDm_new - ΔDm_old|| < tol
- * 3. Return converged ΔG, ΔDm, ΔF, Δμ
+ * Subsumes LR-Dyson (one-shot, no HF/GW), LR-HF SCF (Hartree+Exchange),
+ * and LR-GW+HF SCF (Hartree+Exchange+GW self-energy).
  */
 class lr_driver {
 public:
@@ -79,32 +73,39 @@ public:
   ~lr_driver() = default;
 
   /**
-   * @brief Run LR-HF SCF loop
+   * @brief Run unified LR SCF loop
    *
-   * @param sDeltaG_tskij   - [OUTPUT] Converged LR Green's function (nt, ns, nk, nb, nb)
-   * @param sDeltaDm_skij   - [OUTPUT] Converged LR density matrix (ns, nk, nb, nb)
-   * @param sDeltaF_skij    - [OUTPUT] Converged LR Fock matrix (ns, nk, nb, nb)
-   * @param sG_tskij        - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
-   * @param sDeltaH0_skij   - [INPUT] Perturbation (ns, nk, nb, nb)
-   * @param thc             - [INPUT] THC ERI handler
-   * @param max_iter        - [INPUT] Maximum iterations (default: 50)
-   * @param tol             - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default: 1e-8)
-   * @param fix_density     - [INPUT] If true, compute Δμ to enforce ΔN=0 (default: true)
+   * @param sDeltaG_tskij      - [OUTPUT] Converged LR Green's function (nt, ns, nk, nb, nb)
+   * @param sDeltaDm_skij      - [OUTPUT] Converged LR density matrix (ns, nk, nb, nb)
+   * @param sDeltaF_skij       - [OUTPUT] Converged LR Fock matrix (ns, nk, nb, nb)
+   * @param sDeltaSigma_tskij  - [OUTPUT] Converged LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
+   * @param sG_tskij           - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+   * @param sDeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb)
+   * @param thc                - [INPUT] THC ERI handler
+   * @param include_hartree    - [INPUT] Include ΔJ in SCF loop
+   * @param include_exchange   - [INPUT] Include ΔK in SCF loop
+   * @param include_gw_sigma   - [INPUT] Include ΔΣ_GW in SCF loop
+   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if include_gw_sigma)
+   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if include_gw_sigma)
+   * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
+   * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
+   * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
+   * @param iter_params        - [INPUT] Iteration algorithm parameters (damping/DIIS)
    * @return Tuple of (number of iterations, final Δμ)
    */
-  template<THC_ERI THC_t>
-  std::tuple<int, double> run_lr_hf(
+  template<THC_ERI THC_t, typename dW_t>
+  std::tuple<int, double> run_lr(
       sArray_t<Array_view_5D_t>& sDeltaG_tskij,
       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
       sArray_t<Array_view_4D_t>& sDeltaF_skij,
+      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
       const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
-      int max_iter = 50,
-      double tol = 1e-8,
-      bool fix_density = true,
-      const lr_iter_params& iter_params = {},
-      bool compute_exchange = true);
+      bool include_hartree, bool include_exchange, bool include_gw_sigma,
+      dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
+      int max_iter, double tol, bool fix_density,
+      const lr_iter_params& iter_params);
 
   void print_timers();
 

@@ -34,8 +34,8 @@ from typing import Tuple
 # Import C++ implementation
 from coqui._lib.mbpt_module import calculate_kpq_map_cpp
 
-# Re-export run_lr_dyson from mbpt_driver (the main entry point)
-from .mbpt_driver import run_lr_dyson
+# Re-export run_lr from mbpt_driver (the main entry point)
+from .mbpt_driver import run_lr
 
 
 def calculate_kpq_map(kpts_crys: np.ndarray, q_vec: np.ndarray,

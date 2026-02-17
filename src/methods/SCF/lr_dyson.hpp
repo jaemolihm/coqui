@@ -89,7 +89,7 @@ public:
    * @param sG_tskij          - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix (ns, nk, nb, nb)
-   * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb)
+   * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
    * @param Delta_mu          - [INPUT] Chemical potential shift (used only if fix_density=false)
    * @return The Δμ value used (computed if fix_density=true, otherwise the input value)
@@ -102,7 +102,7 @@ public:
       const G_t& sG_tskij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
-      const DeltaSigma_t& sDeltaSigma_tskij,
+      const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
       bool fix_density = false,
       double Delta_mu = 0.0);
 
@@ -194,7 +194,7 @@ private:
       const G_t& sG_tskij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
-      const DeltaSigma_t& sDeltaSigma_tskij,
+      const DeltaSigma_t* sDeltaSigma_tskij,
       double Delta_mu);
 
   simple_dyson& _dyson;

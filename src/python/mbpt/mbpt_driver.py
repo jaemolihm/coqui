@@ -129,12 +129,17 @@ def run_qpg0w0(params, h_int,
               projector_info = None, local_polarizabilities = None)
 
 
-def run_lr_dyson(params, h_int, q_vec, DeltaH0_skij, fix_density=False):
+def run_lr(params, h_int, q_vec, DeltaH0_skij,
+           include_hartree=True, include_exchange=True, include_gw_sigma=False,
+           max_iter=50, tol=1e-8, fix_density=False, iter_alg=None):
     """
-    Run linear response Dyson equation calculation.
+    Run unified linear response calculation.
 
-    Computes ΔG in response to a perturbation ΔH0 at wavevector q.
-    Requires a previous HF/GW calculation to provide the unperturbed G.
+    Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
+        ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
+
+    Subsumes both run_lr_dyson (one-shot, all flags false) and
+    run_lr_hf_scf (HF, no GW).
 
     Parameters
     ----------
@@ -142,33 +147,64 @@ def run_lr_dyson(params, h_int, q_vec, DeltaH0_skij, fix_density=False):
         Parameters including:
         - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
         - output: Output checkpoint prefix (default: same as prefix)
-    h_int : ThcCoulomb or CholCoulomb
-        ERI handler from the original calculation
+        - input_type: HDF5 group to read checkpoint from (default: "scf")
+        - input_iter: Iteration number to read (default: -1 = use final_iter)
+    h_int : ThcCoulomb
+        THC ERI handler
     q_vec : array-like
         Perturbation wavevector in crystal coordinates, shape (3,)
     DeltaH0_skij : np.ndarray
-        Perturbation matrix, shape (ns, nk, nb, nb)
+        External perturbation matrix, shape (ns, nk, nb, nb)
+    include_hartree : bool, optional
+        Include Hartree (Coulomb) term in SCF loop (default True)
+    include_exchange : bool, optional
+        Include Exchange term in SCF loop (default True)
+    include_gw_sigma : bool, optional
+        Include GW self-energy in SCF loop (default False)
+    max_iter : int, optional
+        Maximum number of SCF iterations (default 50). Use 1 for one-shot.
+    tol : float, optional
+        Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
     fix_density : bool, optional
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
+    iter_alg : dict or None, optional
+        Iteration algorithm configuration. If None, uses damping with mixing=1.0.
+        Keys:
+        - alg : str - "damping" (default) or "DIIS"
+        - mixing : float - Damping/mixing parameter (default 1.0)
+        - max_subsp_size : int - DIIS subspace size (default 5)
+        - diis_warmup : int - Warmup iterations before DIIS (default 3)
 
     Returns
     -------
-    float
-        The Δμ value used (computed if fix_density=True, otherwise 0.0).
+    tuple[int, float]
+        (niter, Delta_mu) - number of iterations and final chemical potential shift
 
     Notes
     -----
-    Results (ΔG, ΔDm) are written to {output}.mbpt.h5 under
-    the "linear_response" group.
+    Results are written to {output}.mbpt.h5 under the "linear_response" group.
     """
     import numpy as np
-    from coqui._lib.mbpt_module import lr_dyson as lr_dyson_cxx
+    from coqui._lib.mbpt_module import run_lr_cpp
 
     q_vec = np.asarray(q_vec, dtype=np.float64)
     DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
 
-    return lr_dyson_cxx(json.dumps(params), h_int, q_vec, DeltaH0_skij, bool(fix_density))
+    # Parse iter_alg dict with defaults
+    if iter_alg is None:
+        iter_alg = {}
+    alg = str(iter_alg.get("alg", "damping"))
+    if alg not in ("damping", "DIIS"):
+        raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
+    mixing = float(iter_alg.get("mixing", 1.0))
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
+    diis_warmup = int(iter_alg.get("diis_warmup", 3))
+
+    return run_lr_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
+                      bool(include_hartree), bool(include_exchange), bool(include_gw_sigma),
+                      int(max_iter), float(tol), bool(fix_density),
+                      alg, mixing, max_subsp_size, diis_warmup)
 
 
 def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):
@@ -260,87 +296,6 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     S_skij = np.asarray(S_skij, dtype=np.complex128)
 
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
-
-
-def run_lr_hf_scf(params, h_int, q_vec, DeltaH0_skij, max_iter=50, tol=1e-8, fix_density=True, iter_alg=None, compute_exchange=True):
-    """
-    Run full linear response Hartree-Fock SCF calculation.
-
-    Runs the LR-HF SCF loop:
-        ΔH0 → ΔG → ΔDm → ΔF → ΔG → ... (iterate until convergence)
-
-    The converged effective perturbation is ΔH_eff = ΔH0 + ΔF - Δμ·S.
-
-    Parameters
-    ----------
-    params : dict
-        Parameters including:
-        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
-        - output: Output checkpoint prefix (default: same as prefix)
-        - input_type: HDF5 group to read checkpoint from (default: "scf").
-          Specifies which calculation's data to use as starting point.
-          Options: "scf" (standard SCF), "embed" (embedding), etc.
-        - input_iter: Iteration number to read (default: -1 = use final_iter)
-    h_int : ThcCoulomb
-        THC ERI handler (currently only THC is supported)
-    q_vec : array-like
-        Perturbation wavevector in crystal coordinates, shape (3,)
-    DeltaH0_skij : np.ndarray
-        External perturbation matrix, shape (ns, nk, nb, nb)
-    max_iter : int, optional
-        Maximum number of SCF iterations (default: 50)
-    tol : float, optional
-        Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default: 1e-8)
-    fix_density : bool, optional
-        If True, compute Δμ to enforce particle conservation ΔN=0 (default: True).
-        Only meaningful for q=0 perturbations.
-    iter_alg : dict or None, optional
-        Iteration algorithm configuration. If None, uses damping with mixing=1.0.
-        Keys:
-        - alg : str
-            "damping" (default) or "DIIS"
-        - mixing : float
-            Damping/mixing parameter (default: 1.0 = no damping).
-            For damping: ΔF = mixing*ΔF_new + (1-mixing)*ΔF_prev.
-            For DIIS: used during warmup iterations.
-        - max_subsp_size : int
-            Maximum DIIS subspace size (default: 5). Only for DIIS.
-        - diis_warmup : int
-            Warmup iterations before DIIS extrapolation (default: 3). Only for DIIS.
-    compute_exchange : bool, optional
-        Whether to compute exchange term in LR Fock matrix (default: True).
-        Set to False for Hartree-only calculations (e.g., phonon benchmarks).
-
-    Returns
-    -------
-    tuple[int, float]
-        (niter, Delta_mu) - number of iterations and final chemical potential shift
-
-    Notes
-    -----
-    Results (ΔG, ΔDm, ΔF, Delta_mu, niter) are written to {output}.mbpt.h5
-    under the "linear_response" group.
-    """
-    import numpy as np
-    from coqui._lib.mbpt_module import lr_hf_scf_cpp
-
-    q_vec = np.asarray(q_vec, dtype=np.float64)
-    DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
-
-    # Parse iter_alg dict with defaults
-    if iter_alg is None:
-        iter_alg = {}
-    alg = str(iter_alg.get("alg", "damping"))
-    if alg not in ("damping", "DIIS"):
-        raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
-    mixing = float(iter_alg.get("mixing", 1.0))
-    max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
-    diis_warmup = int(iter_alg.get("diis_warmup", 3))
-
-    return lr_hf_scf_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
-                         int(max_iter), float(tol), bool(fix_density),
-                         alg, mixing, max_subsp_size, diis_warmup,
-                         bool(compute_exchange))
 
 
 def run_lr_gw_sigma(params, h_int, q_pert, DeltaG_tskij):
