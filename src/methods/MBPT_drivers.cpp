@@ -51,6 +51,7 @@
 
 #include "SCF/scf_driver.hpp"
 #include "methods/GW/lr_gw.hpp"
+#include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -1254,6 +1255,122 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
 }
 
 
+/**
+ * Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space).
+ *
+ * Creates lr_rpa_pi solver, calls evaluate_lr_Pi,
+ * copies distributed result to regular array.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 5> const& DeltaG_tskij) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  long nkpts = mf->nkpts();
+  long Np = thc.Np();
+  long nt = G_tskij.shape(0);
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Create lr_rpa_pi solver and compute ΔP
+  solvers::lr_rpa_pi lr(q_pert);
+
+  using Arr4D = nda::array<ComplexType, 4>;
+  auto dDeltaPi = lr.evaluate_lr_Pi<Arr4D>(G_tskij, DeltaG_tskij, thc);
+  mpi->comm.barrier();
+
+  // Copy distributed result to regular array
+  nda::array<ComplexType, 4> DeltaPi_tqPQ(nt_half, nkpts, Np, Np);
+  DeltaPi_tqPQ() = 0.0;
+  {
+    auto loc = dDeltaPi.local();
+    auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi.origin();
+    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < NP_loc; ++iP)
+          for (long iQ = 0; iQ < NQ_loc; ++iQ)
+            DeltaPi_tqPQ(it + t_origin, iq + q_origin, iP + P_origin, iQ + Q_origin)
+                = loc(it, iq, iP, iQ);
+  }
+  mpi->comm.all_reduce_in_place_n(DeltaPi_tqPQ.data(), DeltaPi_tqPQ.size(), std::plus<>{});
+  mpi->comm.barrier();
+
+  return DeltaPi_tqPQ;
+}
+
+
+/**
+ * Evaluate standard RPA polarization P[G] (FD helper).
+ *
+ * Reads IAFT from checkpoint, constructs scr_coulomb_t, calls eval_Pi_qdep,
+ * copies distributed result to regular array.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_Pi_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_Pi_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long Np = thc.Np();
+
+  // Require no symmetry (same constraint as lr_rpa_pi)
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "gw_evaluate_Pi_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  long nt = ft.nt_f();
+  utils::check(G_tskij.shape(0) == nt,
+               "gw_evaluate_Pi_calc: G tau dimension {} != IAFT nt_f {}",
+               G_tskij.shape(0), nt);
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Use standard scr_coulomb_t to compute P
+  solvers::scr_coulomb_t scr_eri(&ft, "rpa");
+
+  auto dPi_tqPQ = scr_eri.eval_Pi_qdep(G_tskij, thc);
+  mpi->comm.barrier();
+
+  // Copy distributed result to regular array
+  nda::array<ComplexType, 4> Pi_tqPQ(nt_half, nkpts, Np, Np);
+  Pi_tqPQ() = 0.0;
+  {
+    auto loc = dPi_tqPQ.local();
+    auto [t_origin, q_origin, P_origin, Q_origin] = dPi_tqPQ.origin();
+    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < NP_loc; ++iP)
+          for (long iQ = 0; iQ < NQ_loc; ++iQ)
+            Pi_tqPQ(it + t_origin, iq + q_origin, iP + P_origin, iQ + Q_origin)
+                = loc(it, iq, iP, iQ);
+  }
+  mpi->comm.all_reduce_in_place_n(Pi_tqPQ.data(), Pi_tqPQ.size(), std::plus<>{});
+  mpi->comm.barrier();
+
+  return Pi_tqPQ;
+}
+
+
 // instantiations
 using mpi3::communicator;
 
@@ -1331,6 +1448,19 @@ template nda::array<ComplexType, 5> lr_gw_sigma_calc(
 
 // gw_evaluate_sigma_calc instantiations (THC only)
 template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<ComplexType, 5> const&);
+
+// lr_gw_Pi_calc instantiations (THC only — lr_gw requires THC)
+template nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    nda::array<double, 1> const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<ComplexType, 5> const&);
+
+// gw_evaluate_Pi_calc instantiations (THC only)
+template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<ComplexType, 5> const&);

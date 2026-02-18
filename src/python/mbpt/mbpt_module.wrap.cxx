@@ -412,6 +412,72 @@ np.ndarray
     LR self-energy ΔΣ, shape (nt, ns, nk, nb, nb)
 )DOC");
 
+// lr_gw_Pi - compute LR polarization ΔP = -ΔG·G - G·ΔG
+static auto const fun_lr_gw_Pi = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_pert,
+           nda::array<ComplexType, 5> const& G_tskij,
+           nda::array<ComplexType, 5> const& DeltaG_tskij) {
+          return coqui_py::lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij);
+        },
+        "h_int", "q_pert", "G_tskij", "DeltaG_tskij")};
+
+static const auto doc_lr_gw_Pi = fun_lr_gw_Pi.doc(R"DOC(
+Compute linear response polarization ΔP = -ΔG·G - G·ΔG (R-space Hadamard product).
+
+Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
+thc_solver_comm for G factors (symmetric).
+
+Parameters
+----------
+h_int : ThcCoulomb
+    THC ERI handler
+q_pert : np.ndarray
+    LR perturbation wavevector in crystal coordinates, shape (3,)
+G_tskij : np.ndarray
+    Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
+DeltaG_tskij : np.ndarray
+    LR Green's function, shape (nt, ns, nk, nb, nb)
+
+Returns
+-------
+np.ndarray
+    LR polarization ΔP, shape (nt_half, nkpts, NP, NP)
+)DOC");
+
+// gw_evaluate_Pi - evaluate standard RPA polarization P[G]
+static auto const fun_gw_evaluate_Pi = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 5> const& G_tskij) {
+          return coqui_py::gw_evaluate_Pi(lr_params, h_int, G_tskij);
+        },
+        "lr_params", "h_int", "G_tskij")};
+
+static const auto doc_gw_evaluate_Pi = fun_gw_evaluate_Pi.doc(R"DOC(
+Evaluate standard RPA polarization P[G].
+
+Computes the RPA polarization from a given Green's function.
+Used for finite-difference testing of LR polarization.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+G_tskij : np.ndarray
+    Green's function, shape (nt, ns, nk, nb, nb)
+
+Returns
+-------
+np.ndarray
+    Polarization P, shape (nt_half, nkpts, NP, NP)
+)DOC");
+
 // gw_evaluate_sigma - evaluate GW self-energy Σ = -G ⊙ W_c + div_corr
 static auto const fun_gw_evaluate_sigma = c2py::dispatcher_f_kw_t{
     c2py::cfun(
@@ -461,6 +527,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma.c_str()},
     {"gw_evaluate_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma>,
      METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_sigma.c_str()},
+    {"lr_gw_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_Pi>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_Pi.c_str()},
+    {"gw_evaluate_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_Pi>,
+     METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_Pi.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

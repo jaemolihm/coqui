@@ -330,6 +330,69 @@ def run_lr_gw_sigma(params, h_int, q_pert, DeltaG_tskij):
     return lr_gw_sigma_cpp(json.dumps(params), h_int, q_pert, DeltaG_tskij)
 
 
+def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
+    """
+    Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space Hadamard product).
+
+    Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
+    thc_solver_comm for G factors (symmetric).
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    G_tskij : np.ndarray
+        Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaG_tskij : np.ndarray
+        LR Green's function, shape (nt, ns, nk, nb, nb)
+
+    Returns
+    -------
+    np.ndarray
+        LR polarization ΔP, shape (nt_half, nkpts, NP, NP)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_gw_Pi_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+
+    return lr_gw_Pi_cpp(h_int, q_pert, G_tskij, DeltaG_tskij)
+
+
+def gw_evaluate_Pi(params, h_int, G_tskij):
+    """
+    Evaluate standard RPA polarization P[G].
+
+    Computes the RPA polarization from a given Green's function.
+    Used for finite-difference testing of LR polarization.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray
+        Green's function, shape (nt, ns, nk, nb, nb)
+
+    Returns
+    -------
+    np.ndarray
+        Polarization P, shape (nt_half, nkpts, NP, NP)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import gw_evaluate_Pi_cpp
+
+    G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+
+    return gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
+
+
 def gw_evaluate_sigma(params, h_int, G_tskij):
     """
     Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file.

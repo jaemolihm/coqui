@@ -44,6 +44,17 @@ namespace methods {
      * Cannot reuse thc_solver_comm because its _primary_to_aux_impl and
      * _aux_to_primary_impl assume left and right X matrices share the same k-point,
      * which is incompatible with q≠0 linear response.
+     *
+     * Time-reversal handling:
+     * Unlike rpa_pi.icc, which uses a two-step approach (compute on nkpts_no_trev
+     * k-points, then unfold via G_PQ(k) = conj(G_PQ(kp_trev_pair(k)))), this class
+     * loops over all nkpts k-points and handles trev inline via transpose on the
+     * primary-basis input: O_ab(k) = O_ab(ibz_k)^T for Hermitian quantities.
+     *
+     * The rpa_pi.icc conjugation shortcut (kp_trev_pair) relies on X(k) = conj(X(k'))
+     * for time-reversal pairs, making O_PQ(k) = conj(O_PQ(k')). This breaks for q≠0
+     * because the left X is at k+q, and k+q = -k'+q ≠ -(k'+q), so X(k+q) ≠ conj(X(k'+q))
+     * in general. Each trev k-point must be computed independently with its own X(k+q).
      */
     struct lr_thc_comm {
       template<nda::MemoryArray local_Array_t>

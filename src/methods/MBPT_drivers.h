@@ -249,5 +249,41 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     eri_t &eri, ptree const& pt,
     nda::array<ComplexType, 5> const& G_tskij);
 
+/**
+ * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)
+ *
+ * Computes LR polarization via product-rule differentiation of P = -G·G.
+ * Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
+ * thc_solver_comm for G factors (symmetric).
+ *
+ * @param eri          - [INPUT] THC ERI handler
+ * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param G_tskij      - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @return ΔP(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 5> const& DeltaG_tskij);
+
+/**
+ * @brief Evaluate standard RPA polarization P[G] (FD helper)
+ *
+ * Computes the standard RPA polarization from a given G. Used for
+ * finite-difference testing: P[G+εΔG] computed by passing G+εΔG.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix)
+ * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @return P(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij);
+
 }
 #endif

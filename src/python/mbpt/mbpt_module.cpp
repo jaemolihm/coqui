@@ -270,6 +270,43 @@ namespace coqui_py {
   }
 
 
+  /**
+   * @brief Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space)
+   *
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
+   * @param G_tskij        - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaG_tskij   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @return               - [OUTPUT] ΔP (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> lr_gw_Pi(
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      nda::array<ComplexType, 5> const& G_tskij,
+      nda::array<ComplexType, 5> const& DeltaG_tskij) {
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_Pi_calc(mb_eri, q_pert, G_tskij, DeltaG_tskij);
+  }
+
+
+  /**
+   * @brief Evaluate standard RPA polarization P[G] (FD helper)
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @return           - [OUTPUT] P (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> gw_evaluate_Pi(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<ComplexType, 5> const& G_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_Pi_calc(mb_eri, parser.get_root(), G_tskij);
+  }
+
+
   template<typename eri_handler>
   void mbpt(const std::string &solver_type, const std::string &mbpt_params, eri_handler &h_int,
             const nda::array<ComplexType, 5> &C_ksIai,
