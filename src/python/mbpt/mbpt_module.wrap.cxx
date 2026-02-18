@@ -510,6 +510,73 @@ np.ndarray
     Self-energy Σ, shape (nt, ns, nk, nb, nb)
 )DOC");
 
+// lr_gw_W - compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+static auto const fun_lr_gw_W = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_pert,
+           nda::array<ComplexType, 4> const& DeltaPi_tqPQ) {
+          return coqui_py::lr_gw_W(lr_params, h_int, q_pert, DeltaPi_tqPQ);
+        },
+        "lr_params", "h_int", "q_pert", "DeltaPi_tqPQ")};
+
+static const auto doc_lr_gw_W = fun_lr_gw_W.doc(R"DOC(
+Compute linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
+
+Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
+then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+q_pert : np.ndarray
+    LR perturbation wavevector in crystal coordinates, shape (3,)
+DeltaPi_tqPQ : np.ndarray
+    LR polarization, shape (nt_half, nkpts, NP, NP)
+
+Returns
+-------
+np.ndarray
+    LR screened interaction ΔW_c, shape (nt_half, nkpts, NP, NP)
+)DOC");
+
+// gw_evaluate_W_from_Pi - evaluate W_c from Π via Dyson equation (FD helper)
+static auto const fun_gw_evaluate_W_from_Pi = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 4> const& Pi_tqPQ) {
+          return coqui_py::gw_evaluate_W_from_Pi(lr_params, h_int, Pi_tqPQ);
+        },
+        "lr_params", "h_int", "Pi_tqPQ")};
+
+static const auto doc_gw_evaluate_W_from_Pi = fun_gw_evaluate_W_from_Pi.doc(R"DOC(
+Evaluate screened interaction W_c from polarization Π via Dyson equation.
+
+Reads IAFT from checkpoint, applies W Dyson equation Π → W_c(τ).
+Used for finite-difference testing of LR screened interaction.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+Pi_tqPQ : np.ndarray
+    Polarization, shape (nt_half, nkpts, NP, NP)
+
+Returns
+-------
+np.ndarray
+    Screened interaction W_c, shape (nt_half, nkpts, NP, NP)
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -531,6 +598,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_gw_Pi.c_str()},
     {"gw_evaluate_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_Pi>,
      METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_Pi.c_str()},
+    {"lr_gw_W_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_W>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_W.c_str()},
+    {"gw_evaluate_W_from_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_W_from_Pi>,
+     METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_W_from_Pi.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

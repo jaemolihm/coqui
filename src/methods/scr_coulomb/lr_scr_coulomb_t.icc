@@ -1,0 +1,152 @@
+/**
+ * ==========================================================================
+ * CoQuí: Correlated Quantum ínterface
+ *
+ * Copyright (c) 2022-2025 Simons Foundation & The CoQuí developer team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * ==========================================================================
+ */
+
+
+namespace methods {
+namespace solvers {
+
+/**
+ * LR W Dyson in Matsubara frequency space (in-place):
+ *   ΔW_c(q, iω) = (Z(q) + W_c(q, iω)) · ΔΠ(q, iω) · (Z(q) + W_c(q, iω))
+ *
+ * Mirrors scr_coulomb_t::dyson_W_in_place communicator splitting pattern but
+ * replaces the matrix inversion with two matrix multiplications.
+ */
+template<nda::MemoryArray Array_4D_t, typename communicator_t>
+void lr_scr_coulomb_t::lr_dyson_W_in_place(
+    memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
+    memory::darray_t<Array_4D_t, communicator_t>& dW_c_wqPQ,
+    THC_ERI auto& thc) {
+
+  using math::nda::make_distributed_array;
+  using Array_2D_t = memory::array<HOST_MEMORY, ComplexType, 2>;
+
+  _Timer.start("EVALUATE_LR_W");
+
+  utils::check(dDeltaPi_wqPQ.grid() == dW_c_wqPQ.grid() &&
+               dDeltaPi_wqPQ.block_size() == dW_c_wqPQ.block_size(),
+               "lr_dyson_W_in_place: ΔΠ and W_c must have the same distribution (grid and block_size)");
+
+  auto [nw, nqpts, NP, NQ] = dDeltaPi_wqPQ.global_shape();
+  auto [nw_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_wqPQ.local_shape();
+  auto [w_origin, q_origin, P_origin, Q_origin] = dDeltaPi_wqPQ.origin();
+  long nq_loc_max = nq_loc;
+  dDeltaPi_wqPQ.communicator()->broadcast_n(&nq_loc_max, 1, 0);
+
+  auto P_rng = dDeltaPi_wqPQ.local_range(2);
+  auto Q_rng = dDeltaPi_wqPQ.local_range(3);
+  auto pgrid = dDeltaPi_wqPQ.grid();
+  auto block_size = dDeltaPi_wqPQ.block_size();
+  long qpool_id = (nq_loc==nq_loc_max)? q_origin/nq_loc : (q_origin-nqpts%pgrid[1])/nq_loc;
+
+  app_log(2, "  Evaluation of the LR screened interaction:");
+  app_log(2, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+  app_log(2, "    - block size: (w, q, P, Q) = ({}, {}, {}, {})\n", block_size[0], block_size[1], block_size[2], block_size[3]);
+
+  // Setup wq_intra_comm (same as scr_coulomb_t::dyson_W_in_place)
+  mpi3::communicator wq_intra_comm = thc.mpi()->comm.split(w_origin*nqpts + q_origin, thc.mpi()->comm.rank());
+  utils::check(wq_intra_comm.size() == pgrid[2]*pgrid[3], "wq_intra_comm.size() != pgrid[2]*pgrid[3]");
+  // Setup q_intra_comm
+  mpi3::communicator q_intra_comm = thc.mpi()->comm.split(q_origin, thc.mpi()->comm.rank());
+  utils::check(q_intra_comm.size() == pgrid[0]*pgrid[2]*pgrid[3], "q_intra_comm.size() != pgrid[0]*pgrid[2]*pgrid[3]");
+
+  // Distributed 2D work arrays
+  std::array<long, 2> PQ_pgrid = {pgrid[2], pgrid[3]};
+  std::array<long, 2> PQ_gshape = {NP, NQ};
+  std::array<long, 2> PQ_bsize = {block_size[2], block_size[3]};
+  auto dDeltaPi_PQ = make_distributed_array<Array_2D_t>(wq_intra_comm, PQ_pgrid, PQ_gshape, PQ_bsize, true);
+  auto dZ_PQ       = make_distributed_array<Array_2D_t>(wq_intra_comm, PQ_pgrid, PQ_gshape, PQ_bsize, true);
+  auto dW_full_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, PQ_pgrid, PQ_gshape, PQ_bsize, true);
+  auto dTmp_PQ     = make_distributed_array<Array_2D_t>(wq_intra_comm, PQ_pgrid, PQ_gshape, PQ_bsize, true);
+  utils::check(dDeltaPi_PQ.local_range(0) == P_rng, "Error: local range mismatches!");
+  utils::check(dDeltaPi_PQ.local_range(1) == Q_rng, "Error: local range mismatches!");
+  utils::check(dDeltaPi_PQ.local_shape()[0] == NP_loc and dDeltaPi_PQ.local_shape()[1] == NQ_loc, "Error: local shape mismatched!");
+
+  auto DeltaPi_wqPQ_loc = dDeltaPi_wqPQ.local();
+  auto W_c_wqPQ_loc = dW_c_wqPQ.local();
+  auto DeltaPi_PQ = dDeltaPi_PQ.local();
+  auto Z_PQ = dZ_PQ.local();
+  auto W_full_PQ = dW_full_PQ.local();
+  auto Tmp_PQ = dTmp_PQ.local();
+
+  for (size_t iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    long iq = q_origin + iq_loc;
+    Z_PQ = thc.Z(iq, P_rng, Q_rng, qpool_id, pgrid[1], q_intra_comm);
+
+    // W_full = Z + W_c at each (q, iω)
+    // Then: ΔW_c = W_full · ΔΠ · W_full
+    for (size_t n = 0; n < nw_loc; ++n) {
+      DeltaPi_PQ = DeltaPi_wqPQ_loc(n, iq_loc, nda::ellipsis{});
+      W_full_PQ = Z_PQ;
+      W_full_PQ += W_c_wqPQ_loc(n, iq_loc, nda::ellipsis{});
+
+      // Tmp = W_full · ΔΠ
+      math::nda::slate_ops::multiply(dW_full_PQ, dDeltaPi_PQ, dTmp_PQ);
+
+      // ΔW = Tmp · W_full = (W_full · ΔΠ) · W_full
+      math::nda::slate_ops::multiply(dTmp_PQ, dW_full_PQ, dDeltaPi_PQ);
+
+      // Write result back
+      DeltaPi_wqPQ_loc(n, iq_loc, nda::ellipsis{}) = DeltaPi_PQ;
+    }
+  }
+
+  // Prevent deadlock if nq_loc differs across processors (same pattern as scr_coulomb_t)
+  for (long iq_loc = nq_loc; iq_loc < nq_loc_max; ++iq_loc)
+    Z_PQ = thc.Z(0, P_rng, Q_rng, qpool_id, pgrid[1], q_intra_comm);
+
+  _Timer.stop("EVALUATE_LR_W");
+}
+
+/**
+ * LR W Dyson: ΔΠ(τ) → ΔW_c(τ).
+ *
+ * Mirrors scr_coulomb_t::dyson_W_from_Pi_tau but for the linearized equation.
+ * Uses scr_coulomb_t for the τ↔ω Fourier transforms.
+ */
+template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
+auto lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau(
+    memory::darray_t<local_Array_t, communicator_t>& dDeltaPi_tqPQ,
+    memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
+    THC_ERI auto& thc)
+-> memory::darray_t<local_Array_t, mpi3::communicator>
+{
+  auto t_pgrid = dDeltaPi_tqPQ.grid();
+  auto t_bsize = dDeltaPi_tqPQ.block_size();
+
+  // Compute ω-space proc grid
+  auto [w_pgrid, w_bsize] = scr_coulomb_t::W_omega_proc_grid(
+      thc.mpi()->comm.size(), thc.MF()->nqpts_ibz(), _ft->nw_b(), thc.Np());
+
+  // FT to ω-space (resets τ inputs)
+  scr_coulomb_t scr(_ft, "rpa");
+  auto dDeltaPi_wqPQ = scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
+  auto dW_c_wqPQ     = scr.tau_to_w(dW_c_tqPQ,     w_pgrid, w_bsize, true);
+
+  // LR Dyson in ω-space: ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
+  lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_c_wqPQ, thc);
+  dW_c_wqPQ.reset();
+
+  // FT back to τ-space
+  return scr.w_to_tau(dDeltaPi_wqPQ, t_pgrid, t_bsize, true);
+}
+
+} // solvers
+} // methods

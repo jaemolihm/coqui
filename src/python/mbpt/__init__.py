@@ -22,6 +22,7 @@ from .mbpt_driver import (
     run_hf, run_gw, run_qpg0w0, run_lr, run_lr_hf,
     hf_evaluate, run_lr_gw_sigma, gw_evaluate_sigma,
     run_lr_gw_Pi, gw_evaluate_Pi,
+    run_lr_gw_W, gw_evaluate_W_from_Pi,
 )
 from .lr_driver import (
     calculate_kpq_map,
@@ -49,6 +50,9 @@ __all__ = [
     # LR-Pi
     "run_lr_gw_Pi",
     "gw_evaluate_Pi",
+    # LR-W
+    "run_lr_gw_W",
+    "gw_evaluate_W_from_Pi",
     # JML: Temporarily exposed for debugging
     "hf_evaluate",
 ]

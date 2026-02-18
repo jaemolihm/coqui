@@ -421,3 +421,66 @@ def gw_evaluate_sigma(params, h_int, G_tskij):
     G_tskij = np.asarray(G_tskij, dtype=np.complex128)
 
     return gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij)
+
+
+def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
+    """
+    Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
+
+    Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
+    then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaPi_tqPQ : np.ndarray
+        LR polarization, shape (nt_half, nkpts, NP, NP)
+
+    Returns
+    -------
+    np.ndarray
+        LR screened interaction ΔW_c, shape (nt_half, nkpts, NP, NP)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_gw_W_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    DeltaPi_tqPQ = np.asarray(DeltaPi_tqPQ, dtype=np.complex128)
+
+    return lr_gw_W_cpp(json.dumps(params), h_int, q_pert, DeltaPi_tqPQ)
+
+
+def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):
+    """
+    Evaluate screened interaction W_c from polarization Π via Dyson equation.
+
+    Reads IAFT from checkpoint, applies W Dyson equation Π → W_c(τ).
+    Used for finite-difference testing of LR screened interaction.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    Pi_tqPQ : np.ndarray
+        Polarization, shape (nt_half, nkpts, NP, NP)
+
+    Returns
+    -------
+    np.ndarray
+        Screened interaction W_c, shape (nt_half, nkpts, NP, NP)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import gw_evaluate_W_from_Pi_cpp
+
+    Pi_tqPQ = np.asarray(Pi_tqPQ, dtype=np.complex128)
+
+    return gw_evaluate_W_from_Pi_cpp(json.dumps(params), h_int, Pi_tqPQ)

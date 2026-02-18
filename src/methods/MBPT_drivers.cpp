@@ -52,6 +52,7 @@
 #include "SCF/scf_driver.hpp"
 #include "methods/GW/lr_gw.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
+#include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -1371,6 +1372,183 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
 }
 
 
+/**
+ * Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
+ *
+ * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
+ * then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,  // Currently unused; reserved for future q→0 head corrections
+    nda::array<ComplexType, 4> const& DeltaPi_tqPQ) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_W_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_W_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Require no symmetry (same as gw_evaluate_W_from_Pi_calc)
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "lr_gw_W_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  utils::check(DeltaPi_tqPQ.shape(0) == nt_half && DeltaPi_tqPQ.shape(1) == nkpts &&
+               DeltaPi_tqPQ.shape(2) == NP && DeltaPi_tqPQ.shape(3) == NP,
+               "lr_gw_W_calc: DeltaPi_tqPQ shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+               nt_half, nkpts, NP, NP,
+               DeltaPi_tqPQ.shape(0), DeltaPi_tqPQ.shape(1),
+               DeltaPi_tqPQ.shape(2), DeltaPi_tqPQ.shape(3));
+
+  // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
+  // eps_inv_head is unused here (only needed for divergence corrections in primary-basis quantities)
+  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
+  auto dW_tqPQ = make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
+  if (mpi->comm.root()) {
+    auto W_qt = dW_qtPQ.local();
+    auto W_tq = dW_tqPQ.local();
+    for (long iq = 0; iq < nkpts; ++iq)
+      for (long it = 0; it < nt_half; ++it)
+        W_tq(it, iq, nda::ellipsis{}) = W_qt(iq, it, nda::ellipsis{});
+  }
+  dW_qtPQ.reset();
+
+  // Convert ΔΠ regular array → distributed array
+  auto dDeltaPi_tqPQ = make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
+  if (mpi->comm.root()) {
+    dDeltaPi_tqPQ.local() = DeltaPi_tqPQ;
+  }
+  mpi->comm.barrier();
+
+  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
+  solvers::lr_scr_coulomb_t lr_scr(&ft);
+  auto dDeltaW_tqPQ = lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ, thc);
+  mpi->comm.barrier();
+
+  // Copy distributed result to regular array
+  nda::array<ComplexType, 4> DeltaW_tqPQ(nt_half, nkpts, NP, NP);
+  DeltaW_tqPQ() = 0.0;
+  {
+    auto loc = dDeltaW_tqPQ.local();
+    auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaW_tqPQ.origin();
+    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaW_tqPQ.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < NP_loc; ++iP)
+          for (long iQ = 0; iQ < NQ_loc; ++iQ)
+            DeltaW_tqPQ(it + t_origin, iq + q_origin, iP + P_origin, iQ + Q_origin)
+                = loc(it, iq, iP, iQ);
+  }
+  mpi->comm.all_reduce_in_place_n(DeltaW_tqPQ.data(), DeltaW_tqPQ.size(), std::plus<>{});
+  mpi->comm.barrier();
+
+  return DeltaW_tqPQ;
+}
+
+
+/**
+ * Evaluate screened interaction W_c from polarization Π (FD helper).
+ *
+ * Reads IAFT from checkpoint, converts input to distributed array,
+ * calls scr_coulomb_t::dyson_W_from_Pi_tau<false>, copies result to regular array.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 4> const& Pi_tqPQ) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_W_from_Pi_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_W_from_Pi_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  utils::check(Pi_tqPQ.shape(0) == nt_half && Pi_tqPQ.shape(1) == nkpts &&
+               Pi_tqPQ.shape(2) == NP && Pi_tqPQ.shape(3) == NP,
+               "gw_evaluate_W_from_Pi_calc: Pi_tqPQ shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+               nt_half, nkpts, NP, NP,
+               Pi_tqPQ.shape(0), Pi_tqPQ.shape(1),
+               Pi_tqPQ.shape(2), Pi_tqPQ.shape(3));
+
+  // Require no symmetry
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "gw_evaluate_W_from_Pi_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  // Convert input to distributed array
+  auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
+  if (mpi->comm.root()) {
+    dPi_tqPQ.local() = Pi_tqPQ;
+  }
+  mpi->comm.barrier();
+
+  // Use scr_coulomb_t to solve W Dyson equation: Π → W_c(τ)
+  solvers::scr_coulomb_t scr(&ft, "rpa");
+  auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+  mpi->comm.barrier();
+
+  // Copy distributed result to regular array
+  nda::array<ComplexType, 4> W_tqPQ(nt_half, nkpts, NP, NP);
+  W_tqPQ() = 0.0;
+  {
+    auto loc = dW_tqPQ.local();
+    auto [t_origin, q_origin, P_origin, Q_origin] = dW_tqPQ.origin();
+    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < NP_loc; ++iP)
+          for (long iQ = 0; iQ < NQ_loc; ++iQ)
+            W_tqPQ(it + t_origin, iq + q_origin, iP + P_origin, iQ + Q_origin)
+                = loc(it, iq, iP, iQ);
+  }
+  mpi->comm.all_reduce_in_place_n(W_tqPQ.data(), W_tqPQ.size(), std::plus<>{});
+  mpi->comm.barrier();
+
+  return W_tqPQ;
+}
+
+
 // instantiations
 using mpi3::communicator;
 
@@ -1464,5 +1642,18 @@ template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<ComplexType, 5> const&);
+
+// lr_gw_W_calc instantiations (THC only)
+template nda::array<ComplexType, 4> lr_gw_W_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    nda::array<ComplexType, 4> const&);
+
+// gw_evaluate_W_from_Pi_calc instantiations (THC only)
+template nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<ComplexType, 4> const&);
 
 }

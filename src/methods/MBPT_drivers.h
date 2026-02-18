@@ -285,5 +285,39 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     eri_t &eri, ptree const& pt,
     nda::array<ComplexType, 5> const& G_tskij);
 
+/**
+ * @brief Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+ *
+ * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
+ * then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+ *
+ * @param eri           - [INPUT] THC ERI handler
+ * @param pt            - [INPUT] Parameters as property tree (prefix)
+ * @param q_pert        - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param DeltaPi_tqPQ  - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+ * @return ΔW_c(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 4> const& DeltaPi_tqPQ);
+
+/**
+ * @brief Evaluate screened interaction W_c from polarization Π (FD helper)
+ *
+ * Exposes scr_coulomb_t::dyson_W_from_Pi_tau for finite-difference testing.
+ * Reads IAFT from checkpoint, applies W Dyson equation Π→W_c.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix)
+ * @param Pi_tqPQ  - [INPUT] Polarization (nt_half, nkpts, NP, NP)
+ * @return W_c(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 4> const& Pi_tqPQ);
+
 }
 #endif

@@ -307,6 +307,44 @@ namespace coqui_py {
   }
 
 
+  /**
+   * @brief Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
+   * @param DeltaPi_tqPQ   - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+   * @return               - [OUTPUT] ΔW_c (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> lr_gw_W(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      nda::array<ComplexType, 4> const& DeltaPi_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_W_calc(mb_eri, parser.get_root(), q_pert, DeltaPi_tqPQ);
+  }
+
+
+  /**
+   * @brief Evaluate W_c from Π via W Dyson equation (FD helper)
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param Pi_tqPQ    - [INPUT] Polarization (nt_half, nkpts, NP, NP)
+   * @return           - [OUTPUT] W_c (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> gw_evaluate_W_from_Pi(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<ComplexType, 4> const& Pi_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_W_from_Pi_calc(mb_eri, parser.get_root(), Pi_tqPQ);
+  }
+
+
   template<typename eri_handler>
   void mbpt(const std::string &solver_type, const std::string &mbpt_params, eri_handler &h_int,
             const nda::array<ComplexType, 5> &C_ksIai,
