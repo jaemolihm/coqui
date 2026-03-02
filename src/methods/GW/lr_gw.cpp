@@ -68,14 +68,23 @@ namespace methods {
     using Arr = nda::array<ComplexType, 5>;
     using Arrv = nda::array_view<ComplexType, 5>;
 
-    template void lr_gw::evaluate_sigma_fixed_W(
+    template void lr_gw::evaluate_sigma_DeltaG(
         sArray_t<Arrv>&, const Arr&,
         memory::darray_t<Arr4D, mpi3::communicator>&,
-        thc_reader_t&, const nda::array<ComplexType, 1>&);
-    template void lr_gw::evaluate_sigma_fixed_W(
+        thc_reader_t&);
+    template void lr_gw::evaluate_sigma_DeltaG(
         sArray_t<Arrv>&, const Arrv&,
         memory::darray_t<Arr4D, mpi3::communicator>&,
-        thc_reader_t&, const nda::array<ComplexType, 1>&);
+        thc_reader_t&);
+
+    template void lr_gw::evaluate_sigma_DeltaW(
+        sArray_t<Arrv>&, const Arr&,
+        memory::darray_t<Arr4D, mpi3::communicator>&,
+        thc_reader_t&);
+    template void lr_gw::evaluate_sigma_DeltaW(
+        sArray_t<Arrv>&, const Arrv&,
+        memory::darray_t<Arr4D, mpi3::communicator>&,
+        thc_reader_t&);
 
   } // solvers
 } // methods

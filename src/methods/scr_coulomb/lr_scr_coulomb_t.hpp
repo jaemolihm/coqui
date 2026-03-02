@@ -92,6 +92,12 @@ namespace solvers {
         memory::darray_t<Array_4D_t, communicator_t>& dW_c_wqPQ,
         THC_ERI auto& thc);
 
+  inline void print_timers() {
+    app_log(2, "\n  LR_SCR_COULOMB timers");
+    app_log(2, "  ----------------------");
+    app_log(2, "    LR W Dyson (iω):                {0:.3f} sec\n", _Timer.elapsed("EVALUATE_LR_W"));
+  }
+
   private:
     const imag_axes_ft::IAFT* _ft;
     utils::TimerManager _Timer;

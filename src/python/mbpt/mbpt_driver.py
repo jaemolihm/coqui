@@ -130,8 +130,10 @@ def run_qpg0w0(params, h_int,
 
 
 def run_lr(params, h_int, q_vec, DeltaH0_skij,
-           include_hartree=True, include_exchange=True, include_gw_sigma=False,
-           max_iter=50, tol=1e-8, fix_density=False, iter_alg=None):
+           include_hartree=True, include_exchange=True,
+           gw_mode="none",
+           max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
+           include_gw_sigma=None):
     """
     Run unified linear response calculation.
 
@@ -159,8 +161,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Include Hartree (Coulomb) term in SCF loop (default True)
     include_exchange : bool, optional
         Include Exchange term in SCF loop (default True)
-    include_gw_sigma : bool, optional
-        Include GW self-energy in SCF loop (default False)
+    gw_mode : str, optional
+        GW self-energy update mode (default "none"):
+        - "none": No GW self-energy
+        - "fixed_W": ΔΣ = -ΔG⊙W (W frozen)
+        - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
     max_iter : int, optional
         Maximum number of SCF iterations (default 50). Use 1 for one-shot.
     tol : float, optional
@@ -175,6 +180,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - mixing : float - Damping/mixing parameter (default 1.0)
         - max_subsp_size : int - DIIS subspace size (default 5)
         - diis_warmup : int - Warmup iterations before DIIS (default 3)
+    include_gw_sigma : bool or None, optional
+        Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
+        False -> "none". Overrides gw_mode if both are specified.
 
     Returns
     -------
@@ -191,6 +199,17 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     q_vec = np.asarray(q_vec, dtype=np.float64)
     DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
 
+    # Handle deprecated include_gw_sigma parameter
+    if include_gw_sigma is not None:
+        import warnings
+        warnings.warn(
+            "include_gw_sigma is deprecated, use gw_mode='fixed_W' or gw_mode='full' instead",
+            DeprecationWarning, stacklevel=2)
+        gw_mode = "fixed_W" if include_gw_sigma else "none"
+
+    if gw_mode not in ("none", "fixed_W", "full"):
+        raise ValueError(f"Unknown gw_mode '{gw_mode}'. Must be 'none', 'fixed_W', or 'full'.")
+
     # Parse iter_alg dict with defaults
     if iter_alg is None:
         iter_alg = {}
@@ -202,7 +221,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     diis_warmup = int(iter_alg.get("diis_warmup", 3))
 
     return run_lr_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
-                      bool(include_hartree), bool(include_exchange), bool(include_gw_sigma),
+                      bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
                       alg, mixing, max_subsp_size, diis_warmup)
 
@@ -298,9 +317,9 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
 
 
-def run_lr_gw_sigma(params, h_int, q_pert, DeltaG_tskij):
+def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij):
     """
-    Compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space).
+    Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space).
 
     Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
 
@@ -322,12 +341,12 @@ def run_lr_gw_sigma(params, h_int, q_pert, DeltaG_tskij):
         LR self-energy ΔΣ, shape (nt, ns, nk, nb, nb)
     """
     import numpy as np
-    from coqui._lib.mbpt_module import lr_gw_sigma_cpp
+    from coqui._lib.mbpt_module import lr_gw_sigma_DeltaG_cpp
 
     q_pert = np.asarray(q_pert, dtype=np.float64)
     DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
 
-    return lr_gw_sigma_cpp(json.dumps(params), h_int, q_pert, DeltaG_tskij)
+    return lr_gw_sigma_DeltaG_cpp(json.dumps(params), h_int, q_pert, DeltaG_tskij)
 
 
 def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
@@ -393,11 +412,11 @@ def gw_evaluate_Pi(params, h_int, G_tskij):
     return gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
 
 
-def gw_evaluate_sigma(params, h_int, G_tskij):
+def gw_evaluate_sigma(params, h_int, G_tskij, div_corr=True):
     """
-    Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file.
+    Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
 
-    Same R-space computation as lr_gw_sigma but for a full Green's function.
+    Same R-space computation as lr_gw_sigma_DeltaG but for a full Green's function.
     Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG.
 
     Parameters
@@ -409,6 +428,9 @@ def gw_evaluate_sigma(params, h_int, G_tskij):
         THC ERI handler
     G_tskij : np.ndarray
         Green's function, shape (nt, ns, nk, nb, nb)
+    div_corr : bool, optional
+        Whether to apply divergence correction (default True).
+        Set to False for FD testing of LR code (which has no div_corr).
 
     Returns
     -------
@@ -420,7 +442,7 @@ def gw_evaluate_sigma(params, h_int, G_tskij):
 
     G_tskij = np.asarray(G_tskij, dtype=np.complex128)
 
-    return gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij)
+    return gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij, bool(div_corr))
 
 
 def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
@@ -484,3 +506,77 @@ def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):
     Pi_tqPQ = np.asarray(Pi_tqPQ, dtype=np.complex128)
 
     return gw_evaluate_W_from_Pi_cpp(json.dumps(params), h_int, Pi_tqPQ)
+
+
+def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaG_tskij):
+    """
+    Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
+
+    Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+    No divergence correction is applied.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    G_tskij : np.ndarray
+        Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaG_tskij : np.ndarray
+        LR Green's function, shape (nt, ns, nk, nb, nb)
+
+    Returns
+    -------
+    np.ndarray
+        LR self-energy ΔΣ (term 2), shape (nt, ns, nk, nb, nb)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_gw_sigma_DeltaW_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+
+    return lr_gw_sigma_DeltaW_cpp(json.dumps(params), h_int, q_pert, G_tskij, DeltaG_tskij)
+
+
+def gw_evaluate_sigma_with_W(params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr=True):
+    """
+    Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] with provided G and W_c.
+
+    Uses the provided G and W_c arrays (not from file). Used for finite-difference
+    testing of the full LR-GW self-energy.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray
+        Green's function, shape (nt, ns, nk, nb, nb)
+    W_c_qtPQ : np.ndarray
+        Screened interaction, shape (nkpts, nt_half, NP, NP)
+    eps_inv_head : np.ndarray
+        Inverse dielectric head, shape (nt_half,)
+    div_corr : bool, optional
+        Whether to apply divergence correction (default True)
+
+    Returns
+    -------
+    np.ndarray
+        Self-energy Σ, shape (nt, ns, nk, nb, nb)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import gw_evaluate_sigma_with_W_cpp
+
+    G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    W_c_qtPQ = np.asarray(W_c_qtPQ, dtype=np.complex128)
+    eps_inv_head = np.asarray(eps_inv_head, dtype=np.complex128)
+
+    return gw_evaluate_sigma_with_W_cpp(json.dumps(params), h_int, G_tskij, W_c_qtPQ, eps_inv_head, bool(div_corr))

@@ -53,6 +53,7 @@
 #include "methods/GW/lr_gw.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
+#include "utilities/darray_utils.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -918,7 +919,7 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
 /**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
- * Factored out from lr_gw_sigma_calc and gw_evaluate_sigma_calc to avoid duplication.
+ * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
  * Also used by run_lr_calc when include_gw_sigma=true.
  *
  * @param mpi         - MPI context
@@ -981,6 +982,9 @@ auto load_W_and_eps_inv_head(
 }
 
 
+// transpose_axes_01 is now in utilities/darray_utils.hpp
+
+
 /**
  * Unified linear response calculation.
  *
@@ -996,7 +1000,7 @@ auto load_W_and_eps_inv_head(
  * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
  * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
  * @param include_exchange - [INPUT] Include ΔK in SCF loop
- * @param include_gw_sigma - [INPUT] Include ΔΣ_GW in SCF loop
+ * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
  * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
  * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
  * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -1009,7 +1013,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<ComplexType, 4> const& DeltaH0_skij,
                                      bool include_hartree,
                                      bool include_exchange,
-                                     bool include_gw_sigma,
+                                     lr_gw_update_mode gw_mode,
                                      int max_iter,
                                      double tol,
                                      bool fix_density,
@@ -1090,6 +1094,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   // Only allocate ΔΣ array when GW is active
+  bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
   using sArray_5D_t = math::shm::shared_array<Array_view_5D_t>;
   std::optional<sArray_5D_t> opt_sDeltaSigma_tskij;
   if (include_gw_sigma) {
@@ -1130,7 +1135,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   auto [niter, Delta_mu] = driver.run_lr(
       sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
       sG_tskij, sDeltaH0_skij, thc,
-      include_hartree, include_exchange, include_gw_sigma,
+      include_hartree, include_exchange, gw_mode,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params);
@@ -1147,13 +1152,14 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
 
 /**
- * Linear response GW self-energy with fixed W.
+ * Linear response GW self-energy with fixed W (term 1).
  *
- * Computes ΔΣ = -ΔG ⊙ W_c (R-space) + divergence correction.
+ * Computes ΔΣ = -ΔG ⊙ W_c (R-space).
  * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+ * TODO: Divergence correction not yet implemented (see lr_gw.hpp class docstring).
  */
 template<typename eri_t>
-nda::array<ComplexType, 5> lr_gw_sigma_calc(
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& DeltaG_tskij) {
@@ -1162,14 +1168,14 @@ nda::array<ComplexType, 5> lr_gw_sigma_calc(
   auto mf = thc.MF();
   auto& mpi = thc.mpi();
 
-  std::string err = std::string("lr_gw_sigma_calc - Incorrect input - ");
+  std::string err = std::string("lr_gw_sigma_DeltaG_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
-               "lr_gw_sigma_calc: Input checkpoint {} does not exist!", input_file);
+               "lr_gw_sigma_DeltaG_calc: Input checkpoint {} does not exist!", input_file);
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -1188,8 +1194,9 @@ nda::array<ComplexType, 5> lr_gw_sigma_calc(
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_fixed_W(sDeltaSigma_tskij, DeltaG_tskij, dW_qtPQ, thc, eps_inv_head);
+  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, dW_qtPQ, thc);
   mpi->comm.barrier();
+  lr.print_timers();
 
   // Copy result
   nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
@@ -1202,7 +1209,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_calc(
 
 
 /**
- * Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file.
+ * Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
  *
  * Uses the standard gw_t code path (thc_solver_comm, not lr_thc_comm).
  * Used for finite-difference testing of LR-GW.
@@ -1210,7 +1217,8 @@ nda::array<ComplexType, 5> lr_gw_sigma_calc(
 template<typename eri_t>
 nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 5> const& G_tskij) {
+    nda::array<ComplexType, 5> const& G_tskij,
+    bool div_corr) {
 
   auto& thc = eri.corr_eri->get();
   auto mf = thc.MF();
@@ -1243,7 +1251,9 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
   gw.eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc, "R");
-  gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+  if (div_corr) {
+    gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+  }
   mpi->comm.barrier();
 
   // Copy result
@@ -1421,19 +1431,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
                DeltaPi_tqPQ.shape(2), DeltaPi_tqPQ.shape(3));
 
   // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
-  // eps_inv_head is unused here (only needed for divergence corrections in primary-basis quantities)
+  // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
   auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
   // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
-  auto dW_tqPQ = make_distributed_array<local_Array_4D_t>(
-      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
-  if (mpi->comm.root()) {
-    auto W_qt = dW_qtPQ.local();
-    auto W_tq = dW_tqPQ.local();
-    for (long iq = 0; iq < nkpts; ++iq)
-      for (long it = 0; it < nt_half; ++it)
-        W_tq(it, iq, nda::ellipsis{}) = W_qt(iq, it, nda::ellipsis{});
-  }
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
   dW_qtPQ.reset();
 
   // Convert ΔΠ regular array → distributed array
@@ -1549,6 +1551,159 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
 }
 
 
+/**
+ * Linear response GW self-energy term 2: -G ⊙ ΔW.
+ *
+ * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW.
+ * Uses lr_rpa_pi for ΔP, lr_scr_coulomb_t for ΔW, and standard gw_t for -G⊙ΔW.
+ * TODO: Divergence correction not yet implemented (see lr_gw.hpp class docstring).
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 5> const& DeltaG_tskij) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_sigma_DeltaW_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_sigma_DeltaW_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts = mf->nkpts();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Step 1: Compute ΔP = -ΔG·G - G·ΔG
+  app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing ΔP...");
+  solvers::lr_rpa_pi lr_pi(q_pert);
+  auto dDeltaPi_tqPQ = lr_pi.evaluate_lr_Pi<local_Array_4D_t>(G_tskij, DeltaG_tskij, thc);
+  mpi->comm.barrier();
+  lr_pi.print_timers();
+
+  // Step 2: Load W_c and compute ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+  app_log(1, "  lr_gw_sigma_DeltaW_calc: Loading W and computing ΔW...");
+  // eps_inv_head: not yet used, will be needed for div_corr (TODO)
+  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for lr_scr_coulomb_t
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
+
+  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
+  solvers::lr_scr_coulomb_t lr_scr(&ft);
+  auto dDeltaW_tqPQ = lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ, thc);
+  mpi->comm.barrier();
+  lr_scr.print_timers();
+
+  // Transpose ΔW from (t, q, P, Q) → (q, t, P, Q) for lr_gw
+  auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, mpi->comm);
+  dDeltaW_tqPQ.reset();
+
+  // Step 3: Compute ΔΣ = -G ⊙ ΔW using standard gw_t (via lr_gw::evaluate_sigma_DeltaW)
+  app_log(1, "  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
+  solvers::lr_gw lr(&ft, q_pert);
+
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, G_tskij, dDeltaW_qtPQ, thc);
+  mpi->comm.barrier();
+  lr.print_timers();
+
+  // Copy result
+  nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
+  if (mpi->node_comm.root()) {
+    DeltaSigma_tskij = sDeltaSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return DeltaSigma_tskij;
+}
+
+
+/**
+ * Evaluate GW self-energy with provided W and G (FD helper).
+ *
+ * Computes Σ = -G ⊙ W_c [+ div_corr] using provided G and W_c arrays.
+ * Used for finite-difference testing of full LR-GW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 4> const& W_c_qtPQ,
+    nda::array<ComplexType, 1> const& eps_inv_head,
+    bool div_corr) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_sigma_with_W_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_sigma_with_W_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  // Convert W_c to distributed array
+  auto dW_qtPQ = make_distributed_array<local_Array_4D_t>(
+      mpi->comm, {1, 1, 1, 1}, W_c_qtPQ.shape());
+  if (mpi->comm.root()) {
+    dW_qtPQ.local() = W_c_qtPQ;
+  }
+  mpi->comm.barrier();
+
+  // Use standard gw_t code path
+  solvers::gw_t gw(&ft);
+
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  gw.eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc, "R");
+  if (div_corr) {
+    gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  // Copy result
+  nda::array<ComplexType, 5> Sigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
+  if (mpi->node_comm.root()) {
+    Sigma_tskij = sSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return Sigma_tskij;
+}
+
+
 // instantiations
 using mpi3::communicator;
 
@@ -1615,10 +1770,10 @@ template std::tuple<int, double> run_lr_calc(
     ptree const&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 4> const&,
-    bool, bool, bool, int, double, bool, const lr_iter_params&);
+    bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&);
 
-// lr_gw_sigma_calc instantiations (THC only — lr_gw requires THC)
-template nda::array<ComplexType, 5> lr_gw_sigma_calc(
+// lr_gw_sigma_DeltaG_calc instantiations (THC only — lr_gw requires THC)
+template nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<double, 1> const&,
@@ -1628,7 +1783,8 @@ template nda::array<ComplexType, 5> lr_gw_sigma_calc(
 template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
-    nda::array<ComplexType, 5> const&);
+    nda::array<ComplexType, 5> const&,
+    bool);
 
 // lr_gw_Pi_calc instantiations (THC only — lr_gw requires THC)
 template nda::array<ComplexType, 4> lr_gw_Pi_calc(
@@ -1655,5 +1811,22 @@ template nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<ComplexType, 4> const&);
+
+// lr_gw_sigma_DeltaW_calc instantiations (THC only)
+template nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<ComplexType, 5> const&);
+
+// gw_evaluate_sigma_with_W_calc instantiations (THC only)
+template nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<ComplexType, 4> const&,
+    nda::array<ComplexType, 1> const&,
+    bool);
 
 }

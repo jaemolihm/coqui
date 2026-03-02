@@ -21,16 +21,16 @@ namespace methods {
   namespace solvers {
 
     template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
-    void lr_gw::evaluate_sigma_fixed_W(
+    void lr_gw::evaluate_sigma_DeltaG(
         sArray_t<Array_5D_t>& sDeltaSigma_tskij,
         const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
         memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
-        THC_ERI auto& thc,
-        const nda::array<ComplexType, 1>& eps_inv_head) {
+        THC_ERI auto& thc) {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy: ΔΣ = -ΔG ⊙ W_c (R-space) + div_corr");
+      // TODO: div_corr not yet implemented for LR GW (see lr_gw.hpp class docstring)
+      app_log(1, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space, no div_corr)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
@@ -43,10 +43,31 @@ namespace methods {
       // τ ∈ [β/2, β]
       eval_DeltaSigma_Rspace<true, false>(DeltaG_tskij, dW_qtPQ, sDeltaSigma_tskij, thc, true);
 
-      // q→0 divergence correction with LR-aware T matrices (T^L at k+q, T^R at k)
-      _sigma_div_correction(sDeltaSigma_tskij, DeltaG_tskij, thc, eps_inv_head);
+      app_log(1, "  LR-GW self-energy (term 1) done.\n");
+    }
 
-      app_log(1, "  LR-GW self-energy done.\n");
+
+    template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
+    void lr_gw::evaluate_sigma_DeltaW(
+        sArray_t<Array_5D_t>& sDeltaSigma_tskij,
+        const nda::MemoryArrayOfRank<5> auto& G_tskij,
+        memory::darray_t<Array_4D_t, communicator_t>& dDeltaW_qtPQ,
+        THC_ERI auto& thc) {
+
+      // Not used now, but will be needed when div_corr is implemented for term 2.
+      _init_kpq_map(thc);
+
+      // TODO: div_corr not yet implemented for LR GW (see lr_gw.hpp class docstring)
+      app_log(1, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (standard transforms, no div_corr)");
+      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+
+      // G is unperturbed → standard (symmetric) THC transforms are correct.
+      // Reuse _gw.eval_Sigma_all by passing ΔW in place of W.
+      _Timer.start("EVALUATE_SIGMA_DELTAW");
+      _gw.eval_Sigma_all(G_tskij, dDeltaW_qtPQ, sDeltaSigma_tskij, thc, "R");
+      _Timer.stop("EVALUATE_SIGMA_DELTAW");
+
+      app_log(1, "  LR-GW self-energy (term 2) done.\n");
     }
 
 
@@ -249,6 +270,8 @@ namespace methods {
     }
 
     /**
+     * Reserved for future div_corr implementation.
+     *
      * LR-aware divergence correction, adapted from gw_t::Sigma_div_correction.
      *
      * For q_pert≠0 the THC basis transforms use X(k+q) on the left and X(k) on

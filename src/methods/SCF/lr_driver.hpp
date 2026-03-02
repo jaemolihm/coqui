@@ -34,9 +34,20 @@
 #include "methods/SCF/lr_diis.hpp"
 #include "methods/HF/lr_hf.hpp"
 #include "methods/GW/lr_gw.hpp"
+#include "methods/scr_coulomb/lr_rpa_pi.hpp"
+#include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
+
+/**
+ * GW self-energy update mode for the LR SCF loop.
+ *
+ * none:    ΔΣ_GW = 0
+ * fixed_W: ΔΣ = -ΔG ⊙ W,  ΔW = 0
+ * full:    ΔΣ = -ΔG ⊙ W - G ⊙ ΔW,  ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+ */
+enum class lr_gw_update_mode { none, fixed_W, full };
 
 /**
  * @class lr_driver
@@ -84,9 +95,9 @@ public:
    * @param thc                - [INPUT] THC ERI handler
    * @param include_hartree    - [INPUT] Include ΔJ in SCF loop
    * @param include_exchange   - [INPUT] Include ΔK in SCF loop
-   * @param include_gw_sigma   - [INPUT] Include ΔΣ_GW in SCF loop
-   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if include_gw_sigma)
-   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if include_gw_sigma)
+   * @param gw_mode            - [INPUT] GW self-energy mode (none/fixed_W/full)
+   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if gw_mode != none)
+   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if gw_mode != none)
    * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
    * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
    * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -102,7 +113,7 @@ public:
       const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
-      bool include_hartree, bool include_exchange, bool include_gw_sigma,
+      bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
       dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
       const lr_iter_params& iter_params);

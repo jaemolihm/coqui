@@ -47,7 +47,7 @@ namespace coqui_py {
    * @param DeltaH0_skij      - [INPUT] Perturbation matrix (ns, nk, nb, nb)
    * @param include_hartree   - [INPUT] Include ΔJ in SCF loop
    * @param include_exchange  - [INPUT] Include ΔK in SCF loop
-   * @param include_gw_sigma  - [INPUT] Include ΔΣ_GW in SCF loop
+   * @param gw_mode           - [INPUT] GW mode: "none", "fixed_W", or "full"
    * @param max_iter          - [INPUT] Maximum SCF iterations (1 = one-shot)
    * @param tol               - [INPUT] Convergence tolerance
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -64,7 +64,7 @@ namespace coqui_py {
       nda::array<ComplexType, 4> const& DeltaH0_skij,
       bool include_hartree,
       bool include_exchange,
-      bool include_gw_sigma,
+      std::string gw_mode_str,
       int max_iter,
       double tol,
       bool fix_density,
@@ -79,8 +79,21 @@ namespace coqui_py {
     iter_params.mixing = mixing;
     iter_params.max_subsp_size = static_cast<size_t>(max_subsp_size);
     iter_params.diis_warmup = static_cast<size_t>(diis_warmup);
+
+    // Parse gw_mode string to enum
+    methods::lr_gw_update_mode gw_mode;
+    if (gw_mode_str == "none") {
+      gw_mode = methods::lr_gw_update_mode::none;
+    } else if (gw_mode_str == "fixed_W") {
+      gw_mode = methods::lr_gw_update_mode::fixed_W;
+    } else if (gw_mode_str == "full") {
+      gw_mode = methods::lr_gw_update_mode::full;
+    } else {
+      throw std::invalid_argument("run_lr: gw_mode must be 'none', 'fixed_W', or 'full', got '" + gw_mode_str + "'");
+    }
+
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
-                                include_hartree, include_exchange, include_gw_sigma,
+                                include_hartree, include_exchange, gw_mode,
                                 max_iter, tol, fix_density, iter_params);
   }
 
@@ -233,7 +246,7 @@ namespace coqui_py {
 
 
   /**
-   * @brief Compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space)
+   * @brief Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space)
    *
    * @param lr_params     - [INPUT] JSON string with params (prefix)
    * @param h_int         - [INPUT] THC ERI handler
@@ -241,32 +254,34 @@ namespace coqui_py {
    * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
    * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
    */
-  nda::array<ComplexType, 5> lr_gw_sigma(
+  nda::array<ComplexType, 5> lr_gw_sigma_DeltaG(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_pert,
       nda::array<ComplexType, 5> const& DeltaG_tskij) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::lr_gw_sigma_calc(mb_eri, parser.get_root(), q_pert, DeltaG_tskij);
+    return methods::lr_gw_sigma_DeltaG_calc(mb_eri, parser.get_root(), q_pert, DeltaG_tskij);
   }
 
 
   /**
-   * @brief Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file
+   * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
    *
    * @param lr_params  - [INPUT] JSON string with params (prefix)
    * @param h_int      - [INPUT] THC ERI handler
    * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @param div_corr   - [INPUT] Whether to apply divergence correction
    * @return           - [OUTPUT] Σ (nt, ns, nk, nb, nb)
    */
   nda::array<ComplexType, 5> gw_evaluate_sigma(
       const std::string &lr_params,
       ThcCoulomb &h_int,
-      nda::array<ComplexType, 5> const& G_tskij) {
+      nda::array<ComplexType, 5> const& G_tskij,
+      bool div_corr) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::gw_evaluate_sigma_calc(mb_eri, parser.get_root(), G_tskij);
+    return methods::gw_evaluate_sigma_calc(mb_eri, parser.get_root(), G_tskij, div_corr);
   }
 
 
@@ -342,6 +357,54 @@ namespace coqui_py {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     return methods::gw_evaluate_W_from_Pi_calc(mb_eri, parser.get_root(), Pi_tqPQ);
+  }
+
+
+  /**
+   * @brief Compute LR GW self-energy term 2: -G ⊙ ΔW (no div correction)
+   *
+   * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+   *
+   * @param lr_params     - [INPUT] JSON string with params (prefix)
+   * @param h_int         - [INPUT] THC ERI handler
+   * @param q_pert        - [INPUT] LR perturbation wavevector (3,)
+   * @param G_tskij       - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> lr_gw_sigma_DeltaW(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      nda::array<ComplexType, 5> const& G_tskij,
+      nda::array<ComplexType, 5> const& DeltaG_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_sigma_DeltaW_calc(mb_eri, parser.get_root(), q_pert, G_tskij, DeltaG_tskij);
+  }
+
+
+  /**
+   * @brief Evaluate GW self-energy with provided W and G (FD helper)
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param G_tskij        - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @param W_c_qtPQ       - [INPUT] Screened interaction (nkpts, nt_half, NP, NP)
+   * @param eps_inv_head   - [INPUT] Inverse dielectric head (nt_half,)
+   * @param div_corr       - [INPUT] Whether to apply divergence correction
+   * @return               - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> gw_evaluate_sigma_with_W(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<ComplexType, 5> const& G_tskij,
+      nda::array<ComplexType, 4> const& W_c_qtPQ,
+      nda::array<ComplexType, 1> const& eps_inv_head,
+      bool div_corr) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_sigma_with_W_calc(mb_eri, parser.get_root(), G_tskij, W_c_qtPQ, eps_inv_head, div_corr);
   }
 
 

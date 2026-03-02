@@ -37,6 +37,7 @@
 #include "mean_field/MF.hpp"
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_diis.hpp"
+#include "methods/SCF/lr_driver.hpp"
 
 namespace mpi3 = boost::mpi3;
 namespace methods
@@ -196,7 +197,7 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
  * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
  * @param include_exchange - [INPUT] Include ΔK in SCF loop
- * @param include_gw_sigma - [INPUT] Include ΔΣ_GW in SCF loop
+ * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
  * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
  * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
  * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -209,17 +210,18 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<ComplexType, 4> const& DeltaH0_skij,
                                      bool include_hartree,
                                      bool include_exchange,
-                                     bool include_gw_sigma,
+                                     lr_gw_update_mode gw_mode,
                                      int max_iter,
                                      double tol,
                                      bool fix_density,
                                      const lr_iter_params& iter_params);
 
 /**
- * @brief Linear response GW self-energy with fixed W
+ * @brief Linear response GW self-energy with fixed W (term 1)
  *
- * Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product) + divergence correction.
- * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+ * Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product).
+ * Reads W from thc_screened_interaction.h5.
+ * TODO: Divergence correction not yet implemented.
  *
  * @param eri          - [INPUT] THC ERI handler
  * @param pt           - [INPUT] Parameters as property tree (prefix, output)
@@ -228,13 +230,13 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
  * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
  */
 template<typename eri_t>
-nda::array<ComplexType, 5> lr_gw_sigma_calc(
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& DeltaG_tskij);
 
 /**
- * @brief Evaluate GW self-energy Σ = -G ⊙ W_c + div_corr using W from file
+ * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
  *
  * Same R-space computation as lr_gw but for a full (non-LR) Green's function.
  * Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
@@ -242,12 +244,56 @@ nda::array<ComplexType, 5> lr_gw_sigma_calc(
  * @param eri      - [INPUT] THC ERI handler
  * @param pt       - [INPUT] Parameters as property tree (prefix, output)
  * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @param div_corr - [INPUT] Whether to apply divergence correction (default true)
  * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 5> const& G_tskij);
+    nda::array<ComplexType, 5> const& G_tskij,
+    bool div_corr = true);
+
+/**
+ * @brief Linear response GW self-energy term 2: -G ⊙ ΔW
+ *
+ * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW.
+ * TODO: Divergence correction not yet implemented.
+ *
+ * @param eri          - [INPUT] THC ERI handler
+ * @param pt           - [INPUT] Parameters as property tree (prefix)
+ * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param G_tskij      - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 5> const& DeltaG_tskij);
+
+/**
+ * @brief Evaluate GW self-energy with provided W and G (FD helper)
+ *
+ * Computes Σ = -G ⊙ W_c [+ div_corr] using provided G and W_c arrays
+ * (not from file). Used for finite-difference testing of full LR-GW.
+ *
+ * @param eri           - [INPUT] THC ERI handler
+ * @param pt            - [INPUT] Parameters as property tree (prefix)
+ * @param G_tskij       - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @param W_c_qtPQ      - [INPUT] Screened interaction (nkpts, nt_half, NP, NP)
+ * @param eps_inv_head  - [INPUT] Inverse dielectric head (nt_half,)
+ * @param div_corr      - [INPUT] Whether to apply divergence correction
+ * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& G_tskij,
+    nda::array<ComplexType, 4> const& W_c_qtPQ,
+    nda::array<ComplexType, 1> const& eps_inv_head,
+    bool div_corr);
 
 /**
  * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)

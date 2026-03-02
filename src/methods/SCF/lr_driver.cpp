@@ -25,6 +25,7 @@
 #include "methods/ERI/thc_reader_t.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
+#include "utilities/darray_utils.hpp"
 #include "nda/nda.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
@@ -53,7 +54,8 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
           q_vec(0), q_vec(1), q_vec(2));
   app_log(1, "  q is Gamma point: {}\n", _lr_dyson.is_q_gamma() ? "yes" : "no");
 
-  for (auto& v : {"LR_SCF", "LR_DYSON", "LR_HF", "LR_GW_SIGMA"}) {
+  for (auto& v : {"LR_SCF", "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
+                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -69,7 +71,7 @@ std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_5D_t>& sG_tskij,
     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
     THC_t& thc,
-    bool include_hartree, bool include_exchange, bool include_gw_sigma,
+    bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
     dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
     int max_iter, double tol, bool fix_density,
     const lr_iter_params& iter_params) {
@@ -77,15 +79,25 @@ std::tuple<int, double> lr_driver::run_lr(
   _Timer.start("LR_SCF");
 
   bool need_hf = include_hartree || include_exchange;
+  bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
+  bool gw_full = (gw_mode == lr_gw_update_mode::full);
 
   utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS",
                "lr_driver::run_lr: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
                iter_params.alg);
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
-                 "lr_driver::run_lr: include_gw_sigma=true but sDeltaSigma_tskij is null.");
+                 "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
+    // eps_inv_head: not yet used, will be needed for div_corr (TODO)
     utils::check(dW_qtPQ != nullptr && eps_inv_head != nullptr,
-                 "lr_driver::run_lr: include_gw_sigma=true but dW_qtPQ or eps_inv_head is null.");
+                 "lr_driver::run_lr: gw_mode != none but dW_qtPQ or eps_inv_head is null.");
+  }
+
+  const char* gw_mode_str = "none";
+  switch (gw_mode) {
+    case lr_gw_update_mode::none:    gw_mode_str = "none"; break;
+    case lr_gw_update_mode::fixed_W: gw_mode_str = "fixed_W"; break;
+    case lr_gw_update_mode::full:    gw_mode_str = "full"; break;
   }
 
   bool use_diis = (iter_params.alg == "DIIS");
@@ -97,7 +109,7 @@ std::tuple<int, double> lr_driver::run_lr(
   app_log(1, "  fix_density = {}", fix_density ? "true" : "false");
   app_log(1, "  include_hartree = {}", include_hartree ? "true" : "false");
   app_log(1, "  include_exchange = {}", include_exchange ? "true" : "false");
-  app_log(1, "  include_gw_sigma = {}", include_gw_sigma ? "true" : "false");
+  app_log(1, "  gw_mode = {}", gw_mode_str);
   app_log(1, "  iter_alg = {}", iter_params.alg);
   app_log(1, "  mixing = {:.2f}", mixing);
   if (use_diis) {
@@ -114,6 +126,32 @@ std::tuple<int, double> lr_driver::run_lr(
   std::unique_ptr<solvers::lr_gw> lr_gw_solver;
   if (include_gw_sigma) {
     lr_gw_solver = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec());
+  }
+
+  // Create lr_rpa_pi and lr_scr_coulomb_t solvers for full mode
+  std::unique_ptr<solvers::lr_rpa_pi> lr_pi_solver;
+  std::unique_ptr<solvers::lr_scr_coulomb_t> lr_scr_solver;
+  if (gw_full) {
+    lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
+    lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT());
+  }
+
+  // For full mode: copy G to local array once (reused every iteration),
+  // and prepare W_c in (t,q) format (master copy for reuse each iteration).
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  nda::array<ComplexType, 5> G_local;
+  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_tqPQ_master;
+  if (gw_full) {
+    // TODO: Check that G_local is not accessed on non-root ranks by downstream functions.
+    // Currently safe because evaluate_lr_Pi and evaluate_sigma_DeltaW only use data on root.
+    if (_mpi->node_comm.root()) {
+      G_local = nda::array<ComplexType, 5>{sG_tskij.local()};
+    }
+    _mpi->comm.barrier();
+
+    // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q) and store as master copy
+    auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
+    opt_dW_tqPQ_master.emplace(std::move(dW_tqPQ));
   }
 
   // Initialize DIIS if requested
@@ -134,6 +172,11 @@ std::tuple<int, double> lr_driver::run_lr(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
   // Previous ΔΣ only needed when GW is active (saves a full 5D allocation)
   auto sDeltaSigma_prev_tskij = include_gw_sigma
+      ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
+      : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
+
+  // Term 2 buffer for full mode: ΔΣ_term2 (shared array for accumulation)
+  auto sDeltaSigma_term2_tskij = gw_full
       ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
 
@@ -210,21 +253,67 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
     }
 
-    // Step 3: Compute LR GW self-energy (if requested)
+    // Step 3: Copy ΔG from shared memory once (reused by term 1 and term 2)
+    // Copy needed because .local() returns a view into shared memory,
+    // valid only on node root; all MPI ranks need a valid owning array.
+    nda::array<ComplexType, 5> DeltaG_local;
     if (include_gw_sigma) {
-      _Timer.start("LR_GW_SIGMA");
-      // TODO: evaluate_sigma_fixed_W could accept a shared_array view directly
-      // to avoid this O(nt*ns*nk*nb^2) copy every iteration.
-      nda::array<ComplexType, 5> DeltaG_local;
       if (_mpi->node_comm.root()) {
         DeltaG_local = nda::array<ComplexType, 5>{sDeltaG_tskij.local()};
       }
       _mpi->comm.barrier();
+    }
 
-      lr_gw_solver->evaluate_sigma_fixed_W(
-          *sDeltaSigma_tskij, DeltaG_local, *dW_qtPQ, thc, *eps_inv_head);
+    // Step 3a: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
+    if (include_gw_sigma) {
+      _Timer.start("LR_GW_SIGMA");
+      lr_gw_solver->evaluate_sigma_DeltaG(
+          *sDeltaSigma_tskij, DeltaG_local, *dW_qtPQ, thc);
       _Timer.stop("LR_GW_SIGMA");
       _mpi->comm.barrier();
+    }
+
+    // Step 3b-3g: Full mode — compute ΔP, ΔW, and ΔΣ term 2 = -G ⊙ ΔW
+    if (gw_full) {
+      // Step 3b: ΔP = -ΔG·G - G·ΔG
+      _Timer.start("LR_GW_PI");
+      auto dDeltaPi_tqPQ = lr_pi_solver->evaluate_lr_Pi<local_Array_4D_t>(
+          G_local, DeltaG_local, thc);
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_PI");
+
+      // Step 3c: Make a fresh copy of W_c(t,q,P,Q) master.
+      // lr_dyson_W_from_Pi_tau consumes both inputs (internally calls tau_to_w with reset=true).
+      _Timer.start("LR_GW_W");
+      auto [dim0, dim1, dim2, dim3] = opt_dW_tqPQ_master->global_shape();
+      auto dW_tqPQ_copy = math::nda::make_distributed_array<local_Array_4D_t>(
+          _mpi->comm, {1, 1, 1, 1}, {dim0, dim1, dim2, dim3});
+      if (_mpi->comm.root()) {
+        dW_tqPQ_copy.local() = opt_dW_tqPQ_master->local();
+      }
+      _mpi->comm.barrier();
+
+      // Step 3d: ΔW_c(τ) = (Z+W_c) · ΔΠ · (Z+W_c) via lr_dyson_W_from_Pi_tau
+      auto dDeltaW_tqPQ = lr_scr_solver->lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ_copy, thc);
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_W");
+
+      // Step 3e: Transpose ΔW from (t,q,P,Q) → (q,t,P,Q) for lr_gw
+      _Timer.start("LR_GW_SIGMA_TERM2");
+      auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, _mpi->comm);
+      dDeltaW_tqPQ.reset();
+
+      // Step 3f: ΔΣ_term2 = -G ⊙ ΔW
+      lr_gw_solver->evaluate_sigma_DeltaW(
+          sDeltaSigma_term2_tskij, G_local, dDeltaW_qtPQ, thc);
+      _mpi->comm.barrier();
+
+      // Step 3g: ΔΣ += ΔΣ_term2 (accumulate on shared memory, root only)
+      if (_mpi->node_comm.root()) {
+        sDeltaSigma_tskij->local() += sDeltaSigma_term2_tskij.local();
+      }
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_SIGMA_TERM2");
     }
 
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
@@ -361,7 +450,10 @@ void lr_driver::print_timers() {
   app_log(2, "    Total LR SCF:               {0:.3f} sec", _Timer.elapsed("LR_SCF"));
   app_log(2, "      - LR Dyson (total):       {0:.3f} sec", _Timer.elapsed("LR_DYSON"));
   app_log(2, "      - LR HF (total):          {0:.3f} sec", _Timer.elapsed("LR_HF"));
-  app_log(2, "      - LR GW Sigma (total):    {0:.3f} sec\n", _Timer.elapsed("LR_GW_SIGMA"));
+  app_log(2, "      - LR GW Sigma (total):    {0:.3f} sec", _Timer.elapsed("LR_GW_SIGMA"));
+  app_log(2, "      - LR GW Pi (total):       {0:.3f} sec", _Timer.elapsed("LR_GW_PI"));
+  app_log(2, "      - LR GW W (total):        {0:.3f} sec", _Timer.elapsed("LR_GW_W"));
+  app_log(2, "      - LR GW Sig T2 (total):   {0:.3f} sec\n", _Timer.elapsed("LR_GW_SIGMA_TERM2"));
 }
 
 
@@ -377,7 +469,7 @@ template std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     thc_reader_t&,
-    bool, bool, bool,
+    bool, bool, lr_gw_update_mode,
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
     int, double, bool, const lr_iter_params&);
 

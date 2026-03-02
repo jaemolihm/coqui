@@ -82,6 +82,16 @@ namespace methods {
           THC_ERI auto& thc)
       -> memory::darray_t<Array_4D_t, mpi3::communicator>;
 
+    inline void print_timers() {
+      app_log(2, "\n  LR_RPA_PI timers");
+      app_log(2, "  -----------------");
+      app_log(2, "    LR Pi eval:                     {0:.3f} sec", _Timer.elapsed("EVALUATE_LR_PI"));
+      app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("PI_LR_ALLOC"));
+      app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("PI_LR_PRIM_TO_AUX"));
+      app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("PI_LR_FT_R"));
+      app_log(2, "      - Hadamard product:            {0:.3f} sec\n", _Timer.elapsed("PI_LR_HADPROD"));
+    }
+
     private:
       nda::array<double, 1> _q_pert;
       bool _kpq_map_initialized = false;

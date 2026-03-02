@@ -195,7 +195,7 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
            nda::array<ComplexType, 4> const& DeltaH0_skij,
            bool include_hartree,
            bool include_exchange,
-           bool include_gw_sigma,
+           std::string gw_mode,
            int max_iter,
            double tol,
            bool fix_density,
@@ -204,12 +204,12 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
            int max_subsp_size,
            int diis_warmup) {
           return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
-                                  include_hartree, include_exchange, include_gw_sigma,
+                                  include_hartree, include_exchange, gw_mode,
                                   max_iter, tol, fix_density,
                                   iter_alg, mixing, max_subsp_size, diis_warmup);
         },
         "lr_params", "h_int", "q_vec", "DeltaH0_skij",
-        "include_hartree", "include_exchange", "include_gw_sigma",
+        "include_hartree", "include_exchange", "gw_mode",
         "max_iter", "tol", "fix_density",
         "iter_alg", "mixing", "max_subsp_size", "diis_warmup")};
 
@@ -237,8 +237,8 @@ include_hartree : bool
     Include Hartree (Coulomb) term in SCF loop
 include_exchange : bool
     Include Exchange term in SCF loop
-include_gw_sigma : bool
-    Include GW self-energy in SCF loop
+gw_mode : str
+    GW self-energy update mode: "none", "fixed_W", or "full"
 max_iter : int
     Maximum SCF iterations (1 = one-shot)
 tol : float
@@ -377,19 +377,19 @@ np.ndarray
 )DOC");
 
 
-// lr_gw_sigma - compute LR GW self-energy ΔΣ = -ΔG ⊙ W_c + div_corr
-static auto const fun_lr_gw_sigma = c2py::dispatcher_f_kw_t{
+// lr_gw_sigma_DeltaG - compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr
+static auto const fun_lr_gw_sigma_DeltaG = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
            nda::array<ComplexType, 5> const& DeltaG_tskij) {
-          return coqui_py::lr_gw_sigma(lr_params, h_int, q_pert, DeltaG_tskij);
+          return coqui_py::lr_gw_sigma_DeltaG(lr_params, h_int, q_pert, DeltaG_tskij);
         },
         "lr_params", "h_int", "q_pert", "DeltaG_tskij")};
 
-static const auto doc_lr_gw_sigma = fun_lr_gw_sigma.doc(R"DOC(
-Compute linear response GW self-energy with fixed W.
+static const auto doc_lr_gw_sigma_DeltaG = fun_lr_gw_sigma_DeltaG.doc(R"DOC(
+Compute linear response GW self-energy term 1 (fixed W).
 
 Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product) + q→0 divergence correction.
 Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
@@ -478,20 +478,21 @@ np.ndarray
     Polarization P, shape (nt_half, nkpts, NP, NP)
 )DOC");
 
-// gw_evaluate_sigma - evaluate GW self-energy Σ = -G ⊙ W_c + div_corr
+// gw_evaluate_sigma - evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr]
 static auto const fun_gw_evaluate_sigma = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 5> const& G_tskij) {
-          return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij);
+           nda::array<ComplexType, 5> const& G_tskij,
+           bool div_corr) {
+          return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij, div_corr);
         },
-        "lr_params", "h_int", "G_tskij")};
+        "lr_params", "h_int", "G_tskij", "div_corr")};
 
 static const auto doc_gw_evaluate_sigma = fun_gw_evaluate_sigma.doc(R"DOC(
-Evaluate GW self-energy Σ = -G ⊙ W_c + divergence correction using W from file.
+Evaluate GW self-energy Σ = -G ⊙ W_c [+ divergence correction] using W from file.
 
-Same R-space computation as lr_gw_sigma but for a full (non-LR) Green's function.
+Same R-space computation as lr_gw_sigma_DeltaG but for a full (non-LR) Green's function.
 Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
 
 Parameters
@@ -503,6 +504,8 @@ h_int : ThcCoulomb
     THC ERI handler
 G_tskij : np.ndarray
     Green's function, shape (nt, ns, nk, nb, nb)
+div_corr : bool
+    Whether to apply divergence correction
 
 Returns
 -------
@@ -577,6 +580,85 @@ np.ndarray
     Screened interaction W_c, shape (nt_half, nkpts, NP, NP)
 )DOC");
 
+// lr_gw_sigma_DeltaW - compute LR GW self-energy term 2: -G ⊙ ΔW
+static auto const fun_lr_gw_sigma_DeltaW = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<double, 1> const& q_pert,
+           nda::array<ComplexType, 5> const& G_tskij,
+           nda::array<ComplexType, 5> const& DeltaG_tskij) {
+          return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, G_tskij, DeltaG_tskij);
+        },
+        "lr_params", "h_int", "q_pert", "G_tskij", "DeltaG_tskij")};
+
+static const auto doc_lr_gw_sigma_DeltaW = fun_lr_gw_sigma_DeltaW.doc(R"DOC(
+Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
+
+Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+No divergence correction is applied.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+h_int : ThcCoulomb
+    THC ERI handler
+q_pert : np.ndarray
+    LR perturbation wavevector in crystal coordinates, shape (3,)
+G_tskij : np.ndarray
+    Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
+DeltaG_tskij : np.ndarray
+    LR Green's function, shape (nt, ns, nk, nb, nb)
+
+Returns
+-------
+np.ndarray
+    LR self-energy ΔΣ (term 2), shape (nt, ns, nk, nb, nb)
+)DOC");
+
+// gw_evaluate_sigma_with_W - evaluate Σ = -G ⊙ W with provided G and W
+static auto const fun_gw_evaluate_sigma_with_W = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 5> const& G_tskij,
+           nda::array<ComplexType, 4> const& W_c_qtPQ,
+           nda::array<ComplexType, 1> const& eps_inv_head,
+           bool div_corr) {
+          return coqui_py::gw_evaluate_sigma_with_W(lr_params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr);
+        },
+        "lr_params", "h_int", "G_tskij", "W_c_qtPQ", "eps_inv_head", "div_corr")};
+
+static const auto doc_gw_evaluate_sigma_with_W = fun_gw_evaluate_sigma_with_W.doc(R"DOC(
+Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] with provided G and W_c.
+
+Uses the provided G and W_c arrays (not from file). Used for finite-difference
+testing of the full LR-GW self-energy.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+h_int : ThcCoulomb
+    THC ERI handler
+G_tskij : np.ndarray
+    Green's function, shape (nt, ns, nk, nb, nb)
+W_c_qtPQ : np.ndarray
+    Screened interaction, shape (nkpts, nt_half, NP, NP)
+eps_inv_head : np.ndarray
+    Inverse dielectric head, shape (nt_half,)
+div_corr : bool
+    Whether to apply divergence correction
+
+Returns
+-------
+np.ndarray
+    Self-energy Σ, shape (nt, ns, nk, nb, nb)
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -590,8 +672,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_hf.c_str()},
     {"hf_evaluate_cpp", (PyCFunction)c2py::pyfkw<fun_hf_evaluate>,
      METH_VARARGS | METH_KEYWORDS, doc_hf_evaluate.c_str()},
-    {"lr_gw_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_sigma>,
-     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma.c_str()},
+    {"lr_gw_sigma_DeltaG_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_sigma_DeltaG>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma_DeltaG.c_str()},
     {"gw_evaluate_sigma_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma>,
      METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_sigma.c_str()},
     {"lr_gw_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_Pi>,
@@ -602,6 +684,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_gw_W.c_str()},
     {"gw_evaluate_W_from_Pi_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_W_from_Pi>,
      METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_W_from_Pi.c_str()},
+    {"lr_gw_sigma_DeltaW_cpp", (PyCFunction)c2py::pyfkw<fun_lr_gw_sigma_DeltaW>,
+     METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma_DeltaW.c_str()},
+    {"gw_evaluate_sigma_with_W_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma_with_W>,
+     METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_sigma_with_W.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
