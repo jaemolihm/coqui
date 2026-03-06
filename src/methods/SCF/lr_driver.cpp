@@ -142,12 +142,13 @@ std::tuple<int, double> lr_driver::run_lr(
   nda::array<ComplexType, 5> G_local;
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_tqPQ_master;
   if (gw_full) {
-    // TODO: Check that G_local is not accessed on non-root ranks by downstream functions.
-    // Currently safe because evaluate_lr_Pi and evaluate_sigma_DeltaW only use data on root.
-    if (_mpi->node_comm.root()) {
-      G_local = nda::array<ComplexType, 5>{sG_tskij.local()};
+    // Copy G from shared memory and broadcast to all ranks.
+    // All ranks need G for lr_thc_comm operations in evaluate_lr_Pi and evaluate_sigma_DeltaW.
+    G_local = nda::array<ComplexType, 5>(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
+    if (_mpi->comm.root()) {
+      G_local = sG_tskij.local();
     }
-    _mpi->comm.barrier();
+    _mpi->comm.broadcast_n(G_local.data(), G_local.size(), 0);
 
     // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q) and store as master copy
     auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
@@ -253,15 +254,16 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
     }
 
-    // Step 3: Copy ΔG from shared memory once (reused by term 1 and term 2)
-    // Copy needed because .local() returns a view into shared memory,
-    // valid only on node root; all MPI ranks need a valid owning array.
+    // Step 3: Copy ΔG from shared memory and broadcast to all ranks.
+    // .local() returns a view into shared memory, valid only on node root.
+    // All MPI ranks need a valid owning array for lr_thc_comm operations.
     nda::array<ComplexType, 5> DeltaG_local;
     if (include_gw_sigma) {
-      if (_mpi->node_comm.root()) {
-        DeltaG_local = nda::array<ComplexType, 5>{sDeltaG_tskij.local()};
+      DeltaG_local = nda::array<ComplexType, 5>(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
+      if (_mpi->comm.root()) {
+        DeltaG_local = sDeltaG_tskij.local();
       }
-      _mpi->comm.barrier();
+      _mpi->comm.broadcast_n(DeltaG_local.data(), DeltaG_local.size(), 0);
     }
 
     // Step 3a: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
@@ -285,11 +287,14 @@ std::tuple<int, double> lr_driver::run_lr(
       // Step 3c: Make a fresh copy of W_c(t,q,P,Q) master.
       // lr_dyson_W_from_Pi_tau consumes both inputs (internally calls tau_to_w with reset=true).
       _Timer.start("LR_GW_W");
+      auto master_grid = opt_dW_tqPQ_master->grid();
       auto [dim0, dim1, dim2, dim3] = opt_dW_tqPQ_master->global_shape();
       auto dW_tqPQ_copy = math::nda::make_distributed_array<local_Array_4D_t>(
-          _mpi->comm, {1, 1, 1, 1}, {dim0, dim1, dim2, dim3});
-      if (_mpi->comm.root()) {
-        dW_tqPQ_copy.local() = opt_dW_tqPQ_master->local();
+          _mpi->comm, master_grid, {dim0, dim1, dim2, dim3});
+      {
+        auto src = opt_dW_tqPQ_master->local();
+        auto dst = dW_tqPQ_copy.local();
+        dst = src;
       }
       _mpi->comm.barrier();
 

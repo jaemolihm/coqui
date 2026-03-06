@@ -926,6 +926,75 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
 
 
 /**
+ * Compute a 4D processor grid that factors nproc across dimensions.
+ *
+ * Distributes processors across axes 0 and 1 first (using find_proc_grid_max_npools),
+ * then splits remaining processors across axes 2 and 3 (using find_proc_grid_min_diff).
+ * Axes in skip_axes are kept undivided (grid=1 on those axes).
+ *
+ * @return processor grid {n0, n1, n2, n3} with n0*n1*n2*n3 == nproc
+ */
+inline std::array<long, 4> compute_proc_grid_4D(long nproc, std::array<long, 4> shape,
+                                                 std::array<bool, 4> skip_axes = {false, false, false, false}) {
+  long np = nproc;
+  std::array<long, 4> grid = {1, 1, 1, 1};
+  // Distribute over axes 0 and 1 (unless skipped)
+  for (int ax = 0; ax < 2; ++ax) {
+    if (!skip_axes[ax]) {
+      grid[ax] = utils::find_proc_grid_max_npools(np, shape[ax], 0.2);
+      np /= grid[ax];
+    }
+  }
+  // Distribute remaining over axes 2 and 3 (unless skipped)
+  if (!skip_axes[2] && !skip_axes[3]) {
+    grid[2] = utils::find_proc_grid_min_diff(np, shape[2], shape[3]);
+    grid[3] = np / grid[2];
+  } else if (!skip_axes[2]) {
+    grid[2] = np;
+  } else if (!skip_axes[3]) {
+    grid[3] = np;
+  }
+  return grid;
+}
+
+/**
+ * Wrap a regular 4D array into a distributed array with a proper MPI grid.
+ *
+ * The source array must be fully available on rank 0.
+ * All ranks receive their local portion via broadcast + local copy.
+ *
+ * @param comm   - [INPUT] MPI communicator
+ * @param shape  - [INPUT] Global array shape
+ * @param src    - [INPUT] Source array (only meaningful on rank 0)
+ * @return Distributed array with data from src
+ */
+template<typename communicator_t>
+auto distribute_array_4D(communicator_t& comm,
+                         std::array<long, 4> shape,
+                         nda::array<ComplexType, 4> const& src_in,
+                         std::array<bool, 4> skip_axes = {false, false, false, false})
+{
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto pgrid = compute_proc_grid_4D(comm.size(), shape, skip_axes);
+  auto darray = math::nda::make_distributed_array<local_Array_4D_t>(
+      comm, pgrid, shape);
+
+  // Broadcast full array from root, then each rank extracts its local portion
+  nda::array<ComplexType, 4> src(src_in);
+  comm.broadcast_n(src.data(), src.size(), 0);
+  auto loc = darray.local();
+  auto [o0, o1, o2, o3] = darray.origin();
+  auto [n0, n1, n2, n3] = darray.local_shape();
+  for (long i0 = 0; i0 < n0; ++i0)
+    for (long i1 = 0; i1 < n1; ++i1)
+      for (long i2 = 0; i2 < n2; ++i2)
+        for (long i3 = 0; i3 < n3; ++i3)
+          loc(i0, i1, i2, i3) = src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+  comm.barrier();
+  return darray;
+}
+
+/**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
  * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
@@ -948,8 +1017,6 @@ auto load_W_and_eps_inv_head(
     long input_iter,
     long nt)
 {
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-
   auto mf = thc.MF();
   long nkpts = mf->nkpts();
   long NP = thc.Np();
@@ -959,17 +1026,18 @@ auto load_W_and_eps_inv_head(
   auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
   app_log(2, "Reading W from {}...", w_file);
 
-  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi.comm, {1, 1, 1, 1}, {nkpts, nt_half, NP, NP});
+  // Read full array on root, then distribute across MPI ranks
+  nda::array<ComplexType, 4> W_qtPQ(nkpts, nt_half, NP, NP);
+  W_qtPQ() = 0.0;
   if (mpi.comm.root()) {
     h5::file file(w_file, 'r');
     h5::group grp(file);
-    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
-  } else {
-    h5::group grp;
-    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+    nda::h5_read(grp, "W_qtPQ", W_qtPQ);
   }
-  mpi.comm.barrier();
+  // W(q,t,P,Q): keep q-axis (axis 0) undivided — downstream solvers (eval_DeltaSigma_Rspace,
+  // eval_Sigma_all) require all q-points local for k→R Fourier transforms.
+  auto dW_qtPQ = distribute_array_4D(mpi.comm, {nkpts, nt_half, NP, NP}, W_qtPQ,
+                                     {true, false, false, false});
 
   // Read eps_inv_head from checkpoint
   nda::array<ComplexType, 1> eps_inv_head(nt_half);
@@ -1447,12 +1515,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   dW_qtPQ.reset();
 
   // Convert ΔΠ regular array → distributed array
-  auto dDeltaPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
-  if (mpi->comm.root()) {
-    dDeltaPi_tqPQ.local() = DeltaPi_tqPQ;
-  }
-  mpi->comm.barrier();
+  auto dDeltaPi_tqPQ = distribute_array_4D(mpi->comm, {nt_half, nkpts, NP, NP}, DeltaPi_tqPQ);
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
   solvers::lr_scr_coulomb_t lr_scr(&ft);
@@ -1526,12 +1589,7 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
                mf->nqpts(), mf->nqpts_ibz(), nkpts);
 
   // Convert input to distributed array
-  auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-      mpi->comm, {1, 1, 1, 1}, {nt_half, nkpts, NP, NP});
-  if (mpi->comm.root()) {
-    dPi_tqPQ.local() = Pi_tqPQ;
-  }
-  mpi->comm.barrier();
+  auto dPi_tqPQ = distribute_array_4D(mpi->comm, {nt_half, nkpts, NP, NP}, Pi_tqPQ);
 
   // Use scr_coulomb_t to solve W Dyson equation: Π → W_c(τ)
   solvers::scr_coulomb_t scr(&ft, "rpa");
@@ -1679,13 +1737,10 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   long nbnd = mf->nbnd();
   long nt = ft.nt_f();
 
-  // Convert W_c to distributed array
-  auto dW_qtPQ = make_distributed_array<local_Array_4D_t>(
-      mpi->comm, {1, 1, 1, 1}, W_c_qtPQ.shape());
-  if (mpi->comm.root()) {
-    dW_qtPQ.local() = W_c_qtPQ;
-  }
-  mpi->comm.barrier();
+  // Convert W_c to distributed array — keep q-axis (axis 0) undivided
+  auto dW_qtPQ = distribute_array_4D(mpi->comm,
+      {W_c_qtPQ.shape(0), W_c_qtPQ.shape(1), W_c_qtPQ.shape(2), W_c_qtPQ.shape(3)},
+      W_c_qtPQ, {true, false, false, false});
 
   // Use standard gw_t code path
   solvers::gw_t gw(&ft);
