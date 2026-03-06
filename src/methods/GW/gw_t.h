@@ -165,6 +165,9 @@ namespace methods {
 
       void print_rpa_gw_timers();
 
+      /// Print only the Sigma evaluation sub-timers (used by lr_gw for G⊙ΔW term)
+      void print_eval_sigma_timers();
+
       //void set_MF(mf::MF *MF) { _MF = MF; }
 
     private:

@@ -95,7 +95,14 @@ namespace solvers {
   inline void print_timers() {
     app_log(2, "\n  LR_SCR_COULOMB timers");
     app_log(2, "  ----------------------");
-    app_log(2, "    LR W Dyson (iω):                {0:.3f} sec\n", _Timer.elapsed("EVALUATE_LR_W"));
+    if (_Timer.has("LR_W_FT_TAU_TO_W") && _Timer.elapsed("LR_W_FT_TAU_TO_W") > 0) {
+      app_log(2, "    LR W FT (τ→ω):                  {0:.3f} sec", _Timer.elapsed("LR_W_FT_TAU_TO_W"));
+    }
+    app_log(2, "    LR W Dyson (iω):                {0:.3f} sec", _Timer.elapsed("EVALUATE_LR_W"));
+    if (_Timer.has("LR_W_FT_W_TO_TAU") && _Timer.elapsed("LR_W_FT_W_TO_TAU") > 0) {
+      app_log(2, "    LR W FT (ω→τ):                  {0:.3f} sec", _Timer.elapsed("LR_W_FT_W_TO_TAU"));
+    }
+    app_log(2, "");
   }
 
   private:

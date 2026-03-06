@@ -57,8 +57,10 @@ namespace methods {
         _gw(ft, div),
         _Timer() {
 
-      for (auto& v: {"EVALUATE_SIGMA_R", "SIGMA_ALLOC_R", "SIGMA_PRIM_TO_AUX",
-                      "SIGMA_FT_R", "SIGMA_HADPROD_R", "SIGMA_AUX_TO_PRIM"}) {
+      for (auto& v: {"EVALUATE_SIGMA_R", "EVALUATE_SIGMA_DELTAW",
+                      "SIGMA_ALLOC", "SIGMA_TRANSPOSE",
+                      "SIGMA_PRIM_TO_AUX", "SIGMA_FT_R",
+                      "SIGMA_HADPROD_R", "SIGMA_AUX_TO_PRIM"}) {
         _Timer.add(v);
       }
     }

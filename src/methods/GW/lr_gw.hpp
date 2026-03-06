@@ -118,7 +118,8 @@ namespace methods {
       app_log(2, "  -------------");
       if (_Timer.has("EVALUATE_SIGMA_R")) {
         app_log(2, "    LR Sigma -DG*W (R-space):       {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
-        app_log(2, "      - Alloc/transpose:            {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC_R"));
+        app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC"));
+        app_log(2, "      - Transpose:                  {0:.3f} sec", _Timer.elapsed("SIGMA_TRANSPOSE"));
         app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
         app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
         app_log(2, "      - Hadamard product:            {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
@@ -126,6 +127,7 @@ namespace methods {
       }
       if (_Timer.has("EVALUATE_SIGMA_DELTAW")) {
         app_log(2, "    LR Sigma -G*DW (via gw_t):      {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_DELTAW"));
+        _gw.print_eval_sigma_timers();
       }
       app_log(2, "");
     }

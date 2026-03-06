@@ -42,7 +42,7 @@ namespace methods {
         _Timer() {
 
       for (auto& v: {"EVALUATE_LR_PI", "PI_LR_ALLOC", "PI_LR_PRIM_TO_AUX",
-                      "PI_LR_FT_R", "PI_LR_HADPROD"}) {
+                      "PI_LR_TREV_PHASE", "PI_LR_FT_R", "PI_LR_HADPROD"}) {
         _Timer.add(v);
       }
     }

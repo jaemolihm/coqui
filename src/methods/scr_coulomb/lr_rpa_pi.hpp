@@ -88,6 +88,7 @@ namespace methods {
       app_log(2, "    LR Pi eval:                     {0:.3f} sec", _Timer.elapsed("EVALUATE_LR_PI"));
       app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("PI_LR_ALLOC"));
       app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("PI_LR_PRIM_TO_AUX"));
+      app_log(2, "      - Trev unfold + phase:        {0:.3f} sec", _Timer.elapsed("PI_LR_TREV_PHASE"));
       app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("PI_LR_FT_R"));
       app_log(2, "      - Hadamard product:            {0:.3f} sec\n", _Timer.elapsed("PI_LR_HADPROD"));
     }

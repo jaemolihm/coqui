@@ -44,6 +44,7 @@ namespace methods {
       eval_DeltaSigma_Rspace<true, false>(DeltaG_tskij, dW_qtPQ, sDeltaSigma_tskij, thc, true);
 
       app_log(1, "  LR-GW self-energy (term 1) done.\n");
+      print_timers();
     }
 
 
@@ -68,6 +69,7 @@ namespace methods {
       _Timer.stop("EVALUATE_SIGMA_DELTAW");
 
       app_log(1, "  LR-GW self-energy (term 2) done.\n");
+      print_timers();
     }
 
 
@@ -108,7 +110,7 @@ namespace methods {
 
       // === Step 1: Primary → auxiliary basis using lr_thc_comm ===
       //     Input: DeltaG_tskij, Output: dDeltaG_sktPQ
-      _Timer.start("SIGMA_ALLOC_R");
+      _Timer.start("SIGMA_ALLOC");
       auto dDeltaG_sktPQ = make_distributed_array<local_Array_5D_t>(
           mpi->comm, {1, qpools, tpools, np_P, np_Q}, {ns, nkpts, nt_half, NP, NQ},
           {1, bsize[0], bsize[1], bsize[2], bsize[3]});
@@ -116,7 +118,7 @@ namespace methods {
         auto dDeltaG_tskPQ = make_distributed_array<local_Array_5D_t>(
             mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ},
             {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
-        _Timer.stop("SIGMA_ALLOC_R");
+        _Timer.stop("SIGMA_ALLOC");
 
         _Timer.start("SIGMA_PRIM_TO_AUX");
         if (minus_t) {
@@ -140,7 +142,7 @@ namespace methods {
         _Timer.stop("SIGMA_PRIM_TO_AUX");
 
         // Transpose: (t,s,k,P,Q) → (s,k,t,P,Q) locally
-        _Timer.start("SIGMA_ALLOC_R");
+        _Timer.start("SIGMA_TRANSPOSE");
         auto DeltaG_tskPQ = dDeltaG_tskPQ.local();
         auto DeltaG_sktPQ = dDeltaG_sktPQ.local();
         for (size_t skt = 0; skt < ns * nkpts * nt_loc; ++skt) {
@@ -150,11 +152,13 @@ namespace methods {
           DeltaG_sktPQ(is, ik, it, nda::ellipsis{}) = DeltaG_tskPQ(it, is, ik, nda::ellipsis{});
         }
       }
-      _Timer.stop("SIGMA_ALLOC_R");
+      _Timer.stop("SIGMA_TRANSPOSE");
 
       // === Step 2: ΔG^k_{PQ}(τ) → ΔG^R_{PQ}(τ),  W^q_{PQ}(τ) → W^R_{PQ}(τ)  [k→R FT] ===
       //     Input: dDeltaG_sktPQ, dW_qtPQ. Output: in-place (aliased as dDeltaG_sRtPQ, dW_RtPQ)
+      _Timer.start("SIGMA_ALLOC");
       math::shm::shared_array<nda::array_view<ComplexType,2>> sf_Rk(*mpi, {nkpts,nkpts});
+      _Timer.stop("SIGMA_ALLOC");
 
       if (nkpts != 1) {
         _Timer.start("SIGMA_FT_R");
@@ -181,9 +185,11 @@ namespace methods {
 
       // === Step 3: ΔΣ^R_{PQ}(τ) = -ΔG^R_{PQ}(τ) ⊙ W^R_{PQ}(τ)  [Hadamard product] ===
       //     Input: dDeltaG_sRtPQ, dW_RtPQ. Output: dDeltaSigma_sRtPQ
+      _Timer.start("SIGMA_ALLOC");
       auto dDeltaSigma_sRtPQ = make_distributed_array<local_Array_5D_t>(
           mpi->comm, {1, qpools, tpools, np_P, np_Q}, {ns, nkpts, nt_half, NP, NQ},
           {1, bsize[0], bsize[1], bsize[2], bsize[3]});
+      _Timer.stop("SIGMA_ALLOC");
       _Timer.start("SIGMA_HADPROD_R");
       auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y) ; });
       auto W_RtPQ = dW_RtPQ.local();
@@ -222,12 +228,14 @@ namespace methods {
 
       // === Step 5: ΔΣ^k_{PQ}(τ) → ΔΣ^k_{ij}(τ)  [aux → primary via lr_thc_comm] ===
       //     Input: dDeltaSigma_sktPQ. Output: sDeltaSigma_tskij
-      _Timer.start("SIGMA_ALLOC_R");
+      _Timer.start("SIGMA_ALLOC");
       auto dDeltaSigma_tskPQ = make_distributed_array<local_Array_5D_t>(
           mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ},
           {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
+      _Timer.stop("SIGMA_ALLOC");
       {
         // Transpose: (s,k,t,P,Q) → (t,s,k,P,Q)
+        _Timer.start("SIGMA_TRANSPOSE");
         auto Sigma_tskPQ = dDeltaSigma_tskPQ.local();
         auto Sigma_sktPQ = dDeltaSigma_sktPQ.local();
         for (size_t tsk = 0; tsk < nt_loc * ns * nkpts; ++tsk) {
@@ -236,9 +244,9 @@ namespace methods {
           size_t ik = tsk % nkpts;
           Sigma_tskPQ(it, is, ik, nda::ellipsis{}) = Sigma_sktPQ(is, ik, it, nda::ellipsis{});
         }
+        _Timer.stop("SIGMA_TRANSPOSE");
       }
       dDeltaSigma_sktPQ.reset();
-      _Timer.stop("SIGMA_ALLOC_R");
 
       _Timer.start("SIGMA_AUX_TO_PRIM");
       if (!minus_t) {

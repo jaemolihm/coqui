@@ -27,7 +27,7 @@ namespace solvers {
   lr_scr_coulomb_t::lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft)
     : _ft(ft), _Timer() {
 
-    for (auto& v: {"EVALUATE_LR_W"}) {
+    for (auto& v: {"EVALUATE_LR_W", "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU"}) {
       _Timer.add(v);
     }
   }

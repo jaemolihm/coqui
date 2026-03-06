@@ -1196,7 +1196,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
 
   lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, dW_qtPQ, thc);
   mpi->comm.barrier();
-  lr.print_timers();
 
   // Copy result
   nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
@@ -1597,7 +1596,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   solvers::lr_rpa_pi lr_pi(q_pert);
   auto dDeltaPi_tqPQ = lr_pi.evaluate_lr_Pi<local_Array_4D_t>(G_tskij, DeltaG_tskij, thc);
   mpi->comm.barrier();
-  lr_pi.print_timers();
 
   // Step 2: Load W_c and compute ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
   app_log(1, "  lr_gw_sigma_DeltaW_calc: Loading W and computing ΔW...");
@@ -1611,7 +1609,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   solvers::lr_scr_coulomb_t lr_scr(&ft);
   auto dDeltaW_tqPQ = lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ, thc);
   mpi->comm.barrier();
-  lr_scr.print_timers();
 
   // Transpose ΔW from (t, q, P, Q) → (q, t, P, Q) for lr_gw
   auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, mpi->comm);
@@ -1626,7 +1623,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
   lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, G_tskij, dDeltaW_qtPQ, thc);
   mpi->comm.barrier();
-  lr.print_timers();
 
   // Copy result
   nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);

@@ -137,15 +137,21 @@ auto lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau(
 
   // FT to ω-space (resets τ inputs)
   scr_coulomb_t scr(_ft, "rpa");
+  _Timer.start("LR_W_FT_TAU_TO_W");
   auto dDeltaPi_wqPQ = scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
   auto dW_c_wqPQ     = scr.tau_to_w(dW_c_tqPQ,     w_pgrid, w_bsize, true);
+  _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space: ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
   lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_c_wqPQ, thc);
   dW_c_wqPQ.reset();
 
   // FT back to τ-space
-  return scr.w_to_tau(dDeltaPi_wqPQ, t_pgrid, t_bsize, true);
+  _Timer.start("LR_W_FT_W_TO_TAU");
+  auto result = scr.w_to_tau(dDeltaPi_wqPQ, t_pgrid, t_bsize, true);
+  _Timer.stop("LR_W_FT_W_TO_TAU");
+  print_timers();
+  return result;
 }
 
 } // solvers

@@ -183,6 +183,7 @@ namespace methods {
         thc_solver_comm::primary_to_aux(0, 0, G_tskij(it_beta_minus, nda::ellipsis{}),
                                          dG_buf_skPQ, thc, MF->kp_to_ibz(), MF->kp_trev());
         _Timer.stop("PI_LR_PRIM_TO_AUX");
+        _Timer.start("PI_LR_TREV_PHASE");
         for (size_t ik = 0; ik < nkpts; ++ik) {
           // Unfold the k points to the full BZ, applying time-reversal symmetry where needed
           if (kp_trev(ik)) {
@@ -191,6 +192,7 @@ namespace methods {
             G_skPQ_loc(all, ik, all, all) = G_buf_skPQ_loc(all, ik, all, all);
           }
         }
+        _Timer.stop("PI_LR_TREV_PHASE");
 
         // === Step 3: ΔG^k_{PQ}, G^k_{PQ} → ΔG^R_{PQ}, G^R_{PQ}  [k→R FT] ===
         //     Input: dDeltaG_skPQ, dG_skPQ. Output: in-place (aliased as _sRPQ)
@@ -229,6 +231,7 @@ namespace methods {
         thc_solver_comm::primary_to_aux(0, 0, G_tskij(it_global, nda::ellipsis{}),
                                          dG_buf_skPQ, thc, MF->kp_to_ibz(), MF->kp_trev());
         _Timer.stop("PI_LR_PRIM_TO_AUX");
+        _Timer.start("PI_LR_TREV_PHASE");
         for (size_t ik = 0; ik < nkpts; ++ik) {
           if (kp_trev(ik)) {
             G_skPQ_loc(all, ik, all, all) = nda::conj(G_buf_skPQ_loc(all, kp_trev_pair(ik), all, all));
@@ -236,6 +239,7 @@ namespace methods {
             G_skPQ_loc(all, ik, all, all) = G_buf_skPQ_loc(all, ik, all, all);
           }
         }
+        _Timer.stop("PI_LR_TREV_PHASE");
 
         // === Step 6: ΔG^k_{mn}(β-τ) → ΔG^k_{PQ}(β-τ)  [lr_thc_comm::primary_to_aux] ===
         //     Input: DeltaG_tskij(β-τ), Output: dDeltaG_skPQ
@@ -265,6 +269,7 @@ namespace methods {
 
         // === Step 8: ΔG^{-R}_{PQ} → e^{ip·R} [ΔG^{-R}]^T_{PQ}  [transpose + phase] ===
         //     Input/Output: DeltaG_sRPQ_loc (in-place)
+        _Timer.start("PI_LR_TREV_PHASE");
         for (long s = 0; s < (long)ns; ++s) {
           for (long iR = 0; iR < (long)nkpts; ++iR) {
             auto slice = DeltaG_sRPQ_loc(s, iR, nda::range::all, nda::range::all);
@@ -272,6 +277,7 @@ namespace methods {
             slice = phase_ipR(iR) * transpose_buf;
           }
         }
+        _Timer.stop("PI_LR_TREV_PHASE");
 
         // === Step 9: ΔΠ^{(2),R}(τ) += Σ_s G^R(s,τ) · e^{ip·R}[ΔG^{-R}(s,β-τ)]^T  [Hadamard, no conj] ===
         //     Input: G_sRPQ_loc, DeltaG_sRPQ_loc. Output: DeltaPi_RPQ (accumulated)
@@ -301,6 +307,7 @@ namespace methods {
       _Timer.stop("EVALUATE_LR_PI");
 
       app_log(1, "  LR polarization done.\n");
+      print_timers();
 
       return dDeltaPi_tqPQ;
     }
