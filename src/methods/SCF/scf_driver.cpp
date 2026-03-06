@@ -38,7 +38,8 @@ template<typename dyson_type, typename eri_t, typename corr_solver_t>
 auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_axes_ft::IAFT& FT,
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver,
               int niter, bool restart, double conv_tol, bool const_mu,
-              std::string input_grp, int input_iter)
+              std::string input_grp, int input_iter,
+              bool compute_exchange)
               -> std::tuple<double, double> {
   utils::TimerManager Timer;
   auto mpi = mb_eri.corr_eri->get().mpi();
@@ -129,21 +130,23 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     if (mb_solver.hf != nullptr) {
       if (mb_eri.hf_eri) {
         mb_solver.hf->evaluate(sF_skij, sDm_skij.local(),
-                               mb_eri.hf_eri->get(), dyson.sS_skij().local(), true, true);
+                               mb_eri.hf_eri->get(), dyson.sS_skij().local(), true, compute_exchange);
       } else if (mb_eri.hartree_eri and mb_eri.exchange_eri) {
         mb_solver.hf->evaluate(sF_skij, sDm_skij.local(),
                                mb_eri.hartree_eri->get(), dyson.sS_skij().local(), true, false);
-        // create temporary buffer for K since hf_solver.evaluate(F) performs in-place evaluation for F.
-        sArray_t<Array_view_4D_t> sK_skij(
-            math::shm::make_shared_array<Array_view_4D_t>(*mpi, sF_skij.shape()));
-        mb_solver.hf->evaluate(sK_skij, sDm_skij.local(),
-                               mb_eri.exchange_eri->get(), dyson.sS_skij().local(), false, true);
-        if (mpi->node_comm.root()) {
-          sF_skij.local() += sK_skij.local();
+        if (compute_exchange) {
+          // create temporary buffer for K since hf_solver.evaluate(F) performs in-place evaluation for F.
+          sArray_t<Array_view_4D_t> sK_skij(
+              math::shm::make_shared_array<Array_view_4D_t>(*mpi, sF_skij.shape()));
+          mb_solver.hf->evaluate(sK_skij, sDm_skij.local(),
+                                 mb_eri.exchange_eri->get(), dyson.sS_skij().local(), false, true);
+          if (mpi->node_comm.root()) {
+            sF_skij.local() += sK_skij.local();
+          }
         }
       } else {
         mb_solver.hf->evaluate(sF_skij, sDm_skij.local(), mb_eri.corr_eri->get(),
-                               dyson.sS_skij().local(), true, true);
+                               dyson.sS_skij().local(), true, compute_exchange);
       }
       mpi->comm.barrier();
     }
@@ -234,7 +237,8 @@ template<bool evscf_only, typename eri_t, typename corr_solver_t>
 double qp_scf_loop(MBState &mb_state, eri_t &mb_eri, const imag_axes_ft::IAFT& FT,
                    qp_context_t& qp_context, solvers::mb_solver_t<corr_solver_t> mb_solver,
                    iter_scf::iter_scf_t *iter_solver,
-                   int niter, bool restart, double conv_tol) {
+                   int niter, bool restart, double conv_tol,
+                   bool compute_exchange) {
   using math::shm::make_shared_array;
   utils::TimerManager Timer;
   auto mpi = mb_eri.corr_eri->get().mpi();
@@ -305,20 +309,22 @@ double qp_scf_loop(MBState &mb_state, eri_t &mb_eri, const imag_axes_ft::IAFT& F
     if (mb_solver.hf != nullptr) { // HF
       if (mb_eri.hf_eri) {
         mb_solver.hf->evaluate(sHeff_skij, sDm_skij.local(), mb_eri.hf_eri->get(),
-                               sS_skij.local(), true, true);
+                               sS_skij.local(), true, compute_exchange);
       } else if (mb_eri.hartree_eri and mb_eri.exchange_eri) {
         mb_solver.hf->evaluate(sHeff_skij, sDm_skij.local(), mb_eri.hartree_eri->get(),
                                sS_skij.local(), true, false);
-        // create temporary buffer for K since hf_solver.evaluate(F) performs in-place evaluation for F.
-        sArray_t<Array_view_4D_t> sK_skij(math::shm::make_shared_array<Array_view_4D_t>(*mpi, sHeff_skij.shape()));
-        mb_solver.hf->evaluate(sK_skij, sDm_skij.local(), mb_eri.exchange_eri->get(),
-                               sS_skij.local(), false, true);
-        if (mpi->node_comm.root()) {
-          sHeff_skij.local() += sK_skij.local();
+        if (compute_exchange) {
+          // create temporary buffer for K since hf_solver.evaluate(F) performs in-place evaluation for F.
+          sArray_t<Array_view_4D_t> sK_skij(math::shm::make_shared_array<Array_view_4D_t>(*mpi, sHeff_skij.shape()));
+          mb_solver.hf->evaluate(sK_skij, sDm_skij.local(), mb_eri.exchange_eri->get(),
+                                 sS_skij.local(), false, true);
+          if (mpi->node_comm.root()) {
+            sHeff_skij.local() += sK_skij.local();
+          }
         }
       } else {
         mb_solver.hf->evaluate(sHeff_skij, sDm_skij.local(), mb_eri.corr_eri->get(),
-                               sS_skij.local(), true, true);
+                               sS_skij.local(), true, compute_exchange);
       }
       mpi->comm.barrier();
       sHeff_skij.win().fence();
@@ -405,7 +411,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gw_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int);
+         int, bool, double, bool, std::string, int, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GW_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -436,7 +442,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gf2_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int);
+         int, bool, double, bool, std::string, int, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GF2_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -517,7 +523,7 @@ qp_scf_loop<true>(MBState&,                          \
                   qp_context_t&, \
                   solvers::mb_solver_t<solvers::gw_t>,       \
                   iter_scf::iter_scf_t*, \
-                  int, bool, double);
+                  int, bool, double, bool);
 
 // All combinations of thc/chol for 4 eri slots
 EVSCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -548,7 +554,7 @@ qp_scf_loop<false>(MBState&,                         \
                    qp_context_t&, \
                    solvers::mb_solver_t<solvers::gw_t>,       \
                    iter_scf::iter_scf_t*, \
-                   int, bool, double);
+                   int, bool, double, bool);
 
 // All combinations of thc/chol for 4 eri slots
 QPSCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)

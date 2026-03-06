@@ -42,13 +42,15 @@ template<typename dyson_type, typename eri_t, typename corr_solver_t>
 auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_axes_ft::IAFT& FT,
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver = nullptr,
               int niter = 1, bool restart = false, double conv_tol = 1e-9, bool const_mu = false,
-              std::string input_grp = "scf", int input_iter = -1)
+              std::string input_grp = "scf", int input_iter = -1,
+              bool compute_exchange = true)
               -> std::tuple<double, double>;
 template<bool evscf_only, typename eri_t, typename corr_solver_t>
 double qp_scf_loop(MBState &mb_state, eri_t &mb_eri, const imag_axes_ft::IAFT& FT,
                    qp_context_t &qp_context, solvers::mb_solver_t<corr_solver_t> mb_solver,
                    iter_scf::iter_scf_t *iter_solver = nullptr, int niter = 1,
-                   bool restart = false, double conv_tol = 1e-8);
+                   bool restart = false, double conv_tol = 1e-8,
+                   bool compute_exchange = true);
 template<typename eri_t, typename dyson_type>
 double rpa_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_axes_ft::IAFT& FT,
                 solvers::mb_solver_t<solvers::gw_t> mb_solver);

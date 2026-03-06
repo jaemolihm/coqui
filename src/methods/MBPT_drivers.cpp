@@ -134,6 +134,7 @@ inline simple_dyson make_dyson_with_h0_source(
  *  - niter: "1" Number of iterations in the self-consistent loop.
  *  - conv_thr: "1e-9" Convergence threshold for the self-consistent loop.
  *  - const_mu: "false" Fix the chemical potential during the self-consistent loop.
+ *  - compute_exchange: "true" Whether to compute exchange (K) in the Fock matrix. Set to false for Hartree-only.
  *  - output: "bdft.mbpt" Prefix of the output h5 file.
  *  - restart: "false" Restart from a previous bdft.scf calculation.
  *  - t_prescreen_thresh: "0.0" Threshold for prescreening in time (GF2 only for now)
@@ -158,6 +159,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
   auto const_mu = io::get_value_with_default<bool>(pt,"const_mu",false);
+  auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = io::get_value_with_default<std::string>(pt,"output","bdft.mbpt");
 
@@ -221,7 +223,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     MBState mb_state(mpi, ft, output);
     scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf),
              iter_solver.get(), niter, restart, conv_thr, const_mu,
-             greens_func_source, greens_func_iteration);
+             greens_func_source, greens_func_iteration,
+             compute_exchange);
 
   } else if(solver_type == "gw") {
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
@@ -242,7 +245,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       MBState mb_state(ft, output, mf, wannier_file, trans_home_cell);
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration);
+               greens_func_source, greens_func_iteration,
+               compute_exchange);
 
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
@@ -262,7 +266,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       MBState mb_state(mpi, ft, output);
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration);
+               greens_func_source, greens_func_iteration,
+               compute_exchange);
 
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
@@ -304,12 +309,14 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     if (gf2_direct_type == "gf2") {
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration);
+               greens_func_source, greens_func_iteration,
+               compute_exchange);
     } else {
       solvers::scr_coulomb_t scr_eri(&ft, "rpa", string_to_div_enum(div_treatment));
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration);
+               greens_func_source, greens_func_iteration,
+               compute_exchange);
     }
 
   } else if(solver_type == "gw_dca") {
@@ -334,7 +341,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     MBState mb_state(mpi, ft, output);
     qp_context_t qp_context;
     qp_scf_loop<false>(mb_state, eri, ft, qp_context, mb_solver_t(&hf), iter_solver.get(),
-                       niter, restart, conv_thr);
+                       niter, restart, conv_thr, compute_exchange);
 
   } else if (solver_type == "evgw0") {
 
@@ -354,7 +361,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     solvers::gw_t gw(&ft, string_to_div_enum(div_treatment), output);
     MBState mb_state(mpi, ft, output);
     qp_scf_loop<true>(mb_state, eri, ft, qp_context, mb_solver_t(&hf,&gw,&scr_eri), iter_solver.get(),
-                      niter, restart, conv_thr);
+                      niter, restart, conv_thr, compute_exchange);
 
   } else if (solver_type == "qpgw") {
 
@@ -376,7 +383,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     solvers::gw_t gw(&ft, string_to_div_enum(div_treatment), output);
     MBState mb_state(mpi, ft, output);
     qp_scf_loop<false>(mb_state, eri, ft, qp_context, mb_solver_t(&hf,&gw,&scr_eri), iter_solver.get(),
-                       niter, restart, conv_thr);
+                       niter, restart, conv_thr, compute_exchange);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);
@@ -404,6 +411,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
   auto const_mu = io::get_value_with_default<bool>(pt,"const_mu",false);
+  auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = io::get_value_with_default<std::string>(pt,"output","bdft.mbpt");
 
@@ -472,7 +480,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
 
     scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
              iter_solver.get(), niter, restart, conv_thr, const_mu,
-             greens_func_source, greens_func_iteration);
+             greens_func_source, greens_func_iteration,
+             compute_exchange);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);

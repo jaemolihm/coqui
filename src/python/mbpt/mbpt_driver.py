@@ -71,6 +71,9 @@ def run_hf(params, h_int, h_int_exchange=None):
             Source of H0 matrix. Options:
             - "compute" (default): Calculate H0 from plane-wave orbitals
             - "checkpoint": Read H0 from {output}.mbpt.h5 checkpoint
+        - compute_exchange : bool, optional
+            Whether to compute exchange (K) term (default: True).
+            Set to False for Hartree-only calculations.
     h_int : ThcCoulomb or CholCoulomb
         ERI handler
     h_int_exchange : optional
