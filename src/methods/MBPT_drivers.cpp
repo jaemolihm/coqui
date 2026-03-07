@@ -1620,8 +1620,8 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
 /**
  * Linear response GW self-energy term 2: -G ⊙ ΔW.
  *
- * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW.
- * Uses lr_rpa_pi for ΔP, lr_scr_coulomb_t for ΔW, and standard gw_t for -G⊙ΔW.
+ * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+ * Uses lr_gw::evaluate_sigma_DeltaW for the G⊙ΔW convolution.
  * TODO: Divergence correction not yet implemented (see lr_gw.hpp class docstring).
  */
 template<typename eri_t>
@@ -1629,10 +1629,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 5> const& DeltaG_tskij) {
-
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-  using math::nda::make_distributed_array;
+    nda::array<ComplexType, 4> const& DeltaW_qtPQ) {
 
   auto& thc = eri.corr_eri->get();
   auto mf = thc.MF();
@@ -1640,8 +1637,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
   std::string err = std::string("lr_gw_sigma_DeltaW_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
-  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1654,35 +1649,16 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   long nkpts = mf->nkpts();
   long nkpts_ibz = mf->nkpts_ibz();
   long nbnd = mf->nbnd();
-  long NP = thc.Np();
   long nt = ft.nt_f();
-  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
 
-  // Step 1: Compute ΔP = -ΔG·G - G·ΔG
-  app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing ΔP...");
-  solvers::lr_rpa_pi lr_pi(q_pert);
-  auto dDeltaPi_tqPQ = lr_pi.evaluate_lr_Pi<local_Array_4D_t>(G_tskij, DeltaG_tskij, thc);
-  mpi->comm.barrier();
+  // Distribute DeltaW_qtPQ across MPI ranks (keep q-axis undivided)
+  auto dDeltaW_qtPQ = distribute_array_4D(mpi->comm,
+      {DeltaW_qtPQ.shape()[0], DeltaW_qtPQ.shape()[1],
+       DeltaW_qtPQ.shape()[2], DeltaW_qtPQ.shape()[3]},
+      DeltaW_qtPQ, {true, false, false, false});
 
-  // Step 2: Load W_c and compute ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
-  app_log(1, "  lr_gw_sigma_DeltaW_calc: Loading W and computing ΔW...");
-  // eps_inv_head: not yet used, will be needed for div_corr (TODO)
-  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
-
-  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for lr_scr_coulomb_t
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
-
-  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
-  solvers::lr_scr_coulomb_t lr_scr(&ft);
-  auto dDeltaW_tqPQ = lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ, thc);
-  mpi->comm.barrier();
-
-  // Transpose ΔW from (t, q, P, Q) → (q, t, P, Q) for lr_gw
-  auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, mpi->comm);
-  dDeltaW_tqPQ.reset();
-
-  // Step 3: Compute ΔΣ = -G ⊙ ΔW using standard gw_t (via lr_gw::evaluate_sigma_DeltaW)
-  app_log(1, "  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
+  // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
+  app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
   solvers::lr_gw lr(&ft, q_pert);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
@@ -1878,7 +1854,7 @@ template nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     ptree const&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 5> const&,
-    nda::array<ComplexType, 5> const&);
+    nda::array<ComplexType, 4> const&);
 
 // gw_evaluate_sigma_with_W_calc instantiations (THC only)
 template nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(

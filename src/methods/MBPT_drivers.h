@@ -256,14 +256,14 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
 /**
  * @brief Linear response GW self-energy term 2: -G ⊙ ΔW
  *
- * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW.
+ * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
  * TODO: Divergence correction not yet implemented.
  *
  * @param eri          - [INPUT] THC ERI handler
  * @param pt           - [INPUT] Parameters as property tree (prefix)
  * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
  * @param G_tskij      - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
- * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaW_qtPQ  - [INPUT] LR screened interaction (nkpts, nt_half, NP, NP)
  * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
  */
 template<typename eri_t>
@@ -271,7 +271,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 5> const& DeltaG_tskij);
+    nda::array<ComplexType, 4> const& DeltaW_qtPQ);
 
 /**
  * @brief Evaluate GW self-energy with provided W and G (FD helper)

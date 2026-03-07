@@ -587,15 +587,15 @@ static auto const fun_lr_gw_sigma_DeltaW = c2py::dispatcher_f_kw_t{
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
            nda::array<ComplexType, 5> const& G_tskij,
-           nda::array<ComplexType, 5> const& DeltaG_tskij) {
-          return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, G_tskij, DeltaG_tskij);
+           nda::array<ComplexType, 4> const& DeltaW_qtPQ) {
+          return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, G_tskij, DeltaW_qtPQ);
         },
-        "lr_params", "h_int", "q_pert", "G_tskij", "DeltaG_tskij")};
+        "lr_params", "h_int", "q_pert", "G_tskij", "DeltaW_qtPQ")};
 
 static const auto doc_lr_gw_sigma_DeltaW = fun_lr_gw_sigma_DeltaW.doc(R"DOC(
 Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
 
-Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
 No divergence correction is applied.
 
 Parameters
@@ -609,8 +609,8 @@ q_pert : np.ndarray
     LR perturbation wavevector in crystal coordinates, shape (3,)
 G_tskij : np.ndarray
     Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
-DeltaG_tskij : np.ndarray
-    LR Green's function, shape (nt, ns, nk, nb, nb)
+DeltaW_qtPQ : np.ndarray
+    LR screened interaction, shape (nk, nt_half, NP, NP)
 
 Returns
 -------

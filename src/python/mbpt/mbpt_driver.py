@@ -511,11 +511,11 @@ def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):
     return gw_evaluate_W_from_Pi_cpp(json.dumps(params), h_int, Pi_tqPQ)
 
 
-def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaG_tskij):
+def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ):
     """
     Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
 
-    Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+    Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
     No divergence correction is applied.
 
     Parameters
@@ -529,8 +529,8 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaG_tskij):
         LR perturbation wavevector in crystal coordinates, shape (3,)
     G_tskij : np.ndarray
         Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
-    DeltaG_tskij : np.ndarray
-        LR Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaW_qtPQ : np.ndarray
+        LR screened interaction, shape (nk, nt_half, NP, NP)
 
     Returns
     -------
@@ -542,9 +542,9 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaG_tskij):
 
     q_pert = np.asarray(q_pert, dtype=np.float64)
     G_tskij = np.asarray(G_tskij, dtype=np.complex128)
-    DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+    DeltaW_qtPQ = np.asarray(DeltaW_qtPQ, dtype=np.complex128)
 
-    return lr_gw_sigma_DeltaW_cpp(json.dumps(params), h_int, q_pert, G_tskij, DeltaG_tskij)
+    return lr_gw_sigma_DeltaW_cpp(json.dumps(params), h_int, q_pert, G_tskij, DeltaW_qtPQ)
 
 
 def gw_evaluate_sigma_with_W(params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr=True):

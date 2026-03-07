@@ -363,13 +363,13 @@ namespace coqui_py {
   /**
    * @brief Compute LR GW self-energy term 2: -G ⊙ ΔW (no div correction)
    *
-   * Computes ΔP from (G, ΔG), then ΔW from ΔP, then ΔΣ = -G ⊙ ΔW internally.
+   * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
    *
    * @param lr_params     - [INPUT] JSON string with params (prefix)
    * @param h_int         - [INPUT] THC ERI handler
    * @param q_pert        - [INPUT] LR perturbation wavevector (3,)
    * @param G_tskij       - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
-   * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaW_qtPQ   - [INPUT] LR screened interaction (nkpts, nt_half, NP, NP)
    * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
    */
   nda::array<ComplexType, 5> lr_gw_sigma_DeltaW(
@@ -377,10 +377,10 @@ namespace coqui_py {
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_pert,
       nda::array<ComplexType, 5> const& G_tskij,
-      nda::array<ComplexType, 5> const& DeltaG_tskij) {
+      nda::array<ComplexType, 4> const& DeltaW_qtPQ) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::lr_gw_sigma_DeltaW_calc(mb_eri, parser.get_root(), q_pert, G_tskij, DeltaG_tskij);
+    return methods::lr_gw_sigma_DeltaW_calc(mb_eri, parser.get_root(), q_pert, G_tskij, DeltaW_qtPQ);
   }
 
 
