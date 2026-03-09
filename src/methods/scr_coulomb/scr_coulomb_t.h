@@ -261,6 +261,9 @@ namespace solvers {
 
     div_treatment_e _div_treatment;
     utils::TimerManager _Timer;
+  public:
+    utils::TimerManager& timer() { return _Timer; }
+  private:
 
     // optional container for screened interaction
     // TODO Remove these

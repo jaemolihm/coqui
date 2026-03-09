@@ -399,7 +399,6 @@ namespace solvers {
       _ft->check_leakage(dPi_tqPQ_pos, imag_axes_ft::boson, "polarizability", true);
       auto dPi_wqPQ = make_distributed_array<local_Array_t>(
           *comm, {1, 1, 1, 1}, w_gshape, dPi_tqPQ_pos.block_size());
-      // local arrays cover all tau and w points
       auto Pi_ti_loc = dPi_tqPQ_pos.local();
       auto Pi_wi_loc = dPi_wqPQ.local();
       _ft->tau_to_w_PHsym(Pi_ti_loc, Pi_wi_loc);
@@ -408,18 +407,27 @@ namespace solvers {
       return dPi_wqPQ;
     }
     // redistribute to cover (tau, w)-axes locally -> FT locally -> redistribute back
+    // Buffer distributes over q AND PQ (tau/omega axis 0 stays undivided for FT).
     std::array<long, 4> b_pgrid = {1, 1, 1, 1}; // pgrid for buffer
+    std::array<long, 4> b_bsize = {1, 1, 1, 1};
     {
       int np = comm->size();
-      if (t_gshape[2] * t_gshape[3] >= np) {
-        b_pgrid[2] = utils::find_proc_grid_min_diff(np, t_gshape[2], t_gshape[3]);
-        b_pgrid[3] = np / b_pgrid[2];
+      long nq = t_gshape[1];
+      b_pgrid[1] = utils::find_proc_grid_max_npools(np, nq, 0.2);
+      long np_PQ = np / b_pgrid[1];
+      if (t_gshape[2] * t_gshape[3] >= np_PQ) {
+        b_pgrid[2] = utils::find_proc_grid_min_diff(np_PQ, t_gshape[2], t_gshape[3]);
+        b_pgrid[3] = np_PQ / b_pgrid[2];
+      } else if (np_PQ == 1) {
+        // Fine: single rank handles all PQ
       } else {
-        APP_ABORT("scr_coulomb_t::tau_to_w: Error finding proper pgrid: gshape[2]*gshape[3] < np.");
+        APP_ABORT("scr_coulomb_t::tau_to_w: PQ too small for proc count (NP*NP < np_PQ)");
       }
+      b_bsize[2] = std::max(t_gshape[2] / std::max(b_pgrid[2], 1L), 1L);
+      b_bsize[3] = std::max(t_gshape[3] / std::max(b_pgrid[3], 1L), 1L);
     }
     auto buffer_ti  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, t_gshape, dPi_tqPQ_pos.block_size());
+        *comm, b_pgrid, t_gshape, b_bsize);
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(dPi_tqPQ_pos, buffer_ti);
     _Timer.stop("FT_REDISTRIBUTE");
@@ -470,29 +478,37 @@ namespace solvers {
     if (dW_wqPQ_pos.communicator()->size() == 1) {
       auto dW_tqPQ = make_distributed_array<local_Array_t>(
           *comm, {1, 1, 1, 1}, t_gshape, {1, 1, 1, 1});
-      // local arrays cover all tau and w points
       auto W_wi_loc = dW_wqPQ_pos.local();
       auto W_ti_loc = dW_tqPQ.local();
       _ft->w_to_tau_PHsym(W_wi_loc, W_ti_loc);
       if (reset_input) dW_wqPQ_pos.reset();
-      _ft->check_leakage(dW_tqPQ, imag_axes_ft::boson, "screened interation", true);
+      _ft->check_leakage(dW_tqPQ, imag_axes_ft::boson, "screened interaction", true);
       _Timer.stop("IMAG_FT_WtoT");
       return dW_tqPQ;
     }
 
     // redistribute to cover (tau, w)-axes locally -> FT locally -> redistribute back
+    // Buffer distributes over q AND PQ (tau/omega axis 0 stays undivided for FT).
     std::array<long, 4> b_pgrid = {1, 1, 1, 1}; // pgrid for buffer
+    std::array<long, 4> b_bsize = {1, 1, 1, 1};
     {
       int np = comm->size();
-      if (t_gshape[2] * t_gshape[3] >= np) {
-        b_pgrid[2] = utils::find_proc_grid_min_diff(np, t_gshape[2], t_gshape[3]);
-        b_pgrid[3] = np / b_pgrid[2];
+      long nq = t_gshape[1];
+      b_pgrid[1] = utils::find_proc_grid_max_npools(np, nq, 0.2);
+      long np_PQ = np / b_pgrid[1];
+      if (t_gshape[2] * t_gshape[3] >= np_PQ) {
+        b_pgrid[2] = utils::find_proc_grid_min_diff(np_PQ, t_gshape[2], t_gshape[3]);
+        b_pgrid[3] = np_PQ / b_pgrid[2];
+      } else if (np_PQ == 1) {
+        // Fine: single rank handles all PQ
       } else {
-        APP_ABORT("scr_coulomb_t::W_w_to_tau: Error finding proper pgrid: gshape[2]*gshape[3] < np.");
+        APP_ABORT("scr_coulomb_t::w_to_tau: PQ too small for proc count (NP*NP < np_PQ)");
       }
+      b_bsize[2] = std::max(t_gshape[2] / std::max(b_pgrid[2], 1L), 1L);
+      b_bsize[3] = std::max(t_gshape[3] / std::max(b_pgrid[3], 1L), 1L);
     }
     auto buffer_wi  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, w_gshape, dW_wqPQ_pos.block_size());
+        *comm, b_pgrid, w_gshape, b_bsize);
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(dW_wqPQ_pos, buffer_wi);
     _Timer.stop("FT_REDISTRIBUTE");

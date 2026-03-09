@@ -73,7 +73,8 @@ namespace methods {
        * @param G_tskij      - [IN] Unperturbed G(τ), (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param DeltaG_tskij - [IN] LR Green's function ΔG(τ), same shape
        * @param thc          - [IN] THC-ERI handler
-       * @return             - ΔP(τ,q,P,Q) distributed array (nt_half, nkpts, NP, NP)
+       * @return ΔP(τ,q,P,Q) distributed array (nt_half, nkpts, NP, NP)
+       *         Distribution: τ-dist {tpools, 1, np_P, np_Q}.
        */
       template<nda::MemoryArray Array_4D_t>
       auto evaluate_lr_Pi(
@@ -87,10 +88,13 @@ namespace methods {
       app_log(2, "  -----------------");
       app_log(2, "    LR Pi eval:                     {0:.3f} sec", _Timer.elapsed("EVALUATE_LR_PI"));
       app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("PI_LR_ALLOC"));
+      if (_Timer.has("PI_LR_PRECOMPUTE_TRANS") && _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS") > 0) {
+        app_log(2, "      - Precompute ΔG_trans:        {0:.3f} sec", _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS"));
+      }
       app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("PI_LR_PRIM_TO_AUX"));
       app_log(2, "      - Trev unfold + phase:        {0:.3f} sec", _Timer.elapsed("PI_LR_TREV_PHASE"));
       app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("PI_LR_FT_R"));
-      app_log(2, "      - Hadamard product:            {0:.3f} sec\n", _Timer.elapsed("PI_LR_HADPROD"));
+      app_log(2, "      - Hadamard product:           {0:.3f} sec\n", _Timer.elapsed("PI_LR_HADPROD"));
     }
 
     private:

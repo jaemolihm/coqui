@@ -24,10 +24,12 @@
 
 #include "configuration.hpp"
 #include "nda/nda.hpp"
+#include "nda/blas.hpp"
 #include "numerics/distributed_array/nda.hpp"
 
 #include "utilities/mpi_context.h"
 #include "utilities/Timer.hpp"
+#include "utilities/lr_utils.hpp"
 #include "IO/app_loggers.h"
 
 #include "numerics/imag_axes_ft/IAFT.hpp"
@@ -58,39 +60,53 @@ namespace solvers {
     ~lr_scr_coulomb_t() {}
 
     /**
-     * LR W Dyson: ΔΠ(τ) → ΔW_c(τ).
+     * Compute W_full(iω) = W_c(iω) + V from W_c(τ).
      *
-     * Mirrors scr_coulomb_t::dyson_W_from_Pi_tau but for the linearized equation.
-     * Internally: FT ΔΠ(τ)→ΔΠ(iω), FT W_c(τ)→W_c(iω), lr_dyson_W_in_place, FT ΔW_c(iω)→ΔW_c(τ).
+     * Input: dW_c_tqPQ in q-local (τ-dist) distribution, consumed (reset after FT).
+     * Output: dW_full_wqPQ in PQ-local distribution (ready for lr_dyson_W_in_place).
      *
-     * @param dDeltaPi_tqPQ - [IN] ΔΠ(τ) in τ-space, reset after use
-     * @param dW_c_tqPQ     - [IN] W_c(τ) in τ-space, reset after use
-     * @param thc           - [IN] THC-ERI handler
-     * @return ΔW_c(τ) distributed array with same pgrid/bsize as input
+     * @param dW_c_tqPQ - [IN] W_c(τ) in τ-dist, consumed (reset after use)
+     * @param thc       - [IN] THC-ERI handler
+     * @return W_full(iω) = W_c(iω) + V in PQ-local distribution
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
-    auto lr_dyson_W_from_Pi_tau(
-        memory::darray_t<local_Array_t, communicator_t>& dDeltaPi_tqPQ,
+    auto compute_W_full_omega(
         memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
         THC_ERI auto& thc)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
-     * LR W Dyson in Matsubara frequency space (in-place).
-     * ΔΠ(iω) → ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
+     * LR W Dyson: ΔΠ(τ) → ΔW_c(τ), in-place.
      *
-     * Both arrays must be in ω-space with shape (nw_half, nqpts, NP, NP).
+     * Input: dDeltaPi_tqPQ in q-local (τ-dist) distribution.
+     * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
+     *
+     * @param dDeltaPi_tqPQ   - [IN/OUT] ΔΠ(τ) on input, ΔW_c(τ) on output (τ-dist)
+     * @param dW_full_wqPQ    - [IN] W_c(iω) + V in PQ-local distribution (not consumed)
+     * @param thc             - [IN] THC-ERI handler
+     */
+    template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
+             typename dW_full_t>
+    void lr_dyson_W_from_Pi_tau(
+        memory::darray_t<local_Array_t, communicator_t>& dDeltaPi_tqPQ,
+        const dW_full_t& dW_full_wqPQ,
+        THC_ERI auto& thc);
+
+    /**
+     * LR W Dyson in Matsubara frequency space (in-place).
+     * ΔΠ(iω) → ΔW_c(iω) = W_full · ΔΠ · W_full
+     *
+     * Both arrays must be in PQ-local distribution (pgrid[2]==1, pgrid[3]==1).
      * On output, dDeltaPi_wqPQ contains ΔW_c(iω).
      *
      * @param dDeltaPi_wqPQ - [IN/OUT] ΔΠ on input, ΔW_c on output
-     * @param dW_c_wqPQ     - [IN] Correlated screened interaction W_c(iω)
-     * @param thc           - [IN] THC-ERI handler
+     * @param dW_full_wqPQ  - [IN] W_full = W_c(iω) + V in PQ-local distribution
      */
-    template<nda::MemoryArray Array_4D_t, typename communicator_t>
+    template<nda::MemoryArray Array_4D_t, typename communicator_t,
+             typename dW_full_t>
     void lr_dyson_W_in_place(
         memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
-        memory::darray_t<Array_4D_t, communicator_t>& dW_c_wqPQ,
-        THC_ERI auto& thc);
+        const dW_full_t& dW_full_wqPQ);
 
   inline void print_timers() {
     app_log(2, "\n  LR_SCR_COULOMB timers");

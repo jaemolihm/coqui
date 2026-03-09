@@ -24,6 +24,8 @@
 
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/proc_grid_partition.hpp"
+#include "numerics/distributed_array/nda.hpp"
 #include "nda/nda.hpp"
 
 namespace utils {
@@ -191,6 +193,122 @@ inline long find_q_ibz_index(nda::ArrayOfRank<2> auto const& kpts_crys,
   utils::check(false, "find_q_ibz_index: Could not find q=({}, {}, {}) in k-point grid",
                q_vec(0), q_vec(1), q_vec(2));
   return -1; // unreachable
+}
+
+/// τ-distribution: pgrid = {tpools, 1, np_P, np_Q}
+/// Distributes over τ and PQ. q-axis undivided.
+inline auto lr_W_tau_dist(long nproc, long nt, long NP)
+    -> std::tuple<std::array<long,4>, std::array<long,4>>
+{
+  long tpools = find_proc_grid_max_npools(nproc, nt, 0.2);
+  long np_PQ = nproc / tpools;
+  long np_P = find_proc_grid_min_diff(np_PQ, 1, 1);
+  long np_Q = np_PQ / np_P;
+
+  std::array<long, 4> pgrid = {tpools, 1, np_P, np_Q};
+  // Per-dimension block sizes: each rank gets 1 SLATE tile per PQ dimension.
+  // This ensures the block distribution is recognized as 2D cyclic by SLATE.
+  long P_bs = std::max(NP / std::max(np_P, 1L), 1L);
+  long Q_bs = std::max(NP / std::max(np_Q, 1L), 1L);
+  std::array<long, 4> bsize = {1, 1, P_bs, Q_bs};
+
+  return {pgrid, bsize};
+}
+
+/// q-distribution: pgrid = {1, qpools, np_P, np_Q}
+/// Distributes over q and PQ. First axis (τ or ω) undivided.
+/// Used as intermediate distribution for tau_to_w / lr_dyson_W_in_place / w_to_tau.
+inline auto lr_W_q_dist(long nproc, long nq, long NP)
+    -> std::tuple<std::array<long,4>, std::array<long,4>>
+{
+  long np = nproc;
+
+  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
+  np /= nqpools;
+  long np_P = find_proc_grid_min_diff(np, 1, 1);
+  long np_Q = np / np_P;
+
+  std::array<long, 4> pgrid = {1, nqpools, np_P, np_Q};
+  // Per-dimension block sizes: each rank gets 1 SLATE tile per PQ dimension.
+  // This ensures the block distribution is recognized as 2D cyclic by SLATE.
+  long P_bs = std::max(NP / std::max(np_P, 1L), 1L);
+  long Q_bs = std::max(NP / std::max(np_Q, 1L), 1L);
+  std::array<long, 4> bsize = {1, 1, P_bs, Q_bs};
+
+  return {pgrid, bsize};
+}
+
+/// PQ-local distribution: pgrid = {nwpools, nqpools, 1, 1}
+/// Distributes over tau/omega and q. PQ undivided.
+/// Used for lr_dyson_W_in_place (PQ matrix multiply).
+/// Guarantees product(pgrid) == nproc. All remaining procs go to ω-axis.
+inline auto lr_W_PQ_local_dist(long nproc, long nq, long nw_half)
+    -> std::tuple<std::array<long,4>, std::array<long,4>>
+{
+  // Find largest nqpools dividing nproc, with nqpools <= nq
+  // and nproc/nqpools <= nw_half (so ω-axis can absorb remaining procs).
+  long nqpools = 1;
+  for (long i = std::min(nproc, nq); i >= 1; --i) {
+    if (nproc % i == 0 && nproc / i <= nw_half) {
+      nqpools = i;
+      break;
+    }
+  }
+  long nwpools = nproc / nqpools;
+  check(nwpools * nqpools == nproc,
+        "lr_W_PQ_local_dist: cannot find valid PQ-local grid for nproc={}, nq={}, nw_half={}",
+        nproc, nq, nw_half);
+  std::array<long, 4> pgrid = {nwpools, nqpools, 1, 1};
+  std::array<long, 4> bsize = {1, 1, 1, 1};
+  return {pgrid, bsize};
+}
+
+/// Validate that a distributed 4D array has τ-dist pattern:
+/// pgrid[1] == 1 (q undivided).
+template<typename darray_t>
+void check_W_tau_dist(const darray_t& d, const std::string& caller) {
+  auto pgrid = d.grid();
+  check(pgrid[1] == 1,
+        "{}: expected τ-dist (pgrid[1]==1), got pgrid=({},{},{},{})",
+        caller, pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+}
+
+/**
+ * Transpose first two axes of a distributed 4D array: (A, B, P, Q) → (B, A, P, Q).
+ *
+ * Requires one of the first two axes to be undivided (pgrid=1), which allows
+ * a purely local reorder with no MPI communication.
+ * All LR call sites satisfy this precondition (τ-dist has pgrid[1]==1).
+ */
+template<typename Array_4D_t, typename communicator_t>
+auto transpose_axes_01(
+    memory::darray_t<Array_4D_t, communicator_t>& d_in,
+    communicator_t& comm) {
+  auto [g0, g1, g2, g3] = d_in.grid();
+  auto [s0, s1, s2, s3] = d_in.global_shape();
+  auto [b0, b1, b2, b3] = d_in.block_size();
+
+  check(g0 == 1 || g1 == 1,
+      "transpose_axes_01: one of the first two axes must be undivided "
+      "(pgrid[0]={}, pgrid[1]={})", g0, g1);
+
+  auto d_out = math::nda::make_distributed_array<Array_4D_t>(
+      comm, {g1, g0, g2, g3}, {s1, s0, s2, s3}, {b1, b0, b2, b3});
+
+  auto in_loc = d_in.local();
+  auto out_loc = d_out.local();
+  long n0 = d_in.local_shape()[0];
+  long n1 = d_in.local_shape()[1];
+  check(d_out.local_shape()[0] == n1 && d_out.local_shape()[1] == n0,
+      "transpose_axes_01: output local shape ({},{}) != expected ({},{})",
+      d_out.local_shape()[0], d_out.local_shape()[1], n1, n0);
+  for (long i01 = 0; i01 < n0 * n1; ++i01) {
+    long i0 = i01 / n1;
+    long i1 = i01 % n1;
+    out_loc(i1, i0, nda::ellipsis{}) = in_loc(i0, i1, nda::ellipsis{});
+  }
+  comm.barrier();
+  return d_out;
 }
 
 } // namespace utils

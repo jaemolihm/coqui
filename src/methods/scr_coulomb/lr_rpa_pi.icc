@@ -90,20 +90,18 @@ namespace methods {
                    G_tskij.shape(0), G_tskij.shape(1), G_tskij.shape(2), G_tskij.shape(3), G_tskij.shape(4),
                    DeltaG_tskij.shape(0), DeltaG_tskij.shape(1), DeltaG_tskij.shape(2), DeltaG_tskij.shape(3), DeltaG_tskij.shape(4));
 
-      // np_PQ = 1 guaranteed: all MPI parallelism goes to tau dimension.
-      // Needed for PQ transpose in Term 2. Ranks beyond nt_half are idle.
-      long ntpools = mpi->comm.size();
-      int np_P = 1;
-      int np_Q = 1;
+      // τ-dist: distribute over τ and PQ
+      auto [tau_pgrid, tau_bsize] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half, Np);
+      auto [tpools_v, _q, np_P, np_Q] = tau_pgrid;
 
       app_log(1, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
       app_log(2, "    processor grid for Pi: (t, q, P, Q) = ({}, {}, {}, {})",
-                 ntpools, 1, np_P, np_Q);
+                 tau_pgrid[0], tau_pgrid[1], tau_pgrid[2], tau_pgrid[3]);
 
       _Timer.start("PI_LR_ALLOC");
       auto dDeltaPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-          mpi->comm, {ntpools, 1, np_P, np_Q}, {nt_half, nkpts, Np, Np}, {1, 1, 1, 1});
+          mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_bsize);
       auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi_tqPQ.origin();
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
 
@@ -140,13 +138,15 @@ namespace methods {
 
       // Buffers: DeltaG for lr_thc_comm (ΔG factor), G for thc_solver_comm (G factor)
       auto dDeltaG_skPQ = make_distributed_array<local_Array_4D_t>(
-          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
+          {1, 1, tau_bsize[2], tau_bsize[3]});
       auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
-          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
+          {1, 1, tau_bsize[2], tau_bsize[3]});
       auto dG_buf_skPQ = make_distributed_array<local_Array_4D_t>(
-          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np}, {1, 1, 1, 1});
+          t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np},
+          {1, 1, tau_bsize[2], tau_bsize[3]});
       nda::matrix<ComplexType> fft_work_PQ(nkpts, NP_loc*NQ_loc);
-      nda::matrix<ComplexType> transpose_buf(NP_loc, NQ_loc);
       _Timer.stop("PI_LR_ALLOC");
 
       auto DeltaG_skPQ_loc = dDeltaG_skPQ.local();
@@ -161,6 +161,75 @@ namespace methods {
       auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return (x * y); });
       nda::array<ComplexType, 3> DeltaPi_RPQ(nkpts, NP_loc, NQ_loc);
 
+      // ============================================
+      // Precompute DeltaG_trans: PQ-transposed ΔG(β-τ) in τ-dist layout.
+      // Phase e^{ip·R} is applied later (after k→(-R) FT in the main loop).
+      // ============================================
+      _Timer.start("PI_LR_PRECOMPUTE_TRANS");
+
+      // TODO: One distributed array per spin because the 4D layout has no spin axis.
+      // Could be unified into a single 5D distributed array to halve MPI window allocations.
+      std::vector<decltype(dDeltaPi_tqPQ)> dDG_trans_per_spin;
+      for (long is = 0; is < ns; ++is) {
+        dDG_trans_per_spin.push_back(
+            make_distributed_array<local_Array_4D_t>(
+                mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_bsize));
+      }
+
+      // Step 1: Fill with primary_to_aux results for DeltaG(β-τ)
+      for (long it = 0; it < (long)nt_loc; ++it) {
+        long it_global = it + t_origin;
+        long it_beta_minus = nt_f - it_global - 1;
+
+        _Timer.start("PI_LR_PRIM_TO_AUX");
+        lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
+                                     dDeltaG_skPQ, thc,
+                                     MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        _Timer.stop("PI_LR_PRIM_TO_AUX");
+
+        auto DeltaG_skPQ_loc_view = dDeltaG_skPQ.local();
+        for (long is = 0; is < ns; ++is) {
+          dDG_trans_per_spin[is].local()(it, nda::ellipsis{})
+              = DeltaG_skPQ_loc_view(is, nda::ellipsis{});
+        }
+      }
+      mpi->comm.barrier();
+
+      // Step 2: Redistribute to PQ-undistributed grid for local transpose
+      long n_k_trans = utils::find_proc_grid_max_npools(mpi->comm.size(), nkpts, 0.2);
+      long n_t_trans = mpi->comm.size() / n_k_trans;
+      std::array<long, 4> trans_pgrid = {n_t_trans, n_k_trans, 1, 1};
+      std::array<long, 4> trans_bsize = {1, 1, tau_bsize[2], tau_bsize[3]};
+
+      for (long is = 0; is < ns; ++is) {
+        auto dTemp = make_distributed_array<local_Array_4D_t>(
+            mpi->comm, trans_pgrid, {nt_half, nkpts, Np, Np}, trans_bsize);
+
+        // Redistribute: τ-dist → (n_t, n_k, 1, 1)
+        math::nda::redistribute(dDG_trans_per_spin[is], dTemp);
+
+        // Local PQ transpose: for each (t, k) slice, swap P↔Q
+        auto temp_loc = dTemp.local();
+        auto [nt_t, nk_t, NP_t, NQ_t] = dTemp.local_shape();
+        nda::matrix<ComplexType> swap_buf(NP_t, NQ_t);
+        for (long it2 = 0; it2 < nt_t; ++it2) {
+          for (long ik = 0; ik < nk_t; ++ik) {
+            auto slice = temp_loc(it2, ik, nda::range::all, nda::range::all);
+            swap_buf = nda::transpose(slice);
+            slice = swap_buf;
+          }
+        }
+
+        // Redistribute back: (n_t, n_k, 1, 1) → τ-dist
+        math::nda::redistribute(dTemp, dDG_trans_per_spin[is]);
+      }
+      mpi->comm.barrier();
+
+      _Timer.stop("PI_LR_PRECOMPUTE_TRANS");
+
+      // ============================================
+      // Main loop over τ
+      // ============================================
       for (size_t it = 0; it < nt_loc; ++it) {
         size_t it_global = it + t_origin;
         size_t it_beta_minus = nt_f - it_global - 1;
@@ -185,7 +254,6 @@ namespace methods {
         _Timer.stop("PI_LR_PRIM_TO_AUX");
         _Timer.start("PI_LR_TREV_PHASE");
         for (size_t ik = 0; ik < nkpts; ++ik) {
-          // Unfold the k points to the full BZ, applying time-reversal symmetry where needed
           if (kp_trev(ik)) {
             G_skPQ_loc(all, ik, all, all) = nda::conj(G_buf_skPQ_loc(all, kp_trev_pair(ik), all, all));
           } else {
@@ -223,6 +291,7 @@ namespace methods {
 
         // ============================================
         // Term 2: ΔΠ^{(2),R} = G^R(τ) · e^{ip·R} [ΔG^{-R}(β-τ)]^T
+        // DeltaG_trans already precomputed (k-space, PQ transposed).
         // ============================================
 
         // === Step 5: G^k_{mn}(τ) → G^k_{PQ}(τ)  [thc_solver_comm::primary_to_aux] ===
@@ -241,15 +310,14 @@ namespace methods {
         }
         _Timer.stop("PI_LR_TREV_PHASE");
 
-        // === Step 6: ΔG^k_{mn}(β-τ) → ΔG^k_{PQ}(β-τ)  [lr_thc_comm::primary_to_aux] ===
-        //     Input: DeltaG_tskij(β-τ), Output: dDeltaG_skPQ
-        _Timer.start("PI_LR_PRIM_TO_AUX");
-        lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
-                                     dDeltaG_skPQ, thc,
-                                     MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
-        _Timer.stop("PI_LR_PRIM_TO_AUX");
+        // === Step 6: Read precomputed DeltaG_trans for this τ ===
+        //     Input: dDG_trans_per_spin, Output: DeltaG_skPQ_loc
+        for (long is = 0; is < ns; ++is) {
+          DeltaG_skPQ_loc(is, nda::ellipsis{})
+              = dDG_trans_per_spin[is].local()(it, nda::ellipsis{});
+        }
 
-        // === Step 7: G^k → G^R (f_Rk),  ΔG^k → ΔG^{-R} (conj(f_Rk))  [k→R / k→(-R) FT] ===
+        // === Step 7: G^k → G^R (f_Rk),  DeltaG_trans^k → DeltaG_trans^{-R} (f_minus_Rk) ===
         //     Input: dG_skPQ, dDeltaG_skPQ. Output: in-place (aliased as _sRPQ)
         if (nkpts != 1) {
           _Timer.start("PI_LR_FT_R");
@@ -267,19 +335,17 @@ namespace methods {
           _Timer.stop("PI_LR_FT_R");
         }
 
-        // === Step 8: ΔG^{-R}_{PQ} → e^{ip·R} [ΔG^{-R}]^T_{PQ}  [transpose + phase] ===
+        // === Step 8: Phase multiply: e^{ip·R} for each R ===
         //     Input/Output: DeltaG_sRPQ_loc (in-place)
         _Timer.start("PI_LR_TREV_PHASE");
-        for (long s = 0; s < (long)ns; ++s) {
+        for (long is = 0; is < (long)ns; ++is) {
           for (long iR = 0; iR < (long)nkpts; ++iR) {
-            auto slice = DeltaG_sRPQ_loc(s, iR, nda::range::all, nda::range::all);
-            transpose_buf = nda::transpose(slice);
-            slice = phase_ipR(iR) * transpose_buf;
+            DeltaG_sRPQ_loc(is, iR, nda::ellipsis{}) *= phase_ipR(iR);
           }
         }
         _Timer.stop("PI_LR_TREV_PHASE");
 
-        // === Step 9: ΔΠ^{(2),R}(τ) += Σ_s G^R(s,τ) · e^{ip·R}[ΔG^{-R}(s,β-τ)]^T  [Hadamard, no conj] ===
+        // === Step 9: ΔΠ^{(2),R}(τ) += Σ_s G^R(s,τ) · DeltaG_trans^{-R}(s,β-τ)  [Hadamard, no conj] ===
         //     Input: G_sRPQ_loc, DeltaG_sRPQ_loc. Output: DeltaPi_RPQ (accumulated)
         _Timer.start("PI_LR_HADPROD");
         for (long s = 0; s < ns; ++s) {

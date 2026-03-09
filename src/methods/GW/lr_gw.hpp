@@ -85,6 +85,9 @@ namespace methods {
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param DeltaG_tskij      - [INPUT] LR Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param dW_qtPQ           - [INPUT] Screened interaction in THC basis (nkpts, nt_half, NP, NP)
+       *   Axis order: (q, t, P, Q).
+       *   Distribution: τ-dist with axes swapped, pgrid = (1, tpools, np_P, np_Q).
+       *   q-axis (axis 0) MUST be undivided (pgrid[0] == 1).
        * @param thc               - [INPUT] THC-ERI handler
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
@@ -104,6 +107,9 @@ namespace methods {
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param G_tskij           - [INPUT] Unperturbed Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param dDeltaW_qtPQ      - [INPUT] LR screened interaction in THC basis (nkpts, nt_half, NP, NP)
+       *   Axis order: (q, t, P, Q).
+       *   Distribution: τ-dist with axes swapped, pgrid = (1, tpools, np_P, np_Q).
+       *   q-axis (axis 0) MUST be undivided (pgrid[0] == 1).
        * @param thc               - [INPUT] THC-ERI handler
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
@@ -122,7 +128,7 @@ namespace methods {
         app_log(2, "      - Transpose:                  {0:.3f} sec", _Timer.elapsed("SIGMA_TRANSPOSE"));
         app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
         app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
-        app_log(2, "      - Hadamard product:            {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
+        app_log(2, "      - Hadamard product:           {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
         app_log(2, "      - Aux->Primary:               {0:.3f} sec", _Timer.elapsed("SIGMA_AUX_TO_PRIM"));
       }
       if (_Timer.has("EVALUATE_SIGMA_DELTAW")) {
@@ -138,6 +144,22 @@ namespace methods {
       bool _kpq_map_initialized = false;
       nda::array<long, 1> _kpq_map;  // k → k+q_pert mapping (full BZ); identity for q_pert=0
       utils::TimerManager _Timer;
+
+      // Cached work arrays for eval_DeltaSigma_Rspace (Opts 1+2).
+      // 3 distributed 5D arrays + 1 FT buffer, allocated once and reused across calls.
+      // Previously freed after each call; now kept mapped to avoid repeated MPI_Win_allocate_shared.
+      using darray_5D_host_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 5>, mpi3::communicator>;
+      std::optional<darray_5D_host_t> _d_sktPQ_1;   // DeltaG in (s,k,t,P,Q) layout
+      std::optional<darray_5D_host_t> _d_tskPQ;      // shared transpose buf (t,s,k,P,Q)
+      std::optional<darray_5D_host_t> _d_sktPQ_2;   // DeltaSigma in (s,k,t,P,Q) layout
+      nda::matrix<ComplexType> _ft_buffer;            // (nk, nt_loc*NP_loc*NQ_loc)
+
+      /// Lazy-init cached work arrays. Allocates on first call, reuses after.
+      template<typename mpi_context_t>
+      void _ensure_work_arrays(mpi_context_t& mpi,
+                               std::array<long, 4> grid, std::array<long, 5> global_shape,
+                               std::array<long, 4> block_size_4d,
+                               long nkpts, long ft_cols);
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(const auto& thc) {

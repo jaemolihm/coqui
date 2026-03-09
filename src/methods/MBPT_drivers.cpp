@@ -53,7 +53,7 @@
 #include "methods/GW/lr_gw.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
-#include "utilities/darray_utils.hpp"
+#include "utilities/lr_utils.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -1034,10 +1034,27 @@ auto load_W_and_eps_inv_head(
     h5::group grp(file);
     nda::h5_read(grp, "W_qtPQ", W_qtPQ);
   }
-  // W(q,t,P,Q): keep q-axis (axis 0) undivided — downstream solvers (eval_DeltaSigma_Rspace,
-  // eval_Sigma_all) require all q-points local for k→R Fourier transforms.
-  auto dW_qtPQ = distribute_array_4D(mpi.comm, {nkpts, nt_half, NP, NP}, W_qtPQ,
-                                     {true, false, false, false});
+  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
+  auto [tq_pgrid, tq_bsize] = utils::lr_W_tau_dist(mpi.comm.size(), nt_half, NP);
+  std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
+  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
+
+  // Broadcast and copy
+  nda::array<ComplexType, 4> src(W_qtPQ);
+  mpi.comm.broadcast_n(src.data(), src.size(), 0);
+  auto loc = dW_qtPQ.local();
+  auto [o0, o1, o2, o3] = dW_qtPQ.origin();
+  auto [n0, n1, n2, n3] = dW_qtPQ.local_shape();
+  for (long i0 = 0; i0 < n0; ++i0)
+    for (long i1 = 0; i1 < n1; ++i1)
+      for (long i2 = 0; i2 < n2; ++i2)
+        for (long i3 = 0; i3 < n3; ++i3)
+          loc(i0, i1, i2, i3) = src(i0+o0, i1+o1, i2+o2, i3+o3);
+  mpi.comm.barrier();
 
   // Read eps_inv_head from checkpoint
   nda::array<ComplexType, 1> eps_inv_head(nt_half);
@@ -1059,7 +1076,7 @@ auto load_W_and_eps_inv_head(
 }
 
 
-// transpose_axes_01 is now in utilities/darray_utils.hpp
+// transpose_axes_01 is in utilities/lr_utils.hpp
 
 
 /**
@@ -1514,21 +1531,38 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
   dW_qtPQ.reset();
 
-  // Convert ΔΠ regular array → distributed array
-  auto dDeltaPi_tqPQ = distribute_array_4D(mpi->comm, {nt_half, nkpts, NP, NP}, DeltaPi_tqPQ);
+  // Convert ΔΠ regular array → distributed array (τ-dist)
+  auto [pi_pgrid, pi_bsize] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half, NP);
+  auto dDeltaPi_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_bsize);
+  {
+    nda::array<ComplexType, 4> pi_src(DeltaPi_tqPQ);
+    mpi->comm.broadcast_n(pi_src.data(), pi_src.size(), 0);
+    auto pi_loc = dDeltaPi_tqPQ.local();
+    auto [po0, po1, po2, po3] = dDeltaPi_tqPQ.origin();
+    auto [pn0, pn1, pn2, pn3] = dDeltaPi_tqPQ.local_shape();
+    for (long i0 = 0; i0 < pn0; ++i0)
+      for (long i1 = 0; i1 < pn1; ++i1)
+        for (long i2 = 0; i2 < pn2; ++i2)
+          for (long i3 = 0; i3 < pn3; ++i3)
+            pi_loc(i0, i1, i2, i3) = pi_src(i0+po0, i1+po1, i2+po2, i3+po3);
+    mpi->comm.barrier();
+  }
 
-  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = (Z + W_c) · ΔΠ · (Z + W_c)
+  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full · ΔΠ · W_full
   solvers::lr_scr_coulomb_t lr_scr(&ft);
-  auto dDeltaW_tqPQ = lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ, thc);
+  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
+  lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
+  // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
 
   // Copy distributed result to regular array
   nda::array<ComplexType, 4> DeltaW_tqPQ(nt_half, nkpts, NP, NP);
   DeltaW_tqPQ() = 0.0;
   {
-    auto loc = dDeltaW_tqPQ.local();
-    auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaW_tqPQ.origin();
-    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaW_tqPQ.local_shape();
+    auto loc = dDeltaPi_tqPQ.local();
+    auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi_tqPQ.origin();
+    auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
     for (long it = 0; it < nt_loc; ++it)
       for (long iq = 0; iq < nq_loc; ++iq)
         for (long iP = 0; iP < NP_loc; ++iP)
@@ -1651,11 +1685,30 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   long nbnd = mf->nbnd();
   long nt = ft.nt_f();
 
-  // Distribute DeltaW_qtPQ across MPI ranks (keep q-axis undivided)
-  auto dDeltaW_qtPQ = distribute_array_4D(mpi->comm,
+  // Distribute DeltaW_qtPQ across MPI ranks (τ-dist with axes swapped for (q,t))
+  long NP_dw = DeltaW_qtPQ.shape()[2];
+  long nt_half_dw = DeltaW_qtPQ.shape()[1];
+  auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half_dw, NP_dw);
+  std::array<long,4> qt_pgrid_dw = {tq_pgrid_dw[1], tq_pgrid_dw[0], tq_pgrid_dw[2], tq_pgrid_dw[3]};
+  std::array<long,4> qt_bsize_dw = {tq_bsize_dw[1], tq_bsize_dw[0], tq_bsize_dw[2], tq_bsize_dw[3]};
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto dDeltaW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, qt_pgrid_dw,
       {DeltaW_qtPQ.shape()[0], DeltaW_qtPQ.shape()[1],
-       DeltaW_qtPQ.shape()[2], DeltaW_qtPQ.shape()[3]},
-      DeltaW_qtPQ, {true, false, false, false});
+       DeltaW_qtPQ.shape()[2], DeltaW_qtPQ.shape()[3]}, qt_bsize_dw);
+  {
+    nda::array<ComplexType, 4> dw_src(DeltaW_qtPQ);
+    mpi->comm.broadcast_n(dw_src.data(), dw_src.size(), 0);
+    auto dw_loc = dDeltaW_qtPQ.local();
+    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_qtPQ.origin();
+    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_qtPQ.local_shape();
+    for (long i0 = 0; i0 < dwn0; ++i0)
+      for (long i1 = 0; i1 < dwn1; ++i1)
+        for (long i2 = 0; i2 < dwn2; ++i2)
+          for (long i3 = 0; i3 < dwn3; ++i3)
+            dw_loc(i0, i1, i2, i3) = dw_src(i0+dwo0, i1+dwo1, i2+dwo2, i3+dwo3);
+    mpi->comm.barrier();
+  }
 
   // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
   app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");

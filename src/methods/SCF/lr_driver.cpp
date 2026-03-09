@@ -25,7 +25,6 @@
 #include "methods/ERI/thc_reader_t.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
-#include "utilities/darray_utils.hpp"
 #include "nda/nda.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
@@ -54,13 +53,32 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
           q_vec(0), q_vec(1), q_vec(2));
   app_log(1, "  q is Gamma point: {}\n", _lr_dyson.is_q_gamma() ? "yes" : "no");
 
-  for (auto& v : {"LR_SCF", "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
-                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2"}) {
+  for (auto& v : {"LR_SCF", "LR_SETUP", "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
+                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2",
+                   "LR_BCAST", "LR_ITER_ALG"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
 }
 
+
+// Distribution flow through the LR-GW pipeline
+// Three distribution patterns:
+//   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
+//   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
+//   PQ-local:          pgrid = {nwpools, nqpools, 1, 1}  — PQ undivided (matrix multiply)
+//
+//   W_c loaded:          (q,t,P,Q), τ-dist
+//   compute_W_full_omega: τ-dist → FT(τ→ω) → PQ-local, + Z(q) → W_full(iω) [cached]
+//
+//   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
+//   lr_dyson_W_from_Pi_tau (in-place):
+//     tau_to_w:          τ-dist → PQ-local (via q-distributed FT buffer)
+//     lr_dyson_W_in_place: PQ-local (direct BLAS gemm, no SLATE)
+//     w_to_tau:          PQ-local → τ-dist (via q-distributed FT buffer)
+//     output:            τ-dist (overwrites input)
+//   transpose (t,q)→(q,t): τ-dist
+//   evaluate_sigma_*:    τ-dist in (q,t) order
 
 template<THC_ERI THC_t, typename dW_t>
 std::tuple<int, double> lr_driver::run_lr(
@@ -137,10 +155,11 @@ std::tuple<int, double> lr_driver::run_lr(
   }
 
   // For full mode: copy G to local array once (reused every iteration),
-  // and prepare W_c in (t,q) format (master copy for reuse each iteration).
+  // and precompute W_full(iω) = W_c(iω) + V (cached across iterations).
+  _Timer.start("LR_SETUP");
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   nda::array<ComplexType, 5> G_local;
-  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_tqPQ_master;
+  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
   if (gw_full) {
     // Copy G from shared memory and broadcast to all ranks.
     // All ranks need G for lr_thc_comm operations in evaluate_lr_Pi and evaluate_sigma_DeltaW.
@@ -150,9 +169,11 @@ std::tuple<int, double> lr_driver::run_lr(
     }
     _mpi->comm.broadcast_n(G_local.data(), G_local.size(), 0);
 
-    // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q) and store as master copy
+    // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q), then compute W_full(iω)
     auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
-    opt_dW_tqPQ_master.emplace(std::move(dW_tqPQ));
+    opt_dW_full_wqPQ.emplace(
+        lr_scr_solver->compute_W_full_omega(dW_tqPQ, thc));
+    // dW_tqPQ is consumed (reset) by compute_W_full_omega
   }
 
   // Initialize DIIS if requested
@@ -187,6 +208,7 @@ std::tuple<int, double> lr_driver::run_lr(
     if (sDeltaSigma_tskij) sDeltaSigma_tskij->local() = ComplexType(0.0);
   }
   _mpi->comm.barrier();
+  _Timer.stop("LR_SETUP");
 
   double Delta_mu = 0.0;
   int iter = 0;
@@ -257,6 +279,7 @@ std::tuple<int, double> lr_driver::run_lr(
     // Step 3: Copy ΔG from shared memory and broadcast to all ranks.
     // .local() returns a view into shared memory, valid only on node root.
     // All MPI ranks need a valid owning array for lr_thc_comm operations.
+    _Timer.start("LR_BCAST");
     nda::array<ComplexType, 5> DeltaG_local;
     if (include_gw_sigma) {
       DeltaG_local = nda::array<ComplexType, 5>(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
@@ -265,6 +288,7 @@ std::tuple<int, double> lr_driver::run_lr(
       }
       _mpi->comm.broadcast_n(DeltaG_local.data(), DeltaG_local.size(), 0);
     }
+    _Timer.stop("LR_BCAST");
 
     // Step 3a: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
     if (include_gw_sigma) {
@@ -284,22 +308,11 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_PI");
 
-      // Step 3c: Make a fresh copy of W_c(t,q,P,Q) master.
-      // lr_dyson_W_from_Pi_tau consumes both inputs (internally calls tau_to_w with reset=true).
+      // Step 3c-3d: ΔW_c(τ) via lr_dyson_W_from_Pi_tau (in-place, uses cached W_full)
       _Timer.start("LR_GW_W");
-      auto master_grid = opt_dW_tqPQ_master->grid();
-      auto [dim0, dim1, dim2, dim3] = opt_dW_tqPQ_master->global_shape();
-      auto dW_tqPQ_copy = math::nda::make_distributed_array<local_Array_4D_t>(
-          _mpi->comm, master_grid, {dim0, dim1, dim2, dim3});
-      {
-        auto src = opt_dW_tqPQ_master->local();
-        auto dst = dW_tqPQ_copy.local();
-        dst = src;
-      }
-      _mpi->comm.barrier();
-
-      // Step 3d: ΔW_c(τ) = (Z+W_c) · ΔΠ · (Z+W_c) via lr_dyson_W_from_Pi_tau
-      auto dDeltaW_tqPQ = lr_scr_solver->lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_tqPQ_copy, thc);
+      lr_scr_solver->lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, *opt_dW_full_wqPQ, thc);
+      // dDeltaPi_tqPQ now contains ΔW_c(τ) in q-local distribution
+      auto& dDeltaW_tqPQ = dDeltaPi_tqPQ;  // alias for clarity
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_W");
 
@@ -322,6 +335,7 @@ std::tuple<int, double> lr_driver::run_lr(
     }
 
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
+    _Timer.start("LR_ITER_ALG");
     if (iter > 1 && (need_hf || include_gw_sigma)) {
       if (_mpi->node_comm.root()) {
         if (use_diis) {
@@ -350,6 +364,7 @@ std::tuple<int, double> lr_driver::run_lr(
       }
       _mpi->comm.barrier();
     }
+    _Timer.stop("LR_ITER_ALG");
 
     // Compute norms of ΔF and ΔF-ΔF_prev for logging
     double norm_DeltaF = 0.0;
@@ -453,12 +468,15 @@ void lr_driver::print_timers() {
   app_log(2, "\n  LR_DRIVER timers");
   app_log(2, "  -----------------");
   app_log(2, "    Total LR SCF:               {0:.3f} sec", _Timer.elapsed("LR_SCF"));
+  app_log(2, "      - LR Setup:               {0:.3f} sec", _Timer.elapsed("LR_SETUP"));
   app_log(2, "      - LR Dyson (total):       {0:.3f} sec", _Timer.elapsed("LR_DYSON"));
   app_log(2, "      - LR HF (total):          {0:.3f} sec", _Timer.elapsed("LR_HF"));
   app_log(2, "      - LR GW Sigma (total):    {0:.3f} sec", _Timer.elapsed("LR_GW_SIGMA"));
   app_log(2, "      - LR GW Pi (total):       {0:.3f} sec", _Timer.elapsed("LR_GW_PI"));
   app_log(2, "      - LR GW W (total):        {0:.3f} sec", _Timer.elapsed("LR_GW_W"));
-  app_log(2, "      - LR GW Sig T2 (total):   {0:.3f} sec\n", _Timer.elapsed("LR_GW_SIGMA_TERM2"));
+  app_log(2, "      - LR GW Sig T2 (total):   {0:.3f} sec", _Timer.elapsed("LR_GW_SIGMA_TERM2"));
+  app_log(2, "      - LR Bcast (total):       {0:.3f} sec", _Timer.elapsed("LR_BCAST"));
+  app_log(2, "      - LR Iter Alg (total):    {0:.3f} sec\n", _Timer.elapsed("LR_ITER_ALG"));
 }
 
 
