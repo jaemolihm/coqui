@@ -194,32 +194,34 @@ namespace methods {
         }
         _Timer.stop("PI_LR_TREV_PHASE");
 
-        // === Step 3: ΔG^k_{PQ}, G^k_{PQ} → ΔG^R_{PQ}, G^R_{PQ}  [k→R FT] ===
-        //     Input: dDeltaG_skPQ, dG_skPQ. Output: in-place (aliased as _sRPQ)
+        // === Steps 3+4 fused: k→R FT (out-of-place) + Hadamard per spin ===
+        //     ΔΠ^{(1),R}_{PQ}(τ) = Σ_s ΔG^R(s,τ) · conj(G^R(s,β-τ))
         if (nkpts != 1) {
-          _Timer.start("PI_LR_FT_R");
           for (size_t is = 0; is < ns; ++is) {
             auto DeltaG_2D = nda::reshape(DeltaG_skPQ_loc(is, nda::ellipsis{}),
                                            shape_t<2>{nkpts, NP_loc * NQ_loc});
-            nda::blas::gemm(f_Rk, DeltaG_2D, fft_work_PQ);
-            DeltaG_2D = fft_work_PQ;
-
             auto G_2D = nda::reshape(G_skPQ_loc(is, nda::ellipsis{}),
                                          shape_t<2>{nkpts, NP_loc * NQ_loc});
-            nda::blas::gemm(f_Rk, G_2D, fft_work_PQ);
-            G_2D = fft_work_PQ;
-          }
-          _Timer.stop("PI_LR_FT_R");
-        }
+            _Timer.start("PI_LR_FT_R");
+            nda::blas::gemm(f_Rk, DeltaG_2D, fft_out_A);
+            nda::blas::gemm(f_Rk, G_2D, fft_out_B);
+            _Timer.stop("PI_LR_FT_R");
 
-        // === Step 4: ΔΠ^{(1),R}_{PQ}(τ) = Σ_s ΔG^R(s,τ) · conj(G^R(s,β-τ))  [Hadamard with conj] ===
-        //     Input: DeltaG_sRPQ_loc, G_sRPQ_loc. Output: DeltaPi_RPQ
-        _Timer.start("PI_LR_HADPROD");
-        DeltaPi_RPQ = had_prod2(DeltaG_sRPQ_loc(0, nda::ellipsis{}), nda::conj(G_sRPQ_loc(0, nda::ellipsis{})));
-        for (long s = 1; s < ns; ++s) {
-          DeltaPi_RPQ += had_prod2(DeltaG_sRPQ_loc(s, nda::ellipsis{}), nda::conj(G_sRPQ_loc(s, nda::ellipsis{})));
+            _Timer.start("PI_LR_HADPROD");
+            auto A_3D = nda::reshape(fft_out_A, shape_t<3>{nkpts, NP_loc, NQ_loc});
+            auto B_3D = nda::reshape(fft_out_B, shape_t<3>{nkpts, NP_loc, NQ_loc});
+            if (is == 0) DeltaPi_RPQ = had_prod2(A_3D, nda::conj(B_3D));
+            else         DeltaPi_RPQ += had_prod2(A_3D, nda::conj(B_3D));
+            _Timer.stop("PI_LR_HADPROD");
+          }
+        } else {
+          _Timer.start("PI_LR_HADPROD");
+          DeltaPi_RPQ = had_prod2(DeltaG_skPQ_loc(0, nda::ellipsis{}), nda::conj(G_skPQ_loc(0, nda::ellipsis{})));
+          for (long s = 1; s < (long)ns; ++s) {
+            DeltaPi_RPQ += had_prod2(DeltaG_skPQ_loc(s, nda::ellipsis{}), nda::conj(G_skPQ_loc(s, nda::ellipsis{})));
+          }
+          _Timer.stop("PI_LR_HADPROD");
         }
-        _Timer.stop("PI_LR_HADPROD");
 
         // ============================================
         // Term 2: ΔΠ^{(2),R} = G^R(τ) · e^{ip·R} [ΔG^{-R}(β-τ)]^T
@@ -251,41 +253,48 @@ namespace methods {
                                                 MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
         _Timer.stop("PI_LR_PRIM_TO_AUX");
 
-        // === Step 7: G^k → G^R (f_Rk),  DeltaG_trans^k → DeltaG_trans^{-R} (f_minus_Rk) ===
-        //     Input: dG_skPQ, dDeltaG_skPQ. Output: in-place (aliased as _sRPQ)
+        // === Steps 7+8+9 fused: k→R/(-R) FT (out-of-place) + phase + Hadamard per spin ===
+        //     ΔΠ^{(2),R}(τ) += Σ_s G^R(s,τ) · e^{ip·R} [ΔG^{-R}(s,β-τ)]^T
         if (nkpts != 1) {
-          _Timer.start("PI_LR_FT_R");
           for (size_t is = 0; is < ns; ++is) {
             auto G_2D = nda::reshape(G_skPQ_loc(is, nda::ellipsis{}),
                                          shape_t<2>{nkpts, NP_loc * NQ_loc});
-            nda::blas::gemm(f_Rk, G_2D, fft_work_PQ);
-            G_2D = fft_work_PQ;
-
             auto DeltaG_2D = nda::reshape(DeltaG_skPQ_loc(is, nda::ellipsis{}),
                                            shape_t<2>{nkpts, NP_loc * NQ_loc});
-            nda::blas::gemm(f_minus_Rk, DeltaG_2D, fft_work_PQ);
-            DeltaG_2D = fft_work_PQ;
-          }
-          _Timer.stop("PI_LR_FT_R");
-        }
+            _Timer.start("PI_LR_FT_R");
+            nda::blas::gemm(f_Rk, G_2D, fft_out_A);
+            nda::blas::gemm(f_minus_Rk, DeltaG_2D, fft_out_B);
+            _Timer.stop("PI_LR_FT_R");
 
-        // === Step 8: Phase multiply: e^{ip·R} for each R ===
-        //     Input/Output: DeltaG_sRPQ_loc (in-place)
-        _Timer.start("PI_LR_TREV_PHASE");
-        for (long is = 0; is < (long)ns; ++is) {
-          for (long iR = 0; iR < (long)nkpts; ++iR) {
-            DeltaG_sRPQ_loc(is, iR, nda::ellipsis{}) *= phase_ipR(iR);
-          }
-        }
-        _Timer.stop("PI_LR_TREV_PHASE");
+            // Phase multiply on fft_out_B: e^{ip·R} for each R
+            _Timer.start("PI_LR_TREV_PHASE");
+            auto B_3D = nda::reshape(fft_out_B, shape_t<3>{nkpts, NP_loc, NQ_loc});
+            for (long iR = 0; iR < (long)nkpts; ++iR) {
+              B_3D(iR, nda::ellipsis{}) *= phase_ipR(iR);
+            }
+            _Timer.stop("PI_LR_TREV_PHASE");
 
-        // === Step 9: ΔΠ^{(2),R}(τ) += Σ_s G^R(s,τ) · DeltaG_trans^{-R}(s,β-τ)  [Hadamard, no conj] ===
-        //     Input: G_sRPQ_loc, DeltaG_sRPQ_loc. Output: DeltaPi_RPQ (accumulated)
-        _Timer.start("PI_LR_HADPROD");
-        for (long s = 0; s < ns; ++s) {
-          DeltaPi_RPQ += had_prod2(G_sRPQ_loc(s, nda::ellipsis{}), DeltaG_sRPQ_loc(s, nda::ellipsis{}));
+            _Timer.start("PI_LR_HADPROD");
+            auto A_3D = nda::reshape(fft_out_A, shape_t<3>{nkpts, NP_loc, NQ_loc});
+            DeltaPi_RPQ += had_prod2(A_3D, B_3D);
+            _Timer.stop("PI_LR_HADPROD");
+          }
+        } else {
+          // nkpts == 1: phase multiply in-place, then Hadamard
+          _Timer.start("PI_LR_TREV_PHASE");
+          for (long is = 0; is < (long)ns; ++is) {
+            for (long iR = 0; iR < (long)nkpts; ++iR) {
+              DeltaG_skPQ_loc(is, iR, nda::ellipsis{}) *= phase_ipR(iR);
+            }
+          }
+          _Timer.stop("PI_LR_TREV_PHASE");
+
+          _Timer.start("PI_LR_HADPROD");
+          for (long s = 0; s < (long)ns; ++s) {
+            DeltaPi_RPQ += had_prod2(G_skPQ_loc(s, nda::ellipsis{}), DeltaG_skPQ_loc(s, nda::ellipsis{}));
+          }
+          _Timer.stop("PI_LR_HADPROD");
         }
-        _Timer.stop("PI_LR_HADPROD");
 
         // === Step 10: sp_factor · (ΔΠ^{(1)} + ΔΠ^{(2)}) → ΔΠ^q  [R→q FT] ===
         //     Input: DeltaPi_RPQ. Output: DeltaPi_tqPQ_loc
