@@ -217,6 +217,43 @@ namespace methods {
         O_Iab.all_reduce();
       }
 
+      /**
+       * LR primary→aux transposed: computes [O_PQ]^T directly.
+       *
+       * Uses the identity: [O_PQ]^T = conj( X_R @ O^H @ X_L^H )
+       * where X_L = X(k+q) and X_R = X(k) in the standard transform.
+       *
+       * Internally computes O^H = dagger(O), swaps left/right X matrices,
+       * and conjugates the output. Cannot reuse _primary_to_aux_impl because
+       * both the X assignment and the input/output transformations differ.
+       *
+       * Only rank-4 is supported; rank-5 support can be added if needed.
+       * Caller passes the original O (not O^H). Returns [O_PQ]^T directly.
+       */
+      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
+      static void primary_to_aux_transposed(int ip, int iq,
+                                 const Array_primary_t &O_Iab,
+                                 memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
+                                 THC_ERI auto& thc,
+                                 nda::ArrayOfRank<1> auto const& kp_to_ibz,
+                                 nda::ArrayOfRank<1> auto const& kp_trev,
+                                 nda::ArrayOfRank<1> auto const& kpq_map) {
+        constexpr int rank = nda::get_rank<Array_primary_t>;
+        static_assert(rank == 4,
+                      "lr_thc_comm::primary_to_aux_transposed: only rank-4 supported");
+
+        auto P_offset = O_IPQ.origin()[2];
+        auto Q_offset = O_IPQ.origin()[3];
+
+        auto O_IPQ_loc = O_IPQ.local();
+        utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
+                     "lr_thc_comm::primary_to_aux_transposed: Does not support mpi distributed along k-axis.");
+
+        _primary_to_aux_transposed_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
+                             kp_to_ibz, kp_trev, kpq_map,
+                             1, 0, 1, P_offset, Q_offset);
+      }
+
     private:
       /**
        * LR primary→aux impl. Matches thc_solver_comm::_primary_to_aux_impl
@@ -291,6 +328,87 @@ namespace methods {
           // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
           nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
         }
+      }
+
+      /**
+       * LR primary→aux transposed impl.
+       * Computes [O_PQ]^T = conj( X_R @ O^H @ X_L^H ) by:
+       *   1. Using swapped X: left=X(k), right=X(k+q), with O^H computed on-the-fly
+       *   2. Conjugating the output
+       */
+      template<nda::Array Array_primary_t, nda::Array Array_aux_t>
+      static void _primary_to_aux_transposed_impl(int ip, int iq,
+                                       const Array_primary_t& O_tskab,
+                                       Array_aux_t& O_tskPQ,
+                                       THC_ERI auto& thc,
+                                       nda::ArrayOfRank<1> auto const& kp_map,
+                                       nda::ArrayOfRank<1> auto const& kp_trev,
+                                       nda::ArrayOfRank<1> auto const& kpq_map,
+                                       long nbatch,
+                                       int rank, int comm_size,
+                                       long P_offset = 0, long Q_offset = 0) {
+        static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
+                      "lr_thc_comm::_primary_to_aux_transposed_impl: Rank mismatch");
+        static_assert(nda::get_rank<Array_primary_t> >= 4,
+                      "lr_thc_comm::_primary_to_aux_transposed_impl: Rank < 4");
+
+        decltype(nda::range::all) all;
+        constexpr int N = nda::get_rank<Array_primary_t>;
+        size_t ns         = O_tskab.shape(N-4);
+        size_t nkpts_ibz  = O_tskab.shape(N-3);
+        size_t nbnd       = O_tskab.shape(N-2);
+        size_t nkpts      = O_tskPQ.shape(N-3);
+        size_t NP_loc     = O_tskPQ.shape(N-2);
+        size_t NQ_loc     = O_tskPQ.shape(N-1);
+        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NP_loc+P_offset > thc.Np()");
+        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NQ_loc+Q_offset > thc.Np()");
+
+        // dim_i = (t, s) or (s)
+        size_t dim_i = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-3, (size_t)1, std::multiplies<>{});
+        utils::check(dim_i == std::accumulate(O_tskab.shape().begin(), O_tskab.shape().end()-3, (size_t)1, std::multiplies<>{}),
+                     "lr_thc_comm::_primary_to_aux_transposed_impl: dim_i mismatched");
+
+        auto O_ikPQ_4D = nda::reshape(O_tskPQ, shape_t<4>{dim_i, nkpts, NP_loc, NQ_loc});
+        auto O_ikab_4D = nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd});
+
+        if (nbatch < 0) nbatch = utils::find_min_col(comm_size, dim_i*nkpts);
+        utils::check(comm_size % nbatch == 0, "lr_thc_comm::_primary_to_aux_transposed_impl: comm_size % nbatch != 0");
+        auto [origin, end] = itertools::chunk_range(0, NP_loc, nbatch, rank % nbatch);
+        int batch_size = end - origin;
+        int n_large_batch = NP_loc - nbatch * (NP_loc / nbatch);
+        int offset = (rank % nbatch < n_large_batch)? 0 : n_large_batch;
+
+        nda::array<ComplexType, 2> Ask_Pb(batch_size, nbnd);
+        nda::matrix<ComplexType> O_H_slice(nbnd, nbnd);
+
+        // Transform with swapped X: left=X(k), right=X(k+q), input=O^H
+        for (size_t ikP = rank; ikP < dim_i*nkpts*nbatch; ikP += comm_size) {
+          size_t i = ikP / (nkpts*nbatch);
+          size_t s = i % ns;
+          size_t k = (ikP / nbatch) % nkpts;
+          size_t PP = ikP % nbatch;
+          nda::range X_P_rng(PP*batch_size + offset + P_offset, (PP+1)*batch_size + offset + P_offset);
+          nda::range O_P_rng(PP*batch_size + offset, (PP+1)*batch_size + offset);
+          nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
+
+          // === Swapped X: left=X(k), right=X(k+q) ===
+          auto Xsk_Pa_l = thc.X(s, ip, k);
+          auto Xsk_Pa_r = thc.X(s, iq, kpq_map(k));
+
+          // Compute O^H = dagger(O) on-the-fly for this (i, k) slice
+          O_H_slice = nda::dagger(O_ikab_4D(i, kp_map(k), all, all));
+
+          if(kp_trev(k)) {
+            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_H_slice), Ask_Pb);
+          } else {
+            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_H_slice, Ask_Pb);
+          }
+
+          nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
+        }
+
+        // Conjugate output
+        O_ikPQ_4D = nda::conj(O_ikPQ_4D);
       }
 
       /**
