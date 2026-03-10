@@ -484,16 +484,16 @@ std::tuple<int, double> lr_driver::run_lr(
 void lr_driver::print_timers() {
   app_log(2, "\n  LR_DRIVER timers");
   app_log(2, "  -----------------");
-  app_log(2, "    Total LR SCF:               {0:.3f} sec", _Timer.elapsed("LR_SCF"));
-  app_log(2, "      - LR Setup:               {0:.3f} sec", _Timer.elapsed("LR_SETUP"));
-  app_log(2, "      - LR Dyson (total):       {0:.3f} sec", _Timer.elapsed("LR_DYSON"));
-  app_log(2, "      - LR HF (total):          {0:.3f} sec", _Timer.elapsed("LR_HF"));
-  app_log(2, "      - LR GW Sigma (total):    {0:.3f} sec", _Timer.elapsed("LR_GW_SIGMA"));
-  app_log(2, "      - LR GW Pi (total):       {0:.3f} sec", _Timer.elapsed("LR_GW_PI"));
-  app_log(2, "      - LR GW W (total):        {0:.3f} sec", _Timer.elapsed("LR_GW_W"));
-  app_log(2, "      - LR GW Sig T2 (total):   {0:.3f} sec", _Timer.elapsed("LR_GW_SIGMA_TERM2"));
-  app_log(2, "      - LR Bcast (total):       {0:.3f} sec", _Timer.elapsed("LR_BCAST"));
-  app_log(2, "      - LR Iter Alg (total):    {0:.3f} sec\n", _Timer.elapsed("LR_ITER_ALG"));
+  app_log(2, "    Total LR SCF:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SCF"), _Timer.number_of_calls("LR_SCF"));
+  app_log(2, "      - LR Setup:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP"), _Timer.number_of_calls("LR_SETUP"));
+  app_log(2, "      - LR Dyson (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
+  app_log(2, "      - LR HF (total):          {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
+  app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA"), _Timer.number_of_calls("LR_GW_SIGMA"));
+  app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_PI"), _Timer.number_of_calls("LR_GW_PI"));
+  app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W"), _Timer.number_of_calls("LR_GW_W"));
+  app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
+  app_log(2, "      - LR Bcast (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_BCAST"), _Timer.number_of_calls("LR_BCAST"));
+  app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
 }
 
 

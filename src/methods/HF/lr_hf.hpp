@@ -108,12 +108,12 @@ public:
   inline void print_timers() {
     app_log(2, "\n  LR_HF timers");
     app_log(2, "  ------------");
-    app_log(2, "    LR Fock eval:                   {0:.3f} sec", _Timer.elapsed("LR_HF"));
-    app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("ALLOC"));
-    app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("PRIM_TO_AUX"));
-    app_log(2, "      - Coulomb (J):                {0:.3f} sec", _Timer.elapsed("COULOMB"));
-    app_log(2, "      - Exchange (K):               {0:.3f} sec", _Timer.elapsed("EXCHANGE"));
-    app_log(2, "      - Aux->Primary:               {0:.3f} sec\n", _Timer.elapsed("AUX_TO_PRIM"));
+    app_log(2, "    LR Fock eval:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
+    app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("ALLOC"), _Timer.number_of_calls("ALLOC"));
+    app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PRIM_TO_AUX"), _Timer.number_of_calls("PRIM_TO_AUX"));
+    app_log(2, "      - Coulomb (J):                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("COULOMB"), _Timer.number_of_calls("COULOMB"));
+    app_log(2, "      - Exchange (K):               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EXCHANGE"), _Timer.number_of_calls("EXCHANGE"));
+    app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
   }
 
   // Accessors

@@ -124,12 +124,12 @@ namespace methods {
       app_log(2, "\n  LR_GW timers");
       app_log(2, "  -------------");
       if (_Timer.has("EVALUATE_SIGMA_R")) {
-        app_log(2, "    LR Sigma (R-space):             {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
-        app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC"));
-        app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
-        app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
-        app_log(2, "      - Hadamard product:           {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
-        app_log(2, "      - Aux->Primary:               {0:.3f} sec", _Timer.elapsed("SIGMA_AUX_TO_PRIM"));
+        app_log(2, "    LR Sigma (R-space):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
+        app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
+        app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
+        app_log(2, "      - FT (k<->R):                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
+        app_log(2, "      - Hadamard product:           {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
+        app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
       }
       app_log(2, "");
     }

@@ -86,15 +86,15 @@ namespace methods {
     inline void print_timers() {
       app_log(2, "\n  LR_RPA_PI timers");
       app_log(2, "  -----------------");
-      app_log(2, "    LR Pi eval:                     {0:.3f} sec", _Timer.elapsed("EVALUATE_LR_PI"));
-      app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("PI_LR_ALLOC"));
+      app_log(2, "    LR Pi eval:                     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_LR_PI"), _Timer.number_of_calls("EVALUATE_LR_PI"));
+      app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_ALLOC"), _Timer.number_of_calls("PI_LR_ALLOC"));
       if (_Timer.has("PI_LR_PRECOMPUTE_TRANS") && _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS") > 0) {
-        app_log(2, "      - Precompute ΔG_trans:        {0:.3f} sec", _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS"));
+        app_log(2, "      - Precompute ΔG_trans:        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS"), _Timer.number_of_calls("PI_LR_PRECOMPUTE_TRANS"));
       }
-      app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("PI_LR_PRIM_TO_AUX"));
-      app_log(2, "      - Trev unfold + phase:        {0:.3f} sec", _Timer.elapsed("PI_LR_TREV_PHASE"));
-      app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("PI_LR_FT_R"));
-      app_log(2, "      - Hadamard product:           {0:.3f} sec\n", _Timer.elapsed("PI_LR_HADPROD"));
+      app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_PRIM_TO_AUX"), _Timer.number_of_calls("PI_LR_PRIM_TO_AUX"));
+      app_log(2, "      - Trev unfold + phase:        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_TREV_PHASE"), _Timer.number_of_calls("PI_LR_TREV_PHASE"));
+      app_log(2, "      - FT (k<->R):                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_FT_R"), _Timer.number_of_calls("PI_LR_FT_R"));
+      app_log(2, "      - Hadamard product:           {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("PI_LR_HADPROD"), _Timer.number_of_calls("PI_LR_HADPROD"));
     }
 
     private:
