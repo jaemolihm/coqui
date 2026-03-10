@@ -195,9 +195,9 @@ inline long find_q_ibz_index(nda::ArrayOfRank<2> auto const& kpts_crys,
   return -1; // unreachable
 }
 
-/// τ-distribution: pgrid = {tpools, 1, np_P, np_Q}
-/// Distributes over τ and PQ. q-axis undivided.
-inline auto lr_W_tau_dist(long nproc, long nt, long NP)
+/// q-local distribution: pgrid = {tpools, 1, np_P, np_Q}
+/// q-axis is local (undivided). Distributes over τ and PQ.
+inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
     -> std::tuple<std::array<long,4>, std::array<long,4>>
 {
   long tpools = find_proc_grid_max_npools(nproc, nt, 0.2);
@@ -215,10 +215,10 @@ inline auto lr_W_tau_dist(long nproc, long nt, long NP)
   return {pgrid, bsize};
 }
 
-/// q-distribution: pgrid = {1, qpools, np_P, np_Q}
-/// Distributes over q and PQ. First axis (τ or ω) undivided.
+/// τ-local distribution: pgrid = {1, qpools, np_P, np_Q}
+/// First axis (τ or ω) is local (undivided). Distributes over q and PQ.
 /// Used as intermediate distribution for tau_to_w / lr_dyson_W_in_place / w_to_tau.
-inline auto lr_W_q_dist(long nproc, long nq, long NP)
+inline auto lr_W_tau_local_dist(long nproc, long nq, long NP)
     -> std::tuple<std::array<long,4>, std::array<long,4>>
 {
   long np = nproc;

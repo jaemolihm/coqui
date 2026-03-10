@@ -1035,7 +1035,7 @@ auto load_W_and_eps_inv_head(
     nda::h5_read(grp, "W_qtPQ", W_qtPQ);
   }
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
-  auto [tq_pgrid, tq_bsize] = utils::lr_W_tau_dist(mpi.comm.size(), nt_half, NP);
+  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
   std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
   std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
 
@@ -1532,7 +1532,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   dW_qtPQ.reset();
 
   // Convert ΔΠ regular array → distributed array (τ-dist)
-  auto [pi_pgrid, pi_bsize] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half, NP);
+  auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
   auto dDeltaPi_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_bsize);
   {
@@ -1688,7 +1688,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // Distribute DeltaW_qtPQ across MPI ranks (τ-dist with axes swapped for (q,t))
   long NP_dw = DeltaW_qtPQ.shape()[2];
   long nt_half_dw = DeltaW_qtPQ.shape()[1];
-  auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half_dw, NP_dw);
+  auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP_dw);
   std::array<long,4> qt_pgrid_dw = {tq_pgrid_dw[1], tq_pgrid_dw[0], tq_pgrid_dw[2], tq_pgrid_dw[3]};
   std::array<long,4> qt_bsize_dw = {tq_bsize_dw[1], tq_bsize_dw[0], tq_bsize_dw[2], tq_bsize_dw[3]};
   using local_Array_4D_t = nda::array<ComplexType, 4>;

@@ -153,7 +153,7 @@ void lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau(
   lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ);
 
   // FT back: omega → tau, output in q-local (τ-dist) distribution
-  auto [q_pgrid, q_bsize] = utils::lr_W_tau_dist(nproc, nt_half, NP);
+  auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
   dDeltaPi_tqPQ = scr.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true);
   _Timer.stop("LR_W_FT_W_TO_TAU");

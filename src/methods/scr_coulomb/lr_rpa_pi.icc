@@ -91,7 +91,7 @@ namespace methods {
                    DeltaG_tskij.shape(0), DeltaG_tskij.shape(1), DeltaG_tskij.shape(2), DeltaG_tskij.shape(3), DeltaG_tskij.shape(4));
 
       // τ-dist: distribute over τ and PQ
-      auto [tau_pgrid, tau_bsize] = utils::lr_W_tau_dist(mpi->comm.size(), nt_half, Np);
+      auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
       auto [tpools_v, _q, np_P, np_Q] = tau_pgrid;
 
       app_log(1, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
