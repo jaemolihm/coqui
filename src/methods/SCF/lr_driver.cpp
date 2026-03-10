@@ -22,6 +22,7 @@
 #include <cmath>
 
 #include "methods/SCF/lr_driver.hpp"
+#include "methods/SCF/lr_precompute.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
@@ -175,6 +176,15 @@ std::tuple<int, double> lr_driver::run_lr(
     // dW_tqPQ is consumed (reset) by compute_W_full_omega
   }
 
+  // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT per iteration)
+  auto sG_wskij = lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT());
+  _lr_dyson.set_cached_G_omega(&sG_wskij);
+
+  // Precompute dN/dμ if needed for fix_density mode at q=0
+  if (fix_density && _lr_dyson.is_q_gamma()) {
+    _lr_dyson.compute_dN_dmu();
+  }
+
   // Initialize DIIS if requested
   if (use_diis) {
     _lr_diis = std::make_unique<lr_diis>(
@@ -238,7 +248,7 @@ std::tuple<int, double> lr_driver::run_lr(
     // ΔG = G_{k+q} · [ΔH0 + ΔF + ΔΣ - Δμ·S] · G_k
     _Timer.start("LR_DYSON");
     Delta_mu = _lr_dyson.solve_lr_dyson(
-        sDeltaG_tskij, sDeltaDm_skij, sG_tskij, sDeltaH0_skij,
+        sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, sDeltaSigma_tskij,
         fix_density, Delta_mu);
     _Timer.stop("LR_DYSON");

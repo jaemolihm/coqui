@@ -39,6 +39,7 @@
 #include "methods/SCF/scf_common.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
+#include "methods/SCF/lr_precompute.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 
 namespace lr_dyson_tests {
@@ -156,8 +157,12 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
+    // Precompute G(iω) in shared memory and pass to lr_dyson before solving
+    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    lr_dys.set_cached_G_omega(&sG_wskij);
+
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
-    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, G, DeltaH0, DeltaF,
+    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
     context->comm.barrier();
 

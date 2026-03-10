@@ -74,9 +74,29 @@ public:
   ~lr_dyson() {}
 
   /**
+   * @brief Set cached G(iω) for the LR Dyson equation
+   *
+   * Must be called before solve_lr_dyson. The caller retains ownership;
+   * the pointed-to array must outlive all solve_lr_dyson calls.
+   *
+   * @param G_wskij - [INPUT] Pointer to precomputed shared G(iω) (nw, ns, nk, nb, nb)
+   */
+  void set_cached_G_omega(const sArray_t<Array_view_5D_t>* G_wskij) {
+    // Invalidate dN/dμ cache when G pointer changes (dN/dμ depends on G)
+    if (_cached_G_wskij != G_wskij) {
+      _dN_dmu_cached = false;
+      _cached_dN_dmu = 0.0;
+    }
+    _cached_G_wskij = G_wskij;
+  }
+
+  /**
    * @brief Solve full LR Dyson equation
    *
    * Computes: ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)
+   *
+   * Requires: set_cached_G_omega() must have been called first.
+   * For fix_density mode at q=0: compute_dN_dmu() must have been called first.
    *
    * Two modes are available:
    * - fix_density=false (default): Use the provided Delta_mu value
@@ -86,7 +106,6 @@ public:
    *
    * @param sDeltaG_tskij     - [OUTPUT] LR Green's function (nt, ns, nk, nb, nb)
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
-   * @param sG_tskij          - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix (ns, nk, nb, nb)
    * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
@@ -94,12 +113,11 @@ public:
    * @param Delta_mu          - [INPUT] Chemical potential shift (used only if fix_density=false)
    * @return The Δμ value used (computed if fix_density=true, otherwise the input value)
    */
-  template<typename DeltaG_t, typename DeltaDm_t, typename G_t, typename DeltaH0_t,
+  template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
   double solve_lr_dyson(
       DeltaG_t& sDeltaG_tskij,
       DeltaDm_t& sDeltaDm_skij,
-      const G_t& sG_tskij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
@@ -132,22 +150,22 @@ public:
   double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
 
   /**
-   * @brief Compute dN/dμ from unperturbed Green's function (q=0 only)
+   * @brief Compute dN/dμ from cached G(iω) (q=0 only)
    *
    * Computes: dN/dμ = Tr[S · (G·S·G)(τ=β⁻)] = Σ_k w_k Tr[S(k) · G(k)·S(k)·G(k)(τ=β⁻)]
    *
    * This is used to compute Δμ via: Δμ = -ΔN_0 / (dN/dμ)
    *
    * NOTE: This quantity depends only on the unperturbed Green's function G, NOT on
-   * any LR quantities (ΔH0, ΔF, ΔΣ). It can be precomputed once and reused for all
-   * perturbations at the same reference point.
+   * any LR quantities (ΔH0, ΔF, ΔΣ). The result is cached internally. Subsequent
+   * calls return the cached value without recomputation.
+   *
+   * Requires: set_cached_G_omega() must have been called first.
    *
    * @throws std::runtime_error if q≠0
-   * @param sG_tskij   - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @return dN/dμ, the density of states at the Fermi level
    */
-  template<typename G_t>
-  double compute_dN_dmu(const G_t& sG_tskij);
+  double compute_dN_dmu();
 
   /**
    * @brief Compute Δμ to enforce particle conservation ΔN = 0 (q=0 only)
@@ -164,18 +182,16 @@ public:
    *
    * @throws std::runtime_error if q≠0
    * @param sDeltaDm_skij   - [INPUT] LR density matrix at Δμ=0
-   * @param sG_tskij        - [INPUT] Unperturbed Green's function
    * @return Δμ value that enforces ΔN=0
    */
-  template<typename DeltaDm_t, typename G_t>
-  double compute_Delta_mu(const DeltaDm_t& sDeltaDm_skij,
-                          const G_t& sG_tskij);
+  template<typename DeltaDm_t>
+  double compute_Delta_mu(const DeltaDm_t& sDeltaDm_skij);
 
   inline void print_timers() {
     app_log(2, "\n  LR_DYSON timers");
     app_log(2, "  ----------------");
     app_log(2, "    LR Dyson eqn:                   {0:.3f} sec", _Timer.elapsed("LR_DYSON"));
-    app_log(2, "      - G(t)->G(w):                 {0:.3f} sec", _Timer.elapsed("G_TAU_TO_W"));
+    app_log(2, "      - ΔΣ(τ)->ΔΣ(iω):              {0:.3f} sec", _Timer.elapsed("LR_DYSON_TAU_TO_W"));
     app_log(2, "      - LR Dyson loop:              {0:.3f} sec", _Timer.elapsed("LR_DYSON_LOOP"));
     app_log(2, "      - Gather:                     {0:.3f} sec\n", _Timer.elapsed("LR_DYSON_GATHER"));
   }
@@ -187,11 +203,11 @@ public:
 
 private:
   // Internal implementation of the LR Dyson solve (single pass with given Δμ)
-  template<typename DeltaG_t, typename G_t, typename DeltaH0_t,
+  // Uses _cached_G_wskij for G(iω); caller must ensure cache is populated.
+  template<typename DeltaG_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
   void solve_lr_dyson_impl(
       DeltaG_t& sDeltaG_tskij,
-      const G_t& sG_tskij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij,
@@ -210,6 +226,13 @@ private:
   nda::array<double, 1> _q_vec;     // Perturbation wavevector (3,)
   nda::array<int, 1> _kpq_map;      // k → k+q index mapping (nkpts,)
   bool _is_q_gamma;                 // True if q is approximately zero
+
+  // Cached G(iω) in shared memory — set via set_cached_G_omega().
+  // Non-owning pointer; caller (lr_driver) owns the array.
+  const sArray_t<Array_view_5D_t>* _cached_G_wskij = nullptr;
+  // Cached dN/dμ — populated by first call to compute_dN_dmu()
+  double _cached_dN_dmu = 0.0;
+  bool _dN_dmu_cached = false;
 
   utils::TimerManager _Timer;
 };
