@@ -153,7 +153,6 @@ std::tuple<int, double> lr_driver::run_lr(
     lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
     lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT());
   }
-
   // For full mode: copy G to local array once (reused every iteration),
   // and precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_SETUP");

@@ -47,9 +47,10 @@ namespace methods {
      *
      * Two terms:
      *   Term 1 (evaluate_sigma_DeltaG): -ΔG ⊙ W_c using lr_thc_comm
-     *     for asymmetric X(k+q_pert)/X(k) transforms.
-     *   Term 2 (evaluate_sigma_DeltaW): -G ⊙ ΔW using standard thc_solver_comm
-     *     (G is unperturbed, so symmetric transforms are correct).
+     *     with kpq_map for both primary_to_aux (ΔG) and aux_to_primary (ΔΣ).
+     *   Term 2 (evaluate_sigma_DeltaW): -G ⊙ ΔW using lr_thc_comm
+     *     with identity kpq_map for primary_to_aux (G is unperturbed)
+     *     and _kpq_map for aux_to_primary (ΔΣ has k+q structure).
      *
      * Divergence correction is not yet implemented for LR GW. The q→0
      * divergence is 1/q² (same as standard GW), but the correction requires
@@ -98,10 +99,10 @@ namespace methods {
           THC_ERI auto& thc);
 
       /**
-       * Term 2: ΔΣ = -G ⊙ ΔW using standard thc_solver_comm transforms
+       * Term 2: ΔΣ = -G ⊙ ΔW
        *
-       * G is unperturbed, so standard (symmetric) THC transforms are correct.
-       * Reuses _gw.eval_Sigma_all() by passing ΔW in place of W.
+       * Uses eval_DeltaSigma_Rspace with identity kpq_map for G (unperturbed)
+       * and _kpq_map for ΔΣ (which has k+q structure).
        * TODO: Divergence correction not yet implemented (see class docstring).
        *
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
@@ -123,17 +124,12 @@ namespace methods {
       app_log(2, "\n  LR_GW timers");
       app_log(2, "  -------------");
       if (_Timer.has("EVALUATE_SIGMA_R")) {
-        app_log(2, "    LR Sigma -DG*W (R-space):       {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
+        app_log(2, "    LR Sigma (R-space):             {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
         app_log(2, "      - Alloc:                      {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC"));
-        app_log(2, "      - Transpose:                  {0:.3f} sec", _Timer.elapsed("SIGMA_TRANSPOSE"));
         app_log(2, "      - Primary->Aux:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
         app_log(2, "      - FT (k<->R):                 {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
         app_log(2, "      - Hadamard product:           {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
         app_log(2, "      - Aux->Primary:               {0:.3f} sec", _Timer.elapsed("SIGMA_AUX_TO_PRIM"));
-      }
-      if (_Timer.has("EVALUATE_SIGMA_DELTAW")) {
-        app_log(2, "    LR Sigma -G*DW (via gw_t):      {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_DELTAW"));
-        _gw.print_eval_sigma_timers();
       }
       app_log(2, "");
     }
@@ -144,22 +140,6 @@ namespace methods {
       bool _kpq_map_initialized = false;
       nda::array<long, 1> _kpq_map;  // k → k+q_pert mapping (full BZ); identity for q_pert=0
       utils::TimerManager _Timer;
-
-      // Cached work arrays for eval_DeltaSigma_Rspace (Opts 1+2).
-      // 3 distributed 5D arrays + 1 FT buffer, allocated once and reused across calls.
-      // Previously freed after each call; now kept mapped to avoid repeated MPI_Win_allocate_shared.
-      using darray_5D_host_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 5>, mpi3::communicator>;
-      std::optional<darray_5D_host_t> _d_sktPQ_1;   // DeltaG in (s,k,t,P,Q) layout
-      std::optional<darray_5D_host_t> _d_tskPQ;      // shared transpose buf (t,s,k,P,Q)
-      std::optional<darray_5D_host_t> _d_sktPQ_2;   // DeltaSigma in (s,k,t,P,Q) layout
-      nda::matrix<ComplexType> _ft_buffer;            // (nk, nt_loc*NP_loc*NQ_loc)
-
-      /// Lazy-init cached work arrays. Allocates on first call, reuses after.
-      template<typename mpi_context_t>
-      void _ensure_work_arrays(mpi_context_t& mpi,
-                               std::array<long, 4> grid, std::array<long, 5> global_shape,
-                               std::array<long, 4> block_size_4d,
-                               long nkpts, long ft_cols);
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(const auto& thc) {
@@ -175,22 +155,26 @@ namespace methods {
       }
 
       /**
-       * R-space convolution — single code path for all q_pert.
-       * Adapted from gw_t::eval_Sigma_all_Rspace (thc_gw.icc:67-213).
+       * R-space convolution with per-tau loop — single code path for all q_pert.
+       *
+       * Processes one tau point at a time using rank-4 (ns,nk,NP,NQ) work arrays,
+       * eliminating the transpose step and reducing memory by nt_half×.
+       * W is never modified; each tau slice is FT'd to a local buffer.
        *
        * Changes from standard eval_Sigma_all_Rspace:
-       * 1. Step 1: lr_thc_comm::primary_to_aux (rank-5) with _kpq_map
-       * 2. Steps 2-4: Identical (k→R FFT, Hadamard, R→k FFT)
-       * 3. Step 5: lr_thc_comm::aux_to_primary (rank-5) with _kpq_map
+       * 1. primary_to_aux uses lr_thc_comm rank-4 path with _kpq_map
+       * 2. k→R FFT, Hadamard, R→k FFT all operate on rank-4 arrays
+       * 3. aux_to_primary uses lr_thc_comm rank-4 path with _kpq_map
        */
-      template<bool Winp_in_Rspace, bool Wout_in_Rspace,
-          nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
+      template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
           typename communicator_t>
       void eval_DeltaSigma_Rspace(const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
                                   memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
                                   sArray_t<Array_5D_t>& sDeltaSigma_tskij,
                                   THC_ERI auto& thc,
-                                  bool minus_t);
+                                  bool minus_t,
+                                  const nda::array<long, 1>& kpq_map_G,
+                                  const nda::array<long, 1>& kpq_map_Sigma);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†
