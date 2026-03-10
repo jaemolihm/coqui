@@ -54,11 +54,17 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   auto [nw_loc, nq_loc, NP_loc, NQ_loc] = dW_c_wqPQ.local_shape();
   auto [w_origin, q_origin, P_origin, Q_origin] = dW_c_wqPQ.origin();
 
-  for (long iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
-    long iq = q_origin + iq_loc;
+  // thc.Z(iq) is collective: internally loops over all ranks with broadcast+gather.
+  // All ranks must call Z() the same number of times. Since q is distributed
+  // (some ranks have more local q-points than others), loop over all global
+  // q-points so every rank participates in every Z() call.
+  for (long iq = 0; iq < nqpts; ++iq) {
     auto Z_PQ = thc.Z(iq);
-    for (long iw = 0; iw < nw_loc; ++iw) {
-      W_c_loc(iw, iq_loc, nda::range::all, nda::range::all) += Z_PQ;
+    long iq_loc = iq - q_origin;
+    if (iq_loc >= 0 && iq_loc < nq_loc) {
+      for (long iw = 0; iw < nw_loc; ++iw) {
+        W_c_loc(iw, iq_loc, nda::range::all, nda::range::all) += Z_PQ;
+      }
     }
   }
 
