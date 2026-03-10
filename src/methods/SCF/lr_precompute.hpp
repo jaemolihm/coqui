@@ -23,9 +23,14 @@
 #define COQUI_LR_PRECOMPUTE_HPP
 
 #include "IO/app_loggers.h"
+#include "nda/blas.hpp"
+#include "numerics/distributed_array/nda.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/shared_array/nda.hpp"
+#include "utilities/kpoint_utils.hpp"
+#include "utilities/lr_utils.hpp"
 #include "utilities/mpi_context.h"
+#include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
 
@@ -63,6 +68,72 @@ auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
   mpi.comm.barrier();
 
   return sG_wskij;
+}
+
+/**
+ * @brief Transpose W from (q,t,P,Q) to (t,R,P,Q) with in-place q→R Fourier transform.
+ *
+ * Input: dW_qtPQ with (q,t,P,Q) layout, pgrid (1,tpools,np_P,np_Q).
+ * Returns: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+ *
+ * Performs (q,t)→(t,q) transpose via transpose_axes_01, then in-place q→R FT.
+ * For nkpts == 1 (Gamma-only), no FT is needed (q-space == R-space).
+ *
+ * @param dW_qtPQ  - [INPUT] W_c in THC basis, shape (nkpts, nt_half, NP, NQ).
+ * @param thc      - [INPUT] THC-ERI handler (provides MF for Qpts, lattv, kp_grid)
+ * @return dW_tRPQ with (t,R,P,Q) layout
+ */
+template<nda::MemoryArray Array_4D_t, typename communicator_t>
+auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+                          THC_ERI auto& thc) {
+  auto MF = thc.MF();
+  auto mpi = thc.mpi();
+
+  // Transpose (q,t) → (t,q)
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
+
+  auto [nt_half, nkpts, NP, NQ] = dW_tqPQ.global_shape();
+  auto [nt_loc, nk_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
+
+  if (nkpts == 1) {
+    app_log(2, "lr_precompute_W_tRPQ: nkpts=1 (Gamma-only), no transform needed");
+    return dW_tqPQ;
+  }
+
+  app_log(2, "lr_precompute_W_tRPQ: transpose (q,t)->(t,q) + in-place q->R transform on W");
+  app_log(2, "  global: ({}, {}, {}, {}), local: ({}, {}, {}, {})",
+          nt_half, nkpts, NP, NQ, nt_loc, nk_loc, NP_loc, NQ_loc);
+
+  // Compute f_qR Fourier coefficients
+  using sArray_2D_t = math::shm::shared_array<nda::array_view<ComplexType, 2>>;
+  sArray_2D_t sf_qR(*mpi, {nkpts, nkpts});
+  utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts),
+                             MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_qR);
+  auto f_qR = sf_qR.local();
+
+  // Work buffers
+  nda::array<ComplexType, 3> W_buf_qPQ(nkpts, NP_loc, NQ_loc);
+  nda::matrix<ComplexType> W_buf_RPQ(nkpts, NP_loc * NQ_loc);
+
+  // Transform each local tau slice in-place
+  for (long it_local = 0; it_local < nt_loc; ++it_local) {
+    // Copy W(it_local, q, :, :) to contiguous buffer
+    for (long iq = 0; iq < nkpts; ++iq)
+      W_buf_qPQ(iq, nda::ellipsis{}) = dW_tqPQ.local()(it_local, iq, nda::ellipsis{});
+
+    // gemm: W_RPQ = f_qR @ W_qPQ
+    auto W_2D_view = nda::reshape(W_buf_qPQ, std::array<long, 2>{nkpts, NP_loc * NQ_loc});
+    nda::blas::gemm(f_qR, W_2D_view, W_buf_RPQ);
+
+    // Copy back to dW from gemm output (now stores W(t,R,P,Q))
+    auto W_RPQ_3D = nda::reshape(W_buf_RPQ, std::array<long, 3>{nkpts, NP_loc, NQ_loc});
+    for (long iR = 0; iR < nkpts; ++iR)
+      dW_tqPQ.local()(it_local, iR, nda::ellipsis{}) = W_RPQ_3D(iR, nda::ellipsis{});
+  }
+
+  mpi->comm.barrier();
+  app_log(2, "lr_precompute_W_tRPQ: done");
+  return dW_tqPQ;
 }
 
 } // namespace methods

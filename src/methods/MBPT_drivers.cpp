@@ -43,6 +43,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_driver.hpp"
+#include "methods/SCF/lr_precompute.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/embedding/embed_t.h"
 #include "methods/embedding/embed_eri_t.h"
@@ -1282,13 +1283,17 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   // Load W and eps_inv_head using helper
   auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
+  // Pre-transform W to R-space: transpose (q,t)→(t,R), with q→R FT
+  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_qtPQ, thc);
+  dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
+
   // Create lr_gw solver and compute ΔΣ
   solvers::lr_gw lr(& ft, q_pert);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, dW_qtPQ, thc);
+  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, dW_tRPQ, thc);
   mpi->comm.barrier();
 
   // Copy result

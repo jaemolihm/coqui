@@ -176,6 +176,14 @@ std::tuple<int, double> lr_driver::run_lr(
     // dW_tqPQ is consumed (reset) by compute_W_full_omega
   }
 
+  // Precompute W in R-space: transpose (q,t)→(t,R), with q→R FT.
+  // Result: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+  std::optional<dW_t> opt_dW_tRPQ;
+  if (include_gw_sigma) {
+    opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_qtPQ, thc));
+    dW_qtPQ->reset();  // free (q,t,P,Q) memory; no longer needed
+  }
+
   // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT per iteration)
   auto sG_wskij = lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT());
   _lr_dyson.set_cached_G_omega(&sG_wskij);
@@ -303,7 +311,7 @@ std::tuple<int, double> lr_driver::run_lr(
     if (include_gw_sigma) {
       _Timer.start("LR_GW_SIGMA");
       lr_gw_solver->evaluate_sigma_DeltaG(
-          *sDeltaSigma_tskij, DeltaG_local, *dW_qtPQ, thc);
+          *sDeltaSigma_tskij, DeltaG_local, *opt_dW_tRPQ, thc);
       _Timer.stop("LR_GW_SIGMA");
       _mpi->comm.barrier();
     }

@@ -85,17 +85,17 @@ namespace methods {
        *
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param DeltaG_tskij      - [INPUT] LR Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dW_qtPQ           - [INPUT] Screened interaction in THC basis (nkpts, nt_half, NP, NP)
-       *   Axis order: (q, t, P, Q).
-       *   Distribution: τ-dist with axes swapped, pgrid = (1, tpools, np_P, np_Q).
-       *   q-axis (axis 0) MUST be undivided (pgrid[0] == 1).
+       * @param dW_tRPQ           - [INPUT] Screened interaction in THC+R-space (nt_half, nR, NP, NP)
+       *   Pre-transformed to R-space by lr_precompute_W_tRPQ.
+       *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
+       *   R-axis (axis 1) MUST be undivided (pgrid[1] == 1).
        * @param thc               - [INPUT] THC-ERI handler
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
       void evaluate_sigma_DeltaG(
           sArray_t<Array_5D_t>& sDeltaSigma_tskij,
           const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
-          memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+          memory::darray_t<Array_4D_t, communicator_t>& dW_tRPQ,
           THC_ERI auto& thc);
 
       /**
@@ -155,26 +155,32 @@ namespace methods {
       }
 
       /**
-       * R-space convolution with per-tau loop — single code path for all q_pert.
+       * R-space convolution: ΔΣ = -G ⊙ W (per-tau loop).
+       *
+       * Generic workhorse for both LR self-energy terms:
+       *   Term 1: G=ΔG, W=W_c  (W pre-transformed to R-space, W_is_Rspace=true)
+       *   Term 2: G=G,  W=ΔW   (W still in q-space, W_is_Rspace=false)
        *
        * Processes one tau point at a time using rank-4 (ns,nk,NP,NQ) work arrays,
        * eliminating the transpose step and reducing memory by nt_half×.
-       * W is never modified; each tau slice is FT'd to a local buffer.
        *
-       * Changes from standard eval_Sigma_all_Rspace:
-       * 1. primary_to_aux uses lr_thc_comm rank-4 path with _kpq_map
-       * 2. k→R FFT, Hadamard, R→k FFT all operate on rank-4 arrays
-       * 3. aux_to_primary uses lr_thc_comm rank-4 path with _kpq_map
+       * @param G_tskij        - [INPUT] Green's function factor (ΔG or G), (nt, ns, nk, nb, nb)
+       * @param dW_tPQ         - [INPUT] Interaction factor (W_c or ΔW).
+       *   W_is_Rspace=true:  layout (nt_half, nR, NP, NQ), pgrid (tpools, 1, np_P, np_Q).
+       *   W_is_Rspace=false: layout (nq, nt_half, NP, NQ), pgrid (1, tpools, np_P, np_Q).
+       * @param W_is_Rspace    - If true, dW is already in R-space (pre-transformed by
+       *   lr_precompute_W_tRPQ). If false, q→R FFT is applied per tau slice.
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
           typename communicator_t>
-      void eval_DeltaSigma_Rspace(const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
-                                  memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+      void eval_DeltaSigma_Rspace(const nda::MemoryArrayOfRank<5> auto& G_tskij,
+                                  memory::darray_t<Array_4D_t, communicator_t>& dW_tPQ,
                                   sArray_t<Array_5D_t>& sDeltaSigma_tskij,
                                   THC_ERI auto& thc,
                                   bool minus_t,
                                   const nda::array<long, 1>& kpq_map_G,
-                                  const nda::array<long, 1>& kpq_map_Sigma);
+                                  const nda::array<long, 1>& kpq_map_Sigma,
+                                  bool W_is_Rspace);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†
