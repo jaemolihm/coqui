@@ -1293,7 +1293,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, dW_tRPQ, thc);
+  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(DeltaG_tskij), dW_tRPQ, thc);
   mpi->comm.barrier();
 
   // Copy result
@@ -1389,8 +1389,7 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
   // Create lr_rpa_pi solver and compute ΔP
   solvers::lr_rpa_pi lr(q_pert);
 
-  using Arr4D = nda::array<ComplexType, 4>;
-  auto dDeltaPi = lr.evaluate_lr_Pi<Arr4D>(G_tskij, DeltaG_tskij, thc);
+  auto dDeltaPi = lr.evaluate_lr_Pi(nda::array_view<ComplexType, 5>(G_tskij), nda::array_view<ComplexType, 5>(DeltaG_tskij), thc);
   mpi->comm.barrier();
 
   // Copy distributed result to regular array
@@ -1685,7 +1684,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
   long ns = mf->nspin();
-  long nkpts = mf->nkpts();
   long nkpts_ibz = mf->nkpts_ibz();
   long nbnd = mf->nbnd();
   long nt = ft.nt_f();
@@ -1722,7 +1720,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, G_tskij, dDeltaW_qtPQ, thc);
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(G_tskij), dDeltaW_qtPQ, thc);
   mpi->comm.barrier();
 
   // Copy result

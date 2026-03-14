@@ -36,8 +36,14 @@
 #include "methods/GW/gw_t.h"
 
 namespace methods {
+
+  class thc_reader_t;  // forward declaration
+
   namespace solvers {
     using namespace memory;
+
+    using sArrv_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
+    using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
 
     /**
      * Linear response GW self-energy: ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW.
@@ -66,8 +72,6 @@ namespace methods {
      */
     class lr_gw {
     public:
-      template<nda::MemoryArray Array_base_t>
-      using sArray_t = math::shm::shared_array<Array_base_t>;
       template<int N>
       using shape_t = std::array<long, N>;
 
@@ -91,12 +95,11 @@ namespace methods {
        *   R-axis (axis 1) MUST be undivided (pgrid[1] == 1).
        * @param thc               - [INPUT] THC-ERI handler
        */
-      template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
       void evaluate_sigma_DeltaG(
-          sArray_t<Array_5D_t>& sDeltaSigma_tskij,
-          const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
-          memory::darray_t<Array_4D_t, communicator_t>& dW_tRPQ,
-          THC_ERI auto& thc);
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          dArr_4D_t& dW_tRPQ,
+          thc_reader_t& thc);
 
       /**
        * Term 2: ΔΣ = -G ⊙ ΔW
@@ -113,12 +116,11 @@ namespace methods {
        *   q-axis (axis 0) MUST be undivided (pgrid[0] == 1).
        * @param thc               - [INPUT] THC-ERI handler
        */
-      template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
       void evaluate_sigma_DeltaW(
-          sArray_t<Array_5D_t>& sDeltaSigma_tskij,
-          const nda::MemoryArrayOfRank<5> auto& G_tskij,
-          memory::darray_t<Array_4D_t, communicator_t>& dDeltaW_qtPQ,
-          THC_ERI auto& thc);
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& G_tskij,
+          dArr_4D_t& dDeltaW_qtPQ,
+          thc_reader_t& thc);
 
     inline void print_timers() {
       app_log(2, "\n  LR_GW timers");
@@ -142,17 +144,7 @@ namespace methods {
       utils::TimerManager _Timer;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
-      void _init_kpq_map(const auto& thc) {
-        if (_kpq_map_initialized) return;
-        auto MF = thc.MF();
-        long nkpts = MF->nkpts();
-        nda::array<int, 1> kpq_map_int(nkpts);
-        auto kpts_crys = MF->kpts_crystal();
-        utils::calculate_kpq_map(kpts_crys, _q_pert, kpq_map_int);
-        _kpq_map.resize(nkpts);
-        for (long ik = 0; ik < nkpts; ++ik) _kpq_map(ik) = kpq_map_int(ik);
-        _kpq_map_initialized = true;
-      }
+      void _init_kpq_map(thc_reader_t& thc);
 
       /**
        * R-space convolution: ΔΣ = -G ⊙ W (per-tau loop).
@@ -171,16 +163,15 @@ namespace methods {
        * @param W_is_Rspace    - If true, dW is already in R-space (pre-transformed by
        *   lr_precompute_W_tRPQ). If false, q→R FFT is applied per tau slice.
        */
-      template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
-          typename communicator_t>
-      void eval_DeltaSigma_Rspace(const nda::MemoryArrayOfRank<5> auto& G_tskij,
-                                  memory::darray_t<Array_4D_t, communicator_t>& dW_tPQ,
-                                  sArray_t<Array_5D_t>& sDeltaSigma_tskij,
-                                  THC_ERI auto& thc,
-                                  bool minus_t,
-                                  const nda::array<long, 1>& kpq_map_G,
-                                  const nda::array<long, 1>& kpq_map_Sigma,
-                                  bool W_is_Rspace);
+      void eval_DeltaSigma_Rspace(
+          const nda::array_view<ComplexType, 5>& G_tskij,
+          dArr_4D_t& dW_tPQ,
+          sArrv_5D_t& sDeltaSigma_tskij,
+          thc_reader_t& thc,
+          bool minus_t,
+          const nda::array<long, 1>& kpq_map_G,
+          const nda::array<long, 1>& kpq_map_Sigma,
+          bool W_is_Rspace);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†
@@ -192,11 +183,11 @@ namespace methods {
        * Standard Sigma_div_correction uses T^L = T^R = T(k), which is only
        * correct at q_pert=0.
        */
-      template<nda::MemoryArray Array_view_5D_t>
-      void _sigma_div_correction(sArray_t<Array_view_5D_t>& sDeltaSigma_tskij,
-                                 const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
-                                 THC_ERI auto& thc,
-                                 const nda::array<ComplexType, 1>& eps_inv_head);
+      void _sigma_div_correction(
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          thc_reader_t& thc,
+          const nda::array<ComplexType, 1>& eps_inv_head);
 
     }; // lr_gw
   } // solvers

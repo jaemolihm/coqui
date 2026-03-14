@@ -56,7 +56,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_SCF", "LR_SETUP", "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2",
-                   "LR_BCAST", "LR_ITER_ALG"}) {
+                   "LR_ITER_ALG"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -154,21 +154,11 @@ std::tuple<int, double> lr_driver::run_lr(
     lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
     lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT());
   }
-  // For full mode: copy G to local array once (reused every iteration),
-  // and precompute W_full(iω) = W_c(iω) + V (cached across iterations).
+  // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_SETUP");
   using local_Array_4D_t = nda::array<ComplexType, 4>;
-  nda::array<ComplexType, 5> G_local;
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
   if (gw_full) {
-    // Copy G from shared memory and broadcast to all ranks.
-    // All ranks need G for lr_thc_comm operations in evaluate_lr_Pi and evaluate_sigma_DeltaW.
-    G_local = nda::array<ComplexType, 5>(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
-    if (_mpi->comm.root()) {
-      G_local = sG_tskij.local();
-    }
-    _mpi->comm.broadcast_n(G_local.data(), G_local.size(), 0);
-
     // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q), then compute W_full(iω)
     auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
     opt_dW_full_wqPQ.emplace(
@@ -293,25 +283,11 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
     }
 
-    // Step 3: Copy ΔG from shared memory and broadcast to all ranks.
-    // .local() returns a view into shared memory, valid only on node root.
-    // All MPI ranks need a valid owning array for lr_thc_comm operations.
-    _Timer.start("LR_BCAST");
-    nda::array<ComplexType, 5> DeltaG_local;
-    if (include_gw_sigma) {
-      DeltaG_local = nda::array<ComplexType, 5>(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
-      if (_mpi->comm.root()) {
-        DeltaG_local = sDeltaG_tskij.local();
-      }
-      _mpi->comm.broadcast_n(DeltaG_local.data(), DeltaG_local.size(), 0);
-    }
-    _Timer.stop("LR_BCAST");
-
-    // Step 3a: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
+    // Step 3: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
     if (include_gw_sigma) {
       _Timer.start("LR_GW_SIGMA");
       lr_gw_solver->evaluate_sigma_DeltaG(
-          *sDeltaSigma_tskij, DeltaG_local, *opt_dW_tRPQ, thc);
+          *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc);
       _Timer.stop("LR_GW_SIGMA");
       _mpi->comm.barrier();
     }
@@ -320,8 +296,8 @@ std::tuple<int, double> lr_driver::run_lr(
     if (gw_full) {
       // Step 3b: ΔP = -ΔG·G - G·ΔG
       _Timer.start("LR_GW_PI");
-      auto dDeltaPi_tqPQ = lr_pi_solver->evaluate_lr_Pi<local_Array_4D_t>(
-          G_local, DeltaG_local, thc);
+      auto dDeltaPi_tqPQ = lr_pi_solver->evaluate_lr_Pi(
+          sG_tskij.local(), sDeltaG_tskij.local(), thc);
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_PI");
 
@@ -340,7 +316,7 @@ std::tuple<int, double> lr_driver::run_lr(
 
       // Step 3f: ΔΣ_term2 = -G ⊙ ΔW
       lr_gw_solver->evaluate_sigma_DeltaW(
-          sDeltaSigma_term2_tskij, G_local, dDeltaW_qtPQ, thc);
+          sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc);
       _mpi->comm.barrier();
 
       // Step 3g: ΔΣ += ΔΣ_term2 (accumulate on shared memory, root only)
@@ -492,7 +468,6 @@ void lr_driver::print_timers() {
   app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_PI"), _Timer.number_of_calls("LR_GW_PI"));
   app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W"), _Timer.number_of_calls("LR_GW_W"));
   app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
-  app_log(2, "      - LR Bcast (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_BCAST"), _Timer.number_of_calls("LR_BCAST"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
 }
 

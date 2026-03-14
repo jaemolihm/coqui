@@ -34,8 +34,13 @@
 #include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
+
+  class thc_reader_t;  // forward declaration
+
   namespace solvers {
     using namespace memory;
+
+    using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
 
     /**
      * Linear response RPA polarization: ΔP = -ΔG·G - G·ΔG.
@@ -76,21 +81,16 @@ namespace methods {
        * @return ΔP(τ,q,P,Q) distributed array (nt_half, nkpts, NP, NP)
        *         Distribution: τ-dist {tpools, 1, np_P, np_Q}.
        */
-      template<nda::MemoryArray Array_4D_t>
-      auto evaluate_lr_Pi(
-          const nda::MemoryArrayOfRank<5> auto& G_tskij,
-          const nda::MemoryArrayOfRank<5> auto& DeltaG_tskij,
-          THC_ERI auto& thc)
-      -> memory::darray_t<Array_4D_t, mpi3::communicator>;
+      dArr_4D_t evaluate_lr_Pi(
+          const nda::array_view<ComplexType, 5>& G_tskij,
+          const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          thc_reader_t& thc);
 
     inline void print_timers() {
       app_log(2, "\n  LR_RPA_PI timers");
       app_log(2, "  -----------------");
       app_log(2, "    LR Pi eval:                     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_LR_PI"), _Timer.number_of_calls("EVALUATE_LR_PI"));
       app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_ALLOC"), _Timer.number_of_calls("PI_LR_ALLOC"));
-      if (_Timer.has("PI_LR_PRECOMPUTE_TRANS") && _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS") > 0) {
-        app_log(2, "      - Precompute ΔG_trans:        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_PRECOMPUTE_TRANS"), _Timer.number_of_calls("PI_LR_PRECOMPUTE_TRANS"));
-      }
       app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_PRIM_TO_AUX"), _Timer.number_of_calls("PI_LR_PRIM_TO_AUX"));
       app_log(2, "      - Trev unfold + phase:        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_TREV_PHASE"), _Timer.number_of_calls("PI_LR_TREV_PHASE"));
       app_log(2, "      - FT (k<->R):                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PI_LR_FT_R"), _Timer.number_of_calls("PI_LR_FT_R"));
@@ -104,17 +104,7 @@ namespace methods {
       utils::TimerManager _Timer;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
-      void _init_kpq_map(const auto& thc) {
-        if (_kpq_map_initialized) return;
-        auto MF = thc.MF();
-        long nkpts = MF->nkpts();
-        nda::array<int, 1> kpq_map_int(nkpts);
-        auto kpts_crys = MF->kpts_crystal();
-        utils::calculate_kpq_map(kpts_crys, _q_pert, kpq_map_int);
-        _kpq_map.resize(nkpts);
-        for (long ik = 0; ik < nkpts; ++ik) _kpq_map(ik) = kpq_map_int(ik);
-        _kpq_map_initialized = true;
-      }
+      void _init_kpq_map(thc_reader_t& thc);
 
     }; // lr_rpa_pi
   } // solvers
