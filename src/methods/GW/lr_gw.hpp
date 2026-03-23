@@ -83,16 +83,38 @@ namespace methods {
       ~lr_gw() {}
 
       /**
-       * Term 1: ΔΣ = -ΔG ⊙ W_c (R-space)
+       * Both terms fused: ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
        *
-       * TODO: Divergence correction not yet implemented (see class docstring).
+       * Computes both terms in a single pass over tau, fusing the R→k FFT
+       * and aux_to_primary on Sigma (done once per tau instead of twice).
        *
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param DeltaG_tskij      - [INPUT] LR Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dW_tRPQ           - [INPUT] Screened interaction in THC+R-space (nt_half, nR, NP, NP)
+       * @param dW_tRPQ           - [INPUT] W_c in THC+R-space (nt_half, nR, NP, NP)
        *   Pre-transformed to R-space by lr_precompute_W_tRPQ.
        *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
-       *   R-axis (axis 1) MUST be undivided (pgrid[1] == 1).
+       * @param G_tskij           - [INPUT] Unperturbed Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
+       * @param dDeltaW_qtPQ      - [INPUT] ΔW in THC+q-space (nkpts, nt_half, NP, NP)
+       *   Axis order: (q, t, P, Q).
+       *   Distribution: pgrid = (1, tpools, np_P, np_Q).
+       * @param thc               - [INPUT] THC-ERI handler
+       */
+      void evaluate_sigma(
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          dArr_4D_t& dW_tRPQ,
+          const nda::array_view<ComplexType, 5>& G_tskij,
+          dArr_4D_t& dDeltaW_qtPQ,
+          thc_reader_t& thc);
+
+      /**
+       * Term 1 only: ΔΣ = -ΔG ⊙ W_c (R-space)
+       *
+       * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
+       * @param DeltaG_tskij      - [INPUT] LR Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
+       * @param dW_tRPQ           - [INPUT] W_c in THC+R-space (nt_half, nR, NP, NP)
+       *   Pre-transformed to R-space by lr_precompute_W_tRPQ.
+       *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
        */
       void evaluate_sigma_DeltaG(
@@ -102,18 +124,13 @@ namespace methods {
           thc_reader_t& thc);
 
       /**
-       * Term 2: ΔΣ = -G ⊙ ΔW
-       *
-       * Uses eval_DeltaSigma_Rspace with identity kpq_map for G (unperturbed)
-       * and _kpq_map for ΔΣ (which has k+q structure).
-       * TODO: Divergence correction not yet implemented (see class docstring).
+       * Term 2 only: ΔΣ = -G ⊙ ΔW
        *
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param G_tskij           - [INPUT] Unperturbed Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dDeltaW_qtPQ      - [INPUT] LR screened interaction in THC basis (nkpts, nt_half, NP, NP)
+       * @param dDeltaW_qtPQ      - [INPUT] ΔW in THC+q-space (nkpts, nt_half, NP, NP)
        *   Axis order: (q, t, P, Q).
-       *   Distribution: τ-dist with axes swapped, pgrid = (1, tpools, np_P, np_Q).
-       *   q-axis (axis 0) MUST be undivided (pgrid[0] == 1).
+       *   Distribution: pgrid = (1, tpools, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
        */
       void evaluate_sigma_DeltaW(
@@ -147,31 +164,29 @@ namespace methods {
       void _init_kpq_map(thc_reader_t& thc);
 
       /**
-       * R-space convolution: ΔΣ = -G ⊙ W (per-tau loop).
+       * R-space convolution workhorse: ΔΣ = -ΔG⊙W - G⊙ΔW.
        *
-       * Generic workhorse for both LR self-energy terms:
-       *   Term 1: G=ΔG, W=W_c  (W pre-transformed to R-space, W_is_Rspace=true)
-       *   Term 2: G=G,  W=ΔW   (W still in q-space, W_is_Rspace=false)
+       * Handles all three modes via null/non-null pointers:
+       *   Term 1 only: DeltaG + dW non-null, G + dDeltaW null
+       *   Term 2 only: G + dDeltaW non-null, DeltaG + dW null
+       *   Both fused:  all non-null
        *
-       * Processes one tau point at a time using rank-4 (ns,nk,NP,NQ) work arrays,
-       * eliminating the transpose step and reducing memory by nt_half×.
+       * Merges both τ halves (forward + backward) in a single call.
+       * Term 1's W is always R-space (t,R,P,Q); term 2's ΔW is always
+       * q-space (q,t,P,Q) with per-tau q→R FT.
        *
-       * @param G_tskij        - [INPUT] Green's function factor (ΔG or G), (nt, ns, nk, nb, nb)
-       * @param dW_tPQ         - [INPUT] Interaction factor (W_c or ΔW).
-       *   W_is_Rspace=true:  layout (nt_half, nR, NP, NQ), pgrid (tpools, 1, np_P, np_Q).
-       *   W_is_Rspace=false: layout (nq, nt_half, NP, NQ), pgrid (1, tpools, np_P, np_Q).
-       * @param W_is_Rspace    - If true, dW is already in R-space (pre-transformed by
-       *   lr_precompute_W_tRPQ). If false, q→R FFT is applied per tau slice.
+       * @param DeltaG_tskij   - [INPUT] LR Green's function (term 1), or nullptr
+       * @param dW_tRPQ        - [INPUT] W_c in R-space (t,R,P,Q), or nullptr
+       * @param G_tskij        - [INPUT] Unperturbed Green's function (term 2), or nullptr
+       * @param dDeltaW_qtPQ   - [INPUT] ΔW in q-space (q,t,P,Q), or nullptr
        */
-      void eval_DeltaSigma_Rspace(
-          const nda::array_view<ComplexType, 5>& G_tskij,
-          dArr_4D_t& dW_tPQ,
+      void _eval_sigma_Rspace(
           sArrv_5D_t& sDeltaSigma_tskij,
           thc_reader_t& thc,
-          bool minus_t,
-          const nda::array<long, 1>& kpq_map_G,
-          const nda::array<long, 1>& kpq_map_Sigma,
-          bool W_is_Rspace);
+          const nda::array_view<ComplexType, 5>* DeltaG_tskij,
+          dArr_4D_t* dW_tRPQ,
+          const nda::array_view<ComplexType, 5>* G_tskij,
+          dArr_4D_t* dDeltaW_qtPQ);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†

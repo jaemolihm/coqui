@@ -76,6 +76,30 @@ namespace methods {
     }
 
     // =========================================================================
+    // evaluate_sigma: Both terms fused, ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
+    // =========================================================================
+    void lr_gw::evaluate_sigma(
+        sArrv_5D_t& sDeltaSigma_tskij,
+        const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+        dArr_4D_t& dW_tRPQ,
+        const nda::array_view<ComplexType, 5>& G_tskij,
+        dArr_4D_t& dDeltaW_qtPQ,
+        thc_reader_t& thc) {
+
+      _init_kpq_map(thc);
+
+      app_log(1, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space, no div_corr)");
+      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+
+      sDeltaSigma_tskij.set_zero();
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ);
+
+      app_log(1, "  LR-GW self-energy (fused) done.\n");
+      print_timers();
+    }
+
+
+    // =========================================================================
     // evaluate_sigma_DeltaG: Term 1, ΔΣ = -ΔG ⊙ W_c
     // =========================================================================
     void lr_gw::evaluate_sigma_DeltaG(
@@ -86,19 +110,11 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      // TODO: div_corr not yet implemented for LR GW (see lr_gw.hpp class docstring)
       app_log(1, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space, no div_corr)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
-      auto [tpools, Rpools, np_P, np_Q] = dW_tRPQ.grid();
-      app_log(2, "    processor grid for W: (t, R, P, Q) = ({}, {}, {}, {})", tpools, Rpools, np_P, np_Q);
-
       sDeltaSigma_tskij.set_zero();
-
-      // τ ∈ [0, β/2] — W is pre-transformed to R-space
-      eval_DeltaSigma_Rspace(DeltaG_tskij, dW_tRPQ, sDeltaSigma_tskij, thc, false, _kpq_map, _kpq_map, true);
-      // τ ∈ [β/2, β]
-      eval_DeltaSigma_Rspace(DeltaG_tskij, dW_tRPQ, sDeltaSigma_tskij, thc, true, _kpq_map, _kpq_map, true);
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr);
 
       app_log(1, "  LR-GW self-energy (term 1) done.\n");
       print_timers();
@@ -116,25 +132,11 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      // TODO: div_corr not yet implemented for LR GW (see lr_gw.hpp class docstring)
       app_log(1, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
-      auto [qpools, tpools, np_P, np_Q] = dDeltaW_qtPQ.grid();
-      app_log(2, "    processor grid for ΔW: (t, q, P, Q) = ({}, {}, {}, {})", tpools, qpools, np_P, np_Q);
-
-      // G is unperturbed → identity kpq_map for primary_to_aux
-      // ΔΣ has k+q structure → _kpq_map for aux_to_primary
-      long nkpts = thc.MF()->nkpts();
-      nda::array<long, 1> identity_map(nkpts);
-      for (long ik = 0; ik < nkpts; ++ik) identity_map(ik) = ik;
-
       sDeltaSigma_tskij.set_zero();
-
-      // τ ∈ [0, β/2] — ΔW is in q-space, needs q→R FT
-      eval_DeltaSigma_Rspace(G_tskij, dDeltaW_qtPQ, sDeltaSigma_tskij, thc, false, identity_map, _kpq_map, false);
-      // τ ∈ [β/2, β]
-      eval_DeltaSigma_Rspace(G_tskij, dDeltaW_qtPQ, sDeltaSigma_tskij, thc, true, identity_map, _kpq_map, false);
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_qtPQ);
 
       app_log(1, "  LR-GW self-energy (term 2) done.\n");
       print_timers();
@@ -142,70 +144,98 @@ namespace methods {
 
 
     // =========================================================================
-    // eval_DeltaSigma_Rspace: per-tau R-space convolution workhorse
+    // _eval_sigma_Rspace: unified per-tau R-space convolution workhorse
     // =========================================================================
-    void lr_gw::eval_DeltaSigma_Rspace(
-        const nda::array_view<ComplexType, 5>& G_tskij,
-        dArr_4D_t& dW_tPQ,
+    void lr_gw::_eval_sigma_Rspace(
         sArrv_5D_t& sDeltaSigma_tskij,
         thc_reader_t& thc,
-        bool minus_t,
-        const nda::array<long, 1>& kpq_map_G,
-        const nda::array<long, 1>& kpq_map_Sigma,
-        bool W_is_Rspace) {
+        const nda::array_view<ComplexType, 5>* DeltaG_tskij,
+        dArr_4D_t* dW_tRPQ,
+        const nda::array_view<ComplexType, 5>* G_tskij,
+        dArr_4D_t* dDeltaW_qtPQ) {
       _Timer.start("EVALUATE_SIGMA_R");
+
+      bool do_term1 = (DeltaG_tskij != nullptr);
+      bool do_term2 = (G_tskij != nullptr);
+      utils::check(do_term1 || do_term2,
+                   "lr_gw::_eval_sigma_Rspace: at least one term must be active");
+      utils::check(!do_term1 || dW_tRPQ != nullptr,
+                   "lr_gw::_eval_sigma_Rspace: DeltaG requires dW_tRPQ");
+      utils::check(!do_term2 || dDeltaW_qtPQ != nullptr,
+                   "lr_gw::_eval_sigma_Rspace: G requires dDeltaW_qtPQ");
+
       auto MF = thc.MF();
       auto mpi = thc.mpi();
       utils::check(MF->nqpts() == MF->nqpts_ibz() and MF->nqpts() == MF->nkpts(),
-                   "lr_gw::eval_DeltaSigma_Rspace: Symmetry not allowed. nqpts={}, nqpts_ibz={}, nkpts={}",
+                   "lr_gw::_eval_sigma_Rspace: Symmetry not allowed. nqpts={}, nqpts_ibz={}, nkpts={}",
                    MF->nqpts(), MF->nqpts_ibz(), MF->nkpts());
-      auto ns = G_tskij.shape(1);
-      auto nt = G_tskij.shape(0);
-      auto nk_ibz = G_tskij.shape(2);
-      auto nbnd = G_tskij.shape(3);
 
-      // Extract layout-dependent quantities from dW.
-      // W_is_Rspace=true:  dW has (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q)
-      // W_is_Rspace=false: dW has (q,t,P,Q) layout, pgrid (1,tpools,np_P,np_Q)
-      // Axes 2,3 (P,Q) are layout-independent.
-      auto dW_lshape = dW_tPQ.local_shape();
-      auto dW_gshape = dW_tPQ.global_shape();
-      auto dW_grid = dW_tPQ.grid();
-      auto dW_bsize = dW_tPQ.block_size();
+      // Get dimensions from whichever G is available
+      auto& G_ref = do_term1 ? *DeltaG_tskij : *G_tskij;
+      auto ns = G_ref.shape(1);
+      auto nt = G_ref.shape(0);
+      auto nk_ibz = G_ref.shape(2);
+      auto nbnd = G_ref.shape(3);
+
+      // Extract tau distribution and array dimensions from whichever W is available.
+      // Term 1: dW_tRPQ has (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+      // Term 2: dDeltaW_qtPQ has (q,t,P,Q) layout, pgrid (1,tpools,np_P,np_Q).
+      dArr_4D_t& dW_ref = do_term1 ? *dW_tRPQ : *dDeltaW_qtPQ;
+      auto dW_lshape = dW_ref.local_shape();
+      auto dW_gshape = dW_ref.global_shape();
+      auto dW_grid = dW_ref.grid();
+      auto dW_bsize = dW_ref.block_size();
 
       auto NP_loc = dW_lshape[2], NQ_loc = dW_lshape[3];
       auto NP = dW_gshape[2], NQ = dW_gshape[3];
       auto np_P = dW_grid[2], np_Q = dW_grid[3];
       auto P_bs = dW_bsize[2], Q_bs = dW_bsize[3];
 
-      // Axes 0,1 swap meaning depending on layout
+      // Term 1's W: axis 0 = t (distributed), axis 1 = R (undivided)
       long nt_loc, nkpts, t_origin;
-      if (W_is_Rspace) {
-        // (t,R,P,Q): axis 0 = t (distributed), axis 1 = R (undivided)
-        nt_loc = dW_lshape[0]; nkpts = dW_gshape[1];
-        t_origin = dW_tPQ.origin()[0];
-        utils::check(dW_lshape[1] == nkpts,
-                     "lr_gw::eval_DeltaSigma_Rspace: nR_loc = {} != nkpts", dW_lshape[1]);
-        utils::check(dW_grid[1] == 1,
-                     "lr_gw::eval_DeltaSigma_Rspace: R-axis must be undivided, pgrid[1] = {}", dW_grid[1]);
+      if (do_term1) {
+        nt_loc = dW_tRPQ->local_shape()[0];
+        nkpts = dW_tRPQ->global_shape()[1];
+        t_origin = dW_tRPQ->origin()[0];
+        utils::check(dW_tRPQ->local_shape()[1] == nkpts,
+                     "lr_gw: R-axis must be undivided, nR_loc={} != nkpts={}", dW_tRPQ->local_shape()[1], nkpts);
+        utils::check(dW_tRPQ->grid()[1] == 1,
+                     "lr_gw: R-axis must be undivided, pgrid[1]={}", dW_tRPQ->grid()[1]);
       } else {
-        // (q,t,P,Q): axis 0 = q (undivided), axis 1 = t (distributed)
-        nkpts = dW_lshape[0]; nt_loc = dW_lshape[1];
-        t_origin = dW_tPQ.origin()[1];
-        utils::check(dW_lshape[0] == nkpts,
-                     "lr_gw::eval_DeltaSigma_Rspace: nq_loc = {} != nkpts", dW_lshape[0]);
-        utils::check(dW_grid[0] == 1,
-                     "lr_gw::eval_DeltaSigma_Rspace: q-axis must be undivided, pgrid[0] = {}", dW_grid[0]);
+        // Term 2 only: axis 0 = q (undivided), axis 1 = t (distributed)
+        nkpts = dDeltaW_qtPQ->local_shape()[0];
+        nt_loc = dDeltaW_qtPQ->local_shape()[1];
+        t_origin = dDeltaW_qtPQ->origin()[1];
+        utils::check(dDeltaW_qtPQ->local_shape()[0] == nkpts,
+                     "lr_gw: q-axis must be undivided, nq_loc={} != nkpts={}", dDeltaW_qtPQ->local_shape()[0], nkpts);
+        utils::check(dDeltaW_qtPQ->grid()[0] == 1,
+                     "lr_gw: q-axis must be undivided, pgrid[0]={}", dDeltaW_qtPQ->grid()[0]);
+      }
+
+      // Cross-check term 2 tau distribution if both terms active
+      if (do_term1 && do_term2) {
+        utils::check(dDeltaW_qtPQ->local_shape()[1] == nt_loc,
+                     "lr_gw: term1 nt_loc={} != term2 nt_loc={}", nt_loc, dDeltaW_qtPQ->local_shape()[1]);
+        utils::check(dDeltaW_qtPQ->origin()[1] == t_origin,
+                     "lr_gw: term1 t_origin={} != term2 t_origin={}", t_origin, dDeltaW_qtPQ->origin()[1]);
+      }
+
+      app_log(2, "    nt_loc={}, nkpts={}, t_origin={}, NP_loc={}, NQ_loc={}",
+              nt_loc, nkpts, t_origin, NP_loc, NQ_loc);
+
+      // Identity kpq_map for term 2's G (unperturbed, no k+q offset)
+      nda::array<long, 1> identity_map;
+      if (do_term2) {
+        identity_map.resize(nkpts);
+        for (long ik = 0; ik < nkpts; ++ik) identity_map(ik) = ik;
       }
 
       // === Step 0: Create tau subcommunicator and allocate rank-4 work arrays ===
       _Timer.start("SIGMA_ALLOC");
 
-      // Tau subcommunicator: procs sharing the same W tau slices form a group
       mpi3::communicator tau_comm = mpi->comm.split(t_origin, mpi->comm.rank());
       auto tau_mpi = utils::make_mpi_context(tau_comm);
 
-      // Rank-4 distributed arrays on tau subcommunicator: (ns, nkpts, NP, NQ)
       using local_Array_4D_t = memory::array<HOST_MEMORY, ComplexType, 4>;
       using math::nda::make_distributed_array;
 
@@ -217,123 +247,162 @@ namespace methods {
           tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
           {1, 1, P_bs, Q_bs});
 
-      // Shared array for aux_to_primary output (rank-4)
       using Arrv_4D_t = nda::array_view<ComplexType, 4>;
       auto sSigma_skij = math::shm::make_shared_array<Arrv_4D_t>(
           tau_mpi, {ns, nk_ibz, nbnd, nbnd});
 
-      // FT buffer and W tau-slice buffer
       nda::matrix<ComplexType> ft_buffer(nkpts, NP_loc * NQ_loc);
-      nda::array<ComplexType, 3> W_tau_RPQ(nkpts, NP_loc, NQ_loc);
+
+      // W tau-slice buffers: one per active term
+      nda::array<ComplexType, 3> W1_tau_RPQ;
+      if (do_term1) W1_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
+
+      nda::array<ComplexType, 3> W2_tau_RPQ;
+      if (do_term2) W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
 
       _Timer.stop("SIGMA_ALLOC");
 
-      // === Step 1: Compute FT coefficients (once, outside tau loop) ===
+      // === Step 1: Compute FT coefficients (once) ===
       using sArray_2D_t = math::shm::shared_array<nda::array_view<ComplexType, 2>>;
       sArray_2D_t sf_Rk(tau_mpi, {nkpts, nkpts});
       sArray_2D_t sf_kR(tau_mpi, {nkpts, nkpts});
 
       if (nkpts != 1) {
-        // f_Rk: G k→R (using kpts)
         utils::k_to_R_coefficients(tau_comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-        // f_kR: Sigma R→k (using kpts)
         utils::R_to_k_coefficients(tau_comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_kR);
       }
-      // f_qR for W q→R: only needed when W is still in q-space
+
       std::optional<sArray_2D_t> opt_sf_qR;
-      if (nkpts != 1 && !W_is_Rspace) {
+      if (nkpts != 1 && do_term2) {
         opt_sf_qR.emplace(tau_mpi, std::array<long, 2>{nkpts, nkpts});
         utils::k_to_R_coefficients(tau_comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), *opt_sf_qR);
       }
 
-      // === Step 2: Per-tau loop ===
+      // Hadamard product lambda
+      auto neg_prod = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
+
+      // === Step 2: Per-tau loop with inner minus_t loop ===
       sDeltaSigma_tskij.win().fence();
 
       for (long it_local = 0; it_local < nt_loc; ++it_local) {
-        long it_w = t_origin + it_local;  // global tau index in W (first half: 0..nt_half-1)
-        long it_g = minus_t ? (nt - 1 - it_w) : it_w;     // G input tau index
-        long it_out = minus_t ? (nt - 1 - it_w) : it_w;    // output tau index
+        long it_w = t_origin + it_local;  // global W tau index (first half: 0..nt_half-1)
 
-        // For minus_t, skip midpoint (already written by minus_t=false call)
-        if (minus_t && it_w >= static_cast<long>(nt / 2)) continue;
-
-        // --- 2a. primary_to_aux: G_skij(it_g) → dG_skPQ ---
-        _Timer.start("SIGMA_PRIM_TO_AUX");
-        dG_skPQ.local() = 0;
-        auto G_skij_slice = G_tskij(it_g, nda::ellipsis{});
-        lr_thc_comm::primary_to_aux(0, 0, G_skij_slice, dG_skPQ, thc,
-                                    MF->kp_to_ibz(), MF->kp_trev(), kpq_map_G);
-        _Timer.stop("SIGMA_PRIM_TO_AUX");
-
-        // --- 2b. Copy W tau slice to contiguous buffer ---
-        if (W_is_Rspace) {
-          // dW layout: (t,R,P,Q) — W is already in R-space
+        // --- Copy W slices once per tau (reused for both minus_t passes) ---
+        if (do_term1) {
+          // dW_tRPQ layout: (t, R, P, Q)
           for (long iR = 0; iR < nkpts; ++iR)
-            W_tau_RPQ(iR, nda::ellipsis{}) = dW_tPQ.local()(it_local, iR, nda::ellipsis{});
-        } else {
-          // dW layout: (q,t,P,Q) — W still in q-space
+            W1_tau_RPQ(iR, nda::ellipsis{}) = dW_tRPQ->local()(it_local, iR, nda::ellipsis{});
+        }
+        if (do_term2) {
+          // dDeltaW_qtPQ layout: (q, t, P, Q) — copy then q→R FT
           for (long iq = 0; iq < nkpts; ++iq)
-            W_tau_RPQ(iq, nda::ellipsis{}) = dW_tPQ.local()(iq, it_local, nda::ellipsis{});
-        }
+            W2_tau_RPQ(iq, nda::ellipsis{}) = dDeltaW_qtPQ->local()(iq, it_local, nda::ellipsis{});
 
-        // --- 2c. k→R FFT on G ---
-        if (nkpts != 1) {
-          _Timer.start("SIGMA_FT_R");
-          auto f_Rk = sf_Rk.local();
-          auto G_3D = nda::reshape(dG_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-          for (long s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
-            G_3D(s, nda::ellipsis{}) = ft_buffer;
+          if (nkpts != 1) {
+            _Timer.start("SIGMA_FT_R");
+            auto f_qR = opt_sf_qR->local();
+            auto W2_2D = nda::reshape(W2_tau_RPQ, shape_t<2>{nkpts, NP_loc * NQ_loc});
+            nda::blas::gemm(f_qR, W2_2D, ft_buffer);
+            W2_2D = ft_buffer;
+            _Timer.stop("SIGMA_FT_R");
           }
-          _Timer.stop("SIGMA_FT_R");
         }
 
-        // --- 2d. W q→R FT (only when W is still in q-space) ---
-        if (nkpts != 1 && !W_is_Rspace) {
-          _Timer.start("SIGMA_FT_R");
-          auto f_qR = opt_sf_qR->local();
-          auto W_tau_2D = nda::reshape(W_tau_RPQ, shape_t<2>{nkpts, NP_loc * NQ_loc});
-          nda::blas::gemm(f_qR, W_tau_2D, ft_buffer);
-          W_tau_2D = ft_buffer;
-          _Timer.stop("SIGMA_FT_R");
-        }
-        // After FT: dG_skPQ and W_tau_RPQ are both in R-space
-        auto& dG_tau_sRPQ = dG_skPQ;  // alias: k-axis is now R-space
+        // --- Inner loop over forward (τ) and backward (β-τ) passes ---
+        for (int pass = 0; pass < 2; ++pass) {
+          bool minus_t = (pass == 1);
 
-        // --- 2e. Hadamard: dSigma(s,R,P,Q) = -G(s,R,P,Q) * W_tau_RPQ(R,P,Q) ---
-        _Timer.start("SIGMA_HADPROD_R");
-        auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
-        for (long s = 0; s < ns; ++s) {
-          auto G_RPQ = dG_tau_sRPQ.local()(s, nda::ellipsis{});
-          auto Sigma_RPQ = dSigma_skPQ.local()(s, nda::ellipsis{});
-          Sigma_RPQ = had_prod2(G_RPQ, W_tau_RPQ);
-        }
-        _Timer.stop("SIGMA_HADPROD_R");
+          // For backward pass, skip if at or past midpoint (already written by forward)
+          if (minus_t && it_w >= static_cast<long>(nt / 2)) continue;
 
-        // --- 2f. R→k FFT on Sigma ---
-        if (nkpts != 1) {
-          _Timer.start("SIGMA_FT_R");
-          auto f_kR = sf_kR.local();
-          auto Sigma_3D = nda::reshape(dSigma_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-          for (long s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), ft_buffer);
-            Sigma_3D(s, nda::ellipsis{}) = ft_buffer;
+          long it_g = minus_t ? (nt - 1 - it_w) : it_w;
+          long it_out = minus_t ? (nt - 1 - it_w) : it_w;
+
+          // --- Accumulate Sigma in R-space from active terms ---
+          dSigma_skPQ.local() = 0;
+
+          // Term 1: ΔG ⊙ W_c
+          if (do_term1) {
+            _Timer.start("SIGMA_PRIM_TO_AUX");
+            dG_skPQ.local() = 0;
+            auto DeltaG_slice = (*DeltaG_tskij)(it_g, nda::ellipsis{});
+            lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
+                                        MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+            _Timer.stop("SIGMA_PRIM_TO_AUX");
+
+            if (nkpts != 1) {
+              _Timer.start("SIGMA_FT_R");
+              auto f_Rk = sf_Rk.local();
+              auto G_3D = nda::reshape(dG_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
+              for (long s = 0; s < ns; ++s) {
+                nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
+                G_3D(s, nda::ellipsis{}) = ft_buffer;
+              }
+              _Timer.stop("SIGMA_FT_R");
+            }
+
+            _Timer.start("SIGMA_HADPROD_R");
+            for (long s = 0; s < ns; ++s) {
+              auto G_RPQ = dG_skPQ.local()(s, nda::ellipsis{});
+              auto Sigma_RPQ = dSigma_skPQ.local()(s, nda::ellipsis{});
+              Sigma_RPQ += neg_prod(G_RPQ, W1_tau_RPQ);
+            }
+            _Timer.stop("SIGMA_HADPROD_R");
           }
-          _Timer.stop("SIGMA_FT_R");
-        }
 
-        // --- 2g. aux_to_primary: dSigma_skPQ → sSigma_skij ---
-        _Timer.start("SIGMA_AUX_TO_PRIM");
-        sSigma_skij.set_zero();
-        lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
-                                    sSigma_skij, thc, MF->ks_to_k(0), kpq_map_Sigma);
+          // Term 2: G ⊙ ΔW (reuses dG_skPQ buffer)
+          if (do_term2) {
+            _Timer.start("SIGMA_PRIM_TO_AUX");
+            dG_skPQ.local() = 0;
+            auto G_slice = (*G_tskij)(it_g, nda::ellipsis{});
+            lr_thc_comm::primary_to_aux(0, 0, G_slice, dG_skPQ, thc,
+                                        MF->kp_to_ibz(), MF->kp_trev(), identity_map);
+            _Timer.stop("SIGMA_PRIM_TO_AUX");
 
-        // --- 2h. Copy to output at the correct tau index ---
-        if (tau_comm.rank() == 0) {
-          sDeltaSigma_tskij.local()(it_out, nda::ellipsis{}) += sSigma_skij.local();
-        }
-        _Timer.stop("SIGMA_AUX_TO_PRIM");
-      }
+            if (nkpts != 1) {
+              _Timer.start("SIGMA_FT_R");
+              auto f_Rk = sf_Rk.local();
+              auto G_3D = nda::reshape(dG_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
+              for (long s = 0; s < ns; ++s) {
+                nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
+                G_3D(s, nda::ellipsis{}) = ft_buffer;
+              }
+              _Timer.stop("SIGMA_FT_R");
+            }
+
+            _Timer.start("SIGMA_HADPROD_R");
+            for (long s = 0; s < ns; ++s) {
+              auto G_RPQ = dG_skPQ.local()(s, nda::ellipsis{});
+              auto Sigma_RPQ = dSigma_skPQ.local()(s, nda::ellipsis{});
+              Sigma_RPQ += neg_prod(G_RPQ, W2_tau_RPQ);
+            }
+            _Timer.stop("SIGMA_HADPROD_R");
+          }
+
+          // --- R→k FFT on accumulated Sigma (once) ---
+          if (nkpts != 1) {
+            _Timer.start("SIGMA_FT_R");
+            auto f_kR = sf_kR.local();
+            auto Sigma_3D = nda::reshape(dSigma_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
+            for (long s = 0; s < ns; ++s) {
+              nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), ft_buffer);
+              Sigma_3D(s, nda::ellipsis{}) = ft_buffer;
+            }
+            _Timer.stop("SIGMA_FT_R");
+          }
+
+          // --- aux_to_primary on accumulated Sigma (once) ---
+          _Timer.start("SIGMA_AUX_TO_PRIM");
+          sSigma_skij.set_zero();
+          lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
+                                      sSigma_skij, thc, MF->ks_to_k(0), _kpq_map);
+
+          if (tau_comm.rank() == 0) {
+            sDeltaSigma_tskij.local()(it_out, nda::ellipsis{}) += sSigma_skij.local();
+          }
+          _Timer.stop("SIGMA_AUX_TO_PRIM");
+        } // pass
+      } // it_local
 
       // Synchronize and distribute across all nodes
       sDeltaSigma_tskij.win().fence();

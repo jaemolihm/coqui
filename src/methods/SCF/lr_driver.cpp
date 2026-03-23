@@ -204,11 +204,6 @@ std::tuple<int, double> lr_driver::run_lr(
       ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
 
-  // Term 2 buffer for full mode: ΔΣ_term2 (shared array for accumulation)
-  auto sDeltaSigma_term2_tskij = gw_full
-      ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
-      : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
-
   // Initialize ΔF = 0 (and ΔΣ = 0 if GW active)
   if (_mpi->node_comm.root()) {
     sDeltaF_skij.local() = ComplexType(0.0);
@@ -283,8 +278,9 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
     }
 
-    // Step 3: Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c
-    if (include_gw_sigma) {
+    // Step 3: Compute LR GW self-energy
+    if (include_gw_sigma && !gw_full) {
+      // DeltaG-only mode: ΔΣ = -ΔG ⊙ W_c
       _Timer.start("LR_GW_SIGMA");
       lr_gw_solver->evaluate_sigma_DeltaG(
           *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc);
@@ -292,7 +288,6 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
     }
 
-    // Step 3b-3g: Full mode — compute ΔP, ΔW, and ΔΣ term 2 = -G ⊙ ΔW
     if (gw_full) {
       // Step 3b: ΔP = -ΔG·G - G·ΔG
       _Timer.start("LR_GW_PI");
@@ -309,22 +304,15 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_W");
 
-      // Step 3e: Transpose ΔW from (t,q,P,Q) → (q,t,P,Q) for lr_gw
-      _Timer.start("LR_GW_SIGMA_TERM2");
+      // Step 3e-3f: Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
+      _Timer.start("LR_GW_SIGMA");
       auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, _mpi->comm);
       dDeltaW_tqPQ.reset();
-
-      // Step 3f: ΔΣ_term2 = -G ⊙ ΔW
-      lr_gw_solver->evaluate_sigma_DeltaW(
-          sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc);
+      lr_gw_solver->evaluate_sigma(
+          *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
+          sG_tskij.local(), dDeltaW_qtPQ, thc);
       _mpi->comm.barrier();
-
-      // Step 3g: ΔΣ += ΔΣ_term2 (accumulate on shared memory, root only)
-      if (_mpi->node_comm.root()) {
-        sDeltaSigma_tskij->local() += sDeltaSigma_term2_tskij.local();
-      }
-      _mpi->comm.barrier();
-      _Timer.stop("LR_GW_SIGMA_TERM2");
+      _Timer.stop("LR_GW_SIGMA");
     }
 
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
