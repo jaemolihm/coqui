@@ -20,6 +20,7 @@ limitations under the License.
 
 from .thc import make_thc_coulomb, run_isdf
 from .cholesky import make_chol_coulomb
+from coqui._lib.eri_module import compute_delta_X
 
 # import PySCF converter module only if PySCF is available
 try:
@@ -29,4 +30,4 @@ except ImportError:
 else:
     from . import pyscf_interface
 
-__all__ = ["make_thc_coulomb", "make_chol_coulomb", "run_isdf"]
+__all__ = ["make_thc_coulomb", "make_chol_coulomb", "run_isdf", "compute_delta_X"]

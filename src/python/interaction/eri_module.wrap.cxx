@@ -196,11 +196,56 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "thc_params")};
 
 static const auto doc_d_14 = fun_14.doc(R"DOC()DOC");
+
+// compute_delta_X
+static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf,
+       const std::string &dpsi_prefix,
+       nda::array<long, 1> const& r_P,
+       nda::array<double, 2> const& delta_r_P,
+       nda::array<double, 1> const& q_vec_cryst,
+       nda::array<long, 1> const& fft_grid) {
+      return coqui_py::compute_delta_X(mf, dpsi_prefix,
+                                        r_P, delta_r_P, q_vec_cryst, fft_grid);
+    },
+    "mf", "dpsi_prefix", "r_P", "delta_r_P", "q_vec_cryst", "fft_grid")};
+
+static const auto doc_d_15 = fun_15.doc(R"DOC(
+Compute DeltaX(k, P, m) = Deltapsi_mk(r_P) + grad psi_mk(r_P) . Delta_r_P
+
+Deltapsi files are per-mode per-k: {dpsi_prefix}_ik{ik+1}.hdf5,
+each containing MillerIndices (npw, 3) and evc (nbnd, 2*npw).
+
+Parameters
+----------
+mf : Mf
+    Mean-field object (for reading unperturbed wfc and system info)
+dpsi_prefix : str
+    File path prefix including mode. Files are {dpsi_prefix}_ik{ik+1}.hdf5.
+    Example: "temp/dpsi_ibc_iq1_mode1" -> temp/dpsi_ibc_iq1_mode1_ik1.hdf5, ...
+r_P : np.ndarray
+    (nP,) FFT grid indices of interpolating points
+delta_r_P : np.ndarray
+    (nP, 3) grid point displacements in Cartesian Bohr
+q_vec_cryst : np.ndarray
+    (3,) q-vector in crystal coordinates
+fft_grid : np.ndarray
+    (3,) FFT grid dimensions matching the grid used for r_P
+    (e.g. from the THC checkpoint fft_grid dataset)
+
+Returns
+-------
+np.ndarray
+    (nspin, nk_ibz, nP, nbnd) complex array
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
     {"run_isdf", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
      doc_d_14.c_str()},
+    {"compute_delta_X", (PyCFunction)c2py::pyfkw<fun_15>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_15.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

@@ -29,6 +29,7 @@
 
 #include "IO/ptree/InputParser.hpp"
 #include "methods/ERI/eri_utils.hpp"
+#include "methods/ERI/lr_thc_interp.hpp"
 
 namespace coqui_py {
 
@@ -119,6 +120,18 @@ namespace coqui_py {
     methods::chol_reader_t _cholesky;
 
   }; // CholCoulomb
+
+  nda::array<ComplexType, 4> compute_delta_X(
+      const Mf &mf,
+      const std::string &dpsi_prefix,
+      nda::array<long, 1> const& r_P,
+      nda::array<double, 2> const& delta_r_P,
+      nda::array<double, 1> const& q_vec_cryst,
+      nda::array<long, 1> const& fft_grid)
+  {
+    return methods::compute_delta_X(
+        mf.get_mf(), dpsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid);
+  }
 
 } // coqui_py
 
