@@ -92,6 +92,9 @@ class thc
 
   void print_metadata();
 
+  auto get_ecut() const { return ecut; }
+  auto const& get_fft_mesh() const { return rho_g.mesh(); }
+
   template<MEMORY_SPACE MEM = HOST_MEMORY>
   auto interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq=0,
               nda::range k_range = nda::range(-1,-1), 

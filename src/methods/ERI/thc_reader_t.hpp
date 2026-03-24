@@ -269,10 +269,12 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
-            auto X_0 = _X_shm.local(); 
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
+            auto X_0 = _X_shm.local();
             nda::h5_write(grp, "collocation_matrix", X_0, false);
             if(_Y_shm.has_value()) {
-              auto Y_0 = _Y_shm.value().local(); 
+              auto Y_0 = _Y_shm.value().local();
               nda::h5_write(grp, "Y_collocation_matrix", Y_0, false);
             }
             _thc_builder_opt.value().save(grp, _format, _rp, _dZ, _Chi_head, _Chi_bar_head);
@@ -419,6 +421,8 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
             auto X_0 = _X_shm.local();
             nda::h5_write(grp, "collocation_matrix", X_0, false);
             if(_Y_shm.has_value()) {
@@ -494,6 +498,8 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
             nda::h5_write(grp, "collocation_matrix", _X_shm.local(), false);
             _thc_builder_opt.value().save(grp, _format, _rp, dzeta_qur, write_zeta_on_fft_mesh);
           } else {
