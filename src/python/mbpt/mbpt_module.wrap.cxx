@@ -202,16 +202,20 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
            std::string iter_alg,
            double mixing,
            int max_subsp_size,
-           int diis_warmup) {
+           int diis_warmup,
+           std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+           std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
           return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
                                   include_hartree, include_exchange, gw_mode,
                                   max_iter, tol, fix_density,
-                                  iter_alg, mixing, max_subsp_size, diis_warmup);
+                                  iter_alg, mixing, max_subsp_size, diis_warmup,
+                                  std::move(DeltaX_left), std::move(DeltaX_right));
         },
         "lr_params", "h_int", "q_vec", "DeltaH0_skij",
         "include_hartree", "include_exchange", "gw_mode",
         "max_iter", "tol", "fix_density",
-        "iter_alg", "mixing", "max_subsp_size", "diis_warmup")};
+        "iter_alg", "mixing", "max_subsp_size", "diis_warmup",
+        "DeltaX_left", "DeltaX_right")};
 
 static const auto doc_run_lr = fun_run_lr.doc(R"DOC(
 Run unified linear response calculation.
@@ -253,6 +257,12 @@ max_subsp_size : int
     Maximum DIIS subspace size
 diis_warmup : int
     Number of warmup iterations before DIIS
+DeltaX_left : np.ndarray or None
+    Optional perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+    Full BZ indexed. Must be provided together with DeltaX_right.
+DeltaX_right : np.ndarray or None
+    Optional perturbation of collocation matrix δ^{-q} X, shape (ns, nkpts, Np, nb).
+    Full BZ indexed. Must be provided together with DeltaX_left.
 
 Returns
 -------

@@ -33,6 +33,7 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/ERI/div_treatment_e.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 #include "methods/GW/gw_t.h"
 
 namespace methods {
@@ -105,7 +106,8 @@ namespace methods {
           dArr_4D_t& dW_tRPQ,
           const nda::array_view<ComplexType, 5>& G_tskij,
           dArr_4D_t& dDeltaW_qtPQ,
-          thc_reader_t& thc);
+          thc_reader_t& thc,
+          const lr_ibc_DeltaX* ibc = nullptr);
 
       /**
        * Term 1 only: ΔΣ = -ΔG ⊙ W_c (R-space)
@@ -121,7 +123,8 @@ namespace methods {
           sArrv_5D_t& sDeltaSigma_tskij,
           const nda::array_view<ComplexType, 5>& DeltaG_tskij,
           dArr_4D_t& dW_tRPQ,
-          thc_reader_t& thc);
+          thc_reader_t& thc,
+          const lr_ibc_DeltaX* ibc = nullptr);
 
       /**
        * Term 2 only: ΔΣ = -G ⊙ ΔW
@@ -186,7 +189,8 @@ namespace methods {
           const nda::array_view<ComplexType, 5>* DeltaG_tskij,
           dArr_4D_t* dW_tRPQ,
           const nda::array_view<ComplexType, 5>* G_tskij,
-          dArr_4D_t* dDeltaW_qtPQ);
+          dArr_4D_t* dDeltaW_qtPQ,
+          const lr_ibc_DeltaX* ibc = nullptr);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†

@@ -214,7 +214,9 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      int max_iter,
                                      double tol,
                                      bool fix_density,
-                                     const lr_iter_params& iter_params);
+                                     const lr_iter_params& iter_params,
+                                     const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
+                                     const nda::array<ComplexType, 4>* DeltaX_right = nullptr);
 
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)

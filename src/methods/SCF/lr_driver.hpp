@@ -32,6 +32,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_diis.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 #include "methods/HF/lr_hf.hpp"
 #include "methods/GW/lr_gw.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
@@ -116,7 +117,10 @@ public:
       bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
       dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
-      const lr_iter_params& iter_params);
+      const lr_iter_params& iter_params,
+      const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
+      const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+      const nda::array<ComplexType, 4>* Dm_ab = nullptr);
 
   void print_timers();
 

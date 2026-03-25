@@ -87,13 +87,15 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      THC_ERI auto& thc,
                      const nda::MemoryArrayOfRank<4> auto& S_skij,
                      bool compute_hartree,
-                     bool compute_exchange) {
+                     bool compute_exchange,
+                     const lr_ibc_DeltaX* ibc) {
   _Timer.start("LR_HF");
   app_log(2, "Evaluating LR Fock matrix (ΔF from ΔDm):");
   app_log(2, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
   app_log(2, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
+  app_log(2, "  - DeltaX correction: {}", ibc ? "yes" : "no");
 
-  thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange);
+  thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange, ibc);
 
   // Add LR finite-size correction for exchange
   if (compute_exchange) {
@@ -110,7 +112,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                       sArray_t<AF_t>& sDeltaF_skij,
                       THC_ERI auto& thc,
                       bool compute_hartree,
-                      bool compute_exchange) {
+                      bool compute_exchange,
+                      const lr_ibc_DeltaX* ibc) {
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
   // V(q) at _q_ibz_idx instead of q=0, and _MF->Qpts() for U FT.
@@ -127,6 +130,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
   sDeltaF_skij.set_zero();
   if (not compute_hartree and not compute_exchange) return;
+
+  // Extract unperturbed Dm for primary→aux DeltaX correction
+  const nda::array<ComplexType, 4>* Dm_unpert = ibc ? ibc->Dm_ab : nullptr;
 
   // Determine processor grid
   int np = _mpi->comm.size();
@@ -180,7 +186,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
       _Timer.start("PRIM_TO_AUX");
       lr_thc_comm::primary_to_aux<AF_t>(ip, ip, sDeltaDm_skij.local(), dDeltaDm_skPQ, thc,
-                                              _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map);
+                                              _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map,
+                                              ibc, Dm_unpert);
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
@@ -262,7 +269,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
         _Timer.start("PRIM_TO_AUX");
         lr_thc_comm::primary_to_aux<AF_t>(ip, iq, sDeltaDm_skij.local(), dDeltaDm_skPQ, thc,
-                                                _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map);
+                                                _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map,
+                                                ibc, Dm_unpert);
         _Timer.stop("PRIM_TO_AUX");
 
         // FT ΔDm from k-space to R-space
@@ -403,6 +411,15 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
   }
 
+  // Add precomputed IBC correction for aux→primary (DeltaX terms on unperturbed F_PQ).
+  // Added once here — covers all (ip,iq) pairs since V_HF_PQ includes the full sum.
+  if (ibc && ibc->DeltaF_ibc_skij.size() > 0) {
+    if (_mpi->node_comm.root()) {
+      sDeltaF_skij.local() += ibc->DeltaF_ibc_skij;
+    }
+    sDeltaF_skij.win().fence();
+  }
+
   dU_qPQ.reset();
   dDeltaDm_skPQ.reset();
   _mpi->comm.barrier();
@@ -473,13 +490,15 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const sArray_t<Arrv4D>&,
                                thc_reader_t&,
                                Arr4D const&,
-                               bool, bool);
+                               bool, bool,
+                               const lr_ibc_DeltaX*);
 
 template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const sArray_t<Arrv4D>&,
                                thc_reader_t&,
                                Arrv4D const&,
-                               bool, bool);
+                               bool, bool,
+                               const lr_ibc_DeltaX*);
 
 template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
                                          Arrv4D const&,

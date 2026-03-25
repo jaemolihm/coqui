@@ -24,6 +24,7 @@
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
+#include "methods/HF/thc_solver_comm.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
 #include "nda/nda.hpp"
@@ -93,7 +94,10 @@ std::tuple<int, double> lr_driver::run_lr(
     bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
     dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
     int max_iter, double tol, bool fix_density,
-    const lr_iter_params& iter_params) {
+    const lr_iter_params& iter_params,
+    const nda::array<ComplexType, 4>* DeltaX_left,
+    const nda::array<ComplexType, 4>* DeltaX_right,
+    const nda::array<ComplexType, 4>* Dm_ab) {
 
   _Timer.start("LR_SCF");
 
@@ -210,6 +214,26 @@ std::tuple<int, double> lr_driver::run_lr(
     if (sDeltaSigma_tskij) sDeltaSigma_tskij->local() = ComplexType(0.0);
   }
   _mpi->comm.barrier();
+
+  // DeltaX IBC correction setup
+  bool has_deltax = DeltaX_left && DeltaX_right;
+  std::optional<lr_ibc_DeltaX> opt_ibc;
+  if (has_deltax) {
+    app_log(2, "  DeltaX IBC correction: building lr_ibc_DeltaX...");
+
+    auto kpq_map_long = nda::array<long, 1>(_lr_dyson.kpq_map().shape());
+    for (long i = 0; i < kpq_map_long.size(); ++i) kpq_map_long(i) = _lr_dyson.kpq_map()(i);
+
+    opt_ibc.emplace(build_lr_ibc(
+        *_mpi, _MF, thc,
+        *DeltaX_left, *DeltaX_right,
+        _lr_dyson.q_vec(), kpq_map_long,
+        Dm_ab, &sG_tskij,
+        opt_dW_tRPQ ? &(*opt_dW_tRPQ) : nullptr,
+        include_hartree, include_exchange, include_gw_sigma));
+
+    app_log(2, "  DeltaX IBC correction: setup complete.");
+  }
   _Timer.stop("LR_SETUP");
 
   double Delta_mu = 0.0;
@@ -272,8 +296,9 @@ std::tuple<int, double> lr_driver::run_lr(
     // Step 2: Compute LR Fock matrix (if requested)
     if (need_hf) {
       _Timer.start("LR_HF");
+      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       _lr_hf->evaluate(sDeltaF_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                       include_hartree, include_exchange);
+                       include_hartree, include_exchange, ibc_ptr);
       _Timer.stop("LR_HF");
       _mpi->comm.barrier();
     }
@@ -282,8 +307,12 @@ std::tuple<int, double> lr_driver::run_lr(
     if (include_gw_sigma && !gw_full) {
       // DeltaG-only mode: ΔΣ = -ΔG ⊙ W_c
       _Timer.start("LR_GW_SIGMA");
-      lr_gw_solver->evaluate_sigma_DeltaG(
-          *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc);
+      {
+        const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
+        lr_gw_solver->evaluate_sigma_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc,
+            ibc_ptr);
+      }
       _Timer.stop("LR_GW_SIGMA");
       _mpi->comm.barrier();
     }
@@ -291,8 +320,10 @@ std::tuple<int, double> lr_driver::run_lr(
     if (gw_full) {
       // Step 3b: ΔP = -ΔG·G - G·ΔG
       _Timer.start("LR_GW_PI");
+      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       auto dDeltaPi_tqPQ = lr_pi_solver->evaluate_lr_Pi(
-          sG_tskij.local(), sDeltaG_tskij.local(), thc);
+          sG_tskij.local(), sDeltaG_tskij.local(), thc,
+          ibc_ptr);
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_PI");
 
@@ -310,7 +341,8 @@ std::tuple<int, double> lr_driver::run_lr(
       dDeltaW_tqPQ.reset();
       lr_gw_solver->evaluate_sigma(
           *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
-          sG_tskij.local(), dDeltaW_qtPQ, thc);
+          sG_tskij.local(), dDeltaW_qtPQ, thc,
+          ibc_ptr);
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_SIGMA");
     }
@@ -474,6 +506,8 @@ template std::tuple<int, double> lr_driver::run_lr(
     thc_reader_t&,
     bool, bool, lr_gw_update_mode,
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
-    int, double, bool, const lr_iter_params&);
+    int, double, bool, const lr_iter_params&,
+    const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*,
+    const nda::array<ComplexType, 4>*);
 
 } // namespace methods

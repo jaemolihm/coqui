@@ -1112,7 +1112,9 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      int max_iter,
                                      double tol,
                                      bool fix_density,
-                                     const lr_iter_params& iter_params) {
+                                     const lr_iter_params& iter_params,
+                                     const nda::array<ComplexType, 4>* DeltaX_left,
+                                     const nda::array<ComplexType, 4>* DeltaX_right) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1227,13 +1229,21 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   lr_driver driver(dyson, q_vec);
   auto& thc = eri.corr_eri->get();
   auto* pDeltaSigma = opt_sDeltaSigma_tskij ? &(*opt_sDeltaSigma_tskij) : nullptr;
+  // Pass DeltaX and unperturbed Dm for DeltaX/IBC correction
+  const nda::array<ComplexType, 4>* Dm_ab_ptr = nullptr;
+  nda::array<ComplexType, 4> Dm_ab_local;
+  if (DeltaX_left) {
+    Dm_ab_local = sDm_skij.local();
+    Dm_ab_ptr = &Dm_ab_local;
+  }
   auto [niter, Delta_mu] = driver.run_lr(
       sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
       sG_tskij, sDeltaH0_skij, thc,
       include_hartree, include_exchange, gw_mode,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
-      max_iter, tol, fix_density, iter_params);
+      max_iter, tol, fix_density, iter_params,
+      DeltaX_left, DeltaX_right, Dm_ab_ptr);
   mpi->comm.barrier();
 
   // Write results
@@ -1862,7 +1872,8 @@ template std::tuple<int, double> run_lr_calc(
     ptree const&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 4> const&,
-    bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&);
+    bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&,
+    const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*);
 
 // lr_gw_sigma_DeltaG_calc instantiations (THC only — lr_gw requires THC)
 template nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(

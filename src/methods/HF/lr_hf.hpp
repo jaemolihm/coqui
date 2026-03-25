@@ -30,6 +30,7 @@
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "methods/ERI/detail/concepts.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 #include "utilities/lr_utils.hpp"
 
 namespace methods {
@@ -97,13 +98,16 @@ public:
    * @param compute_hartree  - [INPUT] Whether to compute Hartree term (default: true)
    * @param compute_exchange - [INPUT] Whether to compute Exchange term (default: true)
    */
+  using dArray_4D_t = dArray_t<nda::array<ComplexType, 4>>;
+
   template<nda::MemoryArray AF_t>
   void evaluate(sArray_t<AF_t>& sDeltaF_skij,
                 const sArray_t<AF_t>& sDeltaDm_skij,
                 THC_ERI auto& thc,
                 const nda::MemoryArrayOfRank<4> auto& S_skij,
                 bool compute_hartree = true,
-                bool compute_exchange = true);
+                bool compute_exchange = true,
+                const lr_ibc_DeltaX* ibc = nullptr);
 
   inline void print_timers() {
     app_log(2, "\n  LR_HF timers");
@@ -149,7 +153,8 @@ private:
                  sArray_t<AF_t>& sDeltaF_skij,
                  THC_ERI auto& thc,
                  bool compute_hartree,
-                 bool compute_exchange);
+                 bool compute_exchange,
+                 const lr_ibc_DeltaX* ibc = nullptr);
 
   /**
    * @brief LR finite-size correction for K based on "PRB 80, 085114(2009)"

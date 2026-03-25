@@ -136,7 +136,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            include_hartree=True, include_exchange=True,
            gw_mode="none",
            max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
-           include_gw_sigma=None):
+           include_gw_sigma=None,
+           DeltaX_left=None, DeltaX_right=None):
     """
     Run unified linear response calculation.
 
@@ -186,6 +187,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
         False -> "none". Overrides gw_mode if both are specified.
+    DeltaX_left : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Required together with DeltaX_right.
+    DeltaX_right : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^{-q} X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Required together with DeltaX_left.
 
     Returns
     -------
@@ -223,10 +230,17 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
     diis_warmup = int(iter_alg.get("diis_warmup", 3))
 
+    # Validate and convert DeltaX arrays
+    if (DeltaX_left is None) != (DeltaX_right is None):
+        raise ValueError("DeltaX_left and DeltaX_right must both be provided or both be None.")
+    dx_left = np.asarray(DeltaX_left, dtype=np.complex128) if DeltaX_left is not None else None
+    dx_right = np.asarray(DeltaX_right, dtype=np.complex128) if DeltaX_right is not None else None
+
     return run_lr_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
-                      alg, mixing, max_subsp_size, diis_warmup)
+                      alg, mixing, max_subsp_size, diis_warmup,
+                      dx_left, dx_right)
 
 
 def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):

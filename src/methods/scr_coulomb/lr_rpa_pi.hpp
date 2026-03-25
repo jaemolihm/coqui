@@ -32,6 +32,7 @@
 #include "mean_field/MF.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 
 namespace methods {
 
@@ -84,7 +85,8 @@ namespace methods {
       dArr_4D_t evaluate_lr_Pi(
           const nda::array_view<ComplexType, 5>& G_tskij,
           const nda::array_view<ComplexType, 5>& DeltaG_tskij,
-          thc_reader_t& thc);
+          thc_reader_t& thc,
+          const lr_ibc_DeltaX* ibc = nullptr);
 
     inline void print_timers() {
       app_log(2, "\n  LR_RPA_PI timers");

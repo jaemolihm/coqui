@@ -31,6 +31,7 @@
 #include "numerics/shared_array/detail/concepts.hpp"
 
 #include "methods/ERI/detail/concepts.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 
 namespace methods {
   namespace solvers {
@@ -81,18 +82,36 @@ namespace methods {
        * @param kp_to_ibz  - [INPUT] full BZ k → IBZ k mapping (nkpts,)
        * @param kp_trev    - [INPUT] time-reversal flag per full BZ k-point (nkpts,)
        * @param kpq_map    - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       * @param ibc        - [INPUT] optional IBC correction data (DeltaX arrays + unperturbed quantities)
+       * @param O_unpert   - [INPUT] optional unperturbed quantity in primary basis (same shape as O_Iab)
+       *                     Required when ibc is non-null. For rank-4: (ns, nk_ibz, nb, nb).
+       *                     For rank-5: pass as rank-4 with flattened (nt_loc*ns, nk, nb, nb).
+       * @param O_unpert_5d - [INPUT] optional unperturbed rank-5 quantity (nt, ns, nk_ibz, nb, nb)
+       *                      Alternative to O_unpert for rank-5 transforms — auto-sliced to local τ range.
+       *
+       * When ibc is provided, adds correction terms:
+       *   O_PQ += δ^q X(k) · A(k) · X(k)† + X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
        */
-      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
+      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t,
+               typename O_unpert_4D_t = nda::array<ComplexType, 4>,
+               typename O_unpert_5D_t = nda::array<ComplexType, 5>>
       static void primary_to_aux(int ip, int iq,
                                  const Array_primary_t &O_Iab,
                                  memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_to_ibz,
                                  nda::ArrayOfRank<1> auto const& kp_trev,
-                                 nda::ArrayOfRank<1> auto const& kpq_map) {
+                                 nda::ArrayOfRank<1> auto const& kpq_map,
+                                 const lr_ibc_DeltaX* ibc = nullptr,
+                                 const O_unpert_4D_t* O_unpert = nullptr,
+                                 const O_unpert_5D_t* O_unpert_5d = nullptr) {
         constexpr int rank = nda::get_rank<Array_primary_t>;
         static_assert(rank == 4 || rank == 5,
                       "lr_thc_comm::primary_to_aux: rank must be 4 or 5");
+
+        // Extract DeltaX pointers from ibc (null when no correction)
+        const nda::array<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
+        const nda::array<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
 
         if constexpr (rank == 5) {
           auto t_loc_rng = O_IPQ.local_range(0);
@@ -104,9 +123,23 @@ namespace methods {
           utils::check(O_IPQ.global_shape()[2] == O_IPQ.local_shape()[2],
                        "lr_thc_comm::primary_to_aux(rank-5): Does not support mpi distributed along k-axis.");
 
-          _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
-                               kp_to_ibz, kp_trev, kpq_map,
-                               1, 0, 1, P_offset, Q_offset);
+          if (O_unpert_5d) {
+            // Slice to local tau range (rank-5 view), then copy into a rank-5 array
+            // and reshape to rank-4 (dim_i = nt_loc * ns) for _impl.
+            nda::array<ComplexType, 5> O_5d_loc{(*O_unpert_5d)(t_loc_rng, nda::ellipsis{})};
+            long nt_loc_ = O_5d_loc.shape(0), ns_ = O_5d_loc.shape(1);
+            long nk_ = O_5d_loc.shape(2), nb_ = O_5d_loc.shape(3);
+            auto O_unpert_loc = nda::array<ComplexType, 4>{
+                nda::reshape(O_5d_loc, shape_t<4>{nt_loc_ * ns_, nk_, nb_, nb_})};
+            _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
+                                 kp_to_ibz, kp_trev, kpq_map,
+                                 1, 0, 1, P_offset, Q_offset,
+                                 DeltaX_ptr, DeltaX_mq_ptr, &O_unpert_loc);
+          } else {
+            _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
+                                 kp_to_ibz, kp_trev, kpq_map,
+                                 1, 0, 1, P_offset, Q_offset);
+          }
         } else if constexpr (rank == 4) {
           auto P_offset = O_IPQ.origin()[2];
           auto Q_offset = O_IPQ.origin()[3];
@@ -117,7 +150,8 @@ namespace methods {
 
           _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
                                kp_to_ibz, kp_trev, kpq_map,
-                               1, 0, 1, P_offset, Q_offset);
+                               1, 0, 1, P_offset, Q_offset,
+                               DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
         }
       }
 
@@ -230,17 +264,24 @@ namespace methods {
        * Only rank-4 is supported; rank-5 support can be added if needed.
        * Caller passes the original O (not O^H). Returns [O_PQ]^T directly.
        */
-      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
+      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t,
+               typename O_unpert_4D_t = nda::array<ComplexType, 4>>
       static void primary_to_aux_transposed(int ip, int iq,
                                  const Array_primary_t &O_Iab,
                                  memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_to_ibz,
                                  nda::ArrayOfRank<1> auto const& kp_trev,
-                                 nda::ArrayOfRank<1> auto const& kpq_map) {
+                                 nda::ArrayOfRank<1> auto const& kpq_map,
+                                 const lr_ibc_DeltaX* ibc = nullptr,
+                                 const O_unpert_4D_t* O_unpert = nullptr) {
         constexpr int rank = nda::get_rank<Array_primary_t>;
         static_assert(rank == 4,
                       "lr_thc_comm::primary_to_aux_transposed: only rank-4 supported");
+
+        // Extract DeltaX pointers from ibc (null when no correction)
+        const nda::array<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
+        const nda::array<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
 
         auto P_offset = O_IPQ.origin()[2];
         auto Q_offset = O_IPQ.origin()[3];
@@ -251,7 +292,8 @@ namespace methods {
 
         _primary_to_aux_transposed_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
                              kp_to_ibz, kp_trev, kpq_map,
-                             1, 0, 1, P_offset, Q_offset);
+                             1, 0, 1, P_offset, Q_offset,
+                             DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
       }
 
     private:
@@ -261,7 +303,7 @@ namespace methods {
        *   - Left X uses X(kpq_map(k)) instead of X(k)
        *   - Right X uses X(k) (unchanged)
        */
-      template<nda::Array Array_primary_t, nda::Array Array_aux_t>
+      template<nda::Array Array_primary_t, nda::Array Array_aux_t, typename O_unpert_t = nda::array<ComplexType, 4>>
       static void _primary_to_aux_impl(int ip, int iq,
                                        const Array_primary_t& O_tskab,
                                        Array_aux_t& O_tskPQ,
@@ -271,11 +313,16 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kpq_map,
                                        long nbatch,
                                        int rank, int comm_size,
-                                       long P_offset = 0, long Q_offset = 0) {
+                                       long P_offset = 0, long Q_offset = 0,
+                                       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
+                                       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+                                       const O_unpert_t* O_unpert = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_primary_to_aux_impl: Rank mismatch");
         static_assert(nda::get_rank<Array_primary_t> >= 4,
                       "lr_thc_comm::_primary_to_aux_impl: Rank < 4");
+
+        bool has_deltax = DeltaX_left && DeltaX_right && O_unpert;
 
         decltype(nda::range::all) all;
         constexpr int N = nda::get_rank<Array_primary_t>;
@@ -287,6 +334,11 @@ namespace methods {
         size_t NQ_loc     = O_tskPQ.shape(N-1);
         utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_impl: NP_loc+P_offset > thc.Np()");
         utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_impl: NQ_loc+Q_offset > thc.Np()");
+        if (has_deltax) {
+          utils::check(nkpts_ibz == nkpts,
+                       "lr_thc_comm::_primary_to_aux_impl: DeltaX correction requires full BZ grid (nkpts_ibz={} != nkpts={})",
+                       nkpts_ibz, nkpts);
+        }
 
         // dim_i = (t, s) or (s)
         size_t dim_i = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-3, (size_t)1, std::multiplies<>{});
@@ -304,6 +356,12 @@ namespace methods {
         int offset = (rank % nbatch < n_large_batch)? 0 : 0 + n_large_batch;
 
         nda::array<ComplexType, 2> Ask_Pb(batch_size, nbnd);
+
+        // DeltaX correction buffers (allocated only when needed)
+        nda::matrix<ComplexType> U_ab_buf;
+        if (has_deltax) {
+          U_ab_buf.resize(nbnd, nbnd);
+        }
 
         for (size_t ikP = rank; ikP < dim_i*nkpts*nbatch; ikP += comm_size) {
           // ikP = (i * nkpts + k) * nbatch + PP
@@ -327,6 +385,25 @@ namespace methods {
 
           // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
           nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
+
+          // DeltaX correction:
+          //   δ^q X(k) · A(k) · X(k)†  +  X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
+          if (has_deltax) {
+            auto DX_L = (*DeltaX_left)(s, k, all, all);             // δ^q X(k)
+            auto DX_R = (*DeltaX_right)(s, kpq_map(k), all, all);   // δ^{-q} X(k+q)
+
+            // Term 2: δ^q X(k) · A(k) · X(k)†
+            U_ab_buf = (*O_unpert)(i, k, all, all);
+            nda::blas::gemm(DX_L(X_P_rng, all), U_ab_buf, Ask_Pb);
+            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)),
+                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
+
+            // Term 3: X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
+            U_ab_buf = (*O_unpert)(i, kpq_map(k), all, all);
+            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), U_ab_buf, Ask_Pb);
+            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(DX_R(O_Q_rng, all)),
+                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
+          }
         }
       }
 
@@ -336,7 +413,7 @@ namespace methods {
        *   1. Using swapped X: left=X(k), right=X(k+q), with O^H computed on-the-fly
        *   2. Conjugating the output
        */
-      template<nda::Array Array_primary_t, nda::Array Array_aux_t>
+      template<nda::Array Array_primary_t, nda::Array Array_aux_t, typename O_unpert_t = nda::array<ComplexType, 4>>
       static void _primary_to_aux_transposed_impl(int ip, int iq,
                                        const Array_primary_t& O_tskab,
                                        Array_aux_t& O_tskPQ,
@@ -346,11 +423,21 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kpq_map,
                                        long nbatch,
                                        int rank, int comm_size,
-                                       long P_offset = 0, long Q_offset = 0) {
+                                       long P_offset = 0, long Q_offset = 0,
+                                       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
+                                       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+                                       const O_unpert_t* O_unpert = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_primary_to_aux_transposed_impl: Rank mismatch");
         static_assert(nda::get_rank<Array_primary_t> >= 4,
                       "lr_thc_comm::_primary_to_aux_transposed_impl: Rank < 4");
+
+        // Transposed: [O_PQ]^T = conj( X(k) @ O^H @ X(k+q)^H )
+        // DeltaX correction (before final conjugation):
+        //   pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
+        //   pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
+
+        bool has_deltax = DeltaX_left && DeltaX_right && O_unpert;
 
         decltype(nda::range::all) all;
         constexpr int N = nda::get_rank<Array_primary_t>;
@@ -362,6 +449,11 @@ namespace methods {
         size_t NQ_loc     = O_tskPQ.shape(N-1);
         utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NP_loc+P_offset > thc.Np()");
         utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NQ_loc+Q_offset > thc.Np()");
+        if (has_deltax) {
+          utils::check(nkpts_ibz == nkpts,
+                       "lr_thc_comm::_primary_to_aux_transposed_impl: DeltaX correction requires full BZ grid (nkpts_ibz={} != nkpts={})",
+                       nkpts_ibz, nkpts);
+        }
 
         // dim_i = (t, s) or (s)
         size_t dim_i = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-3, (size_t)1, std::multiplies<>{});
@@ -380,6 +472,15 @@ namespace methods {
 
         nda::array<ComplexType, 2> Ask_Pb(batch_size, nbnd);
         nda::matrix<ComplexType> O_H_slice(nbnd, nbnd);
+
+        // DeltaX: reshape unperturbed quantity once
+        using reshape_4D_t = decltype(nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd}));
+        std::optional<reshape_4D_t> U_ikab_4D_opt;
+        nda::matrix<ComplexType> U_H_buf;
+        if (has_deltax) {
+          U_ikab_4D_opt.emplace(nda::reshape(*O_unpert, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd}));
+          U_H_buf.resize(nbnd, nbnd);
+        }
 
         // Transform with swapped X: left=X(k), right=X(k+q), input=O^H
         for (size_t ikP = rank; ikP < dim_i*nkpts*nbatch; ikP += comm_size) {
@@ -405,9 +506,31 @@ namespace methods {
           }
 
           nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
+
+          // DeltaX correction (before final conjugation)
+          // Transpose of eq terms:
+          //   pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
+          //   pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
+          if (has_deltax) {
+            auto& U_ikab_4D = *U_ikab_4D_opt;
+            auto DX_q_at_k   = (*DeltaX_left)(s, k, all, all);              // δ^q X(k)
+            auto DX_mq_at_kpq = (*DeltaX_right)(s, kpq_map(k), all, all);   // δ^{-q} X(k+q)
+
+            // Pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
+            U_H_buf = nda::dagger(U_ikab_4D(i, k, all, all));
+            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), U_H_buf, Ask_Pb);
+            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(DX_q_at_k(O_Q_rng, all)),
+                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
+
+            // Pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
+            U_H_buf = nda::dagger(U_ikab_4D(i, kpq_map(k), all, all));
+            nda::blas::gemm(DX_mq_at_kpq(X_P_rng, all), U_H_buf, Ask_Pb);
+            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)),
+                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
+          }
         }
 
-        // Conjugate output
+        // Conjugate output (applies to both standard and DeltaX terms)
         O_ikPQ_4D = nda::conj(O_ikPQ_4D);
       }
 
@@ -466,6 +589,7 @@ namespace methods {
 
           // Osk_ab = Ask_aQ * Xsk_Qb
           nda::blas::gemm(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_buffer);
+
           dim0_comm.reduce_in_place_n(Oab_buffer.data(), Oab_buffer.size(), std::plus<>{}, 0);
           if (dim0_comm.root()) {
             O_iab_3D(i, all, all) += scl*Oab_buffer;

@@ -28,9 +28,9 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "utilities/kpoint_utils.hpp"
-#include "utilities/lr_utils.hpp"
 #include "utilities/mpi_context.h"
 #include "methods/ERI/detail/concepts.hpp"
+#include "mean_field/MF.hpp"
 
 namespace methods {
 

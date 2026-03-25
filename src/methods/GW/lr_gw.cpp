@@ -84,7 +84,8 @@ namespace methods {
         dArr_4D_t& dW_tRPQ,
         const nda::array_view<ComplexType, 5>& G_tskij,
         dArr_4D_t& dDeltaW_qtPQ,
-        thc_reader_t& thc) {
+        thc_reader_t& thc,
+        const lr_ibc_DeltaX* ibc) {
 
       _init_kpq_map(thc);
 
@@ -92,7 +93,8 @@ namespace methods {
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
-      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ);
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ,
+                         ibc);
 
       app_log(1, "  LR-GW self-energy (fused) done.\n");
       print_timers();
@@ -106,7 +108,8 @@ namespace methods {
         sArrv_5D_t& sDeltaSigma_tskij,
         const nda::array_view<ComplexType, 5>& DeltaG_tskij,
         dArr_4D_t& dW_tRPQ,
-        thc_reader_t& thc) {
+        thc_reader_t& thc,
+        const lr_ibc_DeltaX* ibc) {
 
       _init_kpq_map(thc);
 
@@ -114,7 +117,8 @@ namespace methods {
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
-      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr);
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr,
+                         ibc);
 
       app_log(1, "  LR-GW self-energy (term 1) done.\n");
       print_timers();
@@ -152,7 +156,8 @@ namespace methods {
         const nda::array_view<ComplexType, 5>* DeltaG_tskij,
         dArr_4D_t* dW_tRPQ,
         const nda::array_view<ComplexType, 5>* G_tskij,
-        dArr_4D_t* dDeltaW_qtPQ) {
+        dArr_4D_t* dDeltaW_qtPQ,
+        const lr_ibc_DeltaX* ibc) {
       _Timer.start("EVALUATE_SIGMA_R");
 
       bool do_term1 = (DeltaG_tskij != nullptr);
@@ -222,13 +227,6 @@ namespace methods {
 
       app_log(2, "    nt_loc={}, nkpts={}, t_origin={}, NP_loc={}, NQ_loc={}",
               nt_loc, nkpts, t_origin, NP_loc, NQ_loc);
-
-      // Identity kpq_map for term 2's G (unperturbed, no k+q offset)
-      nda::array<long, 1> identity_map;
-      if (do_term2) {
-        identity_map.resize(nkpts);
-        for (long ik = 0; ik < nkpts; ++ik) identity_map(ik) = ik;
-      }
 
       // === Step 0: Create tau subcommunicator and allocate rank-4 work arrays ===
       _Timer.start("SIGMA_ALLOC");
@@ -326,8 +324,16 @@ namespace methods {
             _Timer.start("SIGMA_PRIM_TO_AUX");
             dG_skPQ.local() = 0;
             auto DeltaG_slice = (*DeltaG_tskij)(it_g, nda::ellipsis{});
-            lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
-                                        MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+            if (ibc && ibc->sG_tskij) {
+              // DeltaX correction: pass unperturbed G(τ) view as O_unpert (no copy)
+              auto G_tau_view = ibc->sG_tskij->local()(it_g, nda::ellipsis{});
+              lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
+                                          MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                          ibc, &G_tau_view);
+            } else {
+              lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
+                                          MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+            }
             _Timer.stop("SIGMA_PRIM_TO_AUX");
 
             if (nkpts != 1) {
@@ -355,8 +361,8 @@ namespace methods {
             _Timer.start("SIGMA_PRIM_TO_AUX");
             dG_skPQ.local() = 0;
             auto G_slice = (*G_tskij)(it_g, nda::ellipsis{});
-            lr_thc_comm::primary_to_aux(0, 0, G_slice, dG_skPQ, thc,
-                                        MF->kp_to_ibz(), MF->kp_trev(), identity_map);
+            thc_solver_comm::primary_to_aux(0, 0, G_slice, dG_skPQ, thc,
+                                           MF->kp_to_ibz(), MF->kp_trev());
             _Timer.stop("SIGMA_PRIM_TO_AUX");
 
             if (nkpts != 1) {
@@ -396,6 +402,14 @@ namespace methods {
           sSigma_skij.set_zero();
           lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
                                       sSigma_skij, thc, MF->ks_to_k(0), _kpq_map);
+
+          // Add precomputed IBC correction for this τ-point
+          if (ibc && ibc->DeltaSigma_ibc_tskij.size() > 0) {
+            if (sSigma_skij.node_comm()->root()) {
+              sSigma_skij.local() += ibc->DeltaSigma_ibc_tskij(it_out, nda::ellipsis{});
+            }
+            sSigma_skij.win().fence();
+          }
 
           if (tau_comm.rank() == 0) {
             sDeltaSigma_tskij.local()(it_out, nda::ellipsis{}) += sSigma_skij.local();

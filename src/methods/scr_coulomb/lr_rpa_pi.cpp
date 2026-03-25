@@ -99,7 +99,8 @@ namespace methods {
     dArr_4D_t lr_rpa_pi::evaluate_lr_Pi(
         const nda::array_view<ComplexType, 5>& G_tskij,
         const nda::array_view<ComplexType, 5>& DeltaG_tskij,
-        thc_reader_t& thc)
+        thc_reader_t& thc,
+        const lr_ibc_DeltaX* ibc)
     {
       using local_Array_4D_t = nda::array<ComplexType, 4>;
       using math::nda::make_distributed_array;
@@ -205,9 +206,17 @@ namespace methods {
         // === Step 1: ΔG^k_{mn}(τ) → ΔG^k_{PQ}(τ)  [lr_thc_comm::primary_to_aux] ===
         //     Input: DeltaG_tskij(τ), Output: dDeltaG_skPQ
         _Timer.start("PI_LR_PRIM_TO_AUX");
-        lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
-                                     dDeltaG_skPQ, thc,
-                                     MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        if (ibc && ibc->sG_tskij) {
+          auto G_tau_view = ibc->sG_tskij->local()(it_global, nda::ellipsis{});
+          lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
+                                       dDeltaG_skPQ, thc,
+                                       MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                       ibc, &G_tau_view);
+        } else {
+          lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
+                                       dDeltaG_skPQ, thc,
+                                       MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        }
         _Timer.stop("PI_LR_PRIM_TO_AUX");
 
         // === Step 2: G^k_{mn}(β-τ) → G^k_{PQ}(β-τ)  [thc_solver_comm::primary_to_aux] ===
@@ -262,9 +271,17 @@ namespace methods {
         //     Uses identity: [O_PQ]^T = conj(X_R @ O^H @ X_L^H)
         //     Dagger and output conjugation are handled inside primary_to_aux_transposed.
         _Timer.start("PI_LR_PRIM_TO_AUX");
-        lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
-                                                dDeltaG_skPQ, thc,
-                                                MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        if (ibc && ibc->sG_tskij) {
+          auto G_beta_view = ibc->sG_tskij->local()(it_beta_minus, nda::ellipsis{});
+          lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
+                                                  dDeltaG_skPQ, thc,
+                                                  MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                                  ibc, &G_beta_view);
+        } else {
+          lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
+                                                  dDeltaG_skPQ, thc,
+                                                  MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
+        }
         _Timer.stop("PI_LR_PRIM_TO_AUX");
 
         // === Steps 7+8+9 fused: k→R/(-R) FT (out-of-place) + phase + Hadamard per spin ===
