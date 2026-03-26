@@ -44,21 +44,46 @@ namespace methods {
      */
     struct div_utils {
 
+      /**
+       * Group q-points by |q| shell, returning unique shell values and indices per shell.
+       * @param Qpts       - [INPUT] q-points (nq, 3) in Cartesian
+       * @param threshold  - [INPUT] max |q|^order to include
+       * @param order      - [INPUT] power of |q| for grouping (1: |q|, 2: q²)
+       * @param two_dim    - [INPUT] if true, restrict to qz=0 (2D systems)
+       * @return (shell_values, shell_indices) where shell_indices[i] lists all
+       *         q-point indices in the i-th shell
+       */
       template<nda::ArrayOfRank<2> Array_q_t>
-      static auto filter_qpts(Array_q_t &&Qpts, double threshold, int order, bool two_dim=false) {
-        std::vector<int> q_indices;
-        std::set<double> q_set{};
-        for (int i=0; i<Qpts.shape(0); ++i) {
-          auto qpt = Qpts(i,nda::range::all);
-          double norm = std::sqrt( qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2) );
+      static auto group_qpts_by_shell(Array_q_t &&Qpts, double threshold, int order, bool two_dim=false) {
+        // Map from shell value → list of q-indices in that shell
+        std::map<double, std::vector<int>> shell_map;
+        for (int i = 0; i < Qpts.shape(0); ++i) {
+          auto qpt = Qpts(i, nda::range::all);
+          double norm = std::sqrt(qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2));
           norm = std::pow(norm, order);
-          if (norm > 0.0 && norm <= threshold && (!two_dim or qpt(2)==0.0)) {
-            auto insert_pair = q_set.insert(norm);
-            if (insert_pair.second) {
-              q_indices.push_back(i);
-            }
+          if (norm > 0.0 && norm <= threshold && (!two_dim || qpt(2) == 0.0)) {
+            // Round to avoid floating-point duplicates within same shell
+            // Round to 1e-10 to merge q-points differing only by FP noise in norm computation
+            double key = std::round(norm * 1e10) / 1e10;
+            shell_map[key].push_back(i);
           }
         }
+        std::vector<double> shell_values;
+        std::vector<std::vector<int>> shell_indices;
+        for (auto& [val, indices] : shell_map) {
+          shell_values.push_back(val);
+          shell_indices.push_back(std::move(indices));
+        }
+        return std::make_pair(shell_values, shell_indices);
+      }
+
+      /// Legacy interface: returns one representative index per shell (backward compat)
+      template<nda::ArrayOfRank<2> Array_q_t>
+      static auto filter_qpts(Array_q_t &&Qpts, double threshold, int order, bool two_dim=false) {
+        auto [shell_values, shell_indices] = group_qpts_by_shell(
+            std::forward<Array_q_t>(Qpts), threshold, order, two_dim);
+        std::vector<int> q_indices;
+        for (auto& indices : shell_indices) q_indices.push_back(indices[0]);
         return q_indices;
       }
 
@@ -76,7 +101,7 @@ namespace methods {
       static auto eps_inv_head_t(memory::darray_t<Array_w_t, communicator_t> &dW_tqPQ, thc_t &thc,
                                  mf::MF &mf, const imag_axes_ft::IAFT *ft,
                                  div_treatment_e div_treatment=gygi_extrplt,
-                                 bool poly_in_q2=false, double q_max=0.8, int fit_order=2)
+                                 bool poly_in_q2=true, double q_max=0.8, int fit_order=2)
       -> std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 1> > {
 
         auto [eps_inv_t, Q_abs, Q_abs2] = eval_eps_inv_q(dW_tqPQ, thc, mf);
@@ -97,22 +122,36 @@ namespace methods {
           nda::array<ComplexType, 2> eps_inv_w(nw, nqpts_ibz);
           ft->tau_to_w_PHsym(eps_inv_t, eps_inv_w);
 
-          auto q_indices = (poly_in_q2)? filter_qpts(mf.Qpts_ibz(), q_max, 2, two_dim)
-                           : filter_qpts(mf.Qpts_ibz(), q_max, 1, two_dim);
-          nda::array<ComplexType, 1> Q_filtered(q_indices.size());
-          nda::array<ComplexType, 2> eps_inv_filtered(eps_inv_w.shape(0), q_indices.size());
-          for (size_t i = 0; i < q_indices.size(); ++i) {
-            Q_filtered(i) = (poly_in_q2)? Q_abs2( q_indices[i] ) : Q_abs( q_indices[i] );
-            eps_inv_filtered(nda::range::all, i) = eps_inv_w(nda::range::all, q_indices[i] );
+          int q_order = poly_in_q2 ? 2 : 1;
+          auto [shell_values, shell_indices] = group_qpts_by_shell(mf.Qpts_ibz(), q_max, q_order, two_dim);
+          long n_shells = shell_values.size();
+
+          // Build shell-averaged eps_inv and Q values
+          nda::array<ComplexType, 1> Q_filtered(n_shells);
+          nda::array<ComplexType, 2> eps_inv_filtered(nw, n_shells);
+          for (long s = 0; s < n_shells; ++s) {
+            Q_filtered(s) = ComplexType(shell_values[s]);
+            eps_inv_filtered(nda::range::all, s) = ComplexType(0.0);
+            for (int iq : shell_indices[s]) {
+              eps_inv_filtered(nda::range::all, s) += eps_inv_w(nda::range::all, iq);
+            }
+            eps_inv_filtered(nda::range::all, s) /= ComplexType(shell_indices[s].size());
           }
-          if ( q_indices.size() < 3) {
-            // Choose the closest point to the gamma instead
-            eps_inv_q0_t = eps_inv_t(nda::range::all, q_indices[0]);
+
+          if (n_shells < 2) {
+            // Too few shells — use closest point to gamma
+            eps_inv_q0_t = eps_inv_t(nda::range::all, shell_indices[0][0]);
           } else {
+            // Reduce fit_order if too few shells
+            if (n_shells <= fit_order) {
+              int new_order = static_cast<int>(n_shells) - 1;
+              app_log(2, "  eps_inv_head_t: only {} q-shells, reducing fit_order from {} to {}", n_shells, fit_order, new_order);
+              fit_order = new_order;
+            }
             if (two_dim)
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points on the xy-plane", q_indices.size());
+              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
             else
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points", q_indices.size());
+              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
             nda::array<ComplexType, 1> eps_inv_q0_w(nw);
             for (int n = 0; n < nw; ++n) {
               eps_inv_q0_w(n) = extrapolate_to_q0(Q_filtered, eps_inv_filtered(n, nda::range::all), fit_order,
@@ -144,7 +183,7 @@ namespace methods {
       template<nda::MemoryArrayOfRank<4> Array_w_t, THC_ERI thc_t, typename communicator_t>
       static auto eps_inv_head_w(memory::darray_t<Array_w_t, communicator_t> &dW_wqPQ, thc_t &thc,
                                  mf::MF &mf, div_treatment_e div_treatment=gygi_extrplt,
-                                 bool poly_in_q2=false, double q_max=0.8, int fit_order=2)
+                                 bool poly_in_q2=true, double q_max=0.8, int fit_order=2)
       -> std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 1> > {
 
         auto [eps_inv_w, Q_abs, Q_abs2] = eval_eps_inv_q(dW_wqPQ, thc, mf);
@@ -161,21 +200,36 @@ namespace methods {
           utils::check(mf.nkpts_ibz() > 1, "eps_inv_head_w: nkpts_ibz <= 1 while div_treatment==gygi_extrplt");
           bool two_dim = (div_treatment==gygi_extrplt_2d)? true : false;
           // extrapolation happens at frequency axis
-          auto q_indices = (poly_in_q2)? filter_qpts(mf.Qpts_ibz(), q_max, 2, two_dim) : filter_qpts(mf.Qpts_ibz(), q_max, 1, two_dim);
-          nda::array<ComplexType, 1> Q_filter(q_indices.size());
-          nda::array<ComplexType, 2> eps_inv_filter(eps_inv_w.shape(0), q_indices.size());
-          for (size_t i = 0; i < q_indices.size(); ++i) {
-            Q_filter(i) = (poly_in_q2)? Q_abs2( q_indices[i] ) : Q_abs( q_indices[i] );
-            eps_inv_filter(nda::range::all, i) = eps_inv_w(nda::range::all, q_indices[i] );
+          int q_order = poly_in_q2 ? 2 : 1;
+          auto [shell_values, shell_indices] = group_qpts_by_shell(mf.Qpts_ibz(), q_max, q_order, two_dim);
+          long n_shells = shell_values.size();
+
+          // Build shell-averaged eps_inv and Q values
+          nda::array<ComplexType, 1> Q_filter(n_shells);
+          nda::array<ComplexType, 2> eps_inv_filter(nw, n_shells);
+          for (long s = 0; s < n_shells; ++s) {
+            Q_filter(s) = ComplexType(shell_values[s]);
+            eps_inv_filter(nda::range::all, s) = ComplexType(0.0);
+            for (int iq : shell_indices[s]) {
+              eps_inv_filter(nda::range::all, s) += eps_inv_w(nda::range::all, iq);
+            }
+            eps_inv_filter(nda::range::all, s) /= ComplexType(shell_indices[s].size());
           }
-          if ( q_indices.size() < 3) {
-            // Choose the closest point to the gamma instead
-            eps_inv_q0_w = eps_inv_w(nda::range::all, q_indices[0]);
+
+          if (n_shells < 2) {
+            // Too few shells — use closest point to gamma
+            eps_inv_q0_w = eps_inv_w(nda::range::all, shell_indices[0][0]);
           } else {
+            // Reduce fit_order if too few shells
+            if (n_shells <= fit_order) {
+              int new_order = static_cast<int>(n_shells) - 1;
+              app_log(2, "  eps_inv_head_w: only {} q-shells, reducing fit_order from {} to {}", n_shells, fit_order, new_order);
+              fit_order = new_order;
+            }
             if (two_dim)
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points on the xy-plane", q_indices.size());
+              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
             else
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points", q_indices.size());
+              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
             for (int n = 0; n < nw; ++n) {
               eps_inv_q0_w(n) = extrapolate_to_q0(Q_filter, eps_inv_filter(n, nda::range::all), fit_order,
                                                   (dW_wqPQ.communicator()->root() and n==0)? true : false);
