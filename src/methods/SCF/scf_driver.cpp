@@ -78,6 +78,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
       *mpi, {FT.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   mb_state.sSigma_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {FT.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  mb_state.sS_skij.emplace(dyson.sS_skij());
   auto& sF_skij = mb_state.sF_skij.value();
   auto& sDm_skij = mb_state.sDm_skij.value();
   auto& sG_tskij = mb_state.sG_tskij.value();
@@ -268,7 +269,8 @@ double qp_scf_loop(MBState &mb_state, eri_t &mb_eri, const imag_axes_ft::IAFT& F
   auto& sHeff_skij = mb_state.sF_skij.value();
   auto& sDm_skij = mb_state.sDm_skij.value();
   auto sH0_skij = make_shared_array<Array_view_4D_t>(*mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  auto sS_skij = make_shared_array<Array_view_4D_t>(*mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  mb_state.sS_skij.emplace(make_shared_array<Array_view_4D_t>(*mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  auto& sS_skij = mb_state.sS_skij.value();
   double mu = 0.0;
   // generates a new pseudopot object if not found in mf. Stores shared_ptr in mf and returns it.
   auto psp = hamilt::make_pseudopot(*mf);

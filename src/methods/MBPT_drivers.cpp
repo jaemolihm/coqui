@@ -1352,6 +1352,11 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   // Load W and eps_inv_head using helper
   auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+
   // Use standard gw_t code path
   solvers::gw_t gw(&ft);
 
@@ -1360,7 +1365,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
 
   gw.eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc, "R");
   if (div_corr) {
-    gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+    gw.Sigma_div_correction(sSigma_tskij, G_tskij, sS_skij.local(), thc, eps_inv_head);
   }
   mpi->comm.barrier();
 
@@ -1784,6 +1789,11 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
       {W_c_qtPQ.shape(0), W_c_qtPQ.shape(1), W_c_qtPQ.shape(2), W_c_qtPQ.shape(3)},
       W_c_qtPQ, {true, false, false, false});
 
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+
   // Use standard gw_t code path
   solvers::gw_t gw(&ft);
 
@@ -1792,7 +1802,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
 
   gw.eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc, "R");
   if (div_corr) {
-    gw.Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+    gw.Sigma_div_correction(sSigma_tskij, G_tskij, sS_skij.local(), thc, eps_inv_head);
   }
   mpi->comm.barrier();
 
