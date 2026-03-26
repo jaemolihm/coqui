@@ -221,9 +221,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)
  *
- * Computes ΔΣ = -ΔG ⊙ W_c (R-space Hadamard product).
- * Reads W from thc_screened_interaction.h5.
- * TODO: Divergence correction not yet implemented.
+ * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space Hadamard product).
+ * Reads W and eps_inv_head from checkpoint.
  *
  * @param eri          - [INPUT] THC ERI handler
  * @param pt           - [INPUT] Parameters as property tree (prefix, output)
@@ -256,10 +255,10 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     bool div_corr = true);
 
 /**
- * @brief Linear response GW self-energy term 2: -G ⊙ ΔW
+ * @brief Linear response GW self-energy term 2: -G ⊙ ΔW + div_corr
  *
  * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
- * TODO: Divergence correction not yet implemented.
+ * At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
  *
  * @param eri          - [INPUT] THC ERI handler
  * @param pt           - [INPUT] Parameters as property tree (prefix)
@@ -296,6 +295,20 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
     nda::array<ComplexType, 4> const& W_c_qtPQ,
     nda::array<ComplexType, 1> const& eps_inv_head,
     bool div_corr);
+
+/**
+ * @brief Compute eps_inv_head from W_c in THC product basis
+ *
+ * Extracts (ε⁻¹-1) head from W_c and extrapolates to q→0.
+ * Matches the convention used by Sigma_div_correction.
+ *
+ * @param W_c_tqPQ  - [INPUT] Screened interaction W_c (nt_half, nkpts, NP, NP)
+ * @return eps_inv_head at q=0, shape (nt_half,)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 4> const& W_c_tqPQ);
 
 /**
  * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)

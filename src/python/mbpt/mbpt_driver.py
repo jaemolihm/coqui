@@ -561,6 +561,38 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ):
     return lr_gw_sigma_DeltaW_cpp(json.dumps(params), h_int, q_pert, G_tskij, DeltaW_qtPQ)
 
 
+def compute_eps_inv_head(params, h_int, W_c_tqPQ):
+    """
+    Compute eps_inv_head from correlation screened interaction W_c in THC product basis.
+
+    Extracts the G=0,G'=0 component of (ε⁻¹ - 1) and extrapolates to q→0
+    using Gygi extrapolation. This matches the convention used by
+    Sigma_div_correction (which uses ε⁻¹-1, not ε⁻¹).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+    h_int : ThcCoulomb
+        THC ERI handler
+    W_c_tqPQ : np.ndarray
+        Correlation screened interaction W_c = W - V, shape (nt_half, nkpts, NP, NP).
+        NOT the full W.
+
+    Returns
+    -------
+    np.ndarray
+        (ε⁻¹ - 1) head at q=0, shape (nt_half,)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import compute_eps_inv_head_cpp
+
+    W_c_tqPQ = np.asarray(W_c_tqPQ, dtype=np.complex128)
+
+    return compute_eps_inv_head_cpp(json.dumps(params), h_int, W_c_tqPQ)
+
+
 def gw_evaluate_sigma_with_W(params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr=True):
     """
     Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] with provided G and W_c.

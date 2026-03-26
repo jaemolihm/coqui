@@ -391,6 +391,24 @@ namespace coqui_py {
 
 
   /**
+   * @brief Compute eps_inv_head from W_c in THC product basis
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix for IAFT)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param W_c_tqPQ       - [INPUT] Correlation screened interaction W_c (nt_half, nkpts, NP, NP)
+   * @return               - [OUTPUT] eps_inv_head (nt_half,)
+   */
+  nda::array<ComplexType, 1> compute_eps_inv_head(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<ComplexType, 4> const& W_c_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::compute_eps_inv_head_calc(mb_eri, parser.get_root(), W_c_tqPQ);
+  }
+
+
+  /**
    * @brief Evaluate GW self-energy with provided W and G (FD helper)
    *
    * @param lr_params      - [INPUT] JSON string with params (prefix)

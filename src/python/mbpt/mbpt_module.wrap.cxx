@@ -628,6 +628,39 @@ np.ndarray
     LR self-energy ΔΣ (term 2), shape (nt, ns, nk, nb, nb)
 )DOC");
 
+// compute_eps_inv_head - compute eps_inv_head from W_c in THC product basis
+static auto const fun_compute_eps_inv_head = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](const std::string &lr_params,
+           coqui_py::ThcCoulomb &h_int,
+           nda::array<ComplexType, 4> const& W_c_tqPQ) {
+          return coqui_py::compute_eps_inv_head(lr_params, h_int, W_c_tqPQ);
+        },
+        "lr_params", "h_int", "W_c_tqPQ")};
+
+static const auto doc_compute_eps_inv_head = fun_compute_eps_inv_head.doc(R"DOC(
+Compute eps_inv_head from correlation screened interaction W_c in THC product basis.
+
+Extracts the G=0,G'=0 component of (eps_inv - 1) and extrapolates to q→0
+using Gygi extrapolation. Matches the convention used by Sigma_div_correction.
+
+Parameters
+----------
+lr_params : str
+    JSON string with parameters:
+    - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+h_int : ThcCoulomb
+    THC ERI handler
+W_c_tqPQ : np.ndarray
+    Correlation screened interaction W_c = W - V, shape (nt_half, nkpts, NP, NP).
+    NOT the full W.
+
+Returns
+-------
+np.ndarray
+    (eps_inv - 1) head at q=0, shape (nt_half,)
+)DOC");
+
 // gw_evaluate_sigma_with_W - evaluate Σ = -G ⊙ W with provided G and W
 static auto const fun_gw_evaluate_sigma_with_W = c2py::dispatcher_f_kw_t{
     c2py::cfun(
@@ -698,6 +731,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_lr_gw_sigma_DeltaW.c_str()},
     {"gw_evaluate_sigma_with_W_cpp", (PyCFunction)c2py::pyfkw<fun_gw_evaluate_sigma_with_W>,
      METH_VARARGS | METH_KEYWORDS, doc_gw_evaluate_sigma_with_W.c_str()},
+    {"compute_eps_inv_head_cpp", (PyCFunction)c2py::pyfkw<fun_compute_eps_inv_head>,
+     METH_VARARGS | METH_KEYWORDS, doc_compute_eps_inv_head.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

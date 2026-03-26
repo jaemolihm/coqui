@@ -24,6 +24,7 @@ from .mbpt_driver import (
     run_lr_gw_Pi, gw_evaluate_Pi,
     run_lr_gw_W, gw_evaluate_W_from_Pi,
     run_lr_gw_sigma_DeltaW, gw_evaluate_sigma_with_W,
+    compute_eps_inv_head,
 )
 from .lr_driver import (
     calculate_kpq_map,
@@ -57,6 +58,7 @@ __all__ = [
     # LR-GW full (term 2)
     "run_lr_gw_sigma_DeltaW",
     "gw_evaluate_sigma_with_W",
+    "compute_eps_inv_head",
     # JML: Temporarily exposed for debugging
     "hf_evaluate",
 ]
