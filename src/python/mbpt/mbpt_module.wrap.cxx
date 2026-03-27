@@ -409,6 +409,7 @@ Parameters
 lr_params : str
     JSON string with parameters:
     - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    - div_corr: bool, apply q→0 divergence correction (default true)
 h_int : ThcCoulomb
     THC ERI handler
 q_pert : np.ndarray
@@ -590,7 +591,7 @@ np.ndarray
     Screened interaction W_c, shape (nt_half, nkpts, NP, NP)
 )DOC");
 
-// lr_gw_sigma_DeltaW - compute LR GW self-energy term 2: -G ⊙ ΔW
+// lr_gw_sigma_DeltaW - compute LR GW self-energy term 2: -G ⊙ ΔW + div_corr
 static auto const fun_lr_gw_sigma_DeltaW = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
@@ -603,16 +604,17 @@ static auto const fun_lr_gw_sigma_DeltaW = c2py::dispatcher_f_kw_t{
         "lr_params", "h_int", "q_pert", "G_tskij", "DeltaW_qtPQ")};
 
 static const auto doc_lr_gw_sigma_DeltaW = fun_lr_gw_sigma_DeltaW.doc(R"DOC(
-Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
+Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW + div_corr.
 
 Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
-No divergence correction is applied.
+At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
 
 Parameters
 ----------
 lr_params : str
     JSON string with parameters:
     - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    - div_corr: bool, apply q→0 divergence correction (default true)
 h_int : ThcCoulomb
     THC ERI handler
 q_pert : np.ndarray

@@ -449,7 +449,7 @@ namespace methods {
                               const nda::MemoryArrayOfRank<4> auto &S_skij,
                               THC_ERI auto &thc,
                               const nda::array<ComplexType, 1> &eps_inv_head) {
-      app_log(1, "  Treatment of long-wavelength divergence in GW self-energy: {}",
+      app_log(2, "  Treatment of long-wavelength divergence in GW self-energy: {}",
               div_enum_to_string(_div_treatment));
 
       auto div_treatment = _div_treatment;
@@ -464,7 +464,7 @@ namespace methods {
       } else if (div_treatment==gygi or div_treatment==gygi_extrplt or div_treatment==gygi_extrplt_2d) {
         auto MF = thc.MF();
         auto mpi = thc.mpi();
-        app_log(1, "    - madelung = {}", MF->madelung());
+        app_log(2, "    - madelung = {}", MF->madelung());
         using math::shm::make_shared_array;
         auto [nts, ns, nkpts, nbnd, nbnd2] = sSigma_tskij.shape();
         auto nt_half = (nts%2==0)? nts / 2 : nts / 2 + 1;
@@ -503,7 +503,7 @@ namespace methods {
       } else {
         utils::check(false, "Unsupported divergence treatment: {}", div_enum_to_string(div_treatment));
       }
-      app_log(1, "");
+      app_log(2, "");
     }
 
   }

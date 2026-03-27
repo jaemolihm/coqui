@@ -137,7 +137,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            gw_mode="none",
            max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
            include_gw_sigma=None,
-           DeltaX_left=None, DeltaX_right=None):
+           DeltaX_left=None, DeltaX_right=None,
+           div_corr=True):
     """
     Run unified linear response calculation.
 
@@ -236,7 +237,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     dx_left = np.asarray(DeltaX_left, dtype=np.complex128) if DeltaX_left is not None else None
     dx_right = np.asarray(DeltaX_right, dtype=np.complex128) if DeltaX_right is not None else None
 
-    return run_lr_cpp(json.dumps(params), h_int, q_vec, DeltaH0_skij,
+    # Pass div_corr flag through params dict (read by C++ run_lr_calc)
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
                       alg, mixing, max_subsp_size, diis_warmup,
@@ -334,7 +339,7 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
 
 
-def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij):
+def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij, div_corr=True):
     """
     Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space).
 
@@ -351,6 +356,8 @@ def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij):
         LR perturbation wavevector in crystal coordinates, shape (3,)
     DeltaG_tskij : np.ndarray
         LR Green's function, shape (nt, ns, nk, nb, nb)
+    div_corr : bool, optional
+        Apply q→0 divergence correction (default True).
 
     Returns
     -------
@@ -363,7 +370,10 @@ def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij):
     q_pert = np.asarray(q_pert, dtype=np.float64)
     DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
 
-    return lr_gw_sigma_DeltaG_cpp(json.dumps(params), h_int, q_pert, DeltaG_tskij)
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    return lr_gw_sigma_DeltaG_cpp(json.dumps(params_with_div), h_int, q_pert, DeltaG_tskij)
 
 
 def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
@@ -525,12 +535,12 @@ def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):
     return gw_evaluate_W_from_Pi_cpp(json.dumps(params), h_int, Pi_tqPQ)
 
 
-def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ):
+def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ, div_corr=True):
     """
-    Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW (no div correction).
+    Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW + div_corr.
 
     Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
-    No divergence correction is applied.
+    At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
 
     Parameters
     ----------
@@ -545,6 +555,8 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ):
         Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
     DeltaW_qtPQ : np.ndarray
         LR screened interaction, shape (nk, nt_half, NP, NP)
+    div_corr : bool, optional
+        Apply q→0 divergence correction (default True).
 
     Returns
     -------
@@ -558,7 +570,10 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ):
     G_tskij = np.asarray(G_tskij, dtype=np.complex128)
     DeltaW_qtPQ = np.asarray(DeltaW_qtPQ, dtype=np.complex128)
 
-    return lr_gw_sigma_DeltaW_cpp(json.dumps(params), h_int, q_pert, G_tskij, DeltaW_qtPQ)
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    return lr_gw_sigma_DeltaW_cpp(json.dumps(params_with_div), h_int, q_pert, G_tskij, DeltaW_qtPQ)
 
 
 def compute_eps_inv_head(params, h_int, W_c_tqPQ):

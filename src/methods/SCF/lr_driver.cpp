@@ -27,6 +27,7 @@
 #include "methods/HF/thc_solver_comm.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
+#include "methods/GW/g0_div_utils.hpp"
 #include "nda/nda.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
@@ -97,7 +98,8 @@ std::tuple<int, double> lr_driver::run_lr(
     const lr_iter_params& iter_params,
     const nda::array<ComplexType, 4>* DeltaX_left,
     const nda::array<ComplexType, 4>* DeltaX_right,
-    const nda::array<ComplexType, 4>* Dm_ab) {
+    const nda::array<ComplexType, 4>* Dm_ab,
+    bool div_corr) {
 
   _Timer.start("LR_SCF");
 
@@ -111,7 +113,6 @@ std::tuple<int, double> lr_driver::run_lr(
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
                  "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
-    // eps_inv_head: not yet used, will be needed for div_corr (TODO)
     utils::check(dW_qtPQ != nullptr && eps_inv_head != nullptr,
                  "lr_driver::run_lr: gw_mode != none but dW_qtPQ or eps_inv_head is null.");
   }
@@ -313,6 +314,11 @@ std::tuple<int, double> lr_driver::run_lr(
             *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc,
             ibc_ptr);
       }
+      // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+      if (div_corr) {
+        lr_gw_solver->apply_div_correction_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+      }
       _Timer.stop("LR_GW_SIGMA");
       _mpi->comm.barrier();
     }
@@ -332,6 +338,16 @@ std::tuple<int, double> lr_driver::run_lr(
       lr_scr_solver->lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, *opt_dW_full_wqPQ, thc);
       // dDeltaPi_tqPQ now contains ΔW_c(τ) in q-local distribution
       auto& dDeltaW_tqPQ = dDeltaPi_tqPQ;  // alias for clarity
+
+      // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
+      nda::array<ComplexType, 1> delta_eps_inv_head;
+      if (div_corr && is_q_gamma()) {
+        auto [delta_eps_inv_q, delta_head] =
+            solvers::div_utils::eps_inv_head_t(
+                dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT());
+        delta_eps_inv_head = std::move(delta_head);
+      }
+
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_W");
 
@@ -343,6 +359,16 @@ std::tuple<int, double> lr_driver::run_lr(
           *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
           sG_tskij.local(), dDeltaW_qtPQ, thc,
           ibc_ptr);
+      // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
+      if (div_corr) {
+        lr_gw_solver->apply_div_correction_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+        // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+        if (is_q_gamma()) {
+          lr_gw_solver->apply_div_correction_G(
+              *sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+        }
+      }
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_SIGMA");
     }
@@ -508,6 +534,6 @@ template std::tuple<int, double> lr_driver::run_lr(
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
     int, double, bool, const lr_iter_params&,
     const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*,
-    const nda::array<ComplexType, 4>*);
+    const nda::array<ComplexType, 4>*, bool);
 
 } // namespace methods

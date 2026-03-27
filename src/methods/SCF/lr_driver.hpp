@@ -120,7 +120,8 @@ public:
       const lr_iter_params& iter_params,
       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
-      const nda::array<ComplexType, 4>* Dm_ab = nullptr);
+      const nda::array<ComplexType, 4>* Dm_ab = nullptr,
+      bool div_corr = true);
 
   void print_timers();
 

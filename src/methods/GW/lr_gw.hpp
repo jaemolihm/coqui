@@ -59,11 +59,11 @@ namespace methods {
      *     with identity kpq_map for primary_to_aux (G is unperturbed)
      *     and _kpq_map for aux_to_primary (ΔΣ has k+q structure).
      *
-     * Divergence correction is not yet implemented for LR GW. The q→0
-     * divergence is 1/q² (same as standard GW), but the correction requires
-     * Δε⁻¹_head which is not yet computed. Both terms are currently computed
-     * without div_corr; for FD testing, the reference Σ must also be computed
-     * without div_corr for consistency.
+     * Divergence correction (q→0, 1/q² singularity) via apply_div_correction_DeltaG
+     * and apply_div_correction_G:
+     *   Term 1 (all q_pert): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+     *   Term 2 (q_pert=0):   ΔΣ^div += -madelung * Δeps_inv_head * S(k) · G · S(k)
+     * Called by lr_driver after evaluate_sigma / evaluate_sigma_DeltaG.
      *
      * Naming convention:
      *   q_pert = LR perturbation wavevector (constructor param).
@@ -142,6 +142,31 @@ namespace methods {
           dArr_4D_t& dDeltaW_qtPQ,
           thc_reader_t& thc);
 
+      /**
+       * Divergence correction term 1 (all q_pert):
+       *   ΔΣ += -madelung * eps_inv_head(τ) * S(k+q) · ΔG · S(k)
+       * Uses _sigma_div_correction with S(k+q)/S(k).
+       */
+      void apply_div_correction_DeltaG(
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          const nda::array_view<ComplexType, 4>& S_skij,
+          thc_reader_t& thc,
+          const nda::array<ComplexType, 1>& eps_inv_head);
+
+      /**
+       * Divergence correction term 2 (q_pert=0 only):
+       *   ΔΣ += -madelung * Δeps_inv_head(τ) * S(k) · G · S(k)
+       * Uses gw_t::Sigma_div_correction (S_L = S_R at q=0).
+       * Asserts q_pert=0; calling at q_pert≠0 is a programming error.
+       */
+      void apply_div_correction_G(
+          sArrv_5D_t& sDeltaSigma_tskij,
+          const nda::array_view<ComplexType, 5>& G_tskij,
+          const nda::array_view<ComplexType, 4>& S_skij,
+          thc_reader_t& thc,
+          const nda::array<ComplexType, 1>& delta_eps_inv_head);
+
     inline void print_timers() {
       app_log(2, "\n  LR_GW timers");
       app_log(2, "  -------------");
@@ -193,18 +218,17 @@ namespace methods {
           const lr_ibc_DeltaX* ibc = nullptr);
 
       /**
-       * LR-aware divergence correction: ΔΣ^div = factor · T^L · ΔG · (T^R)†
+       * LR-aware divergence correction: ΔΣ^div = factor · S(k+q) · ΔG · S(k)
        *
-       * Adapted from gw_t::Sigma_div_correction (thc_gw.icc:445-526).
-       * For q_pert≠0, the left and right T matrices use different X:
-       *   T^L_{ia}(k) = Σ_P conj(X^{k+q}_{Pi}) · X^{k+q}_{Pa} · conj(χ_P)
-       *   T^R_{jb}(k) = Σ_P conj(X^k_{Pj})     · X^k_{Pb}     · conj(χ_P)
-       * Standard Sigma_div_correction uses T^L = T^R = T(k), which is only
-       * correct at q_pert=0.
+       * For q_pert≠0, the left and right overlap matrices use different k:
+       *   S_L(k) = S(k+q_pert)
+       *   S_R(k) = S(k)
+       * At q_pert=0, S_L = S_R = S(k).
        */
       void _sigma_div_correction(
           sArrv_5D_t& sDeltaSigma_tskij,
           const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+          const nda::array_view<ComplexType, 4>& S_skij,
           thc_reader_t& thc,
           const nda::array<ComplexType, 1>& eps_inv_head);
 

@@ -89,7 +89,7 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space, no div_corr)");
+      app_log(1, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
@@ -113,7 +113,7 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space, no div_corr)");
+      app_log(1, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space)");
       app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
@@ -144,6 +144,40 @@ namespace methods {
 
       app_log(1, "  LR-GW self-energy (term 2) done.\n");
       print_timers();
+    }
+
+
+    // =========================================================================
+    // apply_div_correction_DeltaG: Term 1 div corr (all q_pert)
+    //   ΔΣ += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+    // =========================================================================
+    void lr_gw::apply_div_correction_DeltaG(
+        sArrv_5D_t& sDeltaSigma_tskij,
+        const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+        const nda::array_view<ComplexType, 4>& S_skij,
+        thc_reader_t& thc,
+        const nda::array<ComplexType, 1>& eps_inv_head) {
+      _init_kpq_map(thc);
+      app_log(2, "  LR div correction (term 1, ΔG): S(k+q) · ΔG · S(k)");
+      _sigma_div_correction(sDeltaSigma_tskij, DeltaG_tskij, S_skij, thc, eps_inv_head);
+    }
+
+
+    // =========================================================================
+    // apply_div_correction_G: Term 2 div corr (q_pert=0 only)
+    //   ΔΣ += -madelung * Δeps_inv_head * S(k) · G · S(k)
+    // =========================================================================
+    void lr_gw::apply_div_correction_G(
+        sArrv_5D_t& sDeltaSigma_tskij,
+        const nda::array_view<ComplexType, 5>& G_tskij,
+        const nda::array_view<ComplexType, 4>& S_skij,
+        thc_reader_t& thc,
+        const nda::array<ComplexType, 1>& delta_eps_inv_head) {
+      utils::check(utils::is_q_gamma(_q_pert),
+                   "apply_div_correction_G: term 2 is only valid at q_pert=0, "
+                   "but q_pert = ({}, {}, {})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(2, "  LR div correction (term 2, G): S(k) · G · S(k) [q_pert=0]");
+      _gw.Sigma_div_correction(sDeltaSigma_tskij, G_tskij, S_skij, thc, delta_eps_inv_head);
     }
 
 
@@ -428,14 +462,16 @@ namespace methods {
 
     // =========================================================================
     // _sigma_div_correction: LR-aware divergence correction
+    //   ΔΣ^div_{ij} = factor · S(k+q) · ΔG · S(k)
     // =========================================================================
     void lr_gw::_sigma_div_correction(
         sArrv_5D_t& sDeltaSigma_tskij,
         const nda::array_view<ComplexType, 5>& DeltaG_tskij,
+        const nda::array_view<ComplexType, 4>& S_skij,
         thc_reader_t& thc,
         const nda::array<ComplexType, 1>& eps_inv_head) {
       auto div_treatment = _gw.div_treatmemnt();
-      app_log(1, "  LR divergence correction: {}", div_enum_to_string(div_treatment));
+      app_log(2, "  LR divergence correction: {}", div_enum_to_string(div_treatment));
 
       if (thc.MF()->nqpts_ibz() == 1 and div_treatment != ignore_g0) {
         app_log(2, "    nqpts_ibz == 1, taking div_treatment = ignore_g0");
@@ -447,54 +483,18 @@ namespace methods {
       } else if (div_treatment == gygi or div_treatment == gygi_extrplt or div_treatment == gygi_extrplt_2d) {
         auto MF = thc.MF();
         auto mpi = thc.mpi();
-        app_log(1, "    - madelung = {}", MF->madelung());
+        app_log(2, "    - madelung = {}", MF->madelung());
         using math::shm::make_shared_array;
         auto [nts, ns, nkpts, nbnd, nbnd2] = sDeltaSigma_tskij.shape();
         auto nt_half = (nts % 2 == 0) ? nts / 2 : nts / 2 + 1;
-        auto NP = thc.Np();
 
         int rank = mpi->comm.rank();
         int size = mpi->comm.size();
 
-        using Array_view_4D_t = nda::array_view<ComplexType, 4>;
         using Array_view_5D_t = nda::array_view<ComplexType, 5>;
-        auto chi_head = thc.basis_head()(0, nda::range::all);
+        decltype(nda::range::all) all;
 
-        // T^L_{ia}(k) = Σ_P conj(X^{k+q}_{Pi}) · X^{k+q}_{Pa} · conj(χ_P)
-        auto TL_skia = make_shared_array<Array_view_4D_t>(*mpi, {ns, nkpts, nbnd, nbnd});
-        auto TL_loc = TL_skia.local();
-        TL_skia.win().fence();
-        for (size_t skia = rank; skia < ns * nkpts * nbnd * nbnd; skia += size) {
-          size_t is = skia / (nkpts * nbnd * nbnd);
-          size_t ik = (skia / (nbnd * nbnd)) % nkpts;
-          size_t i = (skia / nbnd) % nbnd;
-          size_t a = skia % nbnd;
-          auto Xsk = thc.X(is, 0, _kpq_map(ik));  // X at k+q_pert
-          for (size_t P = 0; P < NP; ++P) {
-            TL_loc(is, ik, i, a) += nda::conj(Xsk(P, i)) * Xsk(P, a) * nda::conj(chi_head(P));
-          }
-        }
-        TL_skia.win().fence();
-        TL_skia.all_reduce();
-
-        // T^R_{jb}(k) = Σ_P conj(X^k_{Pj}) · X^k_{Pb} · conj(χ_P)
-        auto TR_skia = make_shared_array<Array_view_4D_t>(*mpi, {ns, nkpts, nbnd, nbnd});
-        auto TR_loc = TR_skia.local();
-        TR_skia.win().fence();
-        for (size_t skia = rank; skia < ns * nkpts * nbnd * nbnd; skia += size) {
-          size_t is = skia / (nkpts * nbnd * nbnd);
-          size_t ik = (skia / (nbnd * nbnd)) % nkpts;
-          size_t i = (skia / nbnd) % nbnd;
-          size_t a = skia % nbnd;
-          auto Xsk = thc.X(is, 0, ik);  // X at k
-          for (size_t P = 0; P < NP; ++P) {
-            TR_loc(is, ik, i, a) += nda::conj(Xsk(P, i)) * Xsk(P, a) * nda::conj(chi_head(P));
-          }
-        }
-        TR_skia.win().fence();
-        TR_skia.all_reduce();
-
-        // ΔΣ^div_{ij} = factor · T^L · ΔG · (T^R)†
+        // ΔΣ^div_{ij} = factor · S(k+q) · ΔG · S(k)
         nda::array<ComplexType, 2> buffer_ib(nbnd, nbnd);
         auto sDelta_tskij = make_shared_array<Array_view_5D_t>(*mpi, sDeltaSigma_tskij.shape());
         auto Delta_loc = sDelta_tskij.local();
@@ -507,12 +507,12 @@ namespace methods {
           size_t it_pos = (it < nt_half) ? it : nts - it - 1;
           RealType factor = -1.0 * MF->madelung() * eps_inv_head(it_pos).real();
 
-          auto G_ab = DeltaG_tskij(it, is, ik, nda::ellipsis{});
+          auto DeltaG_ab = DeltaG_tskij(it, is, ik, nda::ellipsis{});
           auto Delta_ij = Delta_loc(it, is, ik, nda::ellipsis{});
-          auto TL_ia = TL_loc(is, ik, nda::ellipsis{});
-          nda::blas::gemm(TL_ia, G_ab, buffer_ib);
-          nda::blas::gemm(ComplexType(factor), buffer_ib, nda::dagger(TR_loc(is, ik, nda::ellipsis{})),
-                     ComplexType(0.0), Delta_ij);
+          auto S_kq = S_skij(is, _kpq_map(ik), all, all);  // S at k+q
+          auto S_k = S_skij(is, ik, all, all);              // S at k
+          nda::blas::gemm(S_kq, DeltaG_ab, buffer_ib);
+          nda::blas::gemm(ComplexType(factor), buffer_ib, S_k, ComplexType(0.0), Delta_ij);
         }
         sDelta_tskij.win().fence();
         sDelta_tskij.all_reduce();
@@ -523,7 +523,7 @@ namespace methods {
       } else {
         utils::check(false, "Unsupported divergence treatment: {}", div_enum_to_string(div_treatment));
       }
-      app_log(1, "");
+      app_log(2, "");
     }
 
   } // solvers

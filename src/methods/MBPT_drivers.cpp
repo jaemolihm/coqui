@@ -1125,6 +1125,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
+  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1244,7 +1245,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
-      DeltaX_left, DeltaX_right, Dm_ab_ptr);
+      DeltaX_left, DeltaX_right, Dm_ab_ptr, div_corr);
   mpi->comm.barrier();
 
   // Write results
@@ -1260,9 +1261,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 /**
  * Linear response GW self-energy with fixed W (term 1).
  *
- * Computes ΔΣ = -ΔG ⊙ W_c (R-space).
+ * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space).
  * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
- * TODO: Divergence correction not yet implemented (see lr_gw.hpp class docstring).
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
@@ -1294,6 +1294,16 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   // Load W and eps_inv_head using helper
   auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
+  // Divergence correction flag (default true)
+  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  if (div_corr) {
+    chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+  }
+
   // Pre-transform W to R-space: transpose (q,t)→(t,R), with q→R FT
   auto dW_tRPQ = lr_precompute_W_tRPQ(dW_qtPQ, thc);
   dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
@@ -1305,6 +1315,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
   lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(DeltaG_tskij), dW_tRPQ, thc);
+
+  // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+  if (div_corr) {
+    lr.apply_div_correction_DeltaG(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(DeltaG_tskij), sS_skij.local(), thc, eps_inv_head);
+  }
   mpi->comm.barrier();
 
   // Copy result
@@ -1672,11 +1687,11 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
 
 
 /**
- * Linear response GW self-energy term 2: -G ⊙ ΔW.
+ * Linear response GW self-energy term 2: -G ⊙ ΔW + div_corr.
  *
  * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
  * Uses lr_gw::evaluate_sigma_DeltaW for the G⊙ΔW convolution.
- * TODO: Divergence correction not yet implemented (see lr_gw.hpp class docstring).
+ * At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
@@ -1729,6 +1744,16 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     mpi->comm.barrier();
   }
 
+  // Divergence correction flag (default true)
+  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  if (div_corr) {
+    chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+  }
+
   // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
   app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
   solvers::lr_gw lr(&ft, q_pert);
@@ -1737,6 +1762,15 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
   lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(G_tskij), dDeltaW_qtPQ, thc);
+
+  // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+  if (div_corr && utils::is_q_gamma(q_pert)) {
+    // Transpose (q,t,P,Q) → (t,q,P,Q) for eps_inv_head_t
+    auto dDeltaW_tqPQ = utils::transpose_axes_01(dDeltaW_qtPQ, mpi->comm);
+    auto [delta_eps_inv_q, delta_eps_inv_head] =
+        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft);
+    lr.apply_div_correction_G(sDeltaSigma_tskij, nda::array_view<ComplexType, 5>(G_tskij), sS_skij.local(), thc, delta_eps_inv_head);
+  }
   mpi->comm.barrier();
 
   // Copy result
@@ -1746,6 +1780,54 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   }
   mpi->comm.barrier();
   return DeltaSigma_tskij;
+}
+
+
+/**
+ * Compute eps_inv_head from screened interaction W_c(t,q,P,Q).
+ *
+ * Extracts the G=0,G'=0 component of (ε⁻¹ - 1) from W_c in the THC product
+ * basis, and extrapolates to q→0. This matches the convention used by the
+ * SCF loop and Sigma_div_correction (which stores/uses ε⁻¹-1, not ε⁻¹).
+ *
+ * @param W_c_tqPQ - [INPUT] W_c in (nt_half, nkpts, NP, NP) layout
+ * @return eps_inv_head at q=0, shape (nt_half,)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 4> const& W_c_tqPQ) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("compute_eps_inv_head_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "compute_eps_inv_head_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  // Validate: axis 1 should be nkpts (q-points)
+  utils::check(W_c_tqPQ.shape(1) == mf->nkpts_ibz(),
+               "compute_eps_inv_head_calc: W_c axis 1 ({}) != nkpts_ibz ({}). "
+               "Expected shape (nt_half, nkpts, NP, NP).",
+               W_c_tqPQ.shape(1), mf->nkpts_ibz());
+
+  // Distribute W_c as (t,q,P,Q)
+  auto dW_tqPQ = distribute_array_4D(mpi->comm,
+      {W_c_tqPQ.shape(0), W_c_tqPQ.shape(1), W_c_tqPQ.shape(2), W_c_tqPQ.shape(3)},
+      W_c_tqPQ);
+
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft);
+  mpi->comm.barrier();
+
+  return eps_inv_head;
 }
 
 
@@ -1814,48 +1896,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   }
   mpi->comm.barrier();
   return Sigma_tskij;
-}
-
-
-/**
- * Compute eps_inv_head from screened interaction W_c(t,q,P,Q).
- *
- * Extracts the G=0,G'=0 component of (ε⁻¹ - 1) from W_c in the THC product
- * basis, and extrapolates to q→0. This matches the convention used by the
- * SCF loop and Sigma_div_correction (which stores/uses ε⁻¹-1, not ε⁻¹).
- *
- * @param W_c_tqPQ - [INPUT] W_c in (nt_half, nkpts, NP, NP) layout
- * @return eps_inv_head at q=0, shape (nt_half,)
- */
-template<typename eri_t>
-nda::array<ComplexType, 1> compute_eps_inv_head_calc(
-    eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 4> const& W_c_tqPQ) {
-
-  auto& thc = eri.corr_eri->get();
-  auto mf = thc.MF();
-  auto& mpi = thc.mpi();
-
-  std::string err = std::string("compute_eps_inv_head_calc - Incorrect input - ");
-  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
-
-  std::string input_file = prefix + ".mbpt.h5";
-  utils::check(std::filesystem::exists(input_file),
-               "compute_eps_inv_head_calc: Input checkpoint {} does not exist!", input_file);
-
-  // Read IAFT from checkpoint
-  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
-
-  // Distribute W_c as (t,q,P,Q)
-  auto dW_tqPQ = distribute_array_4D(mpi->comm,
-      {W_c_tqPQ.shape(0), W_c_tqPQ.shape(1), W_c_tqPQ.shape(2), W_c_tqPQ.shape(3)},
-      W_c_tqPQ);
-
-  auto [eps_inv_head_q, eps_inv_head] =
-      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft);
-  mpi->comm.barrier();
-
-  return eps_inv_head;
 }
 
 
