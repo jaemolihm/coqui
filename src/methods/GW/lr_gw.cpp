@@ -89,14 +89,14 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space)");
-      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(2, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space)");
+      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ,
                          ibc);
 
-      app_log(1, "  LR-GW self-energy (fused) done.\n");
+      app_log(2, "  LR-GW self-energy (fused) done.\n");
       print_timers();
     }
 
@@ -113,14 +113,14 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space)");
-      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(2, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space)");
+      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr,
                          ibc);
 
-      app_log(1, "  LR-GW self-energy (term 1) done.\n");
+      app_log(2, "  LR-GW self-energy (term 1) done.\n");
       print_timers();
     }
 
@@ -136,13 +136,13 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(1, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
-      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(2, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
+      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_qtPQ);
 
-      app_log(1, "  LR-GW self-energy (term 2) done.\n");
+      app_log(2, "  LR-GW self-energy (term 2) done.\n");
       print_timers();
     }
 

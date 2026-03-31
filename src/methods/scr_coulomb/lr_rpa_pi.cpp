@@ -131,8 +131,8 @@ namespace methods {
       auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
       auto [tpools_v, _q, np_P, np_Q] = tau_pgrid;
 
-      app_log(1, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
-      app_log(1, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(2, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
+      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
       app_log(2, "    processor grid for Pi: (t, q, P, Q) = ({}, {}, {}, {})",
                  tau_pgrid[0], tau_pgrid[1], tau_pgrid[2], tau_pgrid[3]);
 
@@ -346,7 +346,7 @@ namespace methods {
 
       _Timer.stop("EVALUATE_LR_PI");
 
-      app_log(1, "  LR polarization done.\n");
+      app_log(2, "  LR polarization done.\n");
       print_timers();
 
       return dDeltaPi_tqPQ;
