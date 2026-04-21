@@ -154,11 +154,9 @@ namespace coqui_py {
     lr_hf_solver.evaluate(sDeltaF_skij, sDeltaDm_skij, thc, S_skij,
                           compute_hartree, compute_exchange);
 
-    // Copy result to output array
+    // Copy result to output array (shared memory is visible to all ranks on a node)
     nda::array<ComplexType, 4> DeltaF_skij(ns, nkpts_ibz, nbnd, nbnd);
-    if (mpi->node_comm.root()) {
-      DeltaF_skij = sDeltaF_skij.local();
-    }
+    DeltaF_skij = sDeltaF_skij.local();
     mpi->comm.barrier();
 
     return DeltaF_skij;
@@ -211,11 +209,9 @@ namespace coqui_py {
     hf_solver.evaluate(sF_skij, Dm_skij, eri, S_skij,
                        compute_hartree, compute_exchange);
 
-    // Copy result to output array
+    // Copy result to output array (shared memory is visible to all ranks on a node)
     nda::array<ComplexType, 4> F_skij(ns, nkpts_ibz, nbnd, nbnd);
-    if (mpi->node_comm.root()) {
-      F_skij = sF_skij.local();
-    }
+    F_skij = sF_skij.local();
     mpi->comm.barrier();
 
     return F_skij;

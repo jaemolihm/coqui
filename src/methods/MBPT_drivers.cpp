@@ -1322,11 +1322,9 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   }
   mpi->comm.barrier();
 
-  // Copy result
+  // Copy result (shared memory is visible to all ranks on a node)
   nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
-  if (mpi->node_comm.root()) {
-    DeltaSigma_tskij = sDeltaSigma_tskij.local();
-  }
+  DeltaSigma_tskij = sDeltaSigma_tskij.local();
   mpi->comm.barrier();
   return DeltaSigma_tskij;
 }
@@ -1385,11 +1383,9 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   }
   mpi->comm.barrier();
 
-  // Copy result
+  // Copy result (shared memory is visible to all ranks on a node)
   nda::array<ComplexType, 5> Sigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
-  if (mpi->node_comm.root()) {
-    Sigma_tskij = sSigma_tskij.local();
-  }
+  Sigma_tskij = sSigma_tskij.local();
   mpi->comm.barrier();
   return Sigma_tskij;
 }
@@ -1773,11 +1769,9 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   }
   mpi->comm.barrier();
 
-  // Copy result
+  // Copy result (shared memory is visible to all ranks on a node)
   nda::array<ComplexType, 5> DeltaSigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
-  if (mpi->node_comm.root()) {
-    DeltaSigma_tskij = sDeltaSigma_tskij.local();
-  }
+  DeltaSigma_tskij = sDeltaSigma_tskij.local();
   mpi->comm.barrier();
   return DeltaSigma_tskij;
 }
@@ -1889,11 +1883,9 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   }
   mpi->comm.barrier();
 
-  // Copy result
+  // Copy result (shared memory is visible to all ranks on a node)
   nda::array<ComplexType, 5> Sigma_tskij(nt, ns, nkpts_ibz, nbnd, nbnd);
-  if (mpi->node_comm.root()) {
-    Sigma_tskij = sSigma_tskij.local();
-  }
+  Sigma_tskij = sSigma_tskij.local();
   mpi->comm.barrier();
   return Sigma_tskij;
 }
