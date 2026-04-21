@@ -32,14 +32,14 @@ namespace methods {
  *
  * Term 1 (Deltapsi): Read perturbed wavefunctions from per-mode per-k HDF5 files
  *   and evaluate at interpolating points with Bloch phase e^{i(k+q).r_P}.
- *   File naming: {dpsi_prefix}_ik{ik+1}.hdf5, each containing evc (nbnd, 2*npw).
+ *   File naming: {Deltapsi_prefix}_ik{ik+1}.hdf5, each containing evc (nbnd, 2*npw).
  *
  * Term 2 (gradient): Compute grad psi_mk in plane-wave basis via
  *   i(k+G) * c_G, IFFT, sample at r_P with phase e^{ik.r_P}, dot with delta_r_P.
  *
  * @param mf           Mean-field object (for reading unperturbed wfc and system info)
- * @param dpsi_prefix  File path prefix including mode; files are {dpsi_prefix}_ik{ik+1}.hdf5
- *                     Example: "temp/dpsi_ibc_iq1_mode1" -> temp/dpsi_ibc_iq1_mode1_ik1.hdf5, ...
+ * @param Deltapsi_prefix  File path prefix including mode; files are {Deltapsi_prefix}_ik{ik+1}.hdf5
+ *                     Example: "temp/Deltapsi_ibc_iq1_mode1" -> temp/Deltapsi_ibc_iq1_mode1_ik1.hdf5, ...
  * @param r_P          (nP,) FFT grid indices of interpolating points (on the fft_grid)
  * @param delta_r_P    (nP, 3) grid point displacements in Cartesian Bohr
  * @param q_vec_cryst  (3,) q-vector in crystal (fractional reciprocal) coordinates
@@ -48,8 +48,8 @@ namespace methods {
  * @return             (nspin, nk_ibz, nP, nbnd) complex array
  */
 nda::array<ComplexType, 4> compute_delta_X(
-    std::shared_ptr<mf::MF> mf,
-    std::string const& dpsi_prefix,
+    mf::MF const& mf,
+    std::string const& Deltapsi_prefix,
     nda::array<long, 1> const& r_P,
     nda::array<double, 2> const& delta_r_P,
     nda::array<double, 1> const& q_vec_cryst,

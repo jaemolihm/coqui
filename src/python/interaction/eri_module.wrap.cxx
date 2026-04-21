@@ -89,6 +89,39 @@ static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nspin_in_basis(); },
     "self")};
 
+// compute_delta_Xi
+static auto const fun_thc_DeltaXi = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb &self,
+       const std::string &Deltapsi_prefix,
+       nda::array<double, 1> const &q_vec_cryst,
+       nda::array<double, 2> const &delta_r_P,
+       std::optional<nda::array<double, 1>> const &q_phonon_cryst) {
+      return self.compute_delta_Xi(Deltapsi_prefix, q_vec_cryst, delta_r_P, q_phonon_cryst);
+    },
+    "self", "Deltapsi_prefix", "q_vec_cryst", "delta_r_P", "q_phonon_cryst")};
+
+// compute_delta_V
+static auto const fun_thc_dV = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb &self,
+       const std::string &Deltapsi_prefix,
+       nda::array<double, 1> const &q_vec_cryst,
+       nda::array<double, 2> const &delta_r_P,
+       std::optional<nda::array<double, 1>> const &q_phonon_cryst) {
+      return self.compute_delta_V(Deltapsi_prefix, q_vec_cryst, delta_r_P, q_phonon_cryst);
+    },
+    "self", "Deltapsi_prefix", "q_vec_cryst", "delta_r_P", "q_phonon_cryst")};
+
+// compute_delta_V_batched
+static auto const fun_thc_dV_batched = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb &self,
+       const std::string &Deltapsi_prefix,
+       nda::array<double, 2> const &q_vec_cryst_list,
+       nda::array<double, 2> const &delta_r_P,
+       std::optional<nda::array<double, 1>> const &q_phonon_cryst) {
+      return self.compute_delta_V_batched(Deltapsi_prefix, q_vec_cryst_list, delta_r_P, q_phonon_cryst);
+    },
+    "self", "Deltapsi_prefix", "q_vec_cryst_list", "delta_r_P", "q_phonon_cryst")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -101,6 +134,83 @@ static const auto doc_d_8 = fun_8.doc(R"DOC()DOC");
 static const auto doc_d_9 = fun_9.doc(R"DOC()DOC");
 static const auto doc_d_10 = fun_10.doc(R"DOC()DOC");
 static const auto doc_d_11 = fun_11.doc(R"DOC()DOC");
+static const auto doc_thc_DeltaXi = fun_thc_DeltaXi.doc(R"DOC(
+Compute Ξ^q (self-consistent) and its linear response δΞ^q.
+
+Parameters
+----------
+Deltapsi_prefix : str
+    Per-k δψ files are {Deltapsi_prefix}_ik{ik+1}.hdf5 (QE format: MillerIndices + evc).
+q_vec_cryst : np.ndarray of shape (3,)
+    q-vector in crystal coordinates; must match an entry of Qpts_ibz.
+delta_r_P : np.ndarray of shape (Np, 3), real
+    Linear response of the interpolating points r_μ in Cartesian Bohr.
+    Pass zeros for the fixed-r_μ case.
+
+Returns
+-------
+tuple (Ξ^q, δΞ^q) of two np.ndarray, each shape (Np, nnr), complex
+    Replicated on every rank. Unpack as ``Xi, dXi = thc.compute_delta_Xi(...)``.
+
+Notes
+-----
+Current implementation restrictions: npol == 1, nkpts == nkpts_ibz
+(no k-point symmetry). delta_r_P is restricted to real values;
+complex Δr_μ (needed for q≠0 phonon perturbations) is not yet supported.
+)DOC");
+
+static const auto doc_thc_dV = fun_thc_dV.doc(R"DOC(
+Compute δV^q_{μν}, the linear response of the THC Coulomb matrix.
+
+    δV^q_{μν} = ∫∫ dr dr' [δξ^{-q}_μ(r) v(r,r') ξ^q_ν(r')
+                          + ξ^{-q}_μ(r) v(r,r') δξ^q_ν(r')]
+
+V^q itself is already available from the ordinary THC decomposition and is not
+returned here. Arguments mirror compute_delta_Xi.
+
+Parameters
+----------
+Deltapsi_prefix : str
+    Per-k δψ files {Deltapsi_prefix}_ik{ik+1}.hdf5 (QE format).
+q_vec_cryst : np.ndarray of shape (3,)
+    q-vector in crystal coordinates.
+delta_r_P : np.ndarray of shape (Np, 3), real
+    Linear response of r_μ in Cartesian Bohr.
+
+Returns
+-------
+np.ndarray of shape (Np, Np), complex
+    δV^q. Replicated on every rank.
+)DOC");
+
+static const auto doc_thc_dV_batched = fun_thc_dV_batched.doc(R"DOC(
+Batched variant of compute_delta_V: compute δV^q for all internal q in
+q_vec_cryst_list, amortizing the expensive wfc/δψ I/O and IFFT across q.
+
+Parameters
+----------
+Deltapsi_prefix : str
+    Per-k δψ files {Deltapsi_prefix}_ik{ik+1}.hdf5 (QE format).
+q_vec_cryst_list : np.ndarray of shape (nq, 3)
+    List of internal q-vectors in crystal coordinates; each must lie on the
+    BZ k-grid.
+delta_r_P : np.ndarray of shape (Np, 3), real
+    Linear response of r_μ in Cartesian Bohr.
+q_phonon_cryst : np.ndarray of shape (3,), optional
+    Phonon wavevector Q of δψ in crystal coordinates (defaults to Γ).
+
+Returns
+-------
+np.ndarray of shape (nq, Np, Np), complex
+    δV^{q_list[iq]}. Replicated on every rank.
+
+Notes
+-----
+Stage A (wfc/δψ I/O + IFFT + T, δT build) runs once; stages B + C loop over q.
+Memory cost: the internal per-k caches (T, δT on the full FFT mesh plus
+δr·∇₂T on the pivot grid) are held in full on every rank. Dominant term is
+T + δT: ≈ 2 · nspin · nkpts · Np · nnr · 16 bytes.
+)DOC");
 
 // ----- Method table ----
 template <>
@@ -129,6 +239,12 @@ PyMethodDef c2py::tp_methods<coqui_py::ThcCoulomb>[] = {
      doc_d_10.c_str()},
     {"nspin_in_basis", (PyCFunction)c2py::pyfkw<fun_11>,
      METH_VARARGS | METH_KEYWORDS, doc_d_11.c_str()},
+    {"compute_delta_Xi", (PyCFunction)c2py::pyfkw<fun_thc_DeltaXi>,
+     METH_VARARGS | METH_KEYWORDS, doc_thc_DeltaXi.c_str()},
+    {"compute_delta_V", (PyCFunction)c2py::pyfkw<fun_thc_dV>,
+     METH_VARARGS | METH_KEYWORDS, doc_thc_dV.c_str()},
+    {"compute_delta_V_batched", (PyCFunction)c2py::pyfkw<fun_thc_dV_batched>,
+     METH_VARARGS | METH_KEYWORDS, doc_thc_dV_batched.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
@@ -200,29 +316,29 @@ static const auto doc_d_14 = fun_14.doc(R"DOC()DOC");
 // compute_delta_X
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf,
-       const std::string &dpsi_prefix,
+       const std::string &Deltapsi_prefix,
        nda::array<long, 1> const& r_P,
        nda::array<double, 2> const& delta_r_P,
        nda::array<double, 1> const& q_vec_cryst,
        nda::array<long, 1> const& fft_grid) {
-      return coqui_py::compute_delta_X(mf, dpsi_prefix,
+      return coqui_py::compute_delta_X(mf, Deltapsi_prefix,
                                         r_P, delta_r_P, q_vec_cryst, fft_grid);
     },
-    "mf", "dpsi_prefix", "r_P", "delta_r_P", "q_vec_cryst", "fft_grid")};
+    "mf", "Deltapsi_prefix", "r_P", "delta_r_P", "q_vec_cryst", "fft_grid")};
 
 static const auto doc_d_15 = fun_15.doc(R"DOC(
 Compute DeltaX(k, P, m) = Deltapsi_mk(r_P) + grad psi_mk(r_P) . Delta_r_P
 
-Deltapsi files are per-mode per-k: {dpsi_prefix}_ik{ik+1}.hdf5,
+Deltapsi files are per-mode per-k: {Deltapsi_prefix}_ik{ik+1}.hdf5,
 each containing MillerIndices (npw, 3) and evc (nbnd, 2*npw).
 
 Parameters
 ----------
 mf : Mf
     Mean-field object (for reading unperturbed wfc and system info)
-dpsi_prefix : str
-    File path prefix including mode. Files are {dpsi_prefix}_ik{ik+1}.hdf5.
-    Example: "temp/dpsi_ibc_iq1_mode1" -> temp/dpsi_ibc_iq1_mode1_ik1.hdf5, ...
+Deltapsi_prefix : str
+    File path prefix including mode. Files are {Deltapsi_prefix}_ik{ik+1}.hdf5.
+    Example: "temp/Deltapsi_ibc_iq1_mode1" -> temp/Deltapsi_ibc_iq1_mode1_ik1.hdf5, ...
 r_P : np.ndarray
     (nP,) FFT grid indices of interpolating points
 delta_r_P : np.ndarray

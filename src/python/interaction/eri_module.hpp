@@ -27,9 +27,12 @@
 #include "python/mean_field/mf_module.hpp"
 #include "python/mean_field/mf_module.wrap.hxx"
 
+#include <optional>
+
 #include "IO/ptree/InputParser.hpp"
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/ERI/lr_thc_interp.hpp"
+#include "methods/ERI/lr_thc.hpp"
 
 namespace coqui_py {
 
@@ -79,6 +82,65 @@ namespace coqui_py {
     C2PY_IGNORE
     auto get_mf() const { return _thc.MF(); }
 
+    // Linear response of the THC auxiliary basis Ξ^q.
+    // See src/methods/ERI/lr_thc.hpp for the mathematical setup.
+    //
+    //   Deltapsi_prefix : per-k files {Deltapsi_prefix}_ik{ik+1}.hdf5 (QE format: MillerIndices + evc).
+    //   q_vec_cryst : (3,) q-vector in crystal coordinates; must match a Qpts_ibz entry.
+    //   delta_r_P   : (Np, 3) linear response of interpolating points r_μ in
+    //                 Cartesian Bohr. Pass zeros for the fixed-r_μ case.
+    //
+    // Returns a tuple (Ξ^q, δΞ^q), each a (Np, nnr) complex array replicated on
+    // every rank. Ξ is computed self-consistently from the same C_q used in the
+    // LR solve; returning it lets the caller combine Ξ and δΞ without a convention mismatch.
+    std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 2>>
+    compute_delta_Xi(
+        const std::string& Deltapsi_prefix,
+        nda::array<double, 1> const& q_vec_cryst,
+        nda::array<double, 2> const& delta_r_P,
+        std::optional<nda::array<double, 1>> const& q_phonon_cryst = std::nullopt) {
+      methods::lr_thc lr(_thc);
+      nda::array<double, 1> qph = q_phonon_cryst.value_or(
+          nda::array<double, 1>{0.0, 0.0, 0.0});
+      return lr.compute_delta_Xi(Deltapsi_prefix, q_vec_cryst, delta_r_P, qph);
+    }
+
+    // Linear response of the Coulomb matrix V^q_{μν} in the THC auxiliary basis.
+    //
+    //   V^q_{μν}  = ∫∫ dr dr' ξ^{-q}_μ(r) v(r,r') ξ^q_ν(r')
+    //   δV^q_{μν} = ∫∫ dr dr' [ δξ^{-q}_μ(r) v(r,r') ξ^q_ν(r')
+    //                         + ξ^{-q}_μ(r) v(r,r') δξ^q_ν(r') ]
+    //
+    // Arguments mirror compute_delta_Xi. Returns δV^q as a (Np, Np) complex
+    // array, replicated on every rank. V^q itself is available from the
+    // ordinary THC decomposition.
+    nda::array<ComplexType, 2> compute_delta_V(
+        const std::string& Deltapsi_prefix,
+        nda::array<double, 1> const& q_vec_cryst,
+        nda::array<double, 2> const& delta_r_P,
+        std::optional<nda::array<double, 1>> const& q_phonon_cryst = std::nullopt) {
+      methods::lr_thc lr(_thc);
+      nda::array<double, 1> qph = q_phonon_cryst.value_or(
+          nda::array<double, 1>{0.0, 0.0, 0.0});
+      return lr.compute_delta_V(Deltapsi_prefix, q_vec_cryst, delta_r_P, qph);
+    }
+
+    // Batched: δV^q for all internal q in q_vec_cryst_list, with stage-A
+    // (wfc/δψ I/O + IFFT) amortized. Returns a (nq, Np, Np) complex array.
+    //
+    // Memory cost: internal per-k caches T and δT are held in full on every
+    // rank (≈ 2 · nspin · nkpts · Np · nnr · 16 B).
+    nda::array<ComplexType, 3> compute_delta_V_batched(
+        const std::string& Deltapsi_prefix,
+        nda::array<double, 2> const& q_vec_cryst_list,
+        nda::array<double, 2> const& delta_r_P,
+        std::optional<nda::array<double, 1>> const& q_phonon_cryst = std::nullopt) {
+      methods::lr_thc lr(_thc);
+      nda::array<double, 1> qph = q_phonon_cryst.value_or(
+          nda::array<double, 1>{0.0, 0.0, 0.0});
+      return lr.compute_delta_V_batched(Deltapsi_prefix, q_vec_cryst_list, delta_r_P, qph);
+    }
+
   private:
     methods::thc_reader_t _thc;
 
@@ -121,16 +183,19 @@ namespace coqui_py {
 
   }; // CholCoulomb
 
+  // Linear response of the THC collocation matrix X(k, P, m) = ψ_{mk}(r_P).
+  // See methods::compute_delta_X in src/methods/ERI/lr_thc_interp.hpp for the
+  // full mathematical setup (term 1 = δψ(r_P), term 2 = ∇ψ(r_P)·Δr_P).
   nda::array<ComplexType, 4> compute_delta_X(
       const Mf &mf,
-      const std::string &dpsi_prefix,
+      const std::string &Deltapsi_prefix,
       nda::array<long, 1> const& r_P,
       nda::array<double, 2> const& delta_r_P,
       nda::array<double, 1> const& q_vec_cryst,
       nda::array<long, 1> const& fft_grid)
   {
     return methods::compute_delta_X(
-        mf.get_mf(), dpsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid);
+        *mf.get_mf(), Deltapsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid);
   }
 
 } // coqui_py
