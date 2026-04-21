@@ -138,6 +138,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
            include_gw_sigma=None,
            DeltaX_left=None, DeltaX_right=None,
+           DeltaV_qPQ=None,
            div_corr=True):
     """
     Run unified linear response calculation.
@@ -194,6 +195,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     DeltaX_right : np.ndarray or None, optional
         Perturbation of collocation matrix δ^{-q} X, shape (ns, nkpts, Np, nb).
         Full BZ indexed. Required together with DeltaX_left.
+    DeltaV_qPQ : np.ndarray or None, optional
+        Perturbation of THC auxiliary-basis Coulomb matrix δV^q, shape
+        (nkpts, Np, Np), full-BZ q-grid. When provided, adds the δV
+        correction terms to ΔJ (δV^{q=q_pert}·Dm) and ΔK (δV^R ⊙ Dm^R).
 
     Returns
     -------
@@ -236,6 +241,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         raise ValueError("DeltaX_left and DeltaX_right must both be provided or both be None.")
     dx_left = np.asarray(DeltaX_left, dtype=np.complex128) if DeltaX_left is not None else None
     dx_right = np.asarray(DeltaX_right, dtype=np.complex128) if DeltaX_right is not None else None
+    dv_qPQ = np.asarray(DeltaV_qPQ, dtype=np.complex128) if DeltaV_qPQ is not None else None
 
     # Pass div_corr flag through params dict (read by C++ run_lr_calc)
     params_with_div = dict(params)
@@ -245,7 +251,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
                       alg, mixing, max_subsp_size, diis_warmup,
-                      dx_left, dx_right)
+                      dx_left, dx_right, dv_qPQ)
 
 
 def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):

@@ -121,7 +121,8 @@ public:
       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
       const nda::array<ComplexType, 4>* Dm_ab = nullptr,
-      bool div_corr = true);
+      bool div_corr = true,
+      const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr);
 
   void print_timers();
 

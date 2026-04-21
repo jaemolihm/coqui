@@ -1115,7 +1115,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      bool fix_density,
                                      const lr_iter_params& iter_params,
                                      const nda::array<ComplexType, 4>* DeltaX_left,
-                                     const nda::array<ComplexType, 4>* DeltaX_right) {
+                                     const nda::array<ComplexType, 4>* DeltaX_right,
+                                     const nda::array<ComplexType, 3>* DeltaV_qPQ) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1234,7 +1235,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // Pass DeltaX and unperturbed Dm for DeltaX/IBC correction
   const nda::array<ComplexType, 4>* Dm_ab_ptr = nullptr;
   nda::array<ComplexType, 4> Dm_ab_local;
-  if (DeltaX_left) {
+  if (DeltaX_left || DeltaV_qPQ) {
     Dm_ab_local = sDm_skij.local();
     Dm_ab_ptr = &Dm_ab_local;
   }
@@ -1245,7 +1246,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
-      DeltaX_left, DeltaX_right, Dm_ab_ptr, div_corr);
+      DeltaX_left, DeltaX_right, Dm_ab_ptr, div_corr,
+      DeltaV_qPQ);
   mpi->comm.barrier();
 
   // Write results
@@ -1958,7 +1960,8 @@ template std::tuple<int, double> run_lr_calc(
     nda::array<double, 1> const&,
     nda::array<ComplexType, 4> const&,
     bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&,
-    const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*);
+    const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*,
+    const nda::array<ComplexType, 3>*);
 
 // lr_gw_sigma_DeltaG_calc instantiations (THC only — lr_gw requires THC)
 template nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(

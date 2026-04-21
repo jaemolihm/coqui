@@ -73,7 +73,8 @@ namespace coqui_py {
       int max_subsp_size,
       int diis_warmup,
       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
-      std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
+      std::optional<nda::array<ComplexType, 4>> DeltaX_right,
+      std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     methods::lr_iter_params iter_params;
@@ -96,11 +97,12 @@ namespace coqui_py {
 
     const nda::array<ComplexType, 4>* dx_left_ptr = DeltaX_left ? &(*DeltaX_left) : nullptr;
     const nda::array<ComplexType, 4>* dx_right_ptr = DeltaX_right ? &(*DeltaX_right) : nullptr;
+    const nda::array<ComplexType, 3>* dv_qPQ_ptr = DeltaV_qPQ ? &(*DeltaV_qPQ) : nullptr;
 
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
                                 include_hartree, include_exchange, gw_mode,
                                 max_iter, tol, fix_density, iter_params,
-                                dx_left_ptr, dx_right_ptr);
+                                dx_left_ptr, dx_right_ptr, dv_qPQ_ptr);
   }
 
 

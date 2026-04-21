@@ -99,7 +99,8 @@ std::tuple<int, double> lr_driver::run_lr(
     const nda::array<ComplexType, 4>* DeltaX_left,
     const nda::array<ComplexType, 4>* DeltaX_right,
     const nda::array<ComplexType, 4>* Dm_ab,
-    bool div_corr) {
+    bool div_corr,
+    const nda::array<ComplexType, 3>* DeltaV_qPQ) {
 
   _Timer.start("LR_SCF");
 
@@ -299,7 +300,8 @@ std::tuple<int, double> lr_driver::run_lr(
       _Timer.start("LR_HF");
       const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       _lr_hf->evaluate(sDeltaF_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                       include_hartree, include_exchange, ibc_ptr);
+                       include_hartree, include_exchange, ibc_ptr,
+                       DeltaV_qPQ, Dm_ab);
       _Timer.stop("LR_HF");
       _mpi->comm.barrier();
     }
@@ -534,6 +536,7 @@ template std::tuple<int, double> lr_driver::run_lr(
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
     int, double, bool, const lr_iter_params&,
     const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*,
-    const nda::array<ComplexType, 4>*, bool);
+    const nda::array<ComplexType, 4>*, bool,
+    const nda::array<ComplexType, 3>*);
 
 } // namespace methods

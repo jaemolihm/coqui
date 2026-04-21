@@ -204,18 +204,20 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
            int max_subsp_size,
            int diis_warmup,
            std::optional<nda::array<ComplexType, 4>> DeltaX_left,
-           std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
+           std::optional<nda::array<ComplexType, 4>> DeltaX_right,
+           std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
           return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
                                   include_hartree, include_exchange, gw_mode,
                                   max_iter, tol, fix_density,
                                   iter_alg, mixing, max_subsp_size, diis_warmup,
-                                  std::move(DeltaX_left), std::move(DeltaX_right));
+                                  std::move(DeltaX_left), std::move(DeltaX_right),
+                                  std::move(DeltaV_qPQ));
         },
         "lr_params", "h_int", "q_vec", "DeltaH0_skij",
         "include_hartree", "include_exchange", "gw_mode",
         "max_iter", "tol", "fix_density",
         "iter_alg", "mixing", "max_subsp_size", "diis_warmup",
-        "DeltaX_left", "DeltaX_right")};
+        "DeltaX_left", "DeltaX_right", "DeltaV_qPQ")};
 
 static const auto doc_run_lr = fun_run_lr.doc(R"DOC(
 Run unified linear response calculation.
@@ -263,6 +265,10 @@ DeltaX_left : np.ndarray or None
 DeltaX_right : np.ndarray or None
     Optional perturbation of collocation matrix δ^{-q} X, shape (ns, nkpts, Np, nb).
     Full BZ indexed. Must be provided together with DeltaX_left.
+DeltaV_qPQ : np.ndarray or None
+    Optional perturbation of the THC auxiliary-basis Coulomb matrix δV^q,
+    shape (nkpts, Np, Np), full-BZ q-grid (same layout as thc.dZ()). Enables
+    the DeltaV correction terms in ΔJ (δV^{q=q_pert}·Dm) and ΔK (δV^R⊙Dm^R).
 
 Returns
 -------

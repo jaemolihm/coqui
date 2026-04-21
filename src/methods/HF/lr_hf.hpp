@@ -107,7 +107,9 @@ public:
                 const nda::MemoryArrayOfRank<4> auto& S_skij,
                 bool compute_hartree = true,
                 bool compute_exchange = true,
-                const lr_ibc_DeltaX* ibc = nullptr);
+                const lr_ibc_DeltaX* ibc = nullptr,
+                const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr,
+                const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
 
   inline void print_timers() {
     app_log(2, "\n  LR_HF timers");
@@ -154,7 +156,9 @@ private:
                  THC_ERI auto& thc,
                  bool compute_hartree,
                  bool compute_exchange,
-                 const lr_ibc_DeltaX* ibc = nullptr);
+                 const lr_ibc_DeltaX* ibc = nullptr,
+                 const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr,
+                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
 
   /**
    * @brief LR finite-size correction for K based on "PRB 80, 085114(2009)"
