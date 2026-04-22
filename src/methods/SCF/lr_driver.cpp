@@ -458,10 +458,10 @@ std::tuple<int, double> lr_driver::run_lr(
     // Log iteration
     if (iter == 1) {
       if (include_gw_sigma) {
-        app_log(1, "  {:4d}    {:.6e}     {:13s}   {:.6e}   {:13s}   {:.6e}   {:13s}   {:.3e}",
+        app_log(1, "  {:4d}    {:.6e}     {:13s}     {:.6e}   {:13s}   {:.6e}   {:13s}   {:.3e}",
                 iter, norm_DeltaDm, "---", norm_DeltaF, "---", norm_DeltaSigma, "---", Delta_mu);
       } else {
-        app_log(1, "  {:4d}    {:.6e}     {:13s}   {:.6e}   {:13s}   {:.3e}",
+        app_log(1, "  {:4d}    {:.6e}     {:13s}     {:.6e}   {:13s}   {:.3e}",
                 iter, norm_DeltaDm, "---", norm_DeltaF, "---", Delta_mu);
       }
     } else {
