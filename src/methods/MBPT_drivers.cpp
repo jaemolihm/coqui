@@ -1034,6 +1034,19 @@ auto load_W_and_eps_inv_head(
   if (mpi.comm.root()) {
     h5::file file(w_file, 'r');
     h5::group grp(file);
+    // Verify the W-on-disk matches the THC currently loaded. Silent shape
+    // mismatch between stale W (from scGW build-time) and current THC (from
+    // current ISDF) produces a garbage W that explodes downstream by ~|W|²
+    // amplification in the ΔW = W·ΔΠ·W Dyson step.
+    auto ds_info = h5::array_interface::get_dataset_info(grp, "W_qtPQ");
+    long ds_np_a = ds_info.lengths[2];
+    long ds_np_b = ds_info.lengths[3];
+    utils::check(ds_np_a == NP && ds_np_b == NP,
+                 "load_W_and_eps_inv_head: W_qtPQ in {} has shape (...,{},{}) "
+                 "but current THC has Np={}. The W file was generated with a "
+                 "different THC decomposition; regenerate it (or re-run GW) "
+                 "with the current THC before calling run_lr.",
+                 w_file, ds_np_a, ds_np_b, NP);
     nda::h5_read(grp, "W_qtPQ", W_qtPQ);
   }
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
