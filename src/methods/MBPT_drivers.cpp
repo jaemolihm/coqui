@@ -1075,23 +1075,26 @@ auto load_W_and_eps_inv_head(
   // JML TODO: div_treatment should be read during setup of run_lr_calc, and ideally be
   //           part of the MBState.
   // Read div_treatment that scGW used (written to scf_grp by
-  // scr_coulomb_t::dump_eps_inv_head). Falls back to scGW's TOML default
-  // ('gygi') for older checkpoints that predate this dataset, so the typical
-  // default-config user is unaffected.
-  auto div_treatment = div_treatment_e::gygi;
+  // scr_coulomb_t::dump_eps_inv_head). Required for consistent eps_inv_head
+  // recomputation; checkpoints that predate this dataset must be regenerated.
+  // Encode missing dataset as -1 and broadcast a single int; root aborts via
+  // utils::check if the dataset is absent so callers see a clear error.
+  int div_int = -1;
   if (mpi.comm.root()) {
     h5::file file(input_file, 'r');
     auto root_grp = h5::group(file);
     auto scf_grp = root_grp.open_group(input_grp);
-    if (scf_grp.has_dataset("div_treatment")) {
-      std::string div_str;
-      h5::h5_read(scf_grp, "div_treatment", div_str);
-      div_treatment = string_to_div_enum(div_str);
-    }
+    utils::check(scf_grp.has_dataset("div_treatment"),
+                 "load_W_and_eps_inv_head: '{}/div_treatment' missing in {}. "
+                 "This checkpoint predates div_treatment dump; please regenerate "
+                 "the scGW checkpoint with the current code.",
+                 input_grp, input_file);
+    std::string div_str;
+    h5::h5_read(scf_grp, "div_treatment", div_str);
+    div_int = static_cast<int>(string_to_div_enum(div_str));
   }
-  int div_int = static_cast<int>(div_treatment);
   mpi.comm.broadcast_n(&div_int, 1, 0);
-  div_treatment = static_cast<div_treatment_e>(div_int);
+  auto div_treatment = static_cast<div_treatment_e>(div_int);
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
