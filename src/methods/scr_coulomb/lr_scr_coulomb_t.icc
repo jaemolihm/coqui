@@ -83,6 +83,18 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
  * Both arrays must be in PQ-local distribution (pgrid[2]==1, pgrid[3]==1).
  * With PQ fully local, uses direct nda::blas::gemm instead of SLATE multiply.
  */
+void lr_scr_coulomb_t::_init_kpq_map(THC_ERI auto& thc) {
+  if (_kpq_map_initialized) return;
+  // Empty _q_pert means Γ: leave _kpq_map empty, use identity in lr_dyson_W_in_place.
+  if (_q_pert.size() == 3) {
+    long nkpts = thc.MF()->nkpts();
+    auto kpts_crys = thc.MF()->kpts_crystal();
+    _kpq_map.resize(nkpts);
+    utils::calculate_kpq_map(kpts_crys, _q_pert, _kpq_map);
+  }
+  _kpq_map_initialized = true;
+}
+
 template<nda::MemoryArray Array_4D_t, typename communicator_t,
          typename dW_full_t>
 void lr_scr_coulomb_t::lr_dyson_W_in_place(
@@ -92,15 +104,33 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   _Timer.start("EVALUATE_LR_W");
 
   auto [nw_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_wqPQ.local_shape();
+  auto [nw_g, nq_g, NP_g, NQ_g] = dDeltaPi_wqPQ.global_shape();
   auto pgrid = dDeltaPi_wqPQ.grid();
+  auto [w_origin, q_origin, P_origin, Q_origin] = dDeltaPi_wqPQ.origin();
 
   // PQ must be undivided for direct BLAS gemm
   utils::check(pgrid[2] == 1 && pgrid[3] == 1,
                "lr_dyson_W_in_place: PQ must be undivided (PQ-local dist), "
                "got pgrid=({},{},{},{})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+  // We need to read W_full at _kpq_map(iq) which may be on a different rank;
+  // require the q axis to be undivided so each rank has all q.
+  utils::check(pgrid[1] == 1,
+               "lr_dyson_W_in_place: q axis must be undivided when kpq_map is "
+               "non-trivial; got pgrid[1]={}", pgrid[1]);
+  utils::check(dW_full_wqPQ.grid()[1] == 1,
+               "lr_dyson_W_in_place: dW_full q axis must be undivided; "
+               "got grid[1]={}", dW_full_wqPQ.grid()[1]);
+
+  bool has_kpq_map = _kpq_map_initialized && _kpq_map.size() > 0;
+  if (has_kpq_map) {
+    utils::check(_kpq_map.size() == nq_g,
+                 "lr_dyson_W_in_place: kpq_map size {} != global nq {}",
+                 _kpq_map.size(), nq_g);
+  }
 
   app_log(2, "  Evaluation of the LR screened interaction:");
   app_log(2, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+  app_log(2, "    - kpq_map: {}", has_kpq_map ? "provided (q_pert != Γ)" : "identity (q_pert = Γ)");
 
   auto DeltaPi_loc = dDeltaPi_wqPQ.local();
   auto W_full_loc = dW_full_wqPQ.local();
@@ -108,14 +138,22 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   nda::matrix<ComplexType> Tmp_PQ(NP_loc, NQ_loc);
 
   for (long iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    long iq_g = q_origin + iq_loc;
+    long iqpq_g = has_kpq_map ? _kpq_map(iq_g) : iq_g;
+    // Map global iq+p back to local. Since q axis is undivided, q_origin=0,
+    // so local index equals global index.
+    long iqpq_loc = iqpq_g;
     for (long iw = 0; iw < nw_loc; ++iw) {
       auto DeltaPi = DeltaPi_loc(iw, iq_loc, nda::range::all, nda::range::all);
-      auto W_full = W_full_loc(iw, iq_loc, nda::range::all, nda::range::all);
+      // W_full on the LEFT is read at iq+p (the row Bloch index of ΔΠ),
+      // W_full on the RIGHT at iq (the col Bloch index).
+      auto W_full_left  = W_full_loc(iw, iqpq_loc, nda::range::all, nda::range::all);
+      auto W_full_right = W_full_loc(iw, iq_loc,    nda::range::all, nda::range::all);
 
-      // Tmp = W_full · ΔΠ
-      nda::blas::gemm(1.0, W_full, DeltaPi, 0.0, Tmp_PQ);
-      // ΔW = Tmp · W_full = (W_full · ΔΠ) · W_full
-      nda::blas::gemm(1.0, Tmp_PQ, W_full, 0.0, DeltaPi);
+      // Tmp = W_full(iq+p) · ΔΠ
+      nda::blas::gemm(1.0, W_full_left, DeltaPi, 0.0, Tmp_PQ);
+      // ΔW = Tmp · W_full(iq) = (W_full(iq+p) · ΔΠ) · W_full(iq)
+      nda::blas::gemm(1.0, Tmp_PQ, W_full_right, 0.0, DeltaPi);
     }
   }
 
@@ -133,18 +171,20 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
  */
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
          typename dW_full_t>
-void lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau(
+void lr_scr_coulomb_t::solve_lr_dyson_W(
     memory::darray_t<local_Array_t, communicator_t>& dDeltaPi_tqPQ,
     const dW_full_t& dW_full_wqPQ,
     THC_ERI auto& thc)
 {
+  _init_kpq_map(thc);
+
   long nproc = thc.mpi()->comm.size();
   long NP = thc.Np();
   auto [nt_half, nqpts, NP_g, NQ_g] = dDeltaPi_tqPQ.global_shape();
   long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
 
   // --- Validate input: τ-dist ---
-  utils::check_W_tau_dist(dDeltaPi_tqPQ, "lr_dyson_W_from_Pi_tau(DeltaPi)");
+  utils::check_W_tau_dist(dDeltaPi_tqPQ, "solve_lr_dyson_W(DeltaPi)");
 
   // PQ-local distribution (matches dW_full_wqPQ)
   auto [pq_pgrid, pq_bsize] = utils::lr_W_PQ_local_dist(nproc, nqpts, nw_half);
@@ -155,7 +195,8 @@ void lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau(
   auto dDeltaPi_wqPQ = scr.tau_to_w(dDeltaPi_tqPQ, pq_pgrid, pq_bsize, true);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
-  // LR Dyson in ω-space: ΔW = W_full · ΔΠ · W_full
+  // LR Dyson in ω-space: ΔW^{(iq+p, iq)} = W_full(iq+p) · ΔΠ^{(iq+p, iq)} · W_full(iq)
+  // dDeltaPi_wqPQ holds ΔΠ(iω) on input; overwritten with ΔW_c(iω) on output.
   lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ);
 
   // FT back: omega → tau, output in q-local (τ-dist) distribution

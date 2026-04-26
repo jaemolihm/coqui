@@ -75,7 +75,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 //   compute_W_full_omega: τ-dist → FT(τ→ω) → PQ-local, + Z(q) → W_full(iω) [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
-//   lr_dyson_W_from_Pi_tau (in-place):
+//   solve_lr_dyson_W (in-place):
 //     tau_to_w:          τ-dist → PQ-local (via q-distributed FT buffer)
 //     lr_dyson_W_in_place: PQ-local (direct BLAS gemm, no SLATE)
 //     w_to_tau:          PQ-local → τ-dist (via q-distributed FT buffer)
@@ -142,6 +142,8 @@ std::tuple<int, double> lr_driver::run_lr(
     app_log(1, "  diis_warmup = {}", iter_params.diis_warmup);
   }
 
+  // JML TODO: Why is lr_dyson special? Can't we also initialize it here? And pass q_vec as argument in lr_driver::run_lr?
+
   // Initialize lr_hf solver if needed
   if (need_hf && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
@@ -158,7 +160,7 @@ std::tuple<int, double> lr_driver::run_lr(
   std::unique_ptr<solvers::lr_scr_coulomb_t> lr_scr_solver;
   if (gw_full) {
     lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
-    lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT());
+    lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT(), _lr_dyson.q_vec());
   }
   // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_SETUP");
@@ -335,9 +337,9 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_PI");
 
-      // Step 3c-3d: ΔW_c(τ) via lr_dyson_W_from_Pi_tau (in-place, uses cached W_full)
+      // Step 3c-3d: ΔW_c(τ) via solve_lr_dyson_W (in-place, uses cached W_full)
       _Timer.start("LR_GW_W");
-      lr_scr_solver->lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, *opt_dW_full_wqPQ, thc);
+      lr_scr_solver->solve_lr_dyson_W(dDeltaPi_tqPQ, *opt_dW_full_wqPQ, thc);
       // dDeltaPi_tqPQ now contains ΔW_c(τ) in q-local distribution
       auto& dDeltaW_tqPQ = dDeltaPi_tqPQ;  // alias for clarity
 

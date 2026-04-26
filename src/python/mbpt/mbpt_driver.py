@@ -483,7 +483,7 @@ def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
     Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
 
     Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
-    then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+    then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
 
     Parameters
     ----------

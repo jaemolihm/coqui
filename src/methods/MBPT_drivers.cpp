@@ -1538,7 +1538,7 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
  * Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
  *
  * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
- * then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+ * then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
  */
 template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_W_calc(
@@ -1608,10 +1608,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
     mpi->comm.barrier();
   }
 
-  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full · ΔΠ · W_full
-  solvers::lr_scr_coulomb_t lr_scr(&ft);
+  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
+  // kpq_map (iq → iq+q_pert) is computed lazily inside lr_scr from q_pert.
+  solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
   auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
-  lr_scr.lr_dyson_W_from_Pi_tau(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
+  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
   // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
 

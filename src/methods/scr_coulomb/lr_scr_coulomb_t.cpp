@@ -24,8 +24,9 @@
 namespace methods {
 namespace solvers {
 
-  lr_scr_coulomb_t::lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft)
-    : _ft(ft), _Timer() {
+  lr_scr_coulomb_t::lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft,
+                                     nda::array<double, 1> q_pert)
+    : _ft(ft), _Timer(), _q_pert(std::move(q_pert)) {
 
     for (auto& v: {"EVALUATE_LR_W", "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
                     "LR_W_COMPUTE_W_FULL"}) {
@@ -33,7 +34,7 @@ namespace solvers {
     }
   }
 
-  // Note: lr_dyson_W_in_place and lr_dyson_W_from_Pi_tau are templates with
+  // Note: lr_dyson_W_in_place and solve_lr_dyson_W are templates with
   // THC_ERI auto& (concept-constrained), so they cannot be explicitly instantiated
   // here. They are implicitly instantiated where called (in MBPT_drivers.cpp via
   // lr_scr_coulomb_t.icc include).
