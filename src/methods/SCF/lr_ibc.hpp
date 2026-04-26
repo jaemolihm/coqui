@@ -63,7 +63,7 @@ namespace methods {
 
     // Perturbation wavevector and k→k+q mapping
     nda::array<double, 1> q_vec;       // crystal coordinates (3,)
-    nda::array<long, 1> kpq_map;       // k → k+q mapping, full BZ (nkpts,)
+    nda::array<int, 1> kpq_map;        // k → k+q mapping, full BZ (nkpts,)
 
     // Unperturbed quantities for primary→aux on-the-fly correction (pointers, not copies)
     const nda::array<ComplexType, 4>* Dm_ab = nullptr;     // (ns, nk_ibz, nb, nb) — for HF
@@ -358,7 +358,7 @@ namespace methods {
     for (long is = 0; is < ns; ++is) {
       for (long ik_ibz = 0; ik_ibz < nkpts_ibz; ++ik_ibz) {
         long k = kp_map(ik_ibz);
-        long kpq = ibc.kpq_map(k);
+        int kpq = ibc.kpq_map(k);
 
         auto X_L = thc.X(is, 0, kpq);   // X(k+q), (NP, nb)
         auto X_R = thc.X(is, 0, k);      // X(k),   (NP, nb)
@@ -542,7 +542,7 @@ namespace methods {
       const nda::array<ComplexType, 4>& DeltaX_arr,
       const nda::array<ComplexType, 4>& DeltaX_minusq_arr,
       const nda::array<double, 1>& q_vec,
-      const nda::array<long, 1>& kpq_map,
+      const nda::array<int, 1>& kpq_map,
       const nda::array<ComplexType, 4>* Dm_ab,
       const lr_ibc_DeltaX::sArray_5D_t* sG_tskij,
       dW_t* dW_tRPQ,

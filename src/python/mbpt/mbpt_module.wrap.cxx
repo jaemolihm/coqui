@@ -435,10 +435,14 @@ static auto const fun_lr_gw_Pi = c2py::dispatcher_f_kw_t{
         [](coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
            nda::array<ComplexType, 5> const& G_tskij,
-           nda::array<ComplexType, 5> const& DeltaG_tskij) {
-          return coqui_py::lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij);
+           nda::array<ComplexType, 5> const& DeltaG_tskij,
+           std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+           std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
+          return coqui_py::lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
+                                     std::move(DeltaX_left), std::move(DeltaX_right));
         },
-        "h_int", "q_pert", "G_tskij", "DeltaG_tskij")};
+        "h_int", "q_pert", "G_tskij", "DeltaG_tskij",
+        "DeltaX_left", "DeltaX_right")};
 
 static const auto doc_lr_gw_Pi = fun_lr_gw_Pi.doc(R"DOC(
 Compute linear response polarization ΔP = -ΔG·G - G·ΔG (R-space Hadamard product).
@@ -456,6 +460,15 @@ G_tskij : np.ndarray
     Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
 DeltaG_tskij : np.ndarray
     LR Green's function, shape (nt, ns, nk, nb, nb)
+DeltaX_left : np.ndarray or None
+    Optional perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+    Full BZ indexed. Must be provided together with DeltaX_right. When both
+    DeltaX arrays are given, the primary→aux IBC correction is applied inside
+    ``lr_rpa_pi::evaluate_lr_Pi``; otherwise the legacy IBC-free path is used.
+DeltaX_right : np.ndarray or None
+    Optional perturbation of collocation matrix δ^{-q} X at storage k+q,
+    shape (ns, nkpts, Np, nb). Full BZ indexed. Must be provided together
+    with DeltaX_left.
 
 Returns
 -------
@@ -545,7 +558,7 @@ static const auto doc_lr_gw_W = fun_lr_gw_W.doc(R"DOC(
 Compute linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
 
 Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
-then calls lr_scr_coulomb_t::lr_dyson_W_from_Pi_tau to compute ΔW_c(τ).
+then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
 
 Parameters
 ----------

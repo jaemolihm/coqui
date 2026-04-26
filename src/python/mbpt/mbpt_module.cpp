@@ -296,15 +296,23 @@ namespace coqui_py {
    * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
    * @param G_tskij        - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @param DeltaG_tskij   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaX_left    - [INPUT, optional] δ^q X(k) (ns, nkpts, NP, nb)
+   * @param DeltaX_right   - [INPUT, optional] δ^{-q} X(k+q) at storage k
+   *                         When both are provided, primary→aux IBC is applied.
    * @return               - [OUTPUT] ΔP (nt_half, nkpts, NP, NP)
    */
   nda::array<ComplexType, 4> lr_gw_Pi(
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_pert,
       nda::array<ComplexType, 5> const& G_tskij,
-      nda::array<ComplexType, 5> const& DeltaG_tskij) {
+      nda::array<ComplexType, 5> const& DeltaG_tskij,
+      std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+      std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::lr_gw_Pi_calc(mb_eri, q_pert, G_tskij, DeltaG_tskij);
+    const nda::array<ComplexType, 4>* dx_left_ptr = DeltaX_left ? &(*DeltaX_left) : nullptr;
+    const nda::array<ComplexType, 4>* dx_right_ptr = DeltaX_right ? &(*DeltaX_right) : nullptr;
+    return methods::lr_gw_Pi_calc(mb_eri, q_pert, G_tskij, DeltaG_tskij,
+                                    dx_left_ptr, dx_right_ptr);
   }
 
 

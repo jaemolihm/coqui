@@ -382,7 +382,8 @@ def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij, div_corr=True):
     return lr_gw_sigma_DeltaG_cpp(json.dumps(params_with_div), h_int, q_pert, DeltaG_tskij)
 
 
-def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
+def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
+                  DeltaX_left=None, DeltaX_right=None):
     """
     Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space Hadamard product).
 
@@ -399,6 +400,17 @@ def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
         Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
     DeltaG_tskij : np.ndarray
         LR Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaX_left : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Must be provided together with DeltaX_right. When
+        both DeltaX arrays are given, the primary→aux IBC correction is
+        applied inside ``lr_rpa_pi::evaluate_lr_Pi``. Without IBC the primary
+        →aux transform of ΔG is incomplete (see run_4 in 43_lr_vs_fd_THC for
+        the rationale), so the FD comparison typically needs IBC.
+    DeltaX_right : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^{-q} X at storage k+q, shape
+        (ns, nkpts, Np, nb). Full BZ indexed. Must be provided together with
+        DeltaX_left.
 
     Returns
     -------
@@ -411,8 +423,13 @@ def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij):
     q_pert = np.asarray(q_pert, dtype=np.float64)
     G_tskij = np.asarray(G_tskij, dtype=np.complex128)
     DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+    if DeltaX_left is not None:
+        DeltaX_left = np.asarray(DeltaX_left, dtype=np.complex128)
+    if DeltaX_right is not None:
+        DeltaX_right = np.asarray(DeltaX_right, dtype=np.complex128)
 
-    return lr_gw_Pi_cpp(h_int, q_pert, G_tskij, DeltaG_tskij)
+    return lr_gw_Pi_cpp(h_int, q_pert, G_tskij, DeltaG_tskij,
+                         DeltaX_left=DeltaX_left, DeltaX_right=DeltaX_right)
 
 
 def gw_evaluate_Pi(params, h_int, G_tskij):

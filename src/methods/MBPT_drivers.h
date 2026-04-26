@@ -318,10 +318,14 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
  * Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
  * thc_solver_comm for G factors (symmetric).
  *
- * @param eri          - [INPUT] THC ERI handler
- * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
- * @param G_tskij      - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
- * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @param eri           - [INPUT] THC ERI handler
+ * @param q_pert        - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param G_tskij       - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaX_left   - [INPUT, optional] δ^q X(k), (ns, nkpts, NP, nb). Full BZ.
+ * @param DeltaX_right  - [INPUT, optional] δ^{-q} X(k+q) at storage k, same shape.
+ *                        When both DeltaX arrays are provided, the primary→aux
+ *                        IBC correction is applied inside evaluate_lr_Pi.
  * @return ΔP(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
  */
 template<typename eri_t>
@@ -329,7 +333,9 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
     eri_t &eri,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 5> const& DeltaG_tskij);
+    nda::array<ComplexType, 5> const& DeltaG_tskij,
+    const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
+    const nda::array<ComplexType, 4>* DeltaX_right = nullptr);
 
 /**
  * @brief Evaluate standard RPA polarization P[G] (FD helper)

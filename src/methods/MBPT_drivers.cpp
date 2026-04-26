@@ -44,6 +44,7 @@
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_precompute.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/embedding/embed_t.h"
 #include "methods/embedding/embed_eri_t.h"
@@ -1424,13 +1425,19 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
  *
  * Creates lr_rpa_pi solver, calls evaluate_lr_Pi,
  * copies distributed result to regular array.
+ *
+ * When DeltaX_left (δ^q X) and DeltaX_right (δ^{-q} X) are both provided,
+ * an lr_ibc_DeltaX struct is constructed on the fly and passed to
+ * evaluate_lr_Pi so the primary→aux IBC correction is applied.
  */
 template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_Pi_calc(
     eri_t &eri,
     nda::array<double, 1> const& q_pert,
     nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 5> const& DeltaG_tskij) {
+    nda::array<ComplexType, 5> const& DeltaG_tskij,
+    const nda::array<ComplexType, 4>* DeltaX_left,
+    const nda::array<ComplexType, 4>* DeltaX_right) {
 
   auto& thc = eri.corr_eri->get();
   auto mf = thc.MF();
@@ -1444,7 +1451,38 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
   // Create lr_rpa_pi solver and compute ΔP
   solvers::lr_rpa_pi lr(q_pert);
 
-  auto dDeltaPi = lr.evaluate_lr_Pi(nda::array_view<ComplexType, 5>(G_tskij), nda::array_view<ComplexType, 5>(DeltaG_tskij), thc);
+  // Build IBC struct on demand. The IBC path for Pi only uses the
+  // primary→aux correction, which needs DeltaX / DeltaX_minusq, q_vec,
+  // kpq_map, and sG_tskij. The aux→primary pieces (DeltaF_ibc_skij,
+  // DeltaSigma_ibc_tskij) are only consumed by HF/GW self-energy paths
+  // and remain default-initialised here.
+  using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
+  std::optional<lr_ibc_DeltaX> opt_ibc;
+  if (DeltaX_left && DeltaX_right) {
+    opt_sG_tskij.emplace(
+        math::shm::make_shared_array<Array_view_5D_t>(*mpi, G_tskij.shape()));
+    if (mpi->node_comm.root()) {
+      opt_sG_tskij->local() = G_tskij;
+    }
+    mpi->comm.barrier();
+
+    // Compute kpq_map (full BZ) — mirror of lr_rpa_pi::_init_kpq_map.
+    nda::array<int, 1> kpq_map(nkpts);
+    utils::calculate_kpq_map(mf->kpts_crystal(), q_pert, kpq_map);
+
+    opt_ibc.emplace(lr_ibc_DeltaX{
+        *DeltaX_left, *DeltaX_right,
+        q_pert, std::move(kpq_map),
+        nullptr, &(*opt_sG_tskij),
+        nda::array<ComplexType, 4>{}, nda::array<ComplexType, 5>{}
+    });
+  }
+
+  auto dDeltaPi = lr.evaluate_lr_Pi(nda::array_view<ComplexType, 5>(G_tskij),
+                                     nda::array_view<ComplexType, 5>(DeltaG_tskij),
+                                     thc,
+                                     opt_ibc ? &(*opt_ibc) : nullptr);
   mpi->comm.barrier();
 
   // Copy distributed result to regular array
@@ -1609,7 +1647,6 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   }
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
-  // kpq_map (iq → iq+q_pert) is computed lazily inside lr_scr from q_pert.
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
   auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
   lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
@@ -2009,7 +2046,9 @@ template nda::array<ComplexType, 4> lr_gw_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     nda::array<double, 1> const&,
     nda::array<ComplexType, 5> const&,
-    nda::array<ComplexType, 5> const&);
+    nda::array<ComplexType, 5> const&,
+    const nda::array<ComplexType, 4>*,
+    const nda::array<ComplexType, 4>*);
 
 // gw_evaluate_Pi_calc instantiations (THC only)
 template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
