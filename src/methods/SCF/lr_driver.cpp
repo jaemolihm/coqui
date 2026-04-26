@@ -225,13 +225,10 @@ std::tuple<int, double> lr_driver::run_lr(
   if (has_deltax) {
     app_log(2, "  DeltaX IBC correction: building lr_ibc_DeltaX...");
 
-    auto kpq_map_long = nda::array<long, 1>(_lr_dyson.kpq_map().shape());
-    for (long i = 0; i < kpq_map_long.size(); ++i) kpq_map_long(i) = _lr_dyson.kpq_map()(i);
-
     opt_ibc.emplace(build_lr_ibc(
         *_mpi, _MF, thc,
         *DeltaX_left, *DeltaX_right,
-        _lr_dyson.q_vec(), kpq_map_long,
+        _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
         Dm_ab, &sG_tskij,
         opt_dW_tRPQ ? &(*opt_dW_tRPQ) : nullptr,
         include_hartree, include_exchange, include_gw_sigma));

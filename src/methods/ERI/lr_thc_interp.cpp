@@ -172,7 +172,7 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
                "compute_delta_X_adj: q_vec_cryst must have size 3");
 
   // Build k → k+q index map (ik_pq gives the IBZ index of k_{ik}+q).
-  nda::array<long, 1> kpq_map(nk_ibz);
+  nda::array<int, 1> kpq_map(nk_ibz);
   utils::calculate_kpq_map(kpts_crys, q_vec_cryst, kpq_map);
 
   nda::array<ComplexType, 4> result(nspin, nk_ibz, nP, nbnd);
@@ -194,7 +194,7 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
   for (long sk = sk_lo; sk < sk_hi; ++sk) {
     long const is = sk / nk_ibz;
     long const ik = sk % nk_ibz;
-    long const ik_pq = kpq_map(ik);
+    int const ik_pq = kpq_map(ik);
 
     // k and k+q in crystal; k+q in Cartesian for the gradient i(k+q+G).
     nda::stack_array<double, 3> k_cart_pq, k_cryst, kpq_cryst;

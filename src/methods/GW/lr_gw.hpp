@@ -185,7 +185,7 @@ namespace methods {
       nda::array<double, 1> _q_pert;
       gw_t _gw;                       // stores div_treatment settings (friend access)
       bool _kpq_map_initialized = false;
-      nda::array<long, 1> _kpq_map;  // k → k+q_pert mapping (full BZ); identity for q_pert=0
+      nda::array<int, 1> _kpq_map;   // k → k+q_pert mapping (full BZ); identity for q_pert=0
       utils::TimerManager _Timer;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)

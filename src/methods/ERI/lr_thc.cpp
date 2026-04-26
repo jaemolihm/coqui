@@ -337,7 +337,7 @@ lr_thc::xi_Deltaxi_on_Gred lr_thc::xi_Deltaxi_one_q(
   fft_mesh(0) = N1; fft_mesh(1) = N2; fft_mesh(2) = N3;
 
   // k+q map
-  nda::array<long, 1> kpq_map(nkpts);
+  nda::array<int, 1> kpq_map(nkpts);
   utils::calculate_kpq_map(cache.kpts_crys, q_vec_cryst, kpq_map);
 
   // --- Accumulate Z_r, δZ_r from the cached T / δT over all (is, ik). ---
@@ -348,7 +348,7 @@ lr_thc::xi_Deltaxi_on_Gred lr_thc::xi_Deltaxi_one_q(
 
   for (long is = 0; is < nspin; ++is) {
     for (long ik = 0; ik < nkpts; ++ik) {
-      long const ikq = kpq_map(ik);
+      int const ikq = kpq_map(ik);
       auto T_k   = cache.T_sk_ur(is, ik,  nda::range::all, nda::range::all);
       auto dT_k  = cache.DeltaT_sk_ur(is, ik,  nda::range::all, nda::range::all);
       auto T_kq  = cache.T_sk_ur(is, ikq, nda::range::all, nda::range::all);
@@ -382,7 +382,7 @@ lr_thc::xi_Deltaxi_on_Gred lr_thc::xi_Deltaxi_one_q(
     nda::array<ComplexType, 2> T_kq_rP (Np, Np);
     for (long is = 0; is < nspin; ++is) {
       for (long ik = 0; ik < nkpts; ++ik) {
-        long const ikq = kpq_map(ik);
+        int const ikq = kpq_map(ik);
         auto T_k   = cache.T_sk_ur(is, ik,  nda::range::all, nda::range::all);
         auto T_kq  = cache.T_sk_ur(is, ikq, nda::range::all, nda::range::all);
         auto dT2_k  = cache.DeltaT_grad2_sk_PP(is, ik,  nda::range::all, nda::range::all);

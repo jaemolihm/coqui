@@ -56,11 +56,9 @@ namespace methods {
       if (_kpq_map_initialized) return;
       auto MF = thc.MF();
       long nkpts = MF->nkpts();
-      nda::array<int, 1> kpq_map_int(nkpts);
       auto kpts_crys = MF->kpts_crystal();
-      utils::calculate_kpq_map(kpts_crys, _q_pert, kpq_map_int);
       _kpq_map.resize(nkpts);
-      for (long ik = 0; ik < nkpts; ++ik) _kpq_map(ik) = kpq_map_int(ik);
+      utils::calculate_kpq_map(kpts_crys, _q_pert, _kpq_map);
       _kpq_map_initialized = true;
     }
 
