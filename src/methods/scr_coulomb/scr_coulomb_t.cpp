@@ -559,6 +559,13 @@ namespace solvers {
       auto iter_grp = (scf_grp.has_subgroup(grp_name)) ?
                       scf_grp.open_group(grp_name) : scf_grp.create_group(grp_name);
 
+      // Stash div_treatment at scf_grp so post-processing (e.g. LR
+      // load_W_and_eps_inv_head) can recompute eps_inv_head consistently
+      // with the value scGW used. Same value across all iters.
+      if (!scf_grp.has_dataset("div_treatment")) {
+        h5::h5_write(scf_grp, "div_treatment", div_enum_to_string(_div_treatment));
+      }
+
       nda::h5_write(iter_grp, "eps_inv_head_wq", eps_inv_head_wq, false);
       nda::h5_write(iter_grp, "eps_inv_head_tq", eps_inv_head_tq, false);
       nda::h5_write(iter_grp, "eps_inv_head_w", eps_inv_head_w, false);

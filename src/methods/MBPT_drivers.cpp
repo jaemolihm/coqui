@@ -1071,20 +1071,33 @@ auto load_W_and_eps_inv_head(
           loc(i0, i1, i2, i3) = src(i0+o0, i1+o1, i2+o2, i3+o3);
   mpi.comm.barrier();
 
-  // Read eps_inv_head from checkpoint
-  nda::array<ComplexType, 1> eps_inv_head(nt_half);
+  // JML TODO: div_treatment should be read during setup of run_lr_calc, and ideally be
+  //           part of the MBState.
+  // Read div_treatment that scGW used (written to scf_grp by
+  // scr_coulomb_t::dump_eps_inv_head). Falls back to scGW's TOML default
+  // ('gygi') for older checkpoints that predate this dataset, so the typical
+  // default-config user is unaffected.
+  auto div_treatment = div_treatment_e::gygi;
   if (mpi.comm.root()) {
     h5::file file(input_file, 'r');
-    auto root = h5::group(file);
-    auto scf_grp = root.open_group(input_grp);
-    long iter = input_iter;
-    if (iter == -1) {
-      h5::h5_read(scf_grp, "final_iter", iter);
+    auto root_grp = h5::group(file);
+    auto scf_grp = root_grp.open_group(input_grp);
+    if (scf_grp.has_dataset("div_treatment")) {
+      std::string div_str;
+      h5::h5_read(scf_grp, "div_treatment", div_str);
+      div_treatment = string_to_div_enum(div_str);
     }
-    auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
-    nda::h5_read(iter_grp, "eps_inv_head_t", eps_inv_head);
   }
-  mpi.comm.broadcast_n(eps_inv_head.data(), eps_inv_head.size(), 0);
+  int div_int = static_cast<int>(div_treatment);
+  mpi.comm.broadcast_n(&div_int, 1, 0);
+  div_treatment = static_cast<div_treatment_e>(div_int);
+
+  // Recompute eps_inv_head from the loaded W_c
+  // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   mpi.comm.barrier();
 
   return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
