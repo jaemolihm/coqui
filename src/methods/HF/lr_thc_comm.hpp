@@ -389,8 +389,13 @@ namespace methods {
           // DeltaX correction:
           //   δ^q X(k) · A(k) · X(k)†  +  X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
           if (has_deltax) {
-            auto DX_L = (*DeltaX_left)(s, k, all, all);             // δ^q X(k)
-            auto DX_R = (*DeltaX_right)(s, kpq_map(k), all, all);   // δ^{-q} X(k+q)
+            auto DX_L = (*DeltaX_left)(s, k, all, all);  // δ^q X(k), stored at index k
+            // DeltaX_right[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) where
+            // k is the outer loop index, so read at index k — NOT kpq_map(k).
+            // JML TODO: Switch DeltaX_right to kpq_map(k) indexing (i.e., store δ^{-q}X at
+            // index k+q = kpq_map(k)). This would require compute_delta_X_adj to fill the
+            // array at kpq_map(k) rather than k, and DX_R would become (s, kpq_map(k), ...).
+            auto DX_R = (*DeltaX_right)(s, k, all, all);  // δ^{-q} X(k+q)
 
             // Term 2: δ^q X(k) · A(k) · X(k)†
             U_ab_buf = (*O_unpert)(i, k, all, all);
@@ -513,8 +518,11 @@ namespace methods {
           //   pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
           if (has_deltax) {
             auto& U_ikab_4D = *U_ikab_4D_opt;
-            auto DX_q_at_k   = (*DeltaX_left)(s, k, all, all);              // δ^q X(k)
-            auto DX_mq_at_kpq = (*DeltaX_right)(s, kpq_map(k), all, all);   // δ^{-q} X(k+q)
+            auto DX_q_at_k   = (*DeltaX_left)(s, k, all, all);  // δ^q X(k), stored at index k
+            // DeltaX_right[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) for outer
+            // loop index k, so read at index k — NOT kpq_map(k).
+            // JML TODO: Switch DeltaX_right to kpq_map(k) indexing (see _primary_to_aux_impl).
+            auto DX_mq_at_kpq = (*DeltaX_right)(s, k, all, all);  // δ^{-q} X(k+q)
 
             // Pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
             U_H_buf = nda::dagger(U_ikab_4D(i, k, all, all));

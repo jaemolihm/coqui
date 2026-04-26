@@ -362,8 +362,10 @@ namespace methods {
 
         auto X_L = thc.X(is, 0, kpq);   // X(k+q), (NP, nb)
         auto X_R = thc.X(is, 0, k);      // X(k),   (NP, nb)
-        auto DX   = ibc.DeltaX(is, k, all, all);              // δ^q X(k), (NP, nb)
-        auto DX_mq = ibc.DeltaX_minusq(is, kpq, all, all);   // δ^{-q} X(k+q), (NP, nb)
+        auto DX   = ibc.DeltaX(is, k, all, all);          // δ^q X(k), stored at index k
+        // DeltaX_minusq[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) for outer
+        // loop index k, so read at index k — NOT kpq (the BZ index of k+q).
+        auto DX_mq = ibc.DeltaX_minusq(is, k, all, all);  // δ^{-q} X(k+q)
 
         Oab_buffer = ComplexType(0.0);
 
