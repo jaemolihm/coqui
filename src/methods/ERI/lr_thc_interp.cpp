@@ -44,6 +44,10 @@ nda::array<ComplexType, 4> compute_delta_X(
   utils::check(mf.npol() == 1, "compute_delta_X: Non-collinear not yet implemented");
   utils::check(fft_grid.shape(0) == 3,
                "compute_delta_X: fft_grid must have size 3, got {}", fft_grid.shape(0));
+  utils::check(mf.nkpts_ibz() == mf.nkpts(),
+               "compute_delta_X: requires full-BZ grid (nkpts_ibz={} != nkpts={}); "
+               "matches the assumption of the IBC consumer in lr_thc_comm.",
+               mf.nkpts_ibz(), mf.nkpts());
 
   long nspin = mf.nspin();
   long nk_ibz = mf.nkpts_ibz();
