@@ -55,6 +55,45 @@ nda::array<ComplexType, 4> compute_delta_X(
     nda::array<double, 1> const& q_vec_cryst,
     nda::array<long, 1> const& fft_grid);
 
+/**
+ * Compute adjoint/minus-q perturbation of X:
+ *   δ^{-q} X(k+q, P, m) = [δ^q]† ψ_{m,k+q}(r_P) + grad ψ_{m,k+q}(r_P) . delta_r_P
+ *
+ * The entry at index ik stores the quantity evaluated at k_{ik}+q (wave-function
+ * side), mirroring the consumer convention in lr_thc_comm (DeltaX_right accessed
+ * via kpq_map(k)).
+ *
+ * Term 1 ([δ^q]†ψ): Read adjoint Sternheimer solutions from per-mode per-k HDF5
+ *   files and evaluate at interpolating points with Bloch phase e^{ik.r_P}. The
+ *   response [δ^q]†ψ_{k+q} has k (not k+q) Bloch character.
+ *   File naming: {Deltapsi_adj_prefix}_ik{ik+1}.hdf5 (same as compute_delta_X),
+ *   where ik matches the storage index of the returned array; each file holds
+ *   [δ^q]†ψ_{m, k_{ik}+q}.
+ *
+ * Term 2 (gradient): Compute grad ψ_{m,k+q} in plane-wave basis via
+ *   i(k+q+G) * c_G, IFFT, sample at r_P with phase e^{i(k+q).r_P}, dot with
+ *   delta_r_P. The assumption δ^{-q}_λ = conj(δ^q_λ) combined with real
+ *   delta_r_P means no extra conjugation is needed.
+ *
+ * Assumes nkpts_ibz == nkpts (full-BZ grid, matching the IBC consumer).
+ *
+ * @param mf                  Mean-field object
+ * @param Deltapsi_adj_prefix Prefix of adjoint-Sternheimer HDF5 files
+ * @param r_P                 (nP,) FFT grid indices of interpolating points
+ * @param delta_r_P           (nP, 3) grid point displacements in Cartesian Bohr
+ *                            (the +q displacement; -q case uses the same real array)
+ * @param q_vec_cryst         (3,) +q vector in crystal coordinates
+ * @param fft_grid            (3,) FFT grid dimensions
+ * @return                    (nspin, nk_ibz, nP, nbnd) complex array
+ */
+nda::array<ComplexType, 4> compute_delta_X_adj(
+    mf::MF const& mf,
+    std::string const& Deltapsi_adj_prefix,
+    nda::array<long, 1> const& r_P,
+    nda::array<double, 2> const& delta_r_P,
+    nda::array<double, 1> const& q_vec_cryst,
+    nda::array<long, 1> const& fft_grid);
+
 } // namespace methods
 
 #endif // COQUI_LR_THC_INTERP_HPP

@@ -355,6 +355,58 @@ np.ndarray
     (nspin, nk_ibz, nP, nbnd) complex array
 )DOC");
 
+// compute_delta_X_adj
+static auto const fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf,
+       const std::string &Deltapsi_adj_prefix,
+       nda::array<long, 1> const& r_P,
+       nda::array<double, 2> const& delta_r_P,
+       nda::array<double, 1> const& q_vec_cryst,
+       nda::array<long, 1> const& fft_grid) {
+      return coqui_py::compute_delta_X_adj(mf, Deltapsi_adj_prefix,
+                                            r_P, delta_r_P, q_vec_cryst, fft_grid);
+    },
+    "mf", "Deltapsi_adj_prefix", "r_P", "delta_r_P", "q_vec_cryst", "fft_grid")};
+
+static const auto doc_d_16 = fun_16.doc(R"DOC(
+Compute the adjoint/minus-q DeltaX:
+    DeltaX_adj(k+q, P, m) = [δ^q]† ψ_{m,k+q}(r_P)
+                          + grad ψ_{m,k+q}(r_P) · delta_r_P
+
+At index ik the returned array stores the quantity at k_{ik}+q, matching
+the convention used by DeltaX_right in lr_thc_comm (accessed as
+DeltaX_right[kpq_map(k)]).
+
+Term 1 reads [δ^q]† ψ_{k+q} from adjoint-Sternheimer HDF5 files:
+    {Deltapsi_adj_prefix}_ik{ik+1}.hdf5
+Term 2 uses unperturbed ψ at k+q (looked up via a local k→k+q map) and the
+standard i(k+q+G) gradient. Requires the mean field to be on a full-BZ grid
+(nkpts_ibz == nkpts), matching the IBC consumer.
+
+Parameters
+----------
+mf : Mf
+    Mean-field object (for reading unperturbed wfc and system info)
+Deltapsi_adj_prefix : str
+    File path prefix for adjoint-Sternheimer files.
+    Example: "temp/dpsi_adj_iq1_mode1" -> temp/dpsi_adj_iq1_mode1_ik1.hdf5, ...
+r_P : np.ndarray
+    (nP,) FFT grid indices of interpolating points
+delta_r_P : np.ndarray
+    (nP, 3) grid point displacements in Cartesian Bohr. Interpreted as the
+    +q displacement; under the assumption δ^{-q} = conj(δ^q) and real
+    displacements, no conjugation is needed on the caller side.
+q_vec_cryst : np.ndarray
+    (3,) +q vector in crystal coordinates
+fft_grid : np.ndarray
+    (3,) FFT grid dimensions matching the grid used for r_P
+
+Returns
+-------
+np.ndarray
+    (nspin, nk_ibz, nP, nbnd) complex array
+)DOC");
+
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -362,6 +414,8 @@ static PyMethodDef module_methods[] = {
      doc_d_14.c_str()},
     {"compute_delta_X", (PyCFunction)c2py::pyfkw<fun_15>, METH_VARARGS | METH_KEYWORDS,
      doc_d_15.c_str()},
+    {"compute_delta_X_adj", (PyCFunction)c2py::pyfkw<fun_16>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_16.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
