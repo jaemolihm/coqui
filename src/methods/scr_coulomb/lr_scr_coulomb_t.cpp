@@ -28,6 +28,11 @@ namespace solvers {
                                      nda::array<double, 1> q_pert)
     : _ft(ft), _Timer(), _q_pert(std::move(q_pert)) {
 
+    utils::check(_q_pert.size() == 3,
+                 "lr_scr_coulomb_t: q_pert must have size 3, got {}",
+                 _q_pert.size());
+    _is_q_gamma = utils::is_q_gamma(_q_pert);
+
     for (auto& v: {"EVALUATE_LR_W", "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
                     "LR_W_COMPUTE_W_FULL"}) {
       _Timer.add(v);

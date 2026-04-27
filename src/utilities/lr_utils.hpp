@@ -238,28 +238,37 @@ inline auto lr_W_tau_local_dist(long nproc, long nq, long NP)
   return {pgrid, bsize};
 }
 
-/// PQ-local distribution: pgrid = {nwpools, nqpools, 1, 1}
-/// Distributes over tau/omega and q. PQ undivided.
-/// Used for lr_dyson_W_in_place (PQ matrix multiply).
-/// Guarantees product(pgrid) == nproc. All remaining procs go to ω-axis.
-inline auto lr_W_PQ_local_dist(long nproc, long nq, long nw_half)
+/// LR ω-side distribution: pgrid = {nwpools, nqpools, np_P, np_Q}.
+/// Mirrors scr_coulomb_t::W_omega_proc_grid: maximize nqpools, then nwpools,
+/// then split the remainder between np_P and np_Q. Used by lr_dyson_W_in_place
+/// and the W_full(iω) buffer it reads.
+///
+/// Assumes the (P, Q) global axes have the same length (THC: NP==NQ); the
+/// returned PQ block sizes are derived from NP for both axes.
+inline auto lr_W_proc_grid(long nproc, long nq, long nw_half, long NP)
     -> std::tuple<std::array<long,4>, std::array<long,4>>
 {
-  // Find largest nqpools dividing nproc, with nqpools <= nq
-  // and nproc/nqpools <= nw_half (so ω-axis can absorb remaining procs).
-  long nqpools = 1;
-  for (long i = std::min(nproc, nq); i >= 1; --i) {
-    if (nproc % i == 0 && nproc / i <= nw_half) {
-      nqpools = i;
-      break;
-    }
-  }
-  long nwpools = nproc / nqpools;
-  check(nwpools * nqpools == nproc,
-        "lr_W_PQ_local_dist: cannot find valid PQ-local grid for nproc={}, nq={}, nw_half={}",
-        nproc, nq, nw_half);
-  std::array<long, 4> pgrid = {nwpools, nqpools, 1, 1};
+  long np = nproc;
+  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
+  np /= nqpools;
+  long nwpools = find_proc_grid_max_npools(np, nw_half, 0.2);
+  np /= nwpools;
+  long np_P = find_proc_grid_min_diff(np, 1, 1);
+  long np_Q = np / np_P;
+
+  check(nqpools > 0 && nqpools <= nq,
+        "lr_W_proc_grid: nqpools <= 0 or nqpools > nq. nqpools={}", nqpools);
+  check(nwpools > 0 && nwpools <= nw_half,
+        "lr_W_proc_grid: nwpools <= 0 or nwpools > nw_half. nwpools={}", nwpools);
+  check(nwpools * nqpools * np_P * np_Q == nproc,
+        "lr_W_proc_grid: pgrid product != nproc ({} * {} * {} * {} != {})",
+        nwpools, nqpools, np_P, np_Q, nproc);
+
+  std::array<long, 4> pgrid = {nwpools, nqpools, np_P, np_Q};
   std::array<long, 4> bsize = {1, 1, 1, 1};
+  bsize[2] = std::min({1024L, NP / std::max(np_P, 1L), NP / std::max(np_Q, 1L)});
+  if (bsize[2] < 1) bsize[2] = 1;
+  bsize[3] = bsize[2];
   return {pgrid, bsize};
 }
 

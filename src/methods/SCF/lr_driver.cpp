@@ -69,16 +69,17 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 // Three distribution patterns:
 //   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
 //   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
-//   PQ-local:          pgrid = {nwpools, nqpools, 1, 1}  — PQ undivided (matrix multiply)
+//   ω-side:            pgrid = {nwpools, nqpools, np_P, np_Q}  — distributed over (w, q, P, Q)
 //
 //   W_c loaded:          (q,t,P,Q), τ-dist
-//   compute_W_full_omega: τ-dist → FT(τ→ω) → PQ-local, + Z(q) → W_full(iω) [cached]
+//   compute_W_full_omega: τ-dist → FT(τ→ω) → ω-side, + Z(q) → W_full(iω) [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
 //   solve_lr_dyson_W (in-place):
-//     tau_to_w:          τ-dist → PQ-local (via q-distributed FT buffer)
-//     lr_dyson_W_in_place: PQ-local (direct BLAS gemm, no SLATE)
-//     w_to_tau:          PQ-local → τ-dist (via q-distributed FT buffer)
+//     tau_to_w:          τ-dist → ω-side (via q-distributed FT buffer)
+//     lr_dyson_W_in_place: ω-side; SLATE GEMM batched over (iw, iq).
+//                          For Q≠Γ, gathers W_full(kpq_map(iq)) via Alltoallv on q_pool_comm.
+//     w_to_tau:          ω-side → τ-dist (via q-distributed FT buffer)
 //     output:            τ-dist (overwrites input)
 //   transpose (t,q)→(q,t): τ-dist
 //   evaluate_sigma_*:    τ-dist in (q,t) order

@@ -111,6 +111,8 @@ namespace solvers {
         memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
         const dW_full_t& dW_full_wqPQ);
 
+    bool is_q_gamma() const { return _is_q_gamma; }
+
   inline void print_timers() {
     app_log(2, "\n  LR_SCR_COULOMB timers");
     app_log(2, "  ----------------------");
@@ -127,11 +129,21 @@ namespace solvers {
   private:
     const imag_axes_ft::IAFT* _ft;
     utils::TimerManager _Timer;
-    nda::array<double, 1> _q_pert;
-    bool _kpq_map_initialized = false;
-    nda::array<int, 1> _kpq_map;  // iq → iq+q_pert mapping (full BZ); empty for q_pert=Γ
+    nda::array<double, 1> _q_pert;     // perturbation wavevector (size 3, crystal coords)
+    bool _is_q_gamma;                  // set in constructor; true iff _q_pert ≈ Γ
+    bool _kpq_map_initialized = false; // lazy init for _kpq_map (needs THC handle)
+    nda::array<int, 1> _kpq_map;       // iq → iq+q_pert (full BZ); only built for Q≠Γ
 
     void _init_kpq_map(THC_ERI auto& thc);
+
+    /**
+     * Build dW_full_left[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
+     * via Alltoallv within the q-pool subgroup. Precondition: Q ≠ Γ and
+     * _kpq_map is populated; both arrays must share pgrid/global_shape/bsize.
+     */
+    template<typename darray_t>
+    void _communicate_W_full_left(const darray_t& dW_full_wqPQ,
+                                  darray_t& dW_full_left) const;
 
   }; // lr_scr_coulomb_t
 
