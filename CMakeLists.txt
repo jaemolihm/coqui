@@ -506,7 +506,7 @@ if(ENABLE_WANNIER90)
   FetchContent_Declare(
       Wannier90 
       GIT_REPOSITORY https://github.com/wannier-developers/wannier90.git 
-      GIT_TAG        develop
+      GIT_TAG        f5ba0a9f740ead2cad21815388843c86e17b6fa1
    )
    FetchContent_MakeAvailable(Wannier90)
    add_compile_definitions(ENABLE_WANNIER90)
@@ -541,7 +541,7 @@ if(ENABLE_WANNIER90)
   FetchContent_Declare(
       Wannier90 
       GIT_REPOSITORY https://github.com/wannier-developers/wannier90.git 
-      GIT_TAG        develop
+      GIT_TAG        f5ba0a9f740ead2cad21815388843c86e17b6fa1
    )
    FetchContent_MakeAvailable(Wannier90)
    add_compile_definitions(ENABLE_WANNIER90)
