@@ -57,6 +57,7 @@
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "utilities/lr_utils.hpp"
+#include "utilities/proc_meminfo.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -1162,6 +1163,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   utils::check(std::filesystem::exists(input_file),
                "run_lr_calc: Input checkpoint {} does not exist!", input_file);
 
+  utils::memlog("run_lr_calc: entry");
+
   // Validate checkpoint contains required data
   {
     h5::file file(input_file, 'r');
@@ -1191,6 +1194,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       ? simple_dyson(mf.get(), &ft, prefix)
       : simple_dyson(mf.get(), &ft);
 
+  utils::memlog("run_lr_calc: after simple_dyson ctor");
+
   // Allocate shared arrays for unperturbed state
   auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
@@ -1200,6 +1205,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+
+  utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
 
   // Read F and Sigma from checkpoint
   double mu = 0.0;
@@ -1223,6 +1230,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
   // Only allocate ΔΣ array when GW is active
   bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
   using sArray_5D_t = math::shm::shared_array<Array_view_5D_t>;
@@ -1258,6 +1266,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     opt_eps_inv.emplace(std::move(eps_inv));
   }
 
+  utils::memlog("run_lr_calc: before driver.run_lr");
+
   // Create lr_driver and run unified SCF loop
   lr_driver driver(dyson, q_vec);
   auto& thc = eri.corr_eri->get();
@@ -1280,12 +1290,15 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       DeltaV_qPQ);
   mpi->comm.barrier();
 
+  utils::memlog("run_lr_calc: after driver.run_lr");
+
   // Write results
   chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
                  sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
                  Delta_mu, niter,
                  include_hartree, include_exchange, include_gw_sigma);
 
+  utils::memlog("run_lr_calc: exit (before RAII)");
   return std::make_tuple(niter, Delta_mu);
 }
 

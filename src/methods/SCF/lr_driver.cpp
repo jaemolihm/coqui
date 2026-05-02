@@ -27,6 +27,7 @@
 #include "methods/HF/thc_solver_comm.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
+#include "utilities/proc_meminfo.hpp"
 #include "methods/GW/g0_div_utils.hpp"
 #include "nda/nda.hpp"
 
@@ -184,8 +185,10 @@ std::tuple<int, double> lr_driver::run_lr(
   }
 
   // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT per iteration)
+  utils::memlog("lr_driver::run_lr: before sG_wskij precompute");
   auto sG_wskij = lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT());
   _lr_dyson.set_cached_G_omega(&sG_wskij);
+  utils::memlog("lr_driver::run_lr: after sG_wskij precompute");
 
   // Precompute dN/dμ if needed for fix_density mode at q=0
   if (fix_density && _lr_dyson.is_q_gamma()) {
@@ -226,6 +229,7 @@ std::tuple<int, double> lr_driver::run_lr(
   if (has_deltax) {
     app_log(2, "  DeltaX IBC correction: building lr_ibc_DeltaX...");
 
+    utils::memlog("lr_driver::run_lr: before build_lr_ibc");
     opt_ibc.emplace(build_lr_ibc(
         *_mpi, _MF, thc,
         *DeltaX_left, *DeltaX_right,
@@ -235,8 +239,10 @@ std::tuple<int, double> lr_driver::run_lr(
         include_hartree, include_exchange, include_gw_sigma));
 
     app_log(2, "  DeltaX IBC correction: setup complete.");
+    utils::memlog("lr_driver::run_lr: after build_lr_ibc");
   }
   _Timer.stop("LR_SETUP");
+  utils::memlog("lr_driver::run_lr: end of LR_SETUP");
 
   double Delta_mu = 0.0;
   int iter = 0;
