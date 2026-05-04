@@ -98,6 +98,8 @@ nda::array<ComplexType, 4> compute_delta_X(
     for (int a = 0; a < 3; ++a) {
       k_cryst(a)   = kpts_crys(ik, a);
       kpq_cryst(a) = k_cryst(a) + q_vec_cryst(a);
+    }
+    for (int a = 0; a < 3; ++a) {
       k_cart(a)    = k_cryst(0) * recv(0, a) + k_cryst(1) * recv(1, a) + k_cryst(2) * recv(2, a);
     }
 
@@ -205,6 +207,8 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
     for (int a = 0; a < 3; ++a) {
       k_cryst(a)   = kpts_crys(ik, a);
       kpq_cryst(a) = k_cryst(a) + q_vec_cryst(a);
+    }
+    for (int a = 0; a < 3; ++a) {
       k_cart_pq(a) = kpq_cryst(0) * recv(0, a) + kpq_cryst(1) * recv(1, a) + kpq_cryst(2) * recv(2, a);
     }
 
