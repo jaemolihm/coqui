@@ -436,9 +436,9 @@ namespace methods {
                                       sSigma_skij, thc, MF->ks_to_k(0), _kpq_map);
 
           // Add precomputed IBC correction for this τ-point
-          if (ibc && ibc->DeltaSigma_ibc_tskij.size() > 0) {
+          if (ibc && ibc->sDeltaSigma_ibc_tskij.has_value()) {
             if (sSigma_skij.node_comm()->root()) {
-              sSigma_skij.local() += ibc->DeltaSigma_ibc_tskij(it_out, nda::ellipsis{});
+              sSigma_skij.local() += ibc->sDeltaSigma_ibc_tskij->local()(it_out, nda::ellipsis{});
             }
             sSigma_skij.win().fence();
           }

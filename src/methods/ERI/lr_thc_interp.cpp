@@ -25,6 +25,7 @@
 #include "utilities/kpoint_utils.hpp"
 #include "utilities/lr_utils.hpp"
 #include "numerics/fft/nda.hpp"
+#include "numerics/shared_array/nda.hpp"
 #include "h5/h5.hpp"
 #include "nda/h5.hpp"
 #include "nda/nda.hpp"
@@ -66,26 +67,22 @@ nda::array<ComplexType, 4> compute_delta_X(
   utils::check(q_vec_cryst.shape(0) == 3,
                "compute_delta_X: q_vec_cryst must have size 3");
 
-  nda::array<ComplexType, 4> result(nspin, nk_ibz, nP, nbnd);
-  result() = ComplexType(0.0);
+  // One shared-memory window per node; ranks write disjoint (is, ik) slices.
+  auto mpi_ctx = mf.mpi();
+  auto& comm = mpi_ctx->comm;
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto sDeltaX_skPm = math::shm::make_shared_array<local_Array_4D_t>(
+      *mpi_ctx, std::array<long, 4>{nspin, nk_ibz, nP, nbnd});
+  auto DeltaX_skPm = sDeltaX_skPm.local();
 
-  // FFT workspace: (1, N1, N2, N3)
   nda::array<ComplexType, 2> fft_buf(1, nnr);
   auto fft_buf_4d = nda::reshape(fft_buf, std::array<long, 4>{1, fft_mesh(0), fft_mesh(1), fft_mesh(2)});
 
-  // Workspace for gradient direction
   nda::array<ComplexType, 2> grad_buf(1, nnr);
   auto grad_buf_4d = nda::reshape(grad_buf, std::array<long, 4>{1, fft_mesh(0), fft_mesh(1), fft_mesh(2)});
 
-  // Create FFT plan (reused for all transforms)
   math::nda::fft<true> F(fft_buf_4d);
 
-  // MPI: distribute the flat (is, ik) iteration space across ranks; each rank
-  // owns [sk_lo, sk_hi) out of nspin*nk_ibz pairs. Unowned entries of `result`
-  // stay zero, and we Allreduce(sum) at the end so every rank ends up with the
-  // full replicated array.
-  auto mpi_ctx = mf.mpi();
-  auto& comm = mpi_ctx->comm;
   long const nsk = nspin * nk_ibz;
   auto [sk_lo, sk_hi] = itertools::chunk_range(0L, nsk, comm.size(), comm.rank());
 
@@ -93,7 +90,6 @@ nda::array<ComplexType, 4> compute_delta_X(
     long const is = sk / nk_ibz;
     long const ik = sk % nk_ibz;
 
-    // k-vector in Cartesian (used for i(k+G) gradient) and crystal (for phase sampling).
     nda::stack_array<double, 3> k_cart, k_cryst, kpq_cryst;
     for (int a = 0; a < 3; ++a) {
       k_cryst(a)   = kpts_crys(ik, a);
@@ -103,13 +99,12 @@ nda::array<ComplexType, 4> compute_delta_X(
       k_cart(a)    = k_cryst(0) * recv(0, a) + k_cryst(1) * recv(1, a) + k_cryst(2) * recv(2, a);
     }
 
-    // Bloch phases at interpolating points (sparse-index form, crystal coords).
     nda::array<ComplexType, 1> phase_k(nP);
     nda::array<ComplexType, 1> phase_kpq(nP);
     utils::rspace_phase_factor(k_cryst,   fft_mesh, r_P, phase_k);
     utils::rspace_phase_factor(kpq_cryst, fft_mesh, r_P, phase_kpq);
 
-    // --- Term 2: gradient of unperturbed ψ · delta_r_P ---
+    // Term 2: gradient of unperturbed ψ · delta_r_P
     auto wfc = detail::read_wfc_k(mf, is, ik, fft_mesh);
     for (long m = 0; m < std::min(nbnd, wfc.nbnd); ++m) {
       nda::array<ComplexType, 1> c_on_grid(nnr);
@@ -121,11 +116,11 @@ nda::array<ComplexType, 4> compute_delta_X(
         detail::multiply_by_ikpG(grad_buf_4d, k_cart, recv, alpha);
         F.backward(grad_buf_4d);
         for (long u = 0; u < nP; ++u)
-          result(is, ik, u, m) += grad_buf(0, r_P(u)) * phase_k(u) * delta_r_P(u, alpha);
+          DeltaX_skPm(is, ik, u, m) += grad_buf(0, r_P(u)) * phase_k(u) * delta_r_P(u, alpha);
       }
     }
 
-    // --- Term 1: Δψ at r_P ---
+    // Term 1: Δψ at r_P
     auto Deltapsi = detail::read_Deltapsi_k(Deltapsi_prefix, ik, fft_mesh);
     for (long m = 0; m < std::min(nbnd, Deltapsi.nbnd); ++m) {
       fft_buf(0, nda::range::all) = ComplexType(0.0);
@@ -133,14 +128,18 @@ nda::array<ComplexType, 4> compute_delta_X(
       detail::decode_band_to_fft_grid(Deltapsi.evc_raw, m, Deltapsi.k2g, fft_slice_1d);
       F.backward(fft_buf_4d);
       for (long u = 0; u < nP; ++u)
-        result(is, ik, u, m) += fft_buf(0, r_P(u)) * phase_kpq(u);
+        DeltaX_skPm(is, ik, u, m) += fft_buf(0, r_P(u)) * phase_kpq(u);
     }
   }
 
-  if (comm.size() > 1)
-    comm.all_reduce_in_place_n(result.data(), result.size(), std::plus<>{});
+  sDeltaX_skPm.all_reduce();
 
-  return result;
+  // c2py boundary: rank 0 returns the data, other ranks return empty (→ None in Python).
+  nda::array<ComplexType, 4> out;
+  if (comm.root()) {
+    out = DeltaX_skPm;
+  }
+  return out;
 }
 
 
@@ -177,12 +176,15 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
   utils::check(q_vec_cryst.shape(0) == 3,
                "compute_delta_X_adj: q_vec_cryst must have size 3");
 
-  // Build k → k+q index map (ik_pq gives the IBZ index of k_{ik}+q).
   nda::array<int, 1> kpq_map(nk_ibz);
   utils::calculate_kpq_map(kpts_crys, q_vec_cryst, kpq_map);
 
-  nda::array<ComplexType, 4> result(nspin, nk_ibz, nP, nbnd);
-  result() = ComplexType(0.0);
+  auto mpi_ctx = mf.mpi();
+  auto& comm = mpi_ctx->comm;
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto sDeltaX_skPm = math::shm::make_shared_array<local_Array_4D_t>(
+      *mpi_ctx, std::array<long, 4>{nspin, nk_ibz, nP, nbnd});
+  auto DeltaX_skPm = sDeltaX_skPm.local();
 
   nda::array<ComplexType, 2> fft_buf(1, nnr);
   auto fft_buf_4d = nda::reshape(fft_buf, std::array<long, 4>{1, fft_mesh(0), fft_mesh(1), fft_mesh(2)});
@@ -192,8 +194,6 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
 
   math::nda::fft<true> F(fft_buf_4d);
 
-  auto mpi_ctx = mf.mpi();
-  auto& comm = mpi_ctx->comm;
   long const nsk = nspin * nk_ibz;
   auto [sk_lo, sk_hi] = itertools::chunk_range(0L, nsk, comm.size(), comm.rank());
 
@@ -202,7 +202,6 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
     long const ik = sk % nk_ibz;
     int const ik_pq = kpq_map(ik);
 
-    // k and k+q in crystal; k+q in Cartesian for the gradient i(k+q+G).
     nda::stack_array<double, 3> k_cart_pq, k_cryst, kpq_cryst;
     for (int a = 0; a < 3; ++a) {
       k_cryst(a)   = kpts_crys(ik, a);
@@ -212,16 +211,14 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
       k_cart_pq(a) = kpq_cryst(0) * recv(0, a) + kpq_cryst(1) * recv(1, a) + kpq_cryst(2) * recv(2, a);
     }
 
-    // Bloch phases at interpolating points.
-    //   phase_k   (= exp(i k.r_P))   → term 1, since [δ^q]† ψ_{k+q} has k character
-    //   phase_kpq (= exp(i(k+q).r_P))→ term 2, since ∇ψ_{k+q} has k+q character
+    // phase_k   → term 1 ([δ^q]† ψ_{k+q} has k Bloch character)
+    // phase_kpq → term 2 (∇ψ_{k+q} has k+q character)
     nda::array<ComplexType, 1> phase_k(nP);
     nda::array<ComplexType, 1> phase_kpq(nP);
     utils::rspace_phase_factor(k_cryst,   fft_mesh, r_P, phase_k);
     utils::rspace_phase_factor(kpq_cryst, fft_mesh, r_P, phase_kpq);
 
-    // --- Term 2: gradient of unperturbed ψ_{m, k+q} · delta_r_P ---
-    // Read ψ at k+q (IBZ index ik_pq; nk_ibz == nk so this is exact).
+    // Term 2: gradient of unperturbed ψ_{m, k+q} · delta_r_P
     auto wfc = detail::read_wfc_k(mf, is, ik_pq, fft_mesh);
     for (long m = 0; m < std::min(nbnd, wfc.nbnd); ++m) {
       nda::array<ComplexType, 1> c_on_grid(nnr);
@@ -233,11 +230,11 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
         detail::multiply_by_ikpG(grad_buf_4d, k_cart_pq, recv, alpha);
         F.backward(grad_buf_4d);
         for (long u = 0; u < nP; ++u)
-          result(is, ik, u, m) += grad_buf(0, r_P(u)) * phase_kpq(u) * delta_r_P(u, alpha);
+          DeltaX_skPm(is, ik, u, m) += grad_buf(0, r_P(u)) * phase_kpq(u) * delta_r_P(u, alpha);
       }
     }
 
-    // --- Term 1: [δ^q]† ψ_{m, k+q} at r_P (adjoint Sternheimer) ---
+    // Term 1: [δ^q]† ψ_{m, k+q} at r_P (adjoint Sternheimer)
     auto Deltapsi = detail::read_Deltapsi_k(Deltapsi_adj_prefix, ik, fft_mesh);
     for (long m = 0; m < std::min(nbnd, Deltapsi.nbnd); ++m) {
       fft_buf(0, nda::range::all) = ComplexType(0.0);
@@ -245,14 +242,17 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
       detail::decode_band_to_fft_grid(Deltapsi.evc_raw, m, Deltapsi.k2g, fft_slice_1d);
       F.backward(fft_buf_4d);
       for (long u = 0; u < nP; ++u)
-        result(is, ik, u, m) += fft_buf(0, r_P(u)) * phase_k(u);
+        DeltaX_skPm(is, ik, u, m) += fft_buf(0, r_P(u)) * phase_k(u);
     }
   }
 
-  if (comm.size() > 1)
-    comm.all_reduce_in_place_n(result.data(), result.size(), std::plus<>{});
+  sDeltaX_skPm.all_reduce();
 
-  return result;
+  nda::array<ComplexType, 4> out;
+  if (comm.root()) {
+    out = DeltaX_skPm;
+  }
+  return out;
 }
 
 } // namespace methods

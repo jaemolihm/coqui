@@ -110,8 +110,8 @@ namespace methods {
                       "lr_thc_comm::primary_to_aux: rank must be 4 or 5");
 
         // Extract DeltaX pointers from ibc (null when no correction)
-        const nda::array<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
-        const nda::array<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
+        const nda::array_view<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
+        const nda::array_view<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
 
         if constexpr (rank == 5) {
           auto t_loc_rng = O_IPQ.local_range(0);
@@ -280,8 +280,8 @@ namespace methods {
                       "lr_thc_comm::primary_to_aux_transposed: only rank-4 supported");
 
         // Extract DeltaX pointers from ibc (null when no correction)
-        const nda::array<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
-        const nda::array<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
+        const nda::array_view<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
+        const nda::array_view<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
 
         auto P_offset = O_IPQ.origin()[2];
         auto Q_offset = O_IPQ.origin()[3];
@@ -314,8 +314,8 @@ namespace methods {
                                        long nbatch,
                                        int rank, int comm_size,
                                        long P_offset = 0, long Q_offset = 0,
-                                       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
-                                       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+                                       const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
+                                       const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
                                        const O_unpert_t* O_unpert = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_primary_to_aux_impl: Rank mismatch");
@@ -429,8 +429,8 @@ namespace methods {
                                        long nbatch,
                                        int rank, int comm_size,
                                        long P_offset = 0, long Q_offset = 0,
-                                       const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
-                                       const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+                                       const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
+                                       const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
                                        const O_unpert_t* O_unpert = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_primary_to_aux_transposed_impl: Rank mismatch");

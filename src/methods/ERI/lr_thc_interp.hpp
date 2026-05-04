@@ -45,7 +45,8 @@ namespace methods {
  * @param q_vec_cryst  (3,) q-vector in crystal (fractional reciprocal) coordinates
  * @param fft_grid     (3,) FFT grid dimensions. Must match the grid used for r_P
  *                     (e.g. from the THC checkpoint fft_grid dataset).
- * @return             (nspin, nk_ibz, nP, nbnd) complex array
+ * @return             (nspin, nk_ibz, nP, nbnd) complex array on the global root,
+ *                     empty (0,0,0,0) on non-root ranks.
  */
 nda::array<ComplexType, 4> compute_delta_X(
     mf::MF const& mf,
@@ -84,7 +85,8 @@ nda::array<ComplexType, 4> compute_delta_X(
  *                            (the +q displacement; -q case uses the same real array)
  * @param q_vec_cryst         (3,) +q vector in crystal coordinates
  * @param fft_grid            (3,) FFT grid dimensions
- * @return                    (nspin, nk_ibz, nP, nbnd) complex array
+ * @return                    (nspin, nk_ibz, nP, nbnd) complex array on the global
+ *                            root, empty (0,0,0,0) on non-root ranks.
  */
 nda::array<ComplexType, 4> compute_delta_X_adj(
     mf::MF const& mf,

@@ -1492,6 +1492,12 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   static constexpr int rank = get_rank<std::decay_t<dArr_t>>;
   utils::check(dA.global_shape() == sA.shape(), "Shape mismatch.");
 
+  // Note: callers must ensure that dA's pgrid does not have replicas
+  // *across nodes* — otherwise the trailing internode all_reduce()
+  // double-counts. Within a single node, replicas are fine (idempotent
+  // shared-memory writes). For replicating pgrids that genuinely need
+  // a reduction at the end, use gather_to_shm_slow instead.
+
   sA.set_zero();
   auto sA_loc = sA.local();
 
@@ -1500,12 +1506,12 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
 
   std::vector<::nda::range> rng_v(rank,::nda::range(0));
   for(int r=0; r<rank; ++r)
-    rng_v[r] = dA.local_range(r); 
+    rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
   sA.communicator()->barrier();
 
   // MAM Note: In some MPI implementations/systems, the first call to a collective can be very
-  //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory. 
+  //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory.
   //           If this problem persist, reduce on regular memory and copy to shm locally
   // All_reduce among all nodes
   sA.all_reduce();

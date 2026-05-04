@@ -57,9 +57,17 @@ namespace methods {
   struct lr_ibc_DeltaX {
     using sArray_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
 
-    // Core DeltaX arrays (full BZ indexed, shape: ns, nkpts, Np, nb)
-    const nda::array<ComplexType, 4>& DeltaX;         // δ^q X
-    const nda::array<ComplexType, 4>& DeltaX_minusq;  // δ^{-q} X
+    // Lifetime contract:
+    //   `DeltaX` and `DeltaX_minusq` are non-owning views into a
+    //   `shared_array<array_view<ComplexType,4>>` allocated by the caller
+    //   (currently `run_lr_calc` and `lr_gw_Pi_calc` in MBPT_drivers.cpp).
+    //   The owning shared_array MUST outlive this struct. Do NOT store an
+    //   `lr_ibc_DeltaX` past the scope of the function that allocated the
+    //   underlying shared_array; do NOT copy it across MPI rank boundaries.
+    //
+    // Core DeltaX arrays (full BZ indexed, shape: ns, nkpts, Np, nb).
+    nda::array_view<ComplexType, 4> DeltaX;         // δ^q X
+    nda::array_view<ComplexType, 4> DeltaX_minusq;  // δ^{-q} X
 
     // Perturbation wavevector and k→k+q mapping
     nda::array<double, 1> q_vec;       // crystal coordinates (3,)
@@ -71,7 +79,10 @@ namespace methods {
 
     // Precomputed IBC corrections for aux→primary (added at callsite)
     nda::array<ComplexType, 4> DeltaF_ibc_skij;            // (ns, nk_ibz, nb, nb)
-    nda::array<ComplexType, 5> DeltaSigma_ibc_tskij;       // (nt, ns, nk_ibz, nb, nb)
+
+    // Held in a node-local shared-memory window (one copy per node) when
+    // present. std::nullopt when the GW-Sigma path is inactive.
+    std::optional<sArray_5D_t> sDeltaSigma_ibc_tskij;      // (nt, ns, nk_ibz, nb, nb)
   };
 
 
@@ -313,7 +324,12 @@ namespace methods {
    *                    + X†(k+q) · A_PQ(s,k+q) · δX(k)
    *
    * where A_PQ is the unperturbed quantity in aux basis, and X is the THC collocation matrix.
-   * Works with distributed A_PQ; the result is all_reduced across ranks.
+   *
+   * Postcondition: `result_skij` is **byte-identical on every MPI rank** (final
+   * step of this routine broadcasts from rank 0). Callers like
+   * `compute_DeltaSigma_ibc` rely on this to write into a node-local
+   * shared_array with only a `node_comm.root()` guard — every node's root sees
+   * the same value, so no internode communication is needed afterwards.
    *
    * @param result_skij  - [OUTPUT] (ns, nk_ibz, nb, nb) — zeroed and filled
    * @param A_skPQ       - [INPUT] distributed (ns, nk, NP, NP), k-space indexed
@@ -412,7 +428,7 @@ namespace methods {
    */
   template<typename mpi_context_t, typename dArray_4D_t>
   void compute_DeltaSigma_ibc(
-      nda::array<ComplexType, 5>& result_tskij,
+      typename lr_ibc_DeltaX::sArray_5D_t& sResult_tskij,
       mpi_context_t& mpi,
       const mf::MF* MF,
       THC_ERI auto& thc,
@@ -431,7 +447,7 @@ namespace methods {
 
     auto [nt_half_W, nR_W, NP_W, NQ_W] = dW_tRPQ.global_shape();
     long nt_half = nt_half_W;
-    long nt = result_tskij.shape(0);  // full tau grid
+    long nt = sResult_tskij.shape()[0];  // full tau grid
 
     auto [tpools, qpools_W, np_P_W, np_Q_W] = dW_tRPQ.grid();
 
@@ -516,11 +532,18 @@ namespace methods {
           }
         }
 
-        // Step 5: Compute DeltaX aux→primary correction on Σ_PQ
+        // Step 5: Compute DeltaX aux→primary correction on Σ_PQ.
+        // Sigma_ibc_tau is identical on every rank after compute_ibc_aux_to_primary
+        // (internal allreduce), so only the node root needs to write into the
+        // shared-memory window for sResult_tskij.
         compute_ibc_aux_to_primary(Sigma_ibc_tau, dSigma_skPQ, ibc, thc, MF->ks_to_k(0));
-        result_tskij(it_out, nda::ellipsis{}) = Sigma_ibc_tau;
+        if (mpi.node_comm.root()) {
+          sResult_tskij.local()(it_out, nda::ellipsis{}) = Sigma_ibc_tau;
+        }
       } // pass
     } // it_w
+
+    mpi.comm.barrier();
   }
 
 
@@ -539,8 +562,8 @@ namespace methods {
       mpi_context_t& mpi,
       const mf::MF* MF,
       THC_ERI auto& thc,
-      const nda::array<ComplexType, 4>& DeltaX_arr,
-      const nda::array<ComplexType, 4>& DeltaX_minusq_arr,
+      nda::array_view<ComplexType, 4> DeltaX_arr,
+      nda::array_view<ComplexType, 4> DeltaX_minusq_arr,
       const nda::array<double, 1>& q_vec,
       const nda::array<int, 1>& kpq_map,
       const nda::array<ComplexType, 4>* Dm_ab,
@@ -555,15 +578,16 @@ namespace methods {
     // Initialize empty IBC correction arrays
     nda::array<ComplexType, 4> DeltaF_ibc(std::array<long,4>{ns, nkpts_ibz, nbnd, nbnd});
     DeltaF_ibc = ComplexType(0.0);
-    nda::array<ComplexType, 5> DeltaSigma_ibc;  // empty
 
-    // Partially construct ibc so we can pass it to compute functions
+    // Partially construct ibc so we can pass it to compute functions.
+    // sDeltaSigma_ibc_tskij is left as std::nullopt and emplaced below if the
+    // GW-Sigma path is active.
     lr_ibc_DeltaX ibc{
         DeltaX_arr, DeltaX_minusq_arr,
         q_vec, kpq_map,
         Dm_ab, sG_tskij,
         std::move(DeltaF_ibc),
-        std::move(DeltaSigma_ibc)
+        std::nullopt
     };
 
     // --- Compute DeltaF_ibc from V_HF_PQ ---
@@ -589,15 +613,23 @@ namespace methods {
     // --- Compute DeltaSigma_ibc from Σ_GW_PQ ---
     if (include_gw_sigma && dW_tRPQ && sG_tskij) {
       long nt = sG_tskij->shape()[0];
-      ibc.DeltaSigma_ibc_tskij.resize(std::array<long,5>{nt, ns, nkpts_ibz, nbnd, nbnd});
-      ibc.DeltaSigma_ibc_tskij = ComplexType(0.0);
-      compute_DeltaSigma_ibc(ibc.DeltaSigma_ibc_tskij, mpi, MF, thc, ibc, *dW_tRPQ);
+      ibc.sDeltaSigma_ibc_tskij.emplace(
+          math::shm::make_shared_array<nda::array_view<ComplexType, 5>>(
+              mpi, std::array<long, 5>{nt, ns, nkpts_ibz, nbnd, nbnd}));
+      if (mpi.node_comm.root()) {
+        ibc.sDeltaSigma_ibc_tskij->local() = ComplexType(0.0);
+      }
+      mpi.comm.barrier();
+      compute_DeltaSigma_ibc(*ibc.sDeltaSigma_ibc_tskij, mpi, MF, thc, ibc, *dW_tRPQ);
       {
+        // All ranks see the same node-shared data; compute the norm locally
+        // and let app_log gate by global rank.
+        auto sigma_view = ibc.sDeltaSigma_ibc_tskij->local();
         double norm2 = 0.0;
         for (long it = 0; it < nt; ++it)
           for (long is = 0; is < ns; ++is)
             for (long ik = 0; ik < nkpts_ibz; ++ik)
-              norm2 += std::pow(nda::frobenius_norm(ibc.DeltaSigma_ibc_tskij(it, is, ik, nda::range::all, nda::range::all)), 2);
+              norm2 += std::pow(nda::frobenius_norm(sigma_view(it, is, ik, nda::range::all, nda::range::all)), 2);
         app_log(2, "    IBC: DeltaSigma_ibc computed, norm = {:.6e}", std::sqrt(norm2));
       }
     }

@@ -91,7 +91,7 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      bool compute_hartree,
                      bool compute_exchange,
                      const lr_ibc_DeltaX* ibc,
-                     const nda::array<ComplexType, 3>* DeltaV_qPQ,
+                     const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
                      const nda::array<ComplexType, 4>* Dm_skij_unpert) {
   _Timer.start("LR_HF");
   app_log(2, "Evaluating LR Fock matrix (ΔF from ΔDm):");
@@ -130,7 +130,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                       bool compute_hartree,
                       bool compute_exchange,
                       const lr_ibc_DeltaX* ibc,
-                      const nda::array<ComplexType, 3>* DeltaV_qPQ,
+                      const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
                       const nda::array<ComplexType, 4>* Dm_skij_unpert) {
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
@@ -656,7 +656,7 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                Arr4D const&,
                                bool, bool,
                                const lr_ibc_DeltaX*,
-                               const nda::array<ComplexType, 3>*,
+                               const nda::array_view<ComplexType, 3>*,
                                const nda::array<ComplexType, 4>*);
 
 template void lr_hf::evaluate(sArray_t<Arrv4D>&,
@@ -665,7 +665,7 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                Arrv4D const&,
                                bool, bool,
                                const lr_ibc_DeltaX*,
-                               const nda::array<ComplexType, 3>*,
+                               const nda::array_view<ComplexType, 3>*,
                                const nda::array<ComplexType, 4>*);
 
 template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,

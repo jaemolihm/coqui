@@ -118,11 +118,11 @@ public:
       dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
       const lr_iter_params& iter_params,
-      const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
-      const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
+      const sArray_t<Array_view_4D_t>* sDeltaX_left = nullptr,
+      const sArray_t<Array_view_4D_t>* sDeltaX_right = nullptr,
       const nda::array<ComplexType, 4>* Dm_ab = nullptr,
       bool div_corr = true,
-      const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr);
+      const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr);
 
   void print_setup_timers();
   void print_timers();

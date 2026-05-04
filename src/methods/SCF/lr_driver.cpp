@@ -101,11 +101,11 @@ std::tuple<int, double> lr_driver::run_lr(
     dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
     int max_iter, double tol, bool fix_density,
     const lr_iter_params& iter_params,
-    const nda::array<ComplexType, 4>* DeltaX_left,
-    const nda::array<ComplexType, 4>* DeltaX_right,
+    const sArray_t<Array_view_4D_t>* sDeltaX_left,
+    const sArray_t<Array_view_4D_t>* sDeltaX_right,
     const nda::array<ComplexType, 4>* Dm_ab,
     bool div_corr,
-    const nda::array<ComplexType, 3>* DeltaV_qPQ) {
+    const nda::array_view<ComplexType, 3>* DeltaV_qPQ) {
 
   _Timer.start("LR_SCF");
 
@@ -241,7 +241,7 @@ std::tuple<int, double> lr_driver::run_lr(
   _Timer.stop("LR_SETUP_MISC");
 
   // DeltaX IBC correction setup
-  bool has_deltax = DeltaX_left && DeltaX_right;
+  bool has_deltax = sDeltaX_left && sDeltaX_right;
   std::optional<lr_ibc_DeltaX> opt_ibc;
   if (has_deltax) {
     _Timer.start("LR_SETUP_IBC");
@@ -250,7 +250,7 @@ std::tuple<int, double> lr_driver::run_lr(
     utils::memlog("lr_driver::run_lr: before build_lr_ibc");
     opt_ibc.emplace(build_lr_ibc(
         *_mpi, _MF, thc,
-        *DeltaX_left, *DeltaX_right,
+        sDeltaX_left->local(), sDeltaX_right->local(),
         _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
         Dm_ab, &sG_tskij,
         opt_dW_tRPQ ? &(*opt_dW_tRPQ) : nullptr,
@@ -575,8 +575,8 @@ template std::tuple<int, double> lr_driver::run_lr(
     bool, bool, lr_gw_update_mode,
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
     int, double, bool, const lr_iter_params&,
-    const nda::array<ComplexType, 4>*, const nda::array<ComplexType, 4>*,
+    const sArray_t<Array_view_4D_t>*, const sArray_t<Array_view_4D_t>*,
     const nda::array<ComplexType, 4>*, bool,
-    const nda::array<ComplexType, 3>*);
+    const nda::array_view<ComplexType, 3>*);
 
 } // namespace methods

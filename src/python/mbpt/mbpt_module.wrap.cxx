@@ -192,7 +192,7 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_vec,
-           nda::array<ComplexType, 4> const& DeltaH0_skij,
+           std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
            bool include_hartree,
            bool include_exchange,
            std::string gw_mode,
@@ -206,7 +206,7 @@ static auto const fun_run_lr = c2py::dispatcher_f_kw_t{
            std::optional<nda::array<ComplexType, 4>> DeltaX_left,
            std::optional<nda::array<ComplexType, 4>> DeltaX_right,
            std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
-          return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
+          return coqui_py::run_lr(lr_params, h_int, q_vec, std::move(DeltaH0_skij),
                                   include_hartree, include_exchange, gw_mode,
                                   max_iter, tol, fix_density,
                                   iter_alg, mixing, max_subsp_size, diis_warmup,
@@ -399,8 +399,8 @@ static auto const fun_lr_gw_sigma_DeltaG = c2py::dispatcher_f_kw_t{
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
-           nda::array<ComplexType, 5> const& DeltaG_tskij) {
-          return coqui_py::lr_gw_sigma_DeltaG(lr_params, h_int, q_pert, DeltaG_tskij);
+           std::optional<nda::array<ComplexType, 5>> DeltaG_tskij) {
+          return coqui_py::lr_gw_sigma_DeltaG(lr_params, h_int, q_pert, std::move(DeltaG_tskij));
         },
         "lr_params", "h_int", "q_pert", "DeltaG_tskij")};
 
@@ -434,11 +434,11 @@ static auto const fun_lr_gw_Pi = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
-           nda::array<ComplexType, 5> const& G_tskij,
-           nda::array<ComplexType, 5> const& DeltaG_tskij,
+           std::optional<nda::array<ComplexType, 5>> G_tskij,
+           std::optional<nda::array<ComplexType, 5>> DeltaG_tskij,
            std::optional<nda::array<ComplexType, 4>> DeltaX_left,
            std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
-          return coqui_py::lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
+          return coqui_py::lr_gw_Pi(h_int, q_pert, std::move(G_tskij), std::move(DeltaG_tskij),
                                      std::move(DeltaX_left), std::move(DeltaX_right));
         },
         "h_int", "q_pert", "G_tskij", "DeltaG_tskij",
@@ -481,8 +481,8 @@ static auto const fun_gw_evaluate_Pi = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 5> const& G_tskij) {
-          return coqui_py::gw_evaluate_Pi(lr_params, h_int, G_tskij);
+           std::optional<nda::array<ComplexType, 5>> G_tskij) {
+          return coqui_py::gw_evaluate_Pi(lr_params, h_int, std::move(G_tskij));
         },
         "lr_params", "h_int", "G_tskij")};
 
@@ -513,9 +513,9 @@ static auto const fun_gw_evaluate_sigma = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 5> const& G_tskij,
+           std::optional<nda::array<ComplexType, 5>> G_tskij,
            bool div_corr) {
-          return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij, div_corr);
+          return coqui_py::gw_evaluate_sigma(lr_params, h_int, std::move(G_tskij), div_corr);
         },
         "lr_params", "h_int", "G_tskij", "div_corr")};
 
@@ -549,8 +549,8 @@ static auto const fun_lr_gw_W = c2py::dispatcher_f_kw_t{
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
-           nda::array<ComplexType, 4> const& DeltaPi_tqPQ) {
-          return coqui_py::lr_gw_W(lr_params, h_int, q_pert, DeltaPi_tqPQ);
+           std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ) {
+          return coqui_py::lr_gw_W(lr_params, h_int, q_pert, std::move(DeltaPi_tqPQ));
         },
         "lr_params", "h_int", "q_pert", "DeltaPi_tqPQ")};
 
@@ -583,8 +583,8 @@ static auto const fun_gw_evaluate_W_from_Pi = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 4> const& Pi_tqPQ) {
-          return coqui_py::gw_evaluate_W_from_Pi(lr_params, h_int, Pi_tqPQ);
+           std::optional<nda::array<ComplexType, 4>> Pi_tqPQ) {
+          return coqui_py::gw_evaluate_W_from_Pi(lr_params, h_int, std::move(Pi_tqPQ));
         },
         "lr_params", "h_int", "Pi_tqPQ")};
 
@@ -616,9 +616,9 @@ static auto const fun_lr_gw_sigma_DeltaW = c2py::dispatcher_f_kw_t{
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
            nda::array<double, 1> const& q_pert,
-           nda::array<ComplexType, 5> const& G_tskij,
-           nda::array<ComplexType, 4> const& DeltaW_qtPQ) {
-          return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, G_tskij, DeltaW_qtPQ);
+           std::optional<nda::array<ComplexType, 5>> G_tskij,
+           std::optional<nda::array<ComplexType, 4>> DeltaW_qtPQ) {
+          return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, std::move(G_tskij), std::move(DeltaW_qtPQ));
         },
         "lr_params", "h_int", "q_pert", "G_tskij", "DeltaW_qtPQ")};
 
@@ -654,8 +654,8 @@ static auto const fun_compute_eps_inv_head = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 4> const& W_c_tqPQ) {
-          return coqui_py::compute_eps_inv_head(lr_params, h_int, W_c_tqPQ);
+           std::optional<nda::array<ComplexType, 4>> W_c_tqPQ) {
+          return coqui_py::compute_eps_inv_head(lr_params, h_int, std::move(W_c_tqPQ));
         },
         "lr_params", "h_int", "W_c_tqPQ")};
 
@@ -687,11 +687,11 @@ static auto const fun_gw_evaluate_sigma_with_W = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &lr_params,
            coqui_py::ThcCoulomb &h_int,
-           nda::array<ComplexType, 5> const& G_tskij,
-           nda::array<ComplexType, 4> const& W_c_qtPQ,
+           std::optional<nda::array<ComplexType, 5>> G_tskij,
+           std::optional<nda::array<ComplexType, 4>> W_c_qtPQ,
            nda::array<ComplexType, 1> const& eps_inv_head,
            bool div_corr) {
-          return coqui_py::gw_evaluate_sigma_with_W(lr_params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr);
+          return coqui_py::gw_evaluate_sigma_with_W(lr_params, h_int, std::move(G_tskij), std::move(W_c_qtPQ), eps_inv_head, div_corr);
         },
         "lr_params", "h_int", "G_tskij", "W_c_qtPQ", "eps_inv_head", "div_corr")};
 

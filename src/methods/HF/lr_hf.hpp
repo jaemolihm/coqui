@@ -108,7 +108,7 @@ public:
                 bool compute_hartree = true,
                 bool compute_exchange = true,
                 const lr_ibc_DeltaX* ibc = nullptr,
-                const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr,
+                const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
 
   inline void print_timers() {
@@ -161,7 +161,7 @@ private:
                  bool compute_hartree,
                  bool compute_exchange,
                  const lr_ibc_DeltaX* ibc = nullptr,
-                 const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr,
+                 const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
                  const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
 
   /**

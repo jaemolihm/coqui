@@ -194,7 +194,8 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * @param eri              - [INPUT] ERI handler (must be THC)
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
- * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ * @param DeltaH0_skij_root - [INPUT] Perturbation matrix (ns, nk, nb, nb) on the
+ *                            MPI global root; std::nullopt on every other rank.
  * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
  * @param include_exchange - [INPUT] Include ΔK in SCF loop
  * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
@@ -207,7 +208,7 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
 template<typename eri_t>
 std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
-                                     nda::array<ComplexType, 4> const& DeltaH0_skij,
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaH0_skij_root,
                                      bool include_hartree,
                                      bool include_exchange,
                                      lr_gw_update_mode gw_mode,
@@ -215,9 +216,9 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      double tol,
                                      bool fix_density,
                                      const lr_iter_params& iter_params,
-                                     const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
-                                     const nda::array<ComplexType, 4>* DeltaX_right = nullptr,
-                                     const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr);
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);
 
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)
@@ -225,17 +226,18 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
  * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space Hadamard product).
  * Reads W and eps_inv_head from checkpoint.
  *
- * @param eri          - [INPUT] THC ERI handler
- * @param pt           - [INPUT] Parameters as property tree (prefix, output)
- * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
- * @param DeltaG_tskij - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
- * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ * @param eri               - [INPUT] THC ERI handler
+ * @param pt                - [INPUT] Parameters as property tree (prefix, output)
+ * @param q_pert            - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param DeltaG_tskij_root - [INPUT] LR Green's function (nt, ns, nk, nb, nb) on the
+ *                            MPI global root; std::nullopt elsewhere.
+ * @return ΔΣ(τ,s,k,i,j) on rank 0 (nt, ns, nk, nb, nb); empty array on non-root.
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
-    nda::array<ComplexType, 5> const& DeltaG_tskij);
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root);
 
 /**
  * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
@@ -252,7 +254,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
 template<typename eri_t>
 nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 5> const& G_tskij,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
     bool div_corr = true);
 
 /**
@@ -272,8 +274,8 @@ template<typename eri_t>
 nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
-    nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 4> const& DeltaW_qtPQ);
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaW_qtPQ_root);
 
 /**
  * @brief Evaluate GW self-energy with provided W and G (FD helper)
@@ -292,8 +294,8 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 template<typename eri_t>
 nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 4> const& W_c_qtPQ,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_qtPQ_root,
     nda::array<ComplexType, 1> const& eps_inv_head,
     bool div_corr);
 
@@ -309,7 +311,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
 template<typename eri_t>
 nda::array<ComplexType, 1> compute_eps_inv_head_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 4> const& W_c_tqPQ);
+    std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root);
 
 /**
  * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)
@@ -332,10 +334,10 @@ template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_Pi_calc(
     eri_t &eri,
     nda::array<double, 1> const& q_pert,
-    nda::array<ComplexType, 5> const& G_tskij,
-    nda::array<ComplexType, 5> const& DeltaG_tskij,
-    const nda::array<ComplexType, 4>* DeltaX_left = nullptr,
-    const nda::array<ComplexType, 4>* DeltaX_right = nullptr);
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt);
 
 /**
  * @brief Evaluate standard RPA polarization P[G] (FD helper)
@@ -351,7 +353,7 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
 template<typename eri_t>
 nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 5> const& G_tskij);
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root);
 
 /**
  * @brief Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
@@ -369,7 +371,7 @@ template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_W_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
-    nda::array<ComplexType, 4> const& DeltaPi_tqPQ);
+    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root);
 
 /**
  * @brief Evaluate screened interaction W_c from polarization Π (FD helper)
@@ -385,7 +387,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 template<typename eri_t>
 nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<ComplexType, 4> const& Pi_tqPQ);
+    std::optional<nda::array<ComplexType, 4>> const& Pi_tqPQ_root);
 
 }
 #endif
