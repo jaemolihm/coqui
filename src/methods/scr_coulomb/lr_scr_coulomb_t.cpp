@@ -33,7 +33,8 @@ namespace solvers {
                  _q_pert.size());
     _is_q_gamma = utils::is_q_gamma(_q_pert);
 
-    for (auto& v: {"EVALUATE_LR_W", "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
+    for (auto& v: {"SOLVE_LR_DYSON_W", "EVALUATE_LR_W",
+                    "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
                     "LR_W_COMPUTE_W_FULL"}) {
       _Timer.add(v);
     }

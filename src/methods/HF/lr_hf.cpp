@@ -75,7 +75,8 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   app_log(2, "  - q is Gamma point: {}", _is_q_gamma ? "yes" : "no");
   app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
-  for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM"}) {
+  for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
+                  "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -112,7 +113,9 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
 
   // Add LR finite-size correction for exchange
   if (compute_exchange) {
+    _Timer.start("MADELUNG");
     LR_HF_K_correction(sDeltaF_skij, sDeltaDm_skij.local(), S_skij, _MF->madelung());
+    _Timer.stop("MADELUNG");
   }
 
   _Timer.stop("LR_HF");
@@ -143,7 +146,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   utils::check(sDeltaDm_skij.shape()[1] == nkpts_ibz, "Shape mismatch: sDeltaDm_skij");
   utils::check(sDeltaF_skij.shape()[1] == nkpts_ibz, "Shape mismatch: sDeltaF_skij");
 
+  _Timer.start("MISC");
   sDeltaF_skij.set_zero();
+  _Timer.stop("MISC");
   if (not compute_hartree and not compute_exchange) return;
 
   // Extract unperturbed Dm for primary→aux DeltaX correction
@@ -176,7 +181,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   _Timer.stop("ALLOC");
 
   // Get Coulomb kernel U(q)_PQ; later FT'd in-place to U(R)_PQ for exchange
+  _Timer.start("Z_FETCH");
   auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+  _Timer.stop("Z_FETCH");
   auto dU_qPQ_loc = dU_qPQ.local();  // U(q)_PQ before FT, U(R)_PQ after
 
   // Keep a copy of V(q) for Hartree (V(q=0) when q is Gamma, V(q) otherwise)
@@ -383,6 +390,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     utils::check(compute_exchange, "lr_hf::thc_lr_hf: entered exchange path but compute_exchange=false");
 
     // FT U(q) to real space U(R) for exchange — overwrites dU_qPQ_loc in-place
+    _Timer.start("UQ_TO_UR");
     if (nkpts != 1) {
       buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
       auto f_Rk = sf_Rk.local();
@@ -391,6 +399,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       nda::blas::gemm(f_Rk, U_2D, buffer);
       U_2D = buffer;
     }
+    _Timer.stop("UQ_TO_UR");
     // After FT: dU_qPQ_loc is now U(R)_PQ
     auto& U_RPQ_loc = dU_qPQ_loc;
 
@@ -564,6 +573,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
   }
 
+  _Timer.start("MISC");
   // Add precomputed IBC correction for aux→primary (DeltaX terms on unperturbed F_PQ).
   // Added once here — covers all (ip,iq) pairs since V_HF_PQ includes the full sum.
   if (ibc && ibc->DeltaF_ibc_skij.size() > 0) {
@@ -576,6 +586,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   dU_qPQ.reset();
   dDeltaDm_skPQ.reset();
   _mpi->comm.barrier();
+  _Timer.stop("MISC");
 }
 
 

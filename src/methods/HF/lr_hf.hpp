@@ -115,11 +115,15 @@ public:
     app_log(2, "\n  LR_HF timers");
     app_log(2, "  ------------");
     app_log(2, "    LR Fock eval:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
+    app_log(2, "      - Misc (init/cleanup):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("MISC"), _Timer.number_of_calls("MISC"));
     app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("ALLOC"), _Timer.number_of_calls("ALLOC"));
+    app_log(2, "      - Z fetch (U(q)):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("Z_FETCH"), _Timer.number_of_calls("Z_FETCH"));
     app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PRIM_TO_AUX"), _Timer.number_of_calls("PRIM_TO_AUX"));
+    app_log(2, "      - U(q)->U(R) FT:              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("UQ_TO_UR"), _Timer.number_of_calls("UQ_TO_UR"));
     app_log(2, "      - Coulomb (J):                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("COULOMB"), _Timer.number_of_calls("COULOMB"));
     app_log(2, "      - Exchange (K):               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EXCHANGE"), _Timer.number_of_calls("EXCHANGE"));
-    app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
+    app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
+    app_log(2, "      - Madelung correction:        {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("MADELUNG"), _Timer.number_of_calls("MADELUNG"));
   }
 
   // Accessors

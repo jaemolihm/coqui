@@ -116,12 +116,13 @@ namespace solvers {
   inline void print_timers() {
     app_log(2, "\n  LR_SCR_COULOMB timers");
     app_log(2, "  ----------------------");
+    app_log(2, "    Solve LR W Dyson:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SOLVE_LR_DYSON_W"), _Timer.number_of_calls("SOLVE_LR_DYSON_W"));
     if (_Timer.has("LR_W_FT_TAU_TO_W") && _Timer.elapsed("LR_W_FT_TAU_TO_W") > 0) {
-      app_log(2, "    LR W FT (τ→ω):                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
+      app_log(2, "      - LR W FT (τ→ω):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
     }
-    app_log(2, "    LR W Dyson (iω):                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
+    app_log(2, "      - LR W Dyson (iω):            {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
     if (_Timer.has("LR_W_FT_W_TO_TAU") && _Timer.elapsed("LR_W_FT_W_TO_TAU") > 0) {
-      app_log(2, "    LR W FT (ω→τ):                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
+      app_log(2, "      - LR W FT (ω→τ):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
     }
     app_log(2, "");
   }

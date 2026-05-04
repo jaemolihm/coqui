@@ -57,7 +57,10 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
           q_vec(0), q_vec(1), q_vec(2));
   app_log(1, "  q is Gamma point: {}\n", _lr_dyson.is_q_gamma() ? "yes" : "no");
 
-  for (auto& v : {"LR_SCF", "LR_SETUP", "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
+  for (auto& v : {"LR_SCF", "LR_SETUP",
+                  "LR_SETUP_W_FULL", "LR_SETUP_W_TRPQ", "LR_SETUP_G_OMEGA",
+                  "LR_SETUP_DN_DMU", "LR_SETUP_ALLOC", "LR_SETUP_IBC", "LR_SETUP_MISC",
+                  "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2",
                    "LR_ITER_ALG"}) {
     _Timer.add(v);
@@ -169,32 +172,41 @@ std::tuple<int, double> lr_driver::run_lr(
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
   if (gw_full) {
+    _Timer.start("LR_SETUP_W_FULL");
     // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q), then compute W_full(iω)
     auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
     opt_dW_full_wqPQ.emplace(
         lr_scr_solver->compute_W_full_omega(dW_tqPQ, thc));
     // dW_tqPQ is consumed (reset) by compute_W_full_omega
+    _Timer.stop("LR_SETUP_W_FULL");
   }
 
   // Precompute W in R-space: transpose (q,t)→(t,R), with q→R FT.
   // Result: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
   std::optional<dW_t> opt_dW_tRPQ;
   if (include_gw_sigma) {
+    _Timer.start("LR_SETUP_W_TRPQ");
     opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_qtPQ, thc));
     dW_qtPQ->reset();  // free (q,t,P,Q) memory; no longer needed
+    _Timer.stop("LR_SETUP_W_TRPQ");
   }
 
   // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT per iteration)
   utils::memlog("lr_driver::run_lr: before sG_wskij precompute");
+  _Timer.start("LR_SETUP_G_OMEGA");
   auto sG_wskij = lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT());
   _lr_dyson.set_cached_G_omega(&sG_wskij);
+  _Timer.stop("LR_SETUP_G_OMEGA");
   utils::memlog("lr_driver::run_lr: after sG_wskij precompute");
 
   // Precompute dN/dμ if needed for fix_density mode at q=0
   if (fix_density && _lr_dyson.is_q_gamma()) {
+    _Timer.start("LR_SETUP_DN_DMU");
     _lr_dyson.compute_dN_dmu();
+    _Timer.stop("LR_SETUP_DN_DMU");
   }
 
+  _Timer.start("LR_SETUP_MISC");
   // Initialize DIIS if requested
   if (use_diis) {
     _lr_diis = std::make_unique<lr_diis>(
@@ -203,7 +215,9 @@ std::tuple<int, double> lr_driver::run_lr(
 
   // Get overlap matrix from dyson
   auto& sS_skij = _dyson.sS_skij();
+  _Timer.stop("LR_SETUP_MISC");
 
+  _Timer.start("LR_SETUP_ALLOC");
   // Allocate array for previous density matrix (for convergence check)
   auto sDeltaDm_prev_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
@@ -215,18 +229,22 @@ std::tuple<int, double> lr_driver::run_lr(
   auto sDeltaSigma_prev_tskij = include_gw_sigma
       ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
+  _Timer.stop("LR_SETUP_ALLOC");
 
+  _Timer.start("LR_SETUP_MISC");
   // Initialize ΔF = 0 (and ΔΣ = 0 if GW active)
   if (_mpi->node_comm.root()) {
     sDeltaF_skij.local() = ComplexType(0.0);
     if (sDeltaSigma_tskij) sDeltaSigma_tskij->local() = ComplexType(0.0);
   }
   _mpi->comm.barrier();
+  _Timer.stop("LR_SETUP_MISC");
 
   // DeltaX IBC correction setup
   bool has_deltax = DeltaX_left && DeltaX_right;
   std::optional<lr_ibc_DeltaX> opt_ibc;
   if (has_deltax) {
+    _Timer.start("LR_SETUP_IBC");
     app_log(2, "  DeltaX IBC correction: building lr_ibc_DeltaX...");
 
     utils::memlog("lr_driver::run_lr: before build_lr_ibc");
@@ -240,9 +258,11 @@ std::tuple<int, double> lr_driver::run_lr(
 
     app_log(2, "  DeltaX IBC correction: setup complete.");
     utils::memlog("lr_driver::run_lr: after build_lr_ibc");
+    _Timer.stop("LR_SETUP_IBC");
   }
   _Timer.stop("LR_SETUP");
   utils::memlog("lr_driver::run_lr: end of LR_SETUP");
+  print_setup_timers();
 
   double Delta_mu = 0.0;
   int iter = 0;
@@ -508,6 +528,20 @@ std::tuple<int, double> lr_driver::run_lr(
   print_timers();
 
   return std::make_tuple(iter, Delta_mu);
+}
+
+
+void lr_driver::print_setup_timers() {
+  app_log(2, "\n  LR_SETUP timers");
+  app_log(2, "  ----------------");
+  app_log(2, "    LR Setup:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP"), _Timer.number_of_calls("LR_SETUP"));
+  app_log(2, "      - W_full(iω):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_W_FULL"), _Timer.number_of_calls("LR_SETUP_W_FULL"));
+  app_log(2, "      - W_tRPQ:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_W_TRPQ"), _Timer.number_of_calls("LR_SETUP_W_TRPQ"));
+  app_log(2, "      - G(iω) precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_G_OMEGA"), _Timer.number_of_calls("LR_SETUP_G_OMEGA"));
+  app_log(2, "      - dN/dμ precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_DN_DMU"), _Timer.number_of_calls("LR_SETUP_DN_DMU"));
+  app_log(2, "      - Alloc:                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_ALLOC"), _Timer.number_of_calls("LR_SETUP_ALLOC"));
+  app_log(2, "      - Build IBC (DeltaX):     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SETUP_IBC"), _Timer.number_of_calls("LR_SETUP_IBC"));
+  app_log(2, "      - Misc:                   {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_SETUP_MISC"), _Timer.number_of_calls("LR_SETUP_MISC"));
 }
 
 

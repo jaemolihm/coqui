@@ -124,6 +124,7 @@ public:
       bool div_corr = true,
       const nda::array<ComplexType, 3>* DeltaV_qPQ = nullptr);
 
+  void print_setup_timers();
   void print_timers();
 
   // Accessors

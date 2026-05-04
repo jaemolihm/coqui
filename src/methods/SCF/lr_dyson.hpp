@@ -191,9 +191,15 @@ public:
     app_log(2, "\n  LR_DYSON timers");
     app_log(2, "  ----------------");
     app_log(2, "    LR Dyson eqn:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
+    app_log(2, "      - Alloc (dist arrays):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_ALLOC"), _Timer.number_of_calls("LR_DYSON_ALLOC"));
     app_log(2, "      - ΔΣ(τ)->ΔΣ(iω):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_TAU_TO_W"), _Timer.number_of_calls("LR_DYSON_TAU_TO_W"));
     app_log(2, "      - LR Dyson loop:              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
-    app_log(2, "      - Gather:                     {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
+    app_log(2, "      - Redistribute ΔG(iω):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
+    app_log(2, "      - ΔG(iω)->ΔG(τ):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
+    app_log(2, "      - Gather:                     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
+    app_log(2, "      - Compute ΔDm:                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
+    app_log(2, "      - Compute ΔN:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
+    app_log(2, "      - Misc (barrier/reset):       {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
   }
 
   // Accessors

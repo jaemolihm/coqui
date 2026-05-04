@@ -337,6 +337,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
     const dW_full_t& dW_full_wqPQ,
     THC_ERI auto& thc)
 {
+  _Timer.start("SOLVE_LR_DYSON_W");
   _init_kpq_map(thc);
 
   long nproc = thc.mpi()->comm.size();
@@ -365,14 +366,10 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   dDeltaPi_tqPQ = scr.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
+  _Timer.stop("SOLVE_LR_DYSON_W");
+
   // --- Print timers ---
   print_timers();
-  app_log(2, "  scr_coulomb_t internal FT breakdown:");
-  app_log(2, "    IMAG_FT_TtoW (total):   {0:.3f} sec", scr.timer().elapsed("IMAG_FT_TtoW"));
-  app_log(2, "    IMAG_FT_WtoT (total):   {0:.3f} sec", scr.timer().elapsed("IMAG_FT_WtoT"));
-  if (scr.timer().has("FT_REDISTRIBUTE"))
-    app_log(2, "    FT_REDISTRIBUTE (sum):  {0:.3f} sec", scr.timer().elapsed("FT_REDISTRIBUTE"));
-  app_log(2, "");
 }
 
 } // solvers

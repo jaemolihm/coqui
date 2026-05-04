@@ -52,7 +52,9 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
           _q_vec(0), _q_vec(1), _q_vec(2));
   app_log(2, "  - q is Gamma point: {}", _is_q_gamma ? "yes" : "no");
 
-  for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER"}) {
+  for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
+                  "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
+                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_MISC"}) {
     _Timer.add(v);
   }
   _context->comm.barrier();
@@ -90,10 +92,14 @@ double lr_dyson::solve_lr_dyson(
     // First pass: solve with Δμ=0
     solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
                         sDeltaF_skij, sDeltaSigma_tskij, 0.0);
+    _Timer.start("LR_DYSON_DM");
     compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
+    _Timer.stop("LR_DYSON_DM");
 
     // Compute ΔN at Δμ=0
+    _Timer.start("LR_DYSON_NELEC");
     double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
+    _Timer.stop("LR_DYSON_NELEC");
 
     // Use cached dN/dμ
     double dN_dmu = _cached_dN_dmu;
@@ -111,10 +117,14 @@ double lr_dyson::solve_lr_dyson(
       // Second pass: solve with computed Δμ
       solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
                           sDeltaF_skij, sDeltaSigma_tskij, Delta_mu);
+      _Timer.start("LR_DYSON_DM");
       compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
+      _Timer.stop("LR_DYSON_DM");
 
       // Verify ΔN ≈ 0
+      _Timer.start("LR_DYSON_NELEC");
       double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
+      _Timer.stop("LR_DYSON_NELEC");
       app_log(2, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
     }
   } else {
@@ -126,7 +136,9 @@ double lr_dyson::solve_lr_dyson(
     if (!_is_q_gamma) Delta_mu = 0.0;
     solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
                         sDeltaF_skij, sDeltaSigma_tskij, Delta_mu);
+    _Timer.start("LR_DYSON_DM");
     compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
+    _Timer.stop("LR_DYSON_DM");
   }
 
   _Timer.stop("LR_DYSON");
@@ -194,8 +206,10 @@ void lr_dyson::solve_lr_dyson_impl(
   }
   _Timer.stop("LR_DYSON_TAU_TO_W");
 
+  _Timer.start("LR_DYSON_ALLOC");
   auto dDeltaG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
                                                           {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize);
+  _Timer.stop("LR_DYSON_ALLOC");
 
   // Loop bounds from the output distributed array
   auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dDeltaG_wskij.local_shape();
@@ -245,8 +259,10 @@ void lr_dyson::solve_lr_dyson_impl(
   }
   _Timer.stop("LR_DYSON_LOOP");
 
+  _Timer.start("LR_DYSON_MISC");
   opt_dDeltaSigma_wskij.reset();
   _context->comm.barrier();
+  _Timer.stop("LR_DYSON_MISC");
 
   // Convert ΔG(w) -> ΔG(tau)
   {
@@ -256,24 +272,42 @@ void lr_dyson::solve_lr_dyson_impl(
     long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
     long np_j = np / np_i;
 
+    _Timer.start("LR_DYSON_ALLOC");
     auto dDeltaG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm,
         {1, 1, nkpools, np_i, np_j}, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
-    math::nda::redistribute(dDeltaG_wskij, dDeltaG_wskij_tmp);
-    dDeltaG_wskij.reset();
+    _Timer.stop("LR_DYSON_ALLOC");
 
+    _Timer.start("LR_DYSON_REDIST");
+    math::nda::redistribute(dDeltaG_wskij, dDeltaG_wskij_tmp);
+    _Timer.stop("LR_DYSON_REDIST");
+
+    _Timer.start("LR_DYSON_MISC");
+    dDeltaG_wskij.reset();
+    _Timer.stop("LR_DYSON_MISC");
+
+    _Timer.start("LR_DYSON_ALLOC");
     auto dDeltaG_tskij = make_distributed_array<Array_5D_t>(_context->comm,
         {1, 1, nkpools, np_i, np_j}, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
+    _Timer.stop("LR_DYSON_ALLOC");
+
     auto DeltaGt_loc = dDeltaG_tskij.local();
     auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
+    _Timer.start("LR_DYSON_G_W_TO_T");
     _dyson.FT()->w_to_tau(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermi);
+    _Timer.stop("LR_DYSON_G_W_TO_T");
+
+    _Timer.start("LR_DYSON_MISC");
     dDeltaG_wskij_tmp.reset();
+    _Timer.stop("LR_DYSON_MISC");
 
     _Timer.start("LR_DYSON_GATHER");
     math::nda::gather_to_shm(dDeltaG_tskij, sDeltaG_tskij);
     _Timer.stop("LR_DYSON_GATHER");
   }
 
+  _Timer.start("LR_DYSON_MISC");
   _context->comm.barrier();
+  _Timer.stop("LR_DYSON_MISC");
 }
 
 
