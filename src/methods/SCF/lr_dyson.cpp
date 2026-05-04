@@ -280,12 +280,26 @@ void lr_dyson::solve_lr_dyson_impl(
 template<typename DeltaDm_t, typename DeltaG_t>
 void lr_dyson::compute_lr_dm(DeltaDm_t& sDeltaDm_skij, const DeltaG_t& sDeltaG_tskij) {
   // ΔDm(k) = -ΔG(k, τ=β⁻)
-  if (_context->node_comm.root()) {
-    auto DeltaDm = sDeltaDm_skij.local();
-    _dyson.FT()->tau_to_beta(sDeltaG_tskij.local(), DeltaDm);
-    DeltaDm *= -1;
+  // Distribute (s, k) work over _context->comm; each rank writes its slab into
+  // the shared array, then all_reduce across nodes.
+  decltype(nda::range::all) all;
+  sDeltaDm_skij.set_zero();  // ends with fence + node_sync
+
+  int rank = _context->comm.rank();
+  int size = _context->comm.size();
+  nda::array<ComplexType, 3> DeltaG_buf(_nts, _nbnd, _nbnd);
+  nda::array<ComplexType, 2> DeltaDm_buf(_nbnd, _nbnd);
+  auto DeltaG_loc = sDeltaG_tskij.local();
+  auto DeltaDm_loc = sDeltaDm_skij.local();
+  for (int i = rank; i < _ns * _nkpts_ibz; i += size) {
+    int is = i / _nkpts_ibz;
+    int ik = i % _nkpts_ibz;
+    DeltaG_buf = DeltaG_loc(all, is, ik, all, all);
+    _dyson.FT()->tau_to_beta(DeltaG_buf, DeltaDm_buf);
+    DeltaDm_loc(is, ik, all, all) = -DeltaDm_buf;
   }
-  _context->comm.barrier();
+  sDeltaDm_skij.win().fence();
+  sDeltaDm_skij.all_reduce();
 }
 
 
@@ -371,57 +385,46 @@ double lr_dyson::compute_dN_dmu() {
   auto S_loc = _dyson.sS_skij().local();
   double spin_factor = (_ns == 1 && _dyson.MF()->npol() == 1) ? 2.0 : 1.0;
 
-  // Compute G·S·G in frequency space and FT to tau on node root
-  // Array sizes are modest (nw × ns × nk × nb × nb), so single-rank is fine.
+  // Distribute (s, k) work over _context->comm. Output is a scalar, so each
+  // rank computes its partial sum and we all_reduce the scalar at the end.
+  decltype(nda::range::all) all;
+  auto G_w = _cached_G_wskij->local();  // (nw, ns, nk, nb, nb), shared memory
+
   ComplexType dN_dmu(0.0);
 
-  if (_context->node_comm.root()) {
-    auto G_w = _cached_G_wskij->local();  // (nw, ns, nk, nb, nb)
+  int rank = _context->comm.rank();
+  int size = _context->comm.size();
+  nda::array<ComplexType, 3> GSG_w_buf(_nw, _nbnd, _nbnd);
+  nda::array<ComplexType, 3> GSG_t_buf(_nts, _nbnd, _nbnd);
+  nda::matrix<ComplexType> GSG_beta_buf(_nbnd, _nbnd);
+  nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
+  nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
 
-    // Compute GSG(iω) = G(iω) · S · G(iω) for all (iω, s, k)
-    nda::array<ComplexType, 5> GSG_w(_nw, _ns, _nkpts_ibz, _nbnd, _nbnd);
-    nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
-    nda::matrix<ComplexType> GSG_w_k(_nbnd, _nbnd);
+  for (int i = rank; i < _ns * _nkpts_ibz; i += size) {
+    int is = i / _nkpts_ibz;
+    int ik = i % _nkpts_ibz;
+    auto S_k = S_loc(is, ik, all, all);
 
+    // GSG(iω) = G(iω) · S · G(iω) for all iω at this (is, ik)
     for (int n = 0; n < _nw; ++n) {
-      for (int s = 0; s < _ns; ++s) {
-        for (int k = 0; k < _nkpts_ibz; ++k) {
-          auto G_w_k = G_w(n, s, k, nda::range::all, nda::range::all);
-          auto S_k = S_loc(s, k, nda::range::all, nda::range::all);
-
-          // GSG(iω) = G(iω) · S · G(iω)
-          nda::blas::gemm(ComplexType(1.0), S_k, G_w_k, ComplexType(0.0), tmp);
-          nda::blas::gemm(ComplexType(1.0), G_w_k, tmp, ComplexType(0.0), GSG_w_k);
-
-          GSG_w(n, s, k, nda::range::all, nda::range::all) = GSG_w_k;
-        }
-      }
+      auto G_w_k = G_w(n, is, ik, all, all);
+      auto GSG_w_k = GSG_w_buf(n, all, all);
+      nda::blas::gemm(ComplexType(1.0), S_k, G_w_k, ComplexType(0.0), tmp);
+      nda::blas::gemm(ComplexType(1.0), G_w_k, tmp, ComplexType(0.0), GSG_w_k);
     }
 
-    // FT: GSG(iω) → GSG(τ)
-    nda::array<ComplexType, 5> GSG_t(_nts, _ns, _nkpts_ibz, _nbnd, _nbnd);
-    _dyson.FT()->w_to_tau(GSG_w, GSG_t, imag_axes_ft::fermi);
+    // FT: GSG(iω) → GSG(τ) → GSG(β⁻)
+    _dyson.FT()->w_to_tau(GSG_w_buf, GSG_t_buf, imag_axes_ft::fermi);
+    _dyson.FT()->tau_to_beta(GSG_t_buf, GSG_beta_buf);
 
-    // Interpolate GSG to τ=β⁻ and compute trace
-    nda::array<ComplexType, 4> GSG_beta(_ns, _nkpts_ibz, _nbnd, _nbnd);
-    _dyson.FT()->tau_to_beta(GSG_t, GSG_beta);
-
-    nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
-    for (int is = 0; is < _ns; ++is) {
-      for (int ik = 0; ik < _nkpts_ibz; ++ik) {
-        auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
-        auto GSG_beta_k = GSG_beta(is, ik, nda::range::all, nda::range::all);
-
-        // Tr[S · GSG(β⁻)]
-        nda::blas::gemm(ComplexType(1.0), S_k, GSG_beta_k, ComplexType(0.0), buffer);
-        dN_dmu += k_weight(ik) * nda::trace(buffer);
-      }
-    }
-    dN_dmu *= spin_factor;
+    // Tr[S · GSG(β⁻)]
+    nda::blas::gemm(ComplexType(1.0), S_k, GSG_beta_buf, ComplexType(0.0), buffer);
+    dN_dmu += k_weight(ik) * nda::trace(buffer);
   }
+  dN_dmu *= spin_factor;
 
-  // Broadcast result
-  _context->comm.broadcast_n(&dN_dmu, 1, 0);
+  // Sum partial contributions across ranks
+  dN_dmu = _context->comm.all_reduce_value(dN_dmu);
 
   _cached_dN_dmu = dN_dmu.real();
   _dN_dmu_cached = true;

@@ -50,6 +50,7 @@ template<math::shm::SharedArray sArr_t>
 auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
                            const sArr_t& sG_tskij,
                            const imag_axes_ft::IAFT& FT) {
+  decltype(nda::range::all) all;
   auto [nts, ns, nkpts_ibz, nbnd, nbnd2] = sG_tskij.shape();
   auto nw = FT.nw_f();
 
@@ -61,11 +62,25 @@ auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
   auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
       mpi, {nw, ns, nkpts_ibz, nbnd, nbnd});
 
-  if (mpi.node_comm.root()) {
-    FT.tau_to_w(sG_tskij.local(), sG_wskij.local(), imag_axes_ft::fermi);
+  // Fan out (s, k) work across mpi.comm; each rank writes its slab and
+  // all_reduce makes the result visible to every node.
+  sG_wskij.set_zero();  // ends with fence + node_sync
+
+  int rank = mpi.comm.rank();
+  int size = mpi.comm.size();
+  nda::array<ComplexType, 3> G_t_buf(nts, nbnd, nbnd);
+  nda::array<ComplexType, 3> G_w_buf(nw, nbnd, nbnd);
+  auto G_t_loc = sG_tskij.local();
+  auto G_w_loc = sG_wskij.local();
+  for (int i = rank; i < ns * nkpts_ibz; i += size) {
+    int is = i / nkpts_ibz;
+    int ik = i % nkpts_ibz;
+    G_t_buf = G_t_loc(all, is, ik, all, all);
+    FT.tau_to_w(G_t_buf, G_w_buf, imag_axes_ft::fermi);
+    G_w_loc(all, is, ik, all, all) = G_w_buf;
   }
-  sG_wskij.node_sync();
-  mpi.comm.barrier();
+  sG_wskij.win().fence();
+  sG_wskij.all_reduce();
 
   return sG_wskij;
 }
