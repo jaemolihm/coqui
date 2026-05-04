@@ -1030,10 +1030,20 @@ auto load_W_and_eps_inv_head(
   auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
   app_log(2, "Reading W from {}...", w_file);
 
-  // Read full array on root, then distribute across MPI ranks
-  nda::array<ComplexType, 4> W_qtPQ(nkpts, nt_half, NP, NP);
-  W_qtPQ() = 0.0;
-  if (mpi.comm.root()) {
+  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
+  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
+  std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
+  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
+
+  // Each rank reads only its local (q,t,P,Q) slab via the distributed h5_read.
+  // A "root reads full + broadcast" pattern OOMs at scale: full W for nkpts=512,
+  // NP=204 is ~30 GB per rank (×2 with broadcast staging), well over per-node RAM
+  // when many ranks share a node.
+  {
     h5::file file(w_file, 'r');
     h5::group grp(file);
     // Verify the W-on-disk matches the THC currently loaded. Silent shape
@@ -1049,28 +1059,8 @@ auto load_W_and_eps_inv_head(
                  "different THC decomposition; regenerate it (or re-run GW) "
                  "with the current THC before calling run_lr.",
                  w_file, ds_np_a, ds_np_b, NP);
-    nda::h5_read(grp, "W_qtPQ", W_qtPQ);
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
   }
-  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
-  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
-  std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
-  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
-
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
-
-  // Broadcast and copy
-  nda::array<ComplexType, 4> src(W_qtPQ);
-  mpi.comm.broadcast_n(src.data(), src.size(), 0);
-  auto loc = dW_qtPQ.local();
-  auto [o0, o1, o2, o3] = dW_qtPQ.origin();
-  auto [n0, n1, n2, n3] = dW_qtPQ.local_shape();
-  for (long i0 = 0; i0 < n0; ++i0)
-    for (long i1 = 0; i1 < n1; ++i1)
-      for (long i2 = 0; i2 < n2; ++i2)
-        for (long i3 = 0; i3 < n3; ++i3)
-          loc(i0, i1, i2, i3) = src(i0+o0, i1+o1, i2+o2, i3+o3);
   mpi.comm.barrier();
 
   // JML TODO: div_treatment should be read during setup of run_lr_calc, and ideally be
