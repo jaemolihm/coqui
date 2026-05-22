@@ -76,8 +76,12 @@ public:
         // sub-clocks (only around bulk operations, not hot inner loops)
         "io_wfc", "io_dpsi", "io_dpsi_adj", "phase_factor",
         "accumulate_Z", "accumulate_dZ",
-        "lu_factor", "lu_solve",
-        "fft_forward_std", "fft_forward_conj",
+        "xi_lu_factor", "xi_lu_solve", "dxi_lu_solve",
+        "xi_eig_factor", "xi_eig_solve", "dxi_eig_solve",
+        "xi_phase_factor", "dxi_phase_factor",
+        "xi_fft_forward_std", "dxi_fft_forward_std",
+        "xi_copy_rhs", "xi_copy_out",
+        "dxi_copy_rhs", "dxi_rhs_gemm", "dxi_copy_out",
         "v_evaluate", "gemm_term1", "gemm_term2"})
       Timer.add(name);
   }
@@ -100,11 +104,24 @@ public:
       nda::array<double, 1> const& q_pert_cryst);
 
 private:
+  // C_q factorization. LU by default; hermitian eig path gated on env var
+  // COQUI_LR_THC_USE_HERMITIAN_EIG (eig solve = U · diag(1/λ) · U^H · B).
+  // Only the fields for the active path are populated.
+  struct C_factor {
+    bool use_eig = false;
+    // LU path
+    nda::matrix<ComplexType, nda::F_layout> C_f_lu;
+    nda::array<int, 1> ipiv;
+    // Eigen path (evals ascending, U columns are eigenvectors)
+    nda::matrix<ComplexType, nda::F_layout> U;
+    nda::array<double, 1> evals;
+  };
+
   // --- Helpers (see lr_thc_new.cpp for full descriptions) ---
 
   // Step 1: read ψ and (+Q, −Q) δψ on the full FFT grid for all (is, ik).
-  // Bloch phases applied: e^{ik·r} on ψ; e^{i(k+Q)·r} on +Q δψ; e^{i(k−Q)·r}
-  // on −Q δψ (after the adj-file index shuffle).
+  // Bloch phases applied: e^{ik·r} on ψ; e^{i(k+Q)·r} on +Q δψ;
+  // e^{i·kpts(ik_adj)·r} on −Q δψ (ik_adj = kmQ_map(ik)).
   void read_psi_and_dpsi(
       std::string const& Deltapsi_prefix,
       std::string const& Deltapsi_adj_prefix,
@@ -115,13 +132,16 @@ private:
       nda::array<ComplexType, 4>& Deltapsi_pQ_skmr,
       nda::array<ComplexType, 4>& Deltapsi_mQ_skmr);
 
-  // Step 2: compute the three (T, ΔT_pQ, ΔT_mQ) per-k caches from the
-  // ψ / δψ slabs. Same inner kernel; only the right operand changes.
+  // Step 2: (T, ΔT_pQ, ΔT_mQ) per-k caches. Bra-side ΔT terms are read at
+  // the BZ-folded k±Q index so each ΔT carries a single r-Bloch momentum.
+  // See the formula in compute_T_and_DeltaT.
   void compute_T_and_DeltaT(
       nda::array<ComplexType, 4> const& psi_skmr,
       nda::array<ComplexType, 4> const& Deltapsi_pQ_skmr,
       nda::array<ComplexType, 4> const& Deltapsi_mQ_skmr,
       nda::array<long, 1> const& r_P,
+      nda::array<int, 1> const& kpQ_map,
+      nda::array<int, 1> const& kmQ_map,
       nda::array<ComplexType, 4>& T_skur,
       nda::array<ComplexType, 4>& DeltaT_pQ_skur,
       nda::array<ComplexType, 4>& DeltaT_mQ_skur);
@@ -150,55 +170,64 @@ private:
       nda::array<ComplexType, 2>& DeltaZ_q,
       nda::array<ComplexType, 2>& DeltaC_q);
 
-  // Step 5: solve C_q · Ξ^q = Z^q, then FFT Ξ^q from real space to G-space
-  // (standard and conjugate paths). Returns ipiv + C_f for reuse in step 6.
+  // Step 5: solve C_q · Ξ^q = Z^q in real space, then FFT to G with
+  // phase e^{-iq·r}. Returns real-space Ξ^q as well (consumed by step 6).
+  // C_q is symmetrized in-place. Negative-q slots are recovered via
+  // Ξ^{-q}(r) = [Ξ^q(r)]^*, so only the +G image is needed.
   void solve_xi_for_q(
-      nda::array<ComplexType, 2>& C_q,        // mutated: contains LU after call
+      nda::array<ComplexType, 2>& C_q,        // mutated: symmetrized in-place
       nda::array<ComplexType, 2> const& Z_q,
       nda::stack_array<double, 3> const& q_cart,
       nda::array<ComplexType, 2>& Xi_q_ur,
       nda::array<ComplexType, 2>& Xi_q_uG,
-      nda::array<ComplexType, 2>& Xi_bar_q_uG,
-      nda::matrix<ComplexType, nda::F_layout>& C_f_lu,
-      nda::array<int, 1>& ipiv);
+      C_factor& factor);
 
-  // Step 6: solve C_q · δΞ^q = δZ^q − δC^q · Ξ^{q+Q}, then FFT δΞ^q with
-  // phase e^{±i(q+Q)·r}. Reuses the LU factor from step 5.
+  // Step 6: build δΞ̃^q in G-space.
+  //   rhs(r) = δZ(r) − δC · Ξ^{q+Q}(r)           (real-space gemm)
+  //   rhs̃(G) = FFT[e^{-i(q+Q)·r} · rhs(r)](G)
+  //   C_q · δΞ̃^q = rhs̃                           (G-space solve)
+  // The gemm stays in real space because the cached G-space slab at slot
+  // iq_qpQ uses kpts(iq_qpQ), which differs from the unwrapped (q+Q) phase
+  // by a G-shift when q+Q wraps. Reuses the factorization from step 5.
   void solve_dxi_for_q(
-      nda::matrix<ComplexType, nda::F_layout> const& C_f_lu,
-      nda::array<int, 1> const& ipiv,
+      C_factor const& factor,
       nda::array<ComplexType, 2> const& DeltaZ_q,
       nda::array<ComplexType, 2> const& DeltaC_q,
       nda::array<ComplexType, 2> const& Xi_qpQ_ur,
       nda::stack_array<double, 3> const& q_pQ_cart,
-      nda::array<ComplexType, 2>& DeltaXi_q_ur,
-      nda::array<ComplexType, 2>& DeltaXi_q_uG,
-      nda::array<ComplexType, 2>& DeltaXi_bar_q_uG);
+      nda::array<ComplexType, 2>& DeltaXi_q_uG);
+
+  // Solve C · X = B in-place on B (F-layout, Np rows) using `factor`.
+  void apply_C_inverse(
+      C_factor const& factor,
+      nda::matrix<ComplexType, nda::F_layout>& B,
+      char const* timer_solve_tag);
 
   // Step 7: drive steps 3–6 over all q' on the BZ k-grid.
-  // Pass A: build Ξ at every q' (also caches kmq_map and the real-space Ξ).
-  // Pass B: build δΞ at every q' using cached Ξ at q'+Q.
+  //   Pass A: build Ξ^q' at every q'; cache real-space Ξ_ur, C-factor, kmq.
+  //   Pass B: build δΞ̃^q' using the cached Ξ_ur at slot iq_pQ_map(q').
   void solve_all_q(
       nda::array<ComplexType, 4> const& T_skur,
       nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
       nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
       nda::array<double, 2> const& kpts_crys,
       nda::array<long, 1> const& r_P,
-      nda::array<double, 1> const& q_pert_cryst,
+      nda::array<int, 1> const& iq_pQ_map,
       nda::array<ComplexType, 3>& Xi_uG_all,
-      nda::array<ComplexType, 3>& Xi_bar_uG_all,
-      nda::array<ComplexType, 3>& DeltaXi_uG_all,
-      nda::array<ComplexType, 3>& DeltaXi_bar_uG_all);
+      nda::array<ComplexType, 3>& DeltaXi_uG_all);
 
-  // Step 8: assemble δV^q for one internal q via the two-term gemm formula.
+  // Step 8: δV^q for one internal q.
+  //   term1[μ,ν] = (1/V) Σ_G v(|kpts(iq_mq)+G|) · δΞ_uG[iq_mqmQ, μ, G] · conj(Ξ_uG[iq_mq, ν, G])
+  //   term2[μ,ν] = (1/V) Σ_G v(|kpts(iq_pQ)+G|) · conj(Ξ_uG[iq_pQ, μ, G])  · δΞ_uG[iq, ν, G]
+  // BZ-folded slot k-points (kpts(iq_mq), kpts(iq_pQ)) — NOT literal ±q / q+Q.
   void compute_delta_V_for_q(
       long iq,
+      long iq_mq,
+      long iq_pQ,
       long iq_mqmQ,
       nda::array<ComplexType, 3> const& Xi_uG_all,
-      nda::array<ComplexType, 3> const& Xi_bar_uG_all,
       nda::array<ComplexType, 3> const& DeltaXi_uG_all,
-      nda::array<ComplexType, 3> const& DeltaXi_bar_uG_all,
-      nda::stack_array<double, 3> const& q_cart,
+      nda::stack_array<double, 3> const& q_mq_cart,
       nda::stack_array<double, 3> const& q_pQ_cart,
       nda::array<ComplexType, 2>& dV_q);
 
