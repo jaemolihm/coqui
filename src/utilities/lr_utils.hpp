@@ -28,6 +28,8 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "nda/nda.hpp"
 
+// JML FIXME: There are many similar k point finding routines, unify them.
+
 namespace utils {
 
 /**
@@ -191,6 +193,47 @@ inline long find_q_ibz_index(nda::ArrayOfRank<2> auto const& kpts_crys,
   }
 
   utils::check(false, "find_q_ibz_index: Could not find q=({}, {}, {}) in k-point grid",
+               q_vec(0), q_vec(1), q_vec(2));
+  return -1; // unreachable
+}
+
+/**
+ * @brief Find full-BZ index of a given q-vector
+ *
+ * Searches a full-BZ q-grid for the entry matching q_vec (mod G).
+ * Mirrors find_q_ibz_index but returns the raw full-BZ index (no IBZ folding).
+ *
+ * @param qpts_crys   - [INPUT] q-points in crystal coordinates (nkpts, 3)
+ * @param q_vec       - [INPUT] target q-vector in crystal coordinates (3,)
+ * @param threshold   - [INPUT] tolerance for q-point matching
+ * @return full-BZ index of q_vec
+ */
+inline long find_q_full_index(nda::ArrayOfRank<2> auto const& qpts_crys,
+                              nda::ArrayOfRank<1> auto const& q_vec,
+                              double threshold = 1e-6) {
+  long nkpts = qpts_crys.shape(0);
+  utils::check(qpts_crys.shape(1) == 3, "find_q_full_index: qpts_crys.shape(1) != 3");
+  utils::check(q_vec.shape(0) == 3, "find_q_full_index: q_vec.shape(0) != 3");
+
+  for (long ik = 0; ik < nkpts; ++ik) {
+    double d0 = std::abs(qpts_crys(ik, 0) - q_vec(0));
+    double d1 = std::abs(qpts_crys(ik, 1) - q_vec(1));
+    double d2 = std::abs(qpts_crys(ik, 2) - q_vec(2));
+
+    // Apply periodic boundary conditions
+    d0 -= std::floor(d0);
+    d1 -= std::floor(d1);
+    d2 -= std::floor(d2);
+    d0 -= std::round(d0);
+    d1 -= std::round(d1);
+    d2 -= std::round(d2);
+
+    if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
+      return ik;
+    }
+  }
+
+  utils::check(false, "find_q_full_index: Could not find q=({}, {}, {}) in q-point grid",
                q_vec(0), q_vec(1), q_vec(2));
   return -1; // unreachable
 }

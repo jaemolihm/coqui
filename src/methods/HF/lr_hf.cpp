@@ -100,6 +100,7 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
   app_log(2, "  - DeltaX correction: {}", ibc ? "yes" : "no");
   app_log(2, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
 
+  // JML FIXME: Why two ways of passing Dm? We should remove one
   // If DeltaV is provided, the unperturbed Dm is required to contract against it.
   // Prefer an explicit Dm_skij_unpert; fall back to ibc->Dm_ab if available.
   const nda::array<ComplexType, 4>* Dm_unpert_for_dV = Dm_skij_unpert;
@@ -135,6 +136,10 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
   // V(q) at _q_ibz_idx instead of q=0, and _MF->Qpts() for U FT.
+  //
+  // δV correction (when DeltaV_qPQ is provided):
+  //   - Hartree (δJ): δV at Coulomb q=Γ contracts with Dm_unpert at R=0.
+  //   - Fock (δK): R-space Hadamard δV(R) ⊙ Dm_unpert(R).
   using local_Array_4D_t = memory::array<HOST_MEMORY, ComplexType, 4>;
   using math::nda::make_distributed_array;
 
@@ -206,9 +211,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // q→R, and precompute the unperturbed Dm in aux+R space. These feed the
   // new δV·Dm terms in both the Hartree (δJ) and Fock (δK) contractions.
   //
-  // δJ_μν += 2 δ_μν Σ_{μ'} δV^{q=_q_ibz_idx}_{μμ'} · Dm^{R=0}_{μ'μ'}
-  //   (use δV at the specific q-slice that matches the main Hartree term's
-  //    Uq_PQ = dU_qPQ_loc(_q_ibz_idx, ...), not the q-averaged δV^{R=0}.)
+  // δJ_μν += 2 δ_μν Σ_{μ'} δV^{q=Γ}_{μμ'} · Dm^{R=0}_{μ'μ'}
   // δK^k_μν += -Σ_R e^{ikR} δV^R_{μν} · Dm^R_{μν}
   //
   // npol > 1 with DeltaV_qPQ is not yet supported.
@@ -229,9 +232,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // DeltaV is replicated on all ranks; we only need the local (P, Q) slab to
   // match dU_qPQ's distribution. Fill a local buffer of shape (nkpts, NP_loc, NQ_loc).
   nda::array<ComplexType, 3> DeltaV_RPQ_loc;  // (nkpts, NP_loc, NQ_loc) after q→R FT
-  // δV^{q=_q_ibz_idx}_PQ (local P,Q slab) — the q-specific slice used by the
-  // Hartree (δJ) contribution, matching the main Hartree term's Uq_PQ q-slice.
-  nda::array<ComplexType, 2> DeltaV_qHartree_PQ;
+  nda::array<ComplexType, 2> DeltaV_qGamma_PQ;  // (NP_loc, NQ_loc) δV^{q=Γ}_PQ
 
   // Unperturbed Dm_QQ diagonal at R=0 (global NP)
   nda::array<ComplexType, 1> Dm_QQ_unpert(NP, ComplexType(0.0));
@@ -248,21 +249,11 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       }
     }
 
-    // (1b) Snapshot the q-specific δV slab used by the Hartree (δJ) term.
-    //      The main Hartree term uses Uq_PQ = dU_qPQ_loc(_q_ibz_idx, ...), so
-    //      the δV correction must use the same q-slice for consistency — NOT
-    //      the q-averaged δV^{R=0}.  dU_qPQ is IBZ-indexed (shape nkpts_ibz)
-    //      while DeltaV_qPQ is full-BZ indexed (shape nkpts).  For
-    //      nkpts == nkpts_ibz (trivial symmetry) the indices coincide.  For
-    //      nontrivial symmetry, map IBZ→full-BZ via qs_to_q under the identity
-    //      symmetry (is=0); guarded by a utils::check until the general case
-    //      is tested.
-    utils::check(nkpts == nkpts_ibz,
-                 "lr_hf: DeltaV_qPQ correction currently requires nkpts == nkpts_ibz. "
-                 "Generalization to nontrivial q-symmetry needs testing.");
-    long q_full_idx = _q_ibz_idx;  // valid when nkpts == nkpts_ibz
-    DeltaV_qHartree_PQ.resize(NP_loc, NQ_loc);
-    DeltaV_qHartree_PQ() = DeltaV_RPQ_loc(q_full_idx, nda::ellipsis{});
+    // (1b) Load δV^{q=Γ}_PQ for the δV correction to Hartree term
+    nda::array<double, 1> q_gamma_vec({0.0, 0.0, 0.0});
+    long q_gamma_full_idx = utils::find_q_full_index(_MF->Qpts(), q_gamma_vec);
+    DeltaV_qGamma_PQ.resize(NP_loc, NQ_loc);
+    DeltaV_qGamma_PQ() = DeltaV_RPQ_loc(q_gamma_full_idx, nda::ellipsis{});
 
     // (2) FT DeltaV q→R using the same convention as dU_qPQ in the exchange
     //     path (MF->Qpts() grid).  DeltaV_qPQ is full-BZ q-indexed.
@@ -356,11 +347,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
     nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
     nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
-    // DeltaV correction: DeltaJ_PP += δV^{q=_q_ibz_idx}_PQ · Dm_QQ_unpert
-    // (must use the same q-slice as the main Hartree term's Uq_PQ, not the
-    //  q-averaged δV^{R=0}.)
+    // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ
     if (DeltaV_qPQ) {
-      nda::blas::gemv(ComplexType(1.0), DeltaV_qHartree_PQ,
+      nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
                       Dm_QQ_unpert(dU_qPQ.local_range(2)),
                       ComplexType(1.0), DeltaJ_PP(dU_qPQ.local_range(1)));
     }
@@ -449,11 +438,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
             dDeltaDm_sRPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
             nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
             nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
-            // DeltaV correction: DeltaJ_PP += δV^{q=_q_ibz_idx}_PQ · Dm_QQ_unpert
-            // (must use the same q-slice as the main Hartree term's Uq_PQ, not
-            //  the q-averaged δV^{R=0}.)
+            // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ_unpert
             if (DeltaV_qPQ) {
-              nda::blas::gemv(ComplexType(1.0), DeltaV_qHartree_PQ,
+              nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
                               Dm_QQ_unpert(dU_qPQ.local_range(2)),
                               ComplexType(1.0), DeltaJ_PP(dU_qPQ.local_range(1)));
             }
