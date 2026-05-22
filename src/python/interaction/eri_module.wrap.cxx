@@ -122,6 +122,16 @@ static auto const fun_thc_dV_batched = c2py::dispatcher_f_kw_t{c2py::cmethod(
     },
     "self", "Deltapsi_prefix", "q_vec_cryst_list", "delta_r_P", "q_phonon_cryst")};
 
+// compute_delta_V_new
+static auto const fun_thc_dV_new = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb &self,
+       const std::string &Deltapsi_prefix,
+       const std::string &Deltapsi_adj_prefix,
+       nda::array<double, 1> const &q_pert_cryst) {
+      return self.compute_delta_V_new(Deltapsi_prefix, Deltapsi_adj_prefix, q_pert_cryst);
+    },
+    "self", "Deltapsi_prefix", "Deltapsi_adj_prefix", "q_pert_cryst")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -212,6 +222,40 @@ Memory cost: the internal per-k caches (T, δT on the full FFT mesh plus
 T + δT: ≈ 2 · nspin · nkpts · Np · nnr · 16 bytes.
 )DOC");
 
+static const auto doc_thc_dV_new = fun_thc_dV_new.doc(R"DOC(
+Linear response of V^q for a single phonon momentum Q (theory-note
+convention, see docs/lr_thc_theory.txt). Returns δV^q for every internal q
+on the BZ k-grid in a single call.
+
+Unlike compute_delta_V[_batched], this entry point is correct for general
+phonon Q ≠ 0: it carries the +Q and −Q wavefunction-response channels
+separately, uses the shifted Ξ^{q+Q} on the right-hand side of the LR
+normal equation, and applies the correct Coulomb factors v(|q+G|) and
+v(|q+Q+G|) to the two pieces of δV. The pivot response (Δr_P) is ignored.
+
+Parameters
+----------
+Deltapsi_prefix : str
+    Per-k +Q δψ files. {Deltapsi_prefix}_ik{ik+1}.hdf5 stores
+    δ^{+Q} ψ^{k_ik}.
+Deltapsi_adj_prefix : str
+    Per-k −Q δψ (adjoint) files. {Deltapsi_adj_prefix}_ik{ik+1}.hdf5 stores
+    δ^{−Q} ψ^{k_ik + Q}.
+q_pert_cryst : np.ndarray of shape (3,)
+    Phonon wavevector Q in crystal coordinates.
+
+Returns
+-------
+np.ndarray of shape (nq, Np, Np), complex
+    δV^q at every internal q on the BZ k-grid (same order as
+    mf.kpts_crystal()). Replicated on every rank.
+
+Notes
+-----
+This is a serial reference implementation (no MPI distribution, no GPU,
+no OpenMP). Restrictions: npol == 1, nkpts == nkpts_ibz.
+)DOC");
+
 // ----- Method table ----
 template <>
 PyMethodDef c2py::tp_methods<coqui_py::ThcCoulomb>[] = {
@@ -245,6 +289,8 @@ PyMethodDef c2py::tp_methods<coqui_py::ThcCoulomb>[] = {
      METH_VARARGS | METH_KEYWORDS, doc_thc_dV.c_str()},
     {"compute_delta_V_batched", (PyCFunction)c2py::pyfkw<fun_thc_dV_batched>,
      METH_VARARGS | METH_KEYWORDS, doc_thc_dV_batched.c_str()},
+    {"compute_delta_V_new", (PyCFunction)c2py::pyfkw<fun_thc_dV_new>,
+     METH_VARARGS | METH_KEYWORDS, doc_thc_dV_new.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

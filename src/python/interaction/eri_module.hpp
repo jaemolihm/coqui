@@ -33,6 +33,7 @@
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/ERI/lr_thc_interp.hpp"
 #include "methods/ERI/lr_thc.hpp"
+#include "methods/ERI/lr_thc_new.hpp"
 
 namespace coqui_py {
 
@@ -139,6 +140,18 @@ namespace coqui_py {
       nda::array<double, 1> qph = q_phonon_cryst.value_or(
           nda::array<double, 1>{0.0, 0.0, 0.0});
       return lr.compute_delta_V_batched(Deltapsi_prefix, q_vec_cryst_list, delta_r_P, qph);
+    }
+
+    // Linear response of V^q for a single mode / phonon momentum Q at every
+    // internal q on the BZ k-grid, computed via the new q ≠ 0-correct pipeline
+    // (lr_thc_new). The pivot response (Δr_P) is ignored. Both +Q (dpsi) and
+    // −Q (dpsi_adj) δψ data are required.
+    nda::array<ComplexType, 3> compute_delta_V_new(
+        const std::string& Deltapsi_prefix,
+        const std::string& Deltapsi_adj_prefix,
+        nda::array<double, 1> const& q_pert_cryst) {
+      methods::lr_thc_new lr(_thc);
+      return lr.compute_delta_V_new(Deltapsi_prefix, Deltapsi_adj_prefix, q_pert_cryst);
     }
 
   private:

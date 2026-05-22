@@ -6,6 +6,7 @@ SET(ERI_SRCS
   thc.cpp
   lr_thc_interp.cpp
   lr_thc.cpp
+  lr_thc_new.cpp
   mb_eri_context.h
   eri_utils.cpp
 )
