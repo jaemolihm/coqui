@@ -48,13 +48,20 @@
 // Restrictions:
 //   - single phonon Q (q_pert_cryst), single mode (caller composes modes)
 //   - pivot response Δr_P ignored
-//   - serial: no MPI distribution, no OpenMP, no GPU
+//   - MPI parallelization: Phase 1 distributes the (is, ik) loops in steps 1
+//     and 2 across node_comm; the ψ/δψ/T caches live in node-shared memory.
+//     Steps 7 and 8 are still replicated (Phase 2 will q-distribute them).
+//   - no OpenMP, no GPU
 //   - npol == 1, nkpts == nkpts_ibz (no k-symmetry)
 
+#include <memory>
 #include <string>
 #include "configuration.hpp"
 #include "utilities/Timer.hpp"
+#include "utilities/mpi_context.h"
 #include "nda/nda.hpp"
+#include "mpi3/communicator.hpp"
+#include "numerics/shared_array/nda.hpp"
 
 #include "thc_reader_t.hpp"
 
@@ -64,8 +71,10 @@ class lr_thc_new {
 public:
   // Holds a reference to a thc_reader_t. The reader provides pivot indices
   // ri(), the truncated G-grid rho_g(), the Coulomb evaluator vG(), and the
-  // mean-field object.
-  explicit lr_thc_new(thc_reader_t& reader) : _reader(reader) {
+  // mean-field object. The reader's MPI context is captured for shared-memory
+  // caches and work distribution.
+  explicit lr_thc_new(thc_reader_t& reader)
+      : _reader(reader), _mpi(reader.mpi()) {
     for (auto& name : {
         // top-level (one per helper)
         "read_psi_and_dpsi", "compute_T_and_DeltaT",
@@ -81,7 +90,7 @@ public:
         "xi_phase_factor", "dxi_phase_factor",
         "xi_fft_forward_std", "dxi_fft_forward_std",
         "xi_copy_rhs", "xi_copy_out",
-        "dxi_copy_rhs", "dxi_rhs_gemm", "dxi_copy_out",
+        "dxi_rhs_gemm", "dxi_copy_out",
         "v_evaluate", "gemm_term1", "gemm_term2"})
       Timer.add(name);
   }
@@ -145,27 +154,27 @@ private:
       std::string const& Deltapsi_prefix,
       std::string const& Deltapsi_adj_prefix,
       nda::stack_array<long, 3> const& fft_mesh,
-      nda::array<ComplexType, 4>& psi_skmr,
-      nda::array<ComplexType, 4>& Deltapsi_pQ_skmr,
-      nda::array<ComplexType, 4>& Deltapsi_mQ_skmr);
+      nda::array_view<ComplexType, 4> psi_skmr,
+      nda::array_view<ComplexType, 4> Deltapsi_pQ_skmr,
+      nda::array_view<ComplexType, 4> Deltapsi_mQ_skmr);
 
   // Step 2: (T, ΔT_pQ, ΔT_mQ) per-k caches. Bra-side ΔT terms are read at
   // the BZ-folded k±Q index (via _kqpoint_maps) so each ΔT carries a single r-Bloch
   // momentum. See the formula in compute_T_and_DeltaT.
   void compute_T_and_DeltaT(
-      nda::array<ComplexType, 4> const& psi_skmr,
-      nda::array<ComplexType, 4> const& Deltapsi_pQ_skmr,
-      nda::array<ComplexType, 4> const& Deltapsi_mQ_skmr,
+      nda::array_view<ComplexType, 4> const psi_skmr,
+      nda::array_view<ComplexType, 4> const Deltapsi_pQ_skmr,
+      nda::array_view<ComplexType, 4> const Deltapsi_mQ_skmr,
       nda::array<long, 1> const& r_P,
-      nda::array<ComplexType, 4>& T_skur,
-      nda::array<ComplexType, 4>& DeltaT_pQ_skur,
-      nda::array<ComplexType, 4>& DeltaT_mQ_skur);
+      nda::array_view<ComplexType, 4> T_skur,
+      nda::array_view<ComplexType, 4> DeltaT_pQ_skur,
+      nda::array_view<ComplexType, 4> DeltaT_mQ_skur);
 
   // Step 3: assemble (Z, C) for one internal q, and return the k−q map.
   // Z^q_{μr}    = Σ_k conj(T^{k−q}_{μr}) · T^k_{μr}    (Bloch q)
   // C^q_{μν}    = Z^q_{μ, r_P(ν)}
   void build_Z_C_for_q(
-      nda::array<ComplexType, 4> const& T_skur,
+      nda::array_view<ComplexType, 4> const T_skur,
       nda::array<double, 2> const& kpts_crys,
       nda::array<long, 1> const& r_P,
       nda::array<double, 1> const& q_vec_cryst,
@@ -177,9 +186,9 @@ private:
   // δZ^q_{μr} = Σ_k [conj(ΔT_mQ^{k−q}_{μr}) · T^k_{μr}
   //                  + conj(T^{k−q}_{μr}) · ΔT_pQ^k_{μr}]    (Bloch q+Q)
   void build_DeltaZ_DeltaC_for_q(
-      nda::array<ComplexType, 4> const& T_skur,
-      nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
-      nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
+      nda::array_view<ComplexType, 4> const T_skur,
+      nda::array_view<ComplexType, 4> const DeltaT_pQ_skur,
+      nda::array_view<ComplexType, 4> const DeltaT_mQ_skur,
       nda::array<int, 1> const& kmq_map,
       nda::array<long, 1> const& r_P,
       nda::array<ComplexType, 2>& DeltaZ_q,
@@ -197,18 +206,18 @@ private:
       nda::array<ComplexType, 2>& Xi_q_uG,
       C_factor& factor);
 
-  // Step 6: build δΞ̃^q in G-space.
-  //   rhs(r) = δZ(r) − δC · Ξ^{q+Q}(r)           (real-space gemm)
-  //   rhs̃(G) = FFT[e^{-i(q+Q)·r} · rhs(r)](G)
-  //   C_q · δΞ̃^q = rhs̃                           (G-space solve)
-  // The gemm stays in real space because the cached G-space slab at slot
-  // iq_qpQ uses kpts(iq_qpQ), which differs from the unwrapped (q+Q) phase
-  // by a G-shift when q+Q wraps. Reuses the factorization from step 5.
+  // Step 6: build δΞ̃^q entirely in G-space.
+  //   δZ̃(μ, G) = FFT[e^{-i(q+Q)·r} · δZ(μ, r)](G)        (one fwd FFT per μ)
+  //   rhs̃(G)   = δZ̃(G) − δC · Ξ_uG[iq_qpQ](G)            (G-space gemm)
+  //   C_q · δΞ̃^q = rhs̃                                   (G-space solve)
+  // FFT linearity + δC acting only on μ make this equivalent to the original
+  // (gemm-in-r, then forward-FFT) form, but avoids reconstructing Ξ_qpQ_ur
+  // and never allocates an (Np × nnr) rhs buffer. Reuses the step-5 factor.
   void solve_dxi_for_q(
       C_factor const& factor,
       nda::array<ComplexType, 2> const& DeltaZ_q,
       nda::array<ComplexType, 2> const& DeltaC_q,
-      nda::array<ComplexType, 2> const& Xi_qpQ_ur,
+      nda::array_view<ComplexType, 2> const Xi_qpQ_uG,
       nda::stack_array<double, 3> const& q_pQ_cart,
       nda::array<ComplexType, 2>& DeltaXi_q_uG);
 
@@ -222,9 +231,9 @@ private:
   //   Pass A: build Ξ^q' at every q'; cache real-space Ξ_ur, C-factor, kmq.
   //   Pass B: build δΞ̃^q' using the cached Ξ_ur at slot _kqpoint_maps.kpQ_map(q').
   void solve_xi_dxi_all_q(
-      nda::array<ComplexType, 4> const& T_skur,
-      nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
-      nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
+      nda::array_view<ComplexType, 4> const T_skur,
+      nda::array_view<ComplexType, 4> const DeltaT_pQ_skur,
+      nda::array_view<ComplexType, 4> const DeltaT_mQ_skur,
       nda::array<double, 2> const& kpts_crys,
       nda::array<long, 1> const& r_P,
       nda::array<ComplexType, 3>& Xi_uG_all,
@@ -248,6 +257,9 @@ private:
   void print_timers();
 
   thc_reader_t& _reader;
+  // MPI context captured from the reader. Shared (node-replicated) caches and
+  // (in Phase 2) q-distribution use comm / node_comm / internode_comm here.
+  std::shared_ptr<utils::mpi_context_t<boost::mpi3::communicator>> _mpi;
   utils::TimerManager Timer;
   momentum_maps_t _kqpoint_maps;     // populated by compute_delta_V_new
 };

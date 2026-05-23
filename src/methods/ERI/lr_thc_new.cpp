@@ -37,6 +37,7 @@
 #include "nda/lapack/getrf.hpp"
 #include "nda/lapack/getrs.hpp"
 #include "nda/linalg/eigenelements.hpp"  // C_q hermitian eig path (env-var gated)
+#include "itertools/itertools.hpp"       // chunk_range for q-distribution
 
 // Bloch phase conventions in this file
 // -------------------------------------
@@ -67,9 +68,9 @@ void lr_thc_new::read_psi_and_dpsi(
     std::string const& Deltapsi_prefix,
     std::string const& Deltapsi_adj_prefix,
     nda::stack_array<long, 3> const& fft_mesh,
-    nda::array<ComplexType, 4>& psi_skmr,
-    nda::array<ComplexType, 4>& Deltapsi_pQ_skmr,
-    nda::array<ComplexType, 4>& Deltapsi_mQ_skmr)
+    nda::array_view<ComplexType, 4> psi_skmr,
+    nda::array_view<ComplexType, 4> Deltapsi_pQ_skmr,
+    nda::array_view<ComplexType, 4> Deltapsi_mQ_skmr)
 {
   Timer.start("read_psi_and_dpsi");
   auto const& mf = *_reader.MF();
@@ -87,8 +88,18 @@ void lr_thc_new::read_psi_and_dpsi(
   auto fft_buf_1d = nda::reshape(fft_buf, std::array<long, 1>{nnr});
   math::nda::fft<true> F(fft_buf);
 
+  // Distribute (is, ik) round-robin across node_comm; each rank populates its
+  // assigned slabs of the per-node shared cache. Caller is responsible for
+  // having zero-initialized the buffers (shared_array ctor does this) and for
+  // the post-loop node_sync().
+  long const node_size = _mpi->node_comm.size();
+  long const node_rank = _mpi->node_comm.rank();
+  utils::check(node_size > 0,
+               "lr_thc_new::read_psi_and_dpsi: node_comm.size() must be > 0.");
+
   for (long is = 0; is < nspin; ++is) {
     for (long ik = 0; ik < nkpts; ++ik) {
+      if (((is * nkpts + ik) % node_size) != node_rank) continue;
       long const ik_kmQ = _kqpoint_maps.kmQ_map(ik);
 
       // --- ψ: Bloch phase e^{i k·r}.
@@ -178,13 +189,13 @@ void lr_thc_new::read_psi_and_dpsi(
 // r-Bloch momentum (k±Q). Theory note: docs/lr_thc_new_theory.txt.
 // ----------------------------------------------------------------------------
 void lr_thc_new::compute_T_and_DeltaT(
-    nda::array<ComplexType, 4> const& psi_skmr,
-    nda::array<ComplexType, 4> const& Deltapsi_pQ_skmr,
-    nda::array<ComplexType, 4> const& Deltapsi_mQ_skmr,
+    nda::array_view<ComplexType, 4> const psi_skmr,
+    nda::array_view<ComplexType, 4> const Deltapsi_pQ_skmr,
+    nda::array_view<ComplexType, 4> const Deltapsi_mQ_skmr,
     nda::array<long, 1> const& r_P,
-    nda::array<ComplexType, 4>& T_skur,
-    nda::array<ComplexType, 4>& DeltaT_pQ_skur,
-    nda::array<ComplexType, 4>& DeltaT_mQ_skur)
+    nda::array_view<ComplexType, 4> T_skur,
+    nda::array_view<ComplexType, 4> DeltaT_pQ_skur,
+    nda::array_view<ComplexType, 4> DeltaT_mQ_skur)
 {
   Timer.start("compute_T_and_DeltaT");
   long const nspin = psi_skmr.shape(0);
@@ -192,16 +203,26 @@ void lr_thc_new::compute_T_and_DeltaT(
   long const nbnd  = psi_skmr.shape(2);
   long const Np    = r_P.shape(0);
 
-  T_skur()         = ComplexType(0.0);
-  DeltaT_pQ_skur() = ComplexType(0.0);
-  DeltaT_mQ_skur() = ComplexType(0.0);
+  // T / ΔT outputs live in node-shared memory and are already zeroed by
+  // shared_array's constructor; each rank populates only its owned (is, ik)
+  // slabs below.
 
   nda::array<ComplexType, 2> _psi_k_pivot(nbnd, Np),
                              _Deltapsi_mQ_kpQ_pivot(nbnd, Np),
                              _Deltapsi_pQ_kmQ_pivot(nbnd, Np);
 
+  // Distribute (is, ik) round-robin across node_comm using the same partition
+  // as step 1. The step-1 → step-2 node_sync() in compute_delta_V_new ensures
+  // every (is, ik) slot in psi_*_skmr is fully populated before any rank reads
+  // it here at ik, ik_kpQ, or ik_kmQ.
+  long const node_size = _mpi->node_comm.size();
+  long const node_rank = _mpi->node_comm.rank();
+  utils::check(node_size > 0,
+               "lr_thc_new::compute_T_and_DeltaT: node_comm.size() must be > 0.");
+
   for (long is = 0; is < nspin; ++is) {
     for (long ik = 0; ik < nkpts; ++ik) {
+      if (((is * nkpts + ik) % node_size) != node_rank) continue;
       long const ik_kpQ = _kqpoint_maps.kpQ_map(ik);
       long const ik_kmQ = _kqpoint_maps.kmQ_map(ik);
 
@@ -251,7 +272,7 @@ void lr_thc_new::compute_T_and_DeltaT(
 // calculate_kpq_map with -q).
 // ----------------------------------------------------------------------------
 void lr_thc_new::build_Z_C_for_q(
-    nda::array<ComplexType, 4> const& T_skur,
+    nda::array_view<ComplexType, 4> const T_skur,
     nda::array<double, 2> const& kpts_crys,
     nda::array<long, 1> const& r_P,
     nda::array<double, 1> const& q_vec_cryst,
@@ -297,9 +318,9 @@ void lr_thc_new::build_Z_C_for_q(
 //   δC^q_{μν} = δZ^q_{μ, r_P(ν)}
 // ----------------------------------------------------------------------------
 void lr_thc_new::build_DeltaZ_DeltaC_for_q(
-    nda::array<ComplexType, 4> const& T_skur,
-    nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
-    nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
+    nda::array_view<ComplexType, 4> const T_skur,
+    nda::array_view<ComplexType, 4> const DeltaT_pQ_skur,
+    nda::array_view<ComplexType, 4> const DeltaT_mQ_skur,
     nda::array<int, 1> const& kmq_map,
     nda::array<long, 1> const& r_P,
     nda::array<ComplexType, 2>& DeltaZ_q,
@@ -320,8 +341,8 @@ void lr_thc_new::build_DeltaZ_DeltaC_for_q(
     for (long ik = 0; ik < nkpts; ++ik) {
       long const ikmq = kmq_map(ik);
       DeltaZ_q += conj_prod(DeltaT_mQ_skur(is, ikmq, nda::ellipsis{}),
-                            T_skur        (is, ik,   nda::ellipsis{}));
-      DeltaZ_q += conj_prod(T_skur        (is, ikmq, nda::ellipsis{}),
+                            T_skur        (is, ik,   nda::ellipsis{}))
+                + conj_prod(T_skur        (is, ikmq, nda::ellipsis{}),
                             DeltaT_pQ_skur(is, ik,   nda::ellipsis{}));
     }
   Timer.stop("accumulate_dZ");
@@ -509,22 +530,24 @@ void lr_thc_new::solve_xi_for_q(
 }
 
 // ----------------------------------------------------------------------------
-// Step 6: build δΞ̃^q in G-space.
-//   1) rhs(r) = δZ(r) − δC · Ξ^{q+Q}(r)            (real-space gemm)
-//   2) rhs̃(G) = FFT[e^{-i(q+Q)·r} · rhs(r)](G)
-//   3) C_q · δΞ̃^q = rhs̃                            (G-space solve)
+// Step 6: build δΞ̃^q entirely in G-space.
+//   1) δZ̃(μ, G) = FFT[e^{-i(q+Q)·r} · δZ(μ, r)](G), truncated to rho_g
+//   2) rhs̃(G)   = δZ̃(G) − δC · Ξ_uG[iq_qpQ](G)        (G-space gemm)
+//   3) C_q · δΞ̃^q = rhs̃                                (G-space solve)
 //
-// The gemm must stay in real space: the cached G-space slab at slot iq_qpQ
-// uses phase kpts(iq_qpQ), which differs from the unwrapped (q+Q) phase by
-// a G-shift when q+Q wraps. Real-space Ξ has no such ambiguity. The LU /
-// eig solve commutes with the FFT (acts on the u-index only), so moving it
-// to G-space shrinks the RHS from (Np, nnr) to (Np, nG_red).
+// Equivalent to the (gemm-in-r, then forward-FFT) form by FFT linearity and
+// the fact that δC acts only on the μ-index. Working in G-space avoids the
+// (Np × nnr) rhs_ur and Xi_qpQ_ur buffers and saves one (Np × FFT) per q.
+//
+// q_pQ_cart is kpts(iq_qpQ) (BZ-folded), NOT literal q+Q — see step 7. The
+// gemm against Ξ_uG[iq_qpQ] is therefore consistent: both factors live in the
+// same BZ-folded G basis.
 // ----------------------------------------------------------------------------
 void lr_thc_new::solve_dxi_for_q(
     C_factor const& factor,
     nda::array<ComplexType, 2> const& DeltaZ_q,
     nda::array<ComplexType, 2> const& DeltaC_q,
-    nda::array<ComplexType, 2> const& Xi_qpQ_ur,
+    nda::array_view<ComplexType, 2> const Xi_qpQ_uG,
     nda::stack_array<double, 3> const& q_pQ_cart,
     nda::array<ComplexType, 2>& DeltaXi_q_uG)
 {
@@ -539,26 +562,9 @@ void lr_thc_new::solve_dxi_for_q(
   long const N1 = mesh(0), N2 = mesh(1), N3 = mesh(2);
   auto lattv_mf = mf.lattv();
 
-  // TODO(MPI): rhs_ur (Np × nnr) and rhs_f (Np × nG_red) are both live
-  // across the gemm + FFT block. When this kernel is distributed, fuse the
-  // FFT into a streaming loop so the (Np × nnr) buffer can be freed before
-  // the solve.
-  nda::array<ComplexType, 2> rhs_ur(Np, nnr);
-  Timer.start("dxi_copy_rhs");
-  for (long u = 0; u < Np; ++u)
-    for (long ir = 0; ir < nnr; ++ir) rhs_ur(u, ir) = DeltaZ_q(u, ir);
-  Timer.stop("dxi_copy_rhs");
-
-  Timer.start("dxi_rhs_gemm");
-  nda::blas::gemm(ComplexType(-1.0), DeltaC_q, Xi_qpQ_ur,
-                  ComplexType(1.0), rhs_ur);
-  Timer.stop("dxi_rhs_gemm");
-
-  // FFT rhs(r) to G-space with Bloch (q+Q) phase.
-  nda::array<ComplexType, 4> fft_buf(1, N1, N2, N3);
-  auto fft_buf_1d = nda::reshape(fft_buf, std::array<long, 1>{nnr});
-  math::nda::fft<true> F(fft_buf);
-
+  // e^{-i(q+Q)·r}. q_pQ_cart is q' = (q + Q) folded into the kpts BZ
+  // (caller passes kpts(_kqpoint_maps.kpQ_map(iq))), so this differs from
+  // the literal q+Q phase by an integer G when (q + Q) wraps.
   nda::array<ComplexType, 1> phase_mqpQ(nnr);
   {
     nda::stack_array<double, 3> qpQ_neg;
@@ -569,18 +575,27 @@ void lr_thc_new::solve_dxi_for_q(
     Timer.stop("dxi_phase_factor");
   }
 
-  // G-space RHS (Np, nG_red); holds rhs̃ before the solve and δΞ̃^q after.
-  nda::matrix<ComplexType, nda::F_layout> rhs_f(Np, nG_red);
+  nda::array<ComplexType, 4> fft_buf(1, N1, N2, N3);
+  auto fft_buf_1d = nda::reshape(fft_buf, std::array<long, 1>{nnr});
+  math::nda::fft<true> F(fft_buf);
 
+  // δZ̃(μ, G) = FFT[e^{-i(q+Q)·r} · δZ(μ, r)](G), truncated to rho_g.
+  nda::matrix<ComplexType, nda::F_layout> rhs_f(Np, nG_red);
   Timer.start("dxi_fft_forward_std");
   for (long u = 0; u < Np; ++u) {
     for (long ir = 0; ir < nnr; ++ir)
-      fft_buf_1d(ir) = phase_mqpQ(ir) * rhs_ur(u, ir);
+      fft_buf_1d(ir) = phase_mqpQ(ir) * DeltaZ_q(u, ir);
     F.forward(fft_buf);
     for (long g = 0; g < nG_red; ++g)
       rhs_f(u, g) = fft_buf_1d(rho_g.gv_to_fft(g));
   }
   Timer.stop("dxi_fft_forward_std");
+
+  // rhs̃(G) = δZ̃(G) − δC · Ξ_qpQ_uG(G). Pure (Np × Np) · (Np × nG_red).
+  Timer.start("dxi_rhs_gemm");
+  nda::blas::gemm(ComplexType(-1.0), DeltaC_q, Xi_qpQ_uG,
+                  ComplexType(1.0), rhs_f);
+  Timer.stop("dxi_rhs_gemm");
 
   apply_C_inverse(factor, rhs_f,
                   factor.use_eig ? "dxi_eig_solve" : "dxi_lu_solve");
@@ -600,9 +615,9 @@ void lr_thc_new::solve_dxi_for_q(
 //   Pass B: build δΞ̃^q' at every q' using the cached Ξ_ur at slot iq_pQ_map(q').
 // ----------------------------------------------------------------------------
 void lr_thc_new::solve_xi_dxi_all_q(
-    nda::array<ComplexType, 4> const& T_skur,
-    nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
-    nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
+    nda::array_view<ComplexType, 4> const T_skur,
+    nda::array_view<ComplexType, 4> const DeltaT_pQ_skur,
+    nda::array_view<ComplexType, 4> const DeltaT_mQ_skur,
     nda::array<double, 2> const& kpts_crys,
     nda::array<long, 1> const& r_P,
     nda::array<ComplexType, 3>& Xi_uG_all,
@@ -619,13 +634,23 @@ void lr_thc_new::solve_xi_dxi_all_q(
 
   Xi_uG_all.resize     (nq, Np, nG_red);
   DeltaXi_uG_all.resize(nq, Np, nG_red);
+  Xi_uG_all()      = ComplexType(0.0);
+  DeltaXi_uG_all() = ComplexType(0.0);
 
-  // Pass A.
-  std::vector<nda::array<ComplexType, 2>> Xi_ur_cache(nq);
-  std::vector<C_factor> factor_cache(nq);
-  std::vector<nda::array<int, 1>> kmq_cache(nq);
+  // q-distribution across the full comm. Same partition is used for pass A
+  // and pass B so the rank that built factor_cache[iq_loc] in pass A also
+  // uses it in pass B (no cross-rank handoff of the LU/heev factor).
+  auto [q_origin, q_end] = itertools::chunk_range(
+      0, nq, _mpi->comm.size(), _mpi->comm.rank());
+  long const nq_loc = q_end - q_origin;
 
-  for (long iq = 0; iq < nq; ++iq) {
+  // Pass A: build Ξ^{iq}_uG for the rank-local q's. Ξ_ur_cache is dropped —
+  // pass B works directly off Ξ_uG_all in G-space inside solve_dxi_for_q.
+  std::vector<C_factor>           factor_cache(nq_loc);
+  std::vector<nda::array<int, 1>> kmq_cache   (nq_loc);
+
+  for (long iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    long const iq = q_origin + iq_loc;
     nda::array<double, 1> q_vec_cryst(3);
     for (int a = 0; a < 3; ++a) q_vec_cryst(a) = kpts_crys(iq, a);
 
@@ -649,14 +674,20 @@ void lr_thc_new::solve_xi_dxi_all_q(
 
     Xi_uG_all(iq, nda::ellipsis{}) = Xi_q_uG;
 
-    Xi_ur_cache  [iq] = std::move(Xi_q_ur);
-    factor_cache [iq] = std::move(factor);
-    kmq_cache    [iq] = std::move(kmq_map);
+    factor_cache[iq_loc] = std::move(factor);
+    kmq_cache   [iq_loc] = std::move(kmq_map);
   }
 
-  // Pass B. The δΞ FFT phase uses kpts(iq_qpQ) (BZ-folded), not the literal
-  // kpts(iq) + Q — required for termwise consistency with Step 8.
-  for (long iq = 0; iq < nq; ++iq) {
+  // All-reduce Xi_uG_all so pass B sees every iq_qpQ slab. Each rank wrote
+  // only its owned q_origin..q_end slabs; the rest are zero.
+  _mpi->comm.all_reduce_in_place_n(Xi_uG_all.data(), Xi_uG_all.size(),
+                                   std::plus<>{});
+
+  // Pass B. Same q-partition. The δΞ FFT phase uses kpts(iq_qpQ) (BZ-folded),
+  // not the literal kpts(iq) + Q — required for termwise consistency with
+  // Step 8.
+  for (long iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    long const iq = q_origin + iq_loc;
     long const iq_qpQ = _kqpoint_maps.kpQ_map(iq);
     nda::stack_array<double, 3> q_pQ_cart;
     for (int a = 0; a < 3; ++a)
@@ -666,15 +697,21 @@ void lr_thc_new::solve_xi_dxi_all_q(
 
     nda::array<ComplexType, 2> DeltaZ_q, DeltaC_q;
     build_DeltaZ_DeltaC_for_q(T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur,
-                              kmq_cache[iq], r_P, DeltaZ_q, DeltaC_q);
+                              kmq_cache[iq_loc], r_P, DeltaZ_q, DeltaC_q);
 
     nda::array<ComplexType, 2> DeltaXi_q_uG;
-    solve_dxi_for_q(factor_cache[iq],
-                    DeltaZ_q, DeltaC_q, Xi_ur_cache[iq_qpQ], q_pQ_cart,
+    solve_dxi_for_q(factor_cache[iq_loc],
+                    DeltaZ_q, DeltaC_q,
+                    Xi_uG_all(iq_qpQ, nda::ellipsis{}),
+                    q_pQ_cart,
                     DeltaXi_q_uG);
 
     DeltaXi_uG_all(iq, nda::ellipsis{}) = DeltaXi_q_uG;
   }
+
+  // All-reduce δΞ so step 8 sees every iq, iq_mqmQ slab.
+  _mpi->comm.all_reduce_in_place_n(DeltaXi_uG_all.data(),
+                                   DeltaXi_uG_all.size(), std::plus<>{});
 
   Timer.stop("solve_xi_dxi_all_q");
 }
@@ -689,9 +726,6 @@ void lr_thc_new::solve_xi_dxi_all_q(
 // Bloch labels use kpts(iq_mq) / kpts(iq_qpQ), not literal ±q / q+Q — these
 // match the BZ-folded phases used when the slabs were built. Ξ^{-q} =
 // conj(Ξ^q) lets us read only +G data.
-//
-// TODO: cross-check the Coulomb momentum convention against
-// docs/lr_thc_new_theory.txt.
 // ----------------------------------------------------------------------------
 void lr_thc_new::compute_delta_V_for_q(
     long iq,
@@ -802,7 +836,6 @@ void lr_thc_new::print_timers()
     {      "dxi_eig_solve",          3},
     {      "dxi_phase_factor",       3},
     {      "dxi_fft_forward_std",    3},
-    {      "dxi_copy_rhs",           3},
     {      "dxi_rhs_gemm",           3},
     {      "dxi_copy_out",           3},
     {  "compute_delta_V_for_q",      1},
@@ -942,75 +975,104 @@ nda::array<ComplexType, 3> lr_thc_new::compute_delta_V_new(
   // Build BZ-index maps consumed by every step.
   build_momentum_maps(kpts_crys, Q_cryst, Q_cart);
 
-  // Memory estimate (peak = step 1 ψ/δψ + step 2 T caches, both live at step 2).
+  // Memory estimate. Caches live in node-shared memory: one copy per NODE,
+  // not per rank. Peak per node = step 1 ψ/δψ + step 2 T caches (both live at
+  // step 2).
   {
     double const GB = 1024.0 * 1024.0 * 1024.0;
     double mem_psi  = 3.0 * double(nspin) * double(nkpts) * double(nbnd) * double(nnr) * 16.0 / GB;
     double mem_T    = 3.0 * double(nspin) * double(nkpts) * double(Np)   * double(nnr) * 16.0 / GB;
     double mem_peak = mem_psi + mem_T;  // ψ/δψ and T caches coexist during step 2.
-    app_log(2, "  lr_thc_new estimated peak host-memory for caches:");
+    app_log(2, "  lr_thc_new estimated peak host-memory for caches (per node):");
     app_log(2, "    psi/dpsi (3 x nspin x nkpts x nbnd x nnr): {0:8.3f} GB", mem_psi);
     app_log(2, "    T/dT     (3 x nspin x nkpts x Np   x nnr): {0:8.3f} GB", mem_T);
     app_log(2, "    peak (sum during step 2):                  {0:8.3f} GB", mem_peak);
   }
 
-  // --- Step 1: read ψ and δψ caches. ---
-  nda::array<ComplexType, 4> psi_skmr        (nspin, nkpts, nbnd, nnr);
-  nda::array<ComplexType, 4> Deltapsi_pQ_skmr(nspin, nkpts, nbnd, nnr);
-  nda::array<ComplexType, 4> Deltapsi_mQ_skmr(nspin, nkpts, nbnd, nnr);
+  // --- Step 1: read ψ and δψ into node-shared caches. ---
+  // shared_array's constructor zero-fills, so the round-robin (is, ik)
+  // distribution inside read_psi_and_dpsi safely populates only owned slabs.
+  using shm_arr4_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+  shm_arr4_t s_psi_skmr        (*_mpi, {nspin, nkpts, nbnd, nnr});
+  shm_arr4_t s_Deltapsi_pQ_skmr(*_mpi, {nspin, nkpts, nbnd, nnr});
+  shm_arr4_t s_Deltapsi_mQ_skmr(*_mpi, {nspin, nkpts, nbnd, nnr});
   read_psi_and_dpsi(Deltapsi_prefix, Deltapsi_adj_prefix, fft_mesh,
-                    psi_skmr, Deltapsi_pQ_skmr, Deltapsi_mQ_skmr);
+                    s_psi_skmr.local(), s_Deltapsi_pQ_skmr.local(),
+                    s_Deltapsi_mQ_skmr.local());
+  // All node ranks must see populated ψ/δψ before step 2 reads cross-k.
+  s_psi_skmr.node_sync();
+  s_Deltapsi_pQ_skmr.node_sync();
+  s_Deltapsi_mQ_skmr.node_sync();
 
-  // --- Step 2: T, ΔT_pQ, ΔT_mQ caches. ---
-  nda::array<ComplexType, 4> T_skur        (nspin, nkpts, Np, nnr);
-  nda::array<ComplexType, 4> DeltaT_pQ_skur(nspin, nkpts, Np, nnr);
-  nda::array<ComplexType, 4> DeltaT_mQ_skur(nspin, nkpts, Np, nnr);
-  compute_T_and_DeltaT(psi_skmr, Deltapsi_pQ_skmr, Deltapsi_mQ_skmr,
+  // --- Step 2: T, ΔT_pQ, ΔT_mQ caches in node-shared memory. ---
+  shm_arr4_t s_T_skur        (*_mpi, {nspin, nkpts, Np, nnr});
+  shm_arr4_t s_DeltaT_pQ_skur(*_mpi, {nspin, nkpts, Np, nnr});
+  shm_arr4_t s_DeltaT_mQ_skur(*_mpi, {nspin, nkpts, Np, nnr});
+  compute_T_and_DeltaT(s_psi_skmr.local(), s_Deltapsi_pQ_skmr.local(),
+                       s_Deltapsi_mQ_skmr.local(),
                        r_P_local,
-                       T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur);
+                       s_T_skur.local(), s_DeltaT_pQ_skur.local(),
+                       s_DeltaT_mQ_skur.local());
+  s_T_skur.node_sync();
+  s_DeltaT_pQ_skur.node_sync();
+  s_DeltaT_mQ_skur.node_sync();
 
-  // ψ / δψ are no longer needed after T-cache is built.
-  psi_skmr         = nda::array<ComplexType, 4>{};
-  Deltapsi_pQ_skmr = nda::array<ComplexType, 4>{};
-  Deltapsi_mQ_skmr = nda::array<ComplexType, 4>{};
+  // ψ / δψ are no longer needed after T-cache is built. Release the shared
+  // windows by reassigning to size-1 placeholders.
+  s_psi_skmr         = shm_arr4_t(*_mpi, {1, 1, 1, 1});
+  s_Deltapsi_pQ_skmr = shm_arr4_t(*_mpi, {1, 1, 1, 1});
+  s_Deltapsi_mQ_skmr = shm_arr4_t(*_mpi, {1, 1, 1, 1});
 
   long const nq = nkpts;
 
   // --- Steps 3–6 (driven by step 7): solve Ξ and δΞ at all q's. ---
+  // q's are distributed across _mpi->comm inside solve_xi_dxi_all_q; on return
+  // every rank holds the full Xi_uG_all / DeltaXi_uG_all via an internal
+  // all_reduce.
   nda::array<ComplexType, 3> Xi_uG_all;
   nda::array<ComplexType, 3> DeltaXi_uG_all;
-  solve_xi_dxi_all_q(T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur,
+  solve_xi_dxi_all_q(s_T_skur.local(), s_DeltaT_pQ_skur.local(),
+                     s_DeltaT_mQ_skur.local(),
                      kpts_crys, r_P_local,
                      Xi_uG_all, DeltaXi_uG_all);
 
   // T-caches no longer needed.
-  T_skur         = nda::array<ComplexType, 4>{};
-  DeltaT_pQ_skur = nda::array<ComplexType, 4>{};
-  DeltaT_mQ_skur = nda::array<ComplexType, 4>{};
+  s_T_skur         = shm_arr4_t(*_mpi, {1, 1, 1, 1});
+  s_DeltaT_pQ_skur = shm_arr4_t(*_mpi, {1, 1, 1, 1});
+  s_DeltaT_mQ_skur = shm_arr4_t(*_mpi, {1, 1, 1, 1});
 
   // Step 8: δV^q for every q. Pass BZ-folded slot k-points (not literal ±q /
   // q+Q) so the Coulomb factors match the slab Bloch phases termwise.
+  // q-distributed across _mpi->comm; rank-local slots are filled, the rest
+  // stay zero, then all_reduce gives every rank the same full output.
   nda::array<ComplexType, 3> out(nq, Np, Np);
   out() = ComplexType(0.0);
-  for (long iq = 0; iq < nq; ++iq) {
-    long const iq_mq    = _kqpoint_maps.mk_map(iq);
-    long const iq_qpQ   = _kqpoint_maps.kpQ_map(iq);
-    long const iq_mqmQ  = _kqpoint_maps.mkmQ_map(iq);
-    nda::stack_array<double, 3> q_mq_cart, q_qpQ_cart;
-    for (int a = 0; a < 3; ++a) {
-      q_mq_cart (a) = kpts_crys(iq_mq,  0) * recv_mf(0, a)
-                    + kpts_crys(iq_mq,  1) * recv_mf(1, a)
-                    + kpts_crys(iq_mq,  2) * recv_mf(2, a);
-      q_qpQ_cart(a) = kpts_crys(iq_qpQ, 0) * recv_mf(0, a)
-                    + kpts_crys(iq_qpQ, 1) * recv_mf(1, a)
-                    + kpts_crys(iq_qpQ, 2) * recv_mf(2, a);
+  {
+    auto [q_origin, q_end] = itertools::chunk_range(
+        0, nq, _mpi->comm.size(), _mpi->comm.rank());
+    long const nq_loc = q_end - q_origin;
+    for (long iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+      long const iq      = q_origin + iq_loc;
+      long const iq_mq   = _kqpoint_maps.mk_map(iq);
+      long const iq_qpQ  = _kqpoint_maps.kpQ_map(iq);
+      long const iq_mqmQ = _kqpoint_maps.mkmQ_map(iq);
+      nda::stack_array<double, 3> q_mq_cart, q_qpQ_cart;
+      for (int a = 0; a < 3; ++a) {
+        q_mq_cart (a) = kpts_crys(iq_mq,  0) * recv_mf(0, a)
+                      + kpts_crys(iq_mq,  1) * recv_mf(1, a)
+                      + kpts_crys(iq_mq,  2) * recv_mf(2, a);
+        q_qpQ_cart(a) = kpts_crys(iq_qpQ, 0) * recv_mf(0, a)
+                      + kpts_crys(iq_qpQ, 1) * recv_mf(1, a)
+                      + kpts_crys(iq_qpQ, 2) * recv_mf(2, a);
+      }
+      nda::array<ComplexType, 2> dV_q;
+      compute_delta_V_for_q(iq, iq_mq, iq_qpQ, iq_mqmQ,
+                            Xi_uG_all, DeltaXi_uG_all,
+                            q_mq_cart, q_qpQ_cart, dV_q);
+      out(iq, nda::ellipsis{}) = dV_q;
     }
-    nda::array<ComplexType, 2> dV_q;
-    compute_delta_V_for_q(iq, iq_mq, iq_qpQ, iq_mqmQ,
-                          Xi_uG_all, DeltaXi_uG_all,
-                          q_mq_cart, q_qpQ_cart, dV_q);
-    out(iq, nda::ellipsis{}) = dV_q;
   }
+  _mpi->comm.all_reduce_in_place_n(out.data(), out.size(), std::plus<>{});
 
   Timer.stop("compute_delta_V_new");
   print_timers();
