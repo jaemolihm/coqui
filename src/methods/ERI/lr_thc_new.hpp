@@ -71,7 +71,7 @@ public:
         "read_psi_and_dpsi", "compute_T_and_DeltaT",
         "build_Z_C_for_q",  "build_DeltaZ_DeltaC_for_q",
         "solve_xi_for_q",   "solve_dxi_for_q",
-        "solve_all_q",      "compute_delta_V_for_q",
+        "solve_xi_dxi_all_q",      "compute_delta_V_for_q",
         "compute_delta_V_new",
         // sub-clocks (only around bulk operations, not hot inner loops)
         "io_wfc", "io_dpsi", "io_dpsi_adj", "phase_factor",
@@ -105,43 +105,58 @@ public:
 
 private:
   // C_q factorization. LU by default; hermitian eig path gated on env var
-  // COQUI_LR_THC_USE_HERMITIAN_EIG (eig solve = U · diag(1/λ) · U^H · B).
+  // COQUI_LR_THC_USE_HERMITIAN_EIG (eig solve = U · diag(inv_evals) · U^H · B).
   // Only the fields for the active path are populated.
   struct C_factor {
     bool use_eig = false;
     // LU path
     nda::matrix<ComplexType, nda::F_layout> C_f_lu;
     nda::array<int, 1> ipiv;
-    // Eigen path (evals ascending, U columns are eigenvectors)
+    // Eigen path (U columns are eigenvectors; inv_evals = 1/λ, λ > 0 checked
+    // at factorization)
     nda::matrix<ComplexType, nda::F_layout> U;
-    nda::array<double, 1> evals;
+    nda::array<double, 1> inv_evals;
   };
+
+  // Phonon Q and BZ-index maps on the k-grid (= q-grid). Populated once by
+  // compute_delta_V_new and consumed by every step; centralizing avoids
+  // passing slightly different map subsets to each callee.
+  //   kpQ_map(p):  ip s.t. kpts(ip) ≡  kpts(p) + Q   (mod G)
+  //   kmQ_map(p):  ip s.t. kpts(ip) ≡  kpts(p) - Q   (mod G)
+  //   mk_map(p):   ip s.t. kpts(ip) ≡ -kpts(p)       (mod G)
+  //   mkmQ_map(p): ip s.t. kpts(ip) ≡ -kpts(p) - Q   (mod G)
+  struct momentum_maps_t {
+    nda::stack_array<double, 3> Q_cryst;
+    nda::stack_array<double, 3> Q_cart;
+    nda::array<int, 1> kpQ_map, kmQ_map, mk_map, mkmQ_map;
+  };
+
+  // Build the BZ-index maps for the given perturbation Q on the k-grid.
+  void build_momentum_maps(nda::array<double, 2> const& kpts_crys,
+                           nda::stack_array<double, 3> const& Q_cryst,
+                           nda::stack_array<double, 3> const& Q_cart);
 
   // --- Helpers (see lr_thc_new.cpp for full descriptions) ---
 
   // Step 1: read ψ and (+Q, −Q) δψ on the full FFT grid for all (is, ik).
-  // Bloch phases applied: e^{ik·r} on ψ; e^{i(k+Q)·r} on +Q δψ;
-  // e^{i·kpts(ik_adj)·r} on −Q δψ (ik_adj = kmQ_map(ik)).
+  // Bloch phases: e^{ik·r} on ψ, e^{i(k+Q)·r} on +Q δψ,
+  // e^{i·kpts(ik_kmQ)·r} on −Q δψ (ik_kmQ = _kqpoint_maps.kmQ_map(ik)).
   void read_psi_and_dpsi(
       std::string const& Deltapsi_prefix,
       std::string const& Deltapsi_adj_prefix,
-      nda::stack_array<double, 3> const& q_pert_cart,
       nda::stack_array<long, 3> const& fft_mesh,
-      nda::array<int, 1> const& kmQ_map,
       nda::array<ComplexType, 4>& psi_skmr,
       nda::array<ComplexType, 4>& Deltapsi_pQ_skmr,
       nda::array<ComplexType, 4>& Deltapsi_mQ_skmr);
 
   // Step 2: (T, ΔT_pQ, ΔT_mQ) per-k caches. Bra-side ΔT terms are read at
-  // the BZ-folded k±Q index so each ΔT carries a single r-Bloch momentum.
-  // See the formula in compute_T_and_DeltaT.
+  // the BZ-folded k±Q index (via _kqpoint_maps) so each ΔT carries a single r-Bloch
+  // momentum. See the formula in compute_T_and_DeltaT.
   void compute_T_and_DeltaT(
       nda::array<ComplexType, 4> const& psi_skmr,
       nda::array<ComplexType, 4> const& Deltapsi_pQ_skmr,
       nda::array<ComplexType, 4> const& Deltapsi_mQ_skmr,
       nda::array<long, 1> const& r_P,
-      nda::array<int, 1> const& kpQ_map,
-      nda::array<int, 1> const& kmQ_map,
       nda::array<ComplexType, 4>& T_skur,
       nda::array<ComplexType, 4>& DeltaT_pQ_skur,
       nda::array<ComplexType, 4>& DeltaT_mQ_skur);
@@ -205,36 +220,36 @@ private:
 
   // Step 7: drive steps 3–6 over all q' on the BZ k-grid.
   //   Pass A: build Ξ^q' at every q'; cache real-space Ξ_ur, C-factor, kmq.
-  //   Pass B: build δΞ̃^q' using the cached Ξ_ur at slot iq_pQ_map(q').
-  void solve_all_q(
+  //   Pass B: build δΞ̃^q' using the cached Ξ_ur at slot _kqpoint_maps.kpQ_map(q').
+  void solve_xi_dxi_all_q(
       nda::array<ComplexType, 4> const& T_skur,
       nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
       nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
       nda::array<double, 2> const& kpts_crys,
       nda::array<long, 1> const& r_P,
-      nda::array<int, 1> const& iq_pQ_map,
       nda::array<ComplexType, 3>& Xi_uG_all,
       nda::array<ComplexType, 3>& DeltaXi_uG_all);
 
   // Step 8: δV^q for one internal q.
-  //   term1[μ,ν] = (1/V) Σ_G v(|kpts(iq_mq)+G|) · δΞ_uG[iq_mqmQ, μ, G] · conj(Ξ_uG[iq_mq, ν, G])
-  //   term2[μ,ν] = (1/V) Σ_G v(|kpts(iq_pQ)+G|) · conj(Ξ_uG[iq_pQ, μ, G])  · δΞ_uG[iq, ν, G]
-  // BZ-folded slot k-points (kpts(iq_mq), kpts(iq_pQ)) — NOT literal ±q / q+Q.
+  //   term1[μ,ν] = (1/V) Σ_G v(|kpts(iq_mq)+G|)  · δΞ_uG[iq_mqmQ, μ, G] · conj(Ξ_uG[iq_mq, ν, G])
+  //   term2[μ,ν] = (1/V) Σ_G v(|kpts(iq_qpQ)+G|) · conj(Ξ_uG[iq_qpQ, μ, G]) · δΞ_uG[iq, ν, G]
+  // BZ-folded slot k-points (kpts(iq_mq), kpts(iq_qpQ)) — NOT literal ±q / q+Q.
   void compute_delta_V_for_q(
       long iq,
       long iq_mq,
-      long iq_pQ,
+      long iq_qpQ,
       long iq_mqmQ,
       nda::array<ComplexType, 3> const& Xi_uG_all,
       nda::array<ComplexType, 3> const& DeltaXi_uG_all,
       nda::stack_array<double, 3> const& q_mq_cart,
-      nda::stack_array<double, 3> const& q_pQ_cart,
+      nda::stack_array<double, 3> const& q_qpQ_cart,
       nda::array<ComplexType, 2>& dV_q);
 
   void print_timers();
 
   thc_reader_t& _reader;
   utils::TimerManager Timer;
+  momentum_maps_t _kqpoint_maps;     // populated by compute_delta_V_new
 };
 
 } // namespace methods

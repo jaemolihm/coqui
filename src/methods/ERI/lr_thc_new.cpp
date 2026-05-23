@@ -66,9 +66,7 @@ namespace methods {
 void lr_thc_new::read_psi_and_dpsi(
     std::string const& Deltapsi_prefix,
     std::string const& Deltapsi_adj_prefix,
-    nda::stack_array<double, 3> const& q_pert_cart,
     nda::stack_array<long, 3> const& fft_mesh,
-    nda::array<int, 1> const& kmQ_map,
     nda::array<ComplexType, 4>& psi_skmr,
     nda::array<ComplexType, 4>& Deltapsi_pQ_skmr,
     nda::array<ComplexType, 4>& Deltapsi_mQ_skmr)
@@ -91,20 +89,19 @@ void lr_thc_new::read_psi_and_dpsi(
 
   for (long is = 0; is < nspin; ++is) {
     for (long ik = 0; ik < nkpts; ++ik) {
-      nda::stack_array<double, 3> k_cart;
-      for (int a = 0; a < 3; ++a) k_cart(a) = kpts_mf(ik, a);
+      long const ik_kmQ = _kqpoint_maps.kmQ_map(ik);
 
-      // --- ψ: full file at (is, ik). Bloch phase e^{ik·r}.
+      // --- ψ: Bloch phase e^{i k·r}.
       Timer.start("io_wfc");
       auto wfc = detail::read_wfc_k(mf, is, ik, fft_mesh);
       Timer.stop("io_wfc");
       utils::check(wfc.nbnd >= nbnd,
-                   "lr_thc_new::read_psi_and_dpsi: wfc file at (is={},ik={}) "
-                   "has {} bands, expected >= {}.", is, ik, wfc.nbnd, nbnd);
+                   "lr_thc_new::read_psi_and_dpsi: wfc at (is={},ik={}) has {} bands, "
+                   "expected >= {}.", is, ik, wfc.nbnd, nbnd);
       {
         nda::array<ComplexType, 1> phase_full(nnr);
         Timer.start("phase_factor");
-        utils::rspace_phase_factor(lattv_mf, k_cart,
+        utils::rspace_phase_factor(lattv_mf, kpts_mf(ik, nda::range::all),
             nda::reshape(phase_full, std::array<long,3>{N1, N2, N3}));
         Timer.stop("phase_factor");
         for (long m = 0; m < nbnd; ++m) {
@@ -116,15 +113,15 @@ void lr_thc_new::read_psi_and_dpsi(
         }
       }
 
-      // --- +Q δψ: file at filename ik stores δ^{+Q} ψ^{k_ik}. Bloch phase e^{i(k+Q)·r}.
+      // --- +Q δψ: Bloch phase e^{i(k+Q)·r}.
       nda::stack_array<double, 3> kpQ_cart;
-      for (int a = 0; a < 3; ++a) kpQ_cart(a) = k_cart(a) + q_pert_cart(a);
+      for (int a = 0; a < 3; ++a) kpQ_cart(a) = kpts_mf(ik, a) + _kqpoint_maps.Q_cart(a);
       Timer.start("io_dpsi");
       auto dpsi_pQ = detail::read_Deltapsi_k(Deltapsi_prefix, ik, fft_mesh);
       Timer.stop("io_dpsi");
       utils::check(dpsi_pQ.nbnd >= nbnd,
-                   "lr_thc_new::read_psi_and_dpsi: +Q dpsi file at ik={} "
-                   "has {} bands, expected >= {}.", ik, dpsi_pQ.nbnd, nbnd);
+                   "lr_thc_new::read_psi_and_dpsi: +Q dpsi at ik={} has {} bands, "
+                   "expected >= {}.", ik, dpsi_pQ.nbnd, nbnd);
       {
         nda::array<ComplexType, 1> phase_full(nnr);
         Timer.start("phase_factor");
@@ -140,21 +137,19 @@ void lr_thc_new::read_psi_and_dpsi(
         }
       }
 
-      // --- -Q δψ: read adj file at filename kmQ_map(ik); data is δ^{-Q} ψ^{k_ik}
-      // in the kpts(ik_adj) Bloch frame. See top-of-file note.
-      long const ik_adj = kmQ_map(ik);
+      // --- -Q δψ: read adj file at ik_kmQ; Bloch phase e^{i·kpts(ik_kmQ)·r}
+      // ik-th file of QE contains δ^{-Q}ψ^{k+Q}, while we want δ^{-Q}ψ^{k} at the ik slot.
+      // So we read from kmQ_map(ik)-th QE file.
       Timer.start("io_dpsi_adj");
-      auto dpsi_mQ = detail::read_Deltapsi_k(Deltapsi_adj_prefix, ik_adj, fft_mesh);
+      auto dpsi_mQ = detail::read_Deltapsi_k(Deltapsi_adj_prefix, ik_kmQ, fft_mesh);
       Timer.stop("io_dpsi_adj");
       utils::check(dpsi_mQ.nbnd >= nbnd,
-                   "lr_thc_new::read_psi_and_dpsi: -Q dpsi_adj file at ik={} "
-                   "has {} bands, expected >= {}.", ik_adj, dpsi_mQ.nbnd, nbnd);
+                   "lr_thc_new::read_psi_and_dpsi: -Q dpsi_adj at ik={} has {} bands, "
+                   "expected >= {}.", ik_kmQ, dpsi_mQ.nbnd, nbnd);
       {
-        nda::stack_array<double, 3> k_adj_cart;
-        for (int a = 0; a < 3; ++a) k_adj_cart(a) = kpts_mf(ik_adj, a);
         nda::array<ComplexType, 1> phase_full(nnr);
         Timer.start("phase_factor");
-        utils::rspace_phase_factor(lattv_mf, k_adj_cart,
+        utils::rspace_phase_factor(lattv_mf, kpts_mf(ik_kmQ, nda::range::all),
             nda::reshape(phase_full, std::array<long,3>{N1, N2, N3}));
         Timer.stop("phase_factor");
         for (long m = 0; m < nbnd; ++m) {
@@ -187,8 +182,6 @@ void lr_thc_new::compute_T_and_DeltaT(
     nda::array<ComplexType, 4> const& Deltapsi_pQ_skmr,
     nda::array<ComplexType, 4> const& Deltapsi_mQ_skmr,
     nda::array<long, 1> const& r_P,
-    nda::array<int, 1> const& kpQ_map,
-    nda::array<int, 1> const& kmQ_map,
     nda::array<ComplexType, 4>& T_skur,
     nda::array<ComplexType, 4>& DeltaT_pQ_skur,
     nda::array<ComplexType, 4>& DeltaT_mQ_skur)
@@ -197,55 +190,53 @@ void lr_thc_new::compute_T_and_DeltaT(
   long const nspin = psi_skmr.shape(0);
   long const nkpts = psi_skmr.shape(1);
   long const nbnd  = psi_skmr.shape(2);
-  long const nnr   = psi_skmr.shape(3);
   long const Np    = r_P.shape(0);
 
   T_skur()         = ComplexType(0.0);
   DeltaT_pQ_skur() = ComplexType(0.0);
   DeltaT_mQ_skur() = ComplexType(0.0);
 
-  // Per-k pivot slices (nbnd, Np). psi_pivot is at ik; the dpsi pivots are at
-  // the BZ-folded k±Q indices (bra side of ΔT).
-  nda::array<ComplexType, 2> psi_pivot              (nbnd, Np);
-  nda::array<ComplexType, 2> dpsi_mQ_pivot_at_kpQ   (nbnd, Np);
-  nda::array<ComplexType, 2> dpsi_pQ_pivot_at_kmQ   (nbnd, Np);
+  nda::array<ComplexType, 2> _psi_k_pivot(nbnd, Np),
+                             _Deltapsi_mQ_kpQ_pivot(nbnd, Np),
+                             _Deltapsi_pQ_kmQ_pivot(nbnd, Np);
 
   for (long is = 0; is < nspin; ++is) {
     for (long ik = 0; ik < nkpts; ++ik) {
-      long const ikpQ = kpQ_map(ik);
-      long const ikmQ = kmQ_map(ik);
+      long const ik_kpQ = _kqpoint_maps.kpQ_map(ik);
+      long const ik_kmQ = _kqpoint_maps.kmQ_map(ik);
 
-      auto psi_full     = psi_skmr        (is, ik,   nda::range::all, nda::range::all);
-      auto dpsi_pQ_full = Deltapsi_pQ_skmr(is, ik,   nda::range::all, nda::range::all);
-      auto dpsi_mQ_full = Deltapsi_mQ_skmr(is, ik,   nda::range::all, nda::range::all);
-      auto psi_full_at_kpQ     = psi_skmr        (is, ikpQ, nda::range::all, nda::range::all);
-      auto psi_full_at_kmQ     = psi_skmr        (is, ikmQ, nda::range::all, nda::range::all);
-      auto dpsi_mQ_full_at_kpQ = Deltapsi_mQ_skmr(is, ikpQ, nda::range::all, nda::range::all);
-      auto dpsi_pQ_full_at_kmQ = Deltapsi_pQ_skmr(is, ikmQ, nda::range::all, nda::range::all);
-
+      // Build pivots: pivot(m, u) = full(m, r_P(u)).
       for (long m = 0; m < nbnd; ++m)
         for (long u = 0; u < Np; ++u) {
-          psi_pivot           (m, u) = psi_full            (m, r_P(u));
-          dpsi_mQ_pivot_at_kpQ(m, u) = dpsi_mQ_full_at_kpQ (m, r_P(u));
-          dpsi_pQ_pivot_at_kmQ(m, u) = dpsi_pQ_full_at_kmQ (m, r_P(u));
+          _psi_k_pivot            (m, u) = psi_skmr        (is, ik,     m, r_P(u));
+          _Deltapsi_mQ_kpQ_pivot(m, u) = Deltapsi_mQ_skmr(is, ik_kpQ, m, r_P(u));  // bra of ΔT_pQ
+          _Deltapsi_pQ_kmQ_pivot(m, u) = Deltapsi_pQ_skmr(is, ik_kmQ, m, r_P(u));  // bra of ΔT_mQ
         }
 
-      auto T_sk    = T_skur        (is, ik, nda::range::all, nda::range::all);
-      auto dTpQ_sk = DeltaT_pQ_skur(is, ik, nda::range::all, nda::range::all);
-      auto dTmQ_sk = DeltaT_mQ_skur(is, ik, nda::range::all, nda::range::all);
+      auto _psi_k         = psi_skmr        (is, ik,     nda::range::all, nda::range::all);
+      auto _psi_kpQ       = psi_skmr        (is, ik_kpQ, nda::range::all, nda::range::all);
+      auto _psi_kmQ       = psi_skmr        (is, ik_kmQ, nda::range::all, nda::range::all);
+      auto _Deltapsi_pQ_k = Deltapsi_pQ_skmr(is, ik,     nda::range::all, nda::range::all);
+      auto _Deltapsi_mQ_k = Deltapsi_mQ_skmr(is, ik,     nda::range::all, nda::range::all);
+      auto _T_k           = T_skur          (is, ik,     nda::range::all, nda::range::all);
+      auto _DeltaT_pQ_k   = DeltaT_pQ_skur  (is, ik,     nda::range::all, nda::range::all);
+      auto _DeltaT_mQ_k   = DeltaT_mQ_skur  (is, ik,     nda::range::all, nda::range::all);
 
-      nda::blas::gemm(ComplexType(1.0), nda::dagger(psi_pivot), psi_full,
-                      ComplexType(0.0), T_sk);
+      // T^k = ψ_pivot^H · ψ
+      nda::blas::gemm(ComplexType(1.0), nda::dagger(_psi_k_pivot), _psi_k,
+                      ComplexType(0.0), _T_k);
 
-      nda::blas::gemm(ComplexType(1.0), nda::dagger(dpsi_mQ_pivot_at_kpQ), psi_full_at_kpQ,
-                      ComplexType(0.0), dTpQ_sk);
-      nda::blas::gemm(ComplexType(1.0), nda::dagger(psi_pivot), dpsi_pQ_full,
-                      ComplexType(1.0), dTpQ_sk);
+      // ΔT_pQ = (δ^{-Q}ψ_pivot at k+Q)^H · ψ^{k+Q}  +  ψ_pivot^H · δ^{+Q}ψ^k
+      nda::blas::gemm(ComplexType(1.0), nda::dagger(_Deltapsi_mQ_kpQ_pivot), _psi_kpQ,
+                      ComplexType(0.0), _DeltaT_pQ_k);
+      nda::blas::gemm(ComplexType(1.0), nda::dagger(_psi_k_pivot), _Deltapsi_pQ_k,
+                      ComplexType(1.0), _DeltaT_pQ_k);
 
-      nda::blas::gemm(ComplexType(1.0), nda::dagger(dpsi_pQ_pivot_at_kmQ), psi_full_at_kmQ,
-                      ComplexType(0.0), dTmQ_sk);
-      nda::blas::gemm(ComplexType(1.0), nda::dagger(psi_pivot), dpsi_mQ_full,
-                      ComplexType(1.0), dTmQ_sk);
+      // ΔT_mQ = (δ^{+Q}ψ_pivot at k-Q)^H · ψ^{k-Q}  +  ψ_pivot^H · δ^{-Q}ψ^k
+      nda::blas::gemm(ComplexType(1.0), nda::dagger(_Deltapsi_pQ_kmQ_pivot), _psi_kmQ,
+                      ComplexType(0.0), _DeltaT_mQ_k);
+      nda::blas::gemm(ComplexType(1.0), nda::dagger(_psi_k_pivot), _Deltapsi_mQ_k,
+                      ComplexType(1.0), _DeltaT_mQ_k);
     }
   }
 
@@ -283,22 +274,13 @@ void lr_thc_new::build_Z_C_for_q(
   Z_q.resize(Np, nnr);
   Z_q() = ComplexType(0.0);
 
-  // Z_q(u, r) += conj(T_kmq(u, r)) * T_k(u, r). Raw-pointer loop so the
-  // compiler auto-vectorizes the complex muladd.
+  auto conj_prod = nda::map([](ComplexType a, ComplexType b) { return std::conj(a) * b; });
   Timer.start("accumulate_Z");
-  {
-    long const N = Np * nnr;
-    ComplexType* z_ptr = Z_q.data();
-    for (long is = 0; is < nspin; ++is) {
-      for (long ik = 0; ik < nkpts; ++ik) {
-        long const ikmq = kmq_map(ik);
-        ComplexType const* tk_ptr   = &T_skur(is, ik,   0, 0);
-        ComplexType const* tkmq_ptr = &T_skur(is, ikmq, 0, 0);
-        for (long n = 0; n < N; ++n)
-          z_ptr[n] += std::conj(tkmq_ptr[n]) * tk_ptr[n];
-      }
+  for (long is = 0; is < nspin; ++is)
+    for (long ik = 0; ik < nkpts; ++ik) {
+      long const ikmq = kmq_map(ik);
+      Z_q += conj_prod(T_skur(is, ikmq, nda::ellipsis{}), T_skur(is, ik, nda::ellipsis{}));
     }
-  }
   Timer.stop("accumulate_Z");
 
   C_q.resize(Np, Np);
@@ -332,23 +314,16 @@ void lr_thc_new::build_DeltaZ_DeltaC_for_q(
   DeltaZ_q.resize(Np, nnr);
   DeltaZ_q() = ComplexType(0.0);
 
+  auto conj_prod = nda::map([](ComplexType a, ComplexType b) { return std::conj(a) * b; });
   Timer.start("accumulate_dZ");
-  {
-    long const N = Np * nnr;
-    ComplexType* dz_ptr = DeltaZ_q.data();
-    for (long is = 0; is < nspin; ++is) {
-      for (long ik = 0; ik < nkpts; ++ik) {
-        long const ikmq = kmq_map(ik);
-        ComplexType const* tk_ptr      = &T_skur        (is, ik,   0, 0);
-        ComplexType const* tkmq_ptr    = &T_skur        (is, ikmq, 0, 0);
-        ComplexType const* dTpQ_k_ptr  = &DeltaT_pQ_skur(is, ik,   0, 0);
-        ComplexType const* dTmQ_kmq_ptr= &DeltaT_mQ_skur(is, ikmq, 0, 0);
-        for (long n = 0; n < N; ++n)
-          dz_ptr[n] += std::conj(dTmQ_kmq_ptr[n]) * tk_ptr[n]
-                     + std::conj(tkmq_ptr[n])    * dTpQ_k_ptr[n];
-      }
+  for (long is = 0; is < nspin; ++is)
+    for (long ik = 0; ik < nkpts; ++ik) {
+      long const ikmq = kmq_map(ik);
+      DeltaZ_q += conj_prod(DeltaT_mQ_skur(is, ikmq, nda::ellipsis{}),
+                            T_skur        (is, ik,   nda::ellipsis{}));
+      DeltaZ_q += conj_prod(T_skur        (is, ikmq, nda::ellipsis{}),
+                            DeltaT_pQ_skur(is, ik,   nda::ellipsis{}));
     }
-  }
   Timer.stop("accumulate_dZ");
 
   DeltaC_q.resize(Np, Np);
@@ -369,6 +344,7 @@ void lr_thc_new::apply_C_inverse(
     char const* timer_solve_tag)
 {
   if (!factor.use_eig) {
+    // LU factorization path
     Timer.start(timer_solve_tag);
     int info = nda::lapack::getrs(factor.C_f_lu, B, factor.ipiv);
     Timer.stop(timer_solve_tag);
@@ -377,20 +353,16 @@ void lr_thc_new::apply_C_inverse(
     return;
   }
 
+  // Hermitian eigendecomposition path: B ← U · diag(inv_evals) · U^H · B.
+  // Note: C_q is hermitian positive semidefinite by definition.
   long const Np = factor.U.shape(0);
   long const m  = B.shape(1);
   Timer.start(timer_solve_tag);
   nda::matrix<ComplexType, nda::F_layout> W(Np, m);
   nda::blas::gemm(ComplexType(1.0), nda::dagger(factor.U), B,
                   ComplexType(0.0), W);
-  // C is hermitian PSD by construction (symmetrized upstream); a non-positive
-  // eigenvalue signals an upstream problem, so fail loudly instead of flooring.
   for (long i = 0; i < Np; ++i) {
-    double const lam = factor.evals(i);
-    utils::check(lam > 0.0,
-                 "lr_thc_new::apply_C_inverse: non-positive eigenvalue "
-                 "lam[{}]={:+15.8e} — eigen-path divide-by-zero", i, lam);
-    double const inv_l = 1.0 / lam;
+    double const inv_l = factor.inv_evals(i);
     for (long j = 0; j < m; ++j) W(i, j) *= inv_l;
   }
   nda::blas::gemm(ComplexType(1.0), factor.U, W,
@@ -424,7 +396,20 @@ void lr_thc_new::solve_xi_for_q(
 
   auto lattv_mf = mf.lattv();
 
-  // Symmetrize C_q in place: C ← (C + C^H) / 2.
+  // Check that C_q is hermitian up to round-off, then symmetrize C ← (C + C^H)/2.
+  {
+    double sym_err = 0.0, norm = 0.0;
+    for (long u = 0; u < Np; ++u)
+      for (long v = 0; v < Np; ++v) {
+        ComplexType const d = C_q(u, v) - std::conj(C_q(v, u));
+        sym_err += std::norm(d);
+        norm    += std::norm(C_q(u, v));
+      }
+    double const rel = std::sqrt(sym_err / std::max(norm, 1e-300));
+    utils::check(rel < 1e-8,
+                 "lr_thc_new::solve_xi_for_q: C_q is not hermitian, "
+                 "||C - C^H|| / ||C|| = {:.3e} (expected ≤ 1e-8).", rel);
+  }
   for (long u = 0; u < Np; ++u) {
     for (long v = u + 1; v < Np; ++v) {
       ComplexType const avg = 0.5 * (C_q(u, v) + std::conj(C_q(v, u)));
@@ -434,7 +419,10 @@ void lr_thc_new::solve_xi_for_q(
     C_q(u, u) = ComplexType(C_q(u, u).real(), 0.0);
   }
 
-  // LU by default; COQUI_LR_THC_USE_HERMITIAN_EIG (truthy) switches to heev.
+  // For solving C_q · Ξ^q = Z^q, we have two paths:
+  // - LU factorization: faster factorization, less stable.
+  // - Hermitian eigendecomposition: slower factorization, more stable.
+  // LU by default; COQUI_LR_THC_USE_HERMITIAN_EIG=1 switches to heev.
   bool use_eig = false;
   if (char const* env_val = std::getenv("COQUI_LR_THC_USE_HERMITIAN_EIG")) {
     std::string val(env_val);
@@ -458,12 +446,21 @@ void lr_thc_new::solve_xi_for_q(
     for (long u = 0; u < Np; ++u)
       for (long v = 0; v < Np; ++v) C_f(u, v) = C_q(u, v);
     auto eig_pair = nda::linalg::eigenelements(C_f);
-    factor.evals = std::move(eig_pair.first);
-    factor.U     = std::move(eig_pair.second);
+    auto& evals   = eig_pair.first;
+    factor.U      = std::move(eig_pair.second);
+    // C is hermitian PSD by construction; fail loudly on λ ≤ 0 rather than
+    // flooring. Store 1/λ so the solve path is a plain scale.
+    factor.inv_evals.resize(Np);
+    for (long i = 0; i < Np; ++i) {
+      utils::check(evals(i) > 0.0,
+                   "lr_thc_new::solve_xi_for_q: non-positive eigenvalue "
+                   "lam[{}]={:+15.8e}.", i, evals(i));
+      factor.inv_evals(i) = 1.0 / evals(i);
+    }
     Timer.stop("xi_eig_factor");
     app_log(2,
             "    solve_xi: heev ({}x{}) lam_min={:10.3e} lam_max={:10.3e}",
-            Np, Np, factor.evals(0), factor.evals(Np - 1));
+            Np, Np, evals(0), evals(Np - 1));
   }
 
   // RHS in F-layout (Np, nnr); overwritten with Ξ^q(μ, r) by the solve.
@@ -473,8 +470,7 @@ void lr_thc_new::solve_xi_for_q(
     for (long ir = 0; ir < nnr; ++ir) Xi_f(u, ir) = Z_q(u, ir);
   Timer.stop("xi_copy_rhs");
 
-  apply_C_inverse(factor, Xi_f,
-                  use_eig ? "xi_eig_solve" : "xi_lu_solve");
+  apply_C_inverse(factor, Xi_f, use_eig ? "xi_eig_solve" : "xi_lu_solve");
 
   Xi_q_ur.resize(Np, nnr);
   Timer.start("xi_copy_out");
@@ -603,17 +599,16 @@ void lr_thc_new::solve_dxi_for_q(
 //   Pass A: build Ξ^q' at every q'; cache real-space Ξ_ur, C-factor, kmq.
 //   Pass B: build δΞ̃^q' at every q' using the cached Ξ_ur at slot iq_pQ_map(q').
 // ----------------------------------------------------------------------------
-void lr_thc_new::solve_all_q(
+void lr_thc_new::solve_xi_dxi_all_q(
     nda::array<ComplexType, 4> const& T_skur,
     nda::array<ComplexType, 4> const& DeltaT_pQ_skur,
     nda::array<ComplexType, 4> const& DeltaT_mQ_skur,
     nda::array<double, 2> const& kpts_crys,
     nda::array<long, 1> const& r_P,
-    nda::array<int, 1> const& iq_pQ_map,
     nda::array<ComplexType, 3>& Xi_uG_all,
     nda::array<ComplexType, 3>& DeltaXi_uG_all)
 {
-  Timer.start("solve_all_q");
+  Timer.start("solve_xi_dxi_all_q");
   long const nq  = kpts_crys.shape(0);
   long const Np  = T_skur.shape(2);
 
@@ -662,7 +657,7 @@ void lr_thc_new::solve_all_q(
   // Pass B. The δΞ FFT phase uses kpts(iq_qpQ) (BZ-folded), not the literal
   // kpts(iq) + Q — required for termwise consistency with Step 8.
   for (long iq = 0; iq < nq; ++iq) {
-    long const iq_qpQ = iq_pQ_map(iq);
+    long const iq_qpQ = _kqpoint_maps.kpQ_map(iq);
     nda::stack_array<double, 3> q_pQ_cart;
     for (int a = 0; a < 3; ++a)
       q_pQ_cart(a) = kpts_crys(iq_qpQ, 0) * recv_mf(0, a)
@@ -681,17 +676,17 @@ void lr_thc_new::solve_all_q(
     DeltaXi_uG_all(iq, nda::ellipsis{}) = DeltaXi_q_uG;
   }
 
-  Timer.stop("solve_all_q");
+  Timer.stop("solve_xi_dxi_all_q");
 }
 
 // ----------------------------------------------------------------------------
 // Step 8: assemble δV^q for one internal q.
 //
-//   term1[μ,ν] = (1/V) Σ_G v(|kpts(iq_mq) + G|) · δΞ_uG[iq_mqmQ, μ, G] · conj(Ξ_uG[iq_mq, ν, G])
-//   term2[μ,ν] = (1/V) Σ_G v(|kpts(iq_pQ) + G|) · conj(Ξ_uG[iq_pQ, μ, G])  · δΞ_uG[iq, ν, G]
+//   term1[μ,ν] = (1/V) Σ_G v(|kpts(iq_mq) + G|)  · δΞ_uG[iq_mqmQ, μ, G] · conj(Ξ_uG[iq_mq, ν, G])
+//   term2[μ,ν] = (1/V) Σ_G v(|kpts(iq_qpQ) + G|) · conj(Ξ_uG[iq_qpQ, μ, G]) · δΞ_uG[iq, ν, G]
 //
-// BZ k-grid indices: iq (current q), iq_mq (−q), iq_pQ (q+Q), iq_mqmQ (−q−Q).
-// Bloch labels use kpts(iq_mq) / kpts(iq_pQ), not literal ±q / q+Q — these
+// BZ k-grid indices: iq (current q), iq_mq (−q), iq_qpQ (q+Q), iq_mqmQ (−q−Q).
+// Bloch labels use kpts(iq_mq) / kpts(iq_qpQ), not literal ±q / q+Q — these
 // match the BZ-folded phases used when the slabs were built. Ξ^{-q} =
 // conj(Ξ^q) lets us read only +G data.
 //
@@ -701,12 +696,12 @@ void lr_thc_new::solve_all_q(
 void lr_thc_new::compute_delta_V_for_q(
     long iq,
     long iq_mq,
-    long iq_pQ,
+    long iq_qpQ,
     long iq_mqmQ,
     nda::array<ComplexType, 3> const& Xi_uG_all,
     nda::array<ComplexType, 3> const& DeltaXi_uG_all,
     nda::stack_array<double, 3> const& q_mq_cart,
-    nda::stack_array<double, 3> const& q_pQ_cart,
+    nda::stack_array<double, 3> const& q_qpQ_cart,
     nda::array<ComplexType, 2>& dV_q)
 {
   Timer.start("compute_delta_V_for_q");
@@ -718,25 +713,25 @@ void lr_thc_new::compute_delta_V_for_q(
   auto lattv_mf = mf.lattv();
 
   auto Xi_mq        = Xi_uG_all     (iq_mq,   nda::range::all, nda::range::all);
-  auto Xi_pQ        = Xi_uG_all     (iq_pQ,   nda::range::all, nda::range::all);
+  auto Xi_qpQ       = Xi_uG_all     (iq_qpQ,  nda::range::all, nda::range::all);
   auto DeltaXi_q    = DeltaXi_uG_all(iq,      nda::range::all, nda::range::all);
   auto DeltaXi_mqmQ = DeltaXi_uG_all(iq_mqmQ, nda::range::all, nda::range::all);
 
   // Coulomb factors. vG().evaluate(V, lattv, gv, kp, kq) gives v(|G + (kp-kq)|),
   // so passing kp = kpts(iq_*), kq = 0 yields v(|kpts(iq_*) + G|).
-  memory::unified_array<ComplexType, 1> v_kmq_G(rho_g.size());
-  memory::unified_array<ComplexType, 1> v_kpQ_G(rho_g.size());
+  memory::unified_array<ComplexType, 1> v_kmq_G (rho_g.size());
+  memory::unified_array<ComplexType, 1> v_kqpQ_G(rho_g.size());
   nda::array<RealType, 1> v_zero = {0.0, 0.0, 0.0};
   {
-    nda::array<RealType, 1> q_mq_cart_a(3);
-    nda::array<RealType, 1> q_pQ_cart_a(3);
+    nda::array<RealType, 1> q_mq_cart_a (3);
+    nda::array<RealType, 1> q_qpQ_cart_a(3);
     for (int a = 0; a < 3; ++a) {
-      q_mq_cart_a(a) = q_mq_cart(a);
-      q_pQ_cart_a(a) = q_pQ_cart(a);
+      q_mq_cart_a (a) = q_mq_cart(a);
+      q_qpQ_cart_a(a) = q_qpQ_cart(a);
     }
     Timer.start("v_evaluate");
-    _reader.vG().evaluate(v_kmq_G, lattv_mf, rho_g.g_vectors(), q_mq_cart_a, v_zero);
-    _reader.vG().evaluate(v_kpQ_G, lattv_mf, rho_g.g_vectors(), q_pQ_cart_a, v_zero);
+    _reader.vG().evaluate(v_kmq_G,  lattv_mf, rho_g.g_vectors(), q_mq_cart_a,  v_zero);
+    _reader.vG().evaluate(v_kqpQ_G, lattv_mf, rho_g.g_vectors(), q_qpQ_cart_a, v_zero);
     Timer.stop("v_evaluate");
   }
 
@@ -753,11 +748,11 @@ void lr_thc_new::compute_delta_V_for_q(
                   ComplexType(0.0), term1);
   Timer.stop("gemm_term1");
 
-  // term2 = (conj(Xi_pQ) ⊙ v_kpQ_G) · δΞ_q^T
+  // term2 = (conj(Xi_qpQ) ⊙ v_kqpQ_G) · δΞ_q^T
   nda::array<ComplexType, 2> tmp2(Np, nG_red);
   for (long u = 0; u < Np; ++u)
     for (long g = 0; g < nG_red; ++g)
-      tmp2(u, g) = std::conj(Xi_pQ(u, g)) * v_kpQ_G(g);
+      tmp2(u, g) = std::conj(Xi_qpQ(u, g)) * v_kqpQ_G(g);
 
   nda::array<ComplexType, 2> term2(Np, Np);
   term2() = ComplexType(0.0);
@@ -788,7 +783,7 @@ void lr_thc_new::print_timers()
     {    "io_dpsi_adj",              2},
     {    "phase_factor",             2},
     {  "compute_T_and_DeltaT",       1},
-    {  "solve_all_q",                1},
+    {  "solve_xi_dxi_all_q",         1},
     {    "build_Z_C_for_q",          2},
     {      "accumulate_Z",           3},
     {    "build_DeltaZ_DeltaC_for_q",2},
@@ -824,6 +819,60 @@ void lr_thc_new::print_timers()
             label, Timer.elapsed(name), Timer.number_of_calls(name));
   }
   app_log(2, "");
+}
+
+// ----------------------------------------------------------------------------
+// Populate _kqpoint_maps: kpQ_map / kmQ_map via utils::calculate_kpq_map (with
+// ±Q); mk_map, mkmQ_map via a small scan with the same wrap convention as
+// calculate_kpq_map.
+// ----------------------------------------------------------------------------
+void lr_thc_new::build_momentum_maps(nda::array<double, 2> const& kpts_crys,
+                                     nda::stack_array<double, 3> const& Q_cryst,
+                                     nda::stack_array<double, 3> const& Q_cart)
+{
+  long const nk = kpts_crys.shape(0);
+  _kqpoint_maps.Q_cryst = Q_cryst;
+  _kqpoint_maps.Q_cart  = Q_cart;
+
+  _kqpoint_maps.kpQ_map.resize(nk);
+  utils::calculate_kpq_map(kpts_crys, Q_cryst, _kqpoint_maps.kpQ_map);
+
+  nda::stack_array<double, 3> Q_neg_cryst;
+  for (int a = 0; a < 3; ++a) Q_neg_cryst(a) = -Q_cryst(a);
+  _kqpoint_maps.kmQ_map.resize(nk);
+  utils::calculate_kpq_map(kpts_crys, Q_neg_cryst, _kqpoint_maps.kmQ_map);
+
+  // mk_map(p) and mkmQ_map(p): same wrap+tolerance convention as calculate_kpq_map.
+  auto find_match = [&](long ip, double off0, double off1, double off2) {
+    double d0 = std::abs(kpts_crys(ip, 0) + off0);
+    double d1 = std::abs(kpts_crys(ip, 1) + off1);
+    double d2 = std::abs(kpts_crys(ip, 2) + off2);
+    d0 -= std::floor(d0); d1 -= std::floor(d1); d2 -= std::floor(d2);
+    d0 -= std::round(d0); d1 -= std::round(d1); d2 -= std::round(d2);
+    return d0*d0 + d1*d1 + d2*d2;
+  };
+  double const tol2 = 1e-12;  // (1e-6)^2
+
+  _kqpoint_maps.mk_map.resize(nk);
+  _kqpoint_maps.mkmQ_map.resize(nk);
+  for (long ip = 0; ip < nk; ++ip) {
+    int found_mk = -1, found_mkmQ = -1;
+    for (long iq = 0; iq < nk; ++iq) {
+      if (found_mk   < 0 && find_match(iq, kpts_crys(ip, 0),
+                                           kpts_crys(ip, 1),
+                                           kpts_crys(ip, 2)) < tol2)
+        found_mk = (int)iq;
+      if (found_mkmQ < 0 && find_match(iq, kpts_crys(ip, 0) + Q_cryst(0),
+                                           kpts_crys(ip, 1) + Q_cryst(1),
+                                           kpts_crys(ip, 2) + Q_cryst(2)) < tol2)
+        found_mkmQ = (int)iq;
+      if (found_mk >= 0 && found_mkmQ >= 0) break;
+    }
+    utils::check(found_mk   >= 0, "lr_thc_new::build_momentum_maps: -k not found on grid for ip={}.", ip);
+    utils::check(found_mkmQ >= 0, "lr_thc_new::build_momentum_maps: -k-Q not found on grid for ip={}.", ip);
+    _kqpoint_maps.mk_map  (ip) = found_mk;
+    _kqpoint_maps.mkmQ_map(ip) = found_mkmQ;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -878,25 +927,20 @@ nda::array<ComplexType, 3> lr_thc_new::compute_delta_V_new(
   for (long ik = 0; ik < nkpts; ++ik)
     for (int a = 0; a < 3; ++a) kpts_crys(ik, a) = kpts_crys_mf(ik, a);
 
-  // Q in Cartesian (2π included)
-  nda::stack_array<double, 3> Q_cart;
-  for (int a = 0; a < 3; ++a)
-    Q_cart(a) = q_pert_cryst(0) * recv_mf(0, a)
-              + q_pert_cryst(1) * recv_mf(1, a)
-              + q_pert_cryst(2) * recv_mf(2, a);
+  // Q in crystal and Cartesian (2π included).
+  nda::stack_array<double, 3> Q_cryst, Q_cart;
+  for (int a = 0; a < 3; ++a) {
+    Q_cryst(a) = q_pert_cryst(a);
+    Q_cart(a)  = q_pert_cryst(0) * recv_mf(0, a)
+               + q_pert_cryst(1) * recv_mf(1, a)
+               + q_pert_cryst(2) * recv_mf(2, a);
+  }
 
   nda::array<long, 1> r_P_local(Np);
   for (long u = 0; u < Np; ++u) r_P_local(u) = r_P(u);
 
-  // kmQ_map: index of (k - Q). Used for the adj-file shuffle.
-  nda::array<double, 1> Q_neg_cryst(3);
-  for (int a = 0; a < 3; ++a) Q_neg_cryst(a) = -q_pert_cryst(a);
-  nda::array<int, 1> kmQ_map(nkpts);
-  utils::calculate_kpq_map(kpts_crys, Q_neg_cryst, kmQ_map);
-
-  // kpQ_map: index of (k + Q) for each k. Used by ΔT for the bra-side lookup.
-  nda::array<int, 1> kpQ_map(nkpts);
-  utils::calculate_kpq_map(kpts_crys, q_pert_cryst, kpQ_map);
+  // Build BZ-index maps consumed by every step.
+  build_momentum_maps(kpts_crys, Q_cryst, Q_cart);
 
   // Memory estimate (peak = step 1 ψ/δψ + step 2 T caches, both live at step 2).
   {
@@ -914,16 +958,15 @@ nda::array<ComplexType, 3> lr_thc_new::compute_delta_V_new(
   nda::array<ComplexType, 4> psi_skmr        (nspin, nkpts, nbnd, nnr);
   nda::array<ComplexType, 4> Deltapsi_pQ_skmr(nspin, nkpts, nbnd, nnr);
   nda::array<ComplexType, 4> Deltapsi_mQ_skmr(nspin, nkpts, nbnd, nnr);
-  read_psi_and_dpsi(Deltapsi_prefix, Deltapsi_adj_prefix, Q_cart, fft_mesh,
-                   kmQ_map,
-                   psi_skmr, Deltapsi_pQ_skmr, Deltapsi_mQ_skmr);
+  read_psi_and_dpsi(Deltapsi_prefix, Deltapsi_adj_prefix, fft_mesh,
+                    psi_skmr, Deltapsi_pQ_skmr, Deltapsi_mQ_skmr);
 
   // --- Step 2: T, ΔT_pQ, ΔT_mQ caches. ---
   nda::array<ComplexType, 4> T_skur        (nspin, nkpts, Np, nnr);
   nda::array<ComplexType, 4> DeltaT_pQ_skur(nspin, nkpts, Np, nnr);
   nda::array<ComplexType, 4> DeltaT_mQ_skur(nspin, nkpts, Np, nnr);
   compute_T_and_DeltaT(psi_skmr, Deltapsi_pQ_skmr, Deltapsi_mQ_skmr,
-                       r_P_local, kpQ_map, kmQ_map,
+                       r_P_local,
                        T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur);
 
   // ψ / δψ are no longer needed after T-cache is built.
@@ -931,85 +974,41 @@ nda::array<ComplexType, 3> lr_thc_new::compute_delta_V_new(
   Deltapsi_pQ_skmr = nda::array<ComplexType, 4>{};
   Deltapsi_mQ_skmr = nda::array<ComplexType, 4>{};
 
-  // BZ index maps (all on the k-grid):
-  //   iq_pQ_map(iq):   ip s.t. kpts(ip) ≡ kpts(iq) + Q   (mod G)
-  //   iq_mq_map(iq):   ip s.t. kpts(ip) ≡ -kpts(iq)      (mod G)
-  //   iq_mqmQ_map(iq): ip s.t. kpts(ip) ≡ -kpts(iq) - Q  (mod G)
   long const nq = nkpts;
-
-  nda::array<int, 1> iq_pQ_map(nq);
-  utils::calculate_kpq_map(kpts_crys, q_pert_cryst, iq_pQ_map);
 
   // --- Steps 3–6 (driven by step 7): solve Ξ and δΞ at all q's. ---
   nda::array<ComplexType, 3> Xi_uG_all;
   nda::array<ComplexType, 3> DeltaXi_uG_all;
-  solve_all_q(T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur,
-              kpts_crys, r_P_local, iq_pQ_map,
-              Xi_uG_all, DeltaXi_uG_all);
+  solve_xi_dxi_all_q(T_skur, DeltaT_pQ_skur, DeltaT_mQ_skur,
+                     kpts_crys, r_P_local,
+                     Xi_uG_all, DeltaXi_uG_all);
 
   // T-caches no longer needed.
   T_skur         = nda::array<ComplexType, 4>{};
   DeltaT_pQ_skur = nda::array<ComplexType, 4>{};
   DeltaT_mQ_skur = nda::array<ComplexType, 4>{};
 
-  // Same wrap convention and tolerance as utils::calculate_kpq_map.
-  double const kpt_tol  = 1e-6;
-  double const tol2     = kpt_tol * kpt_tol;
-  nda::array<int, 1> iq_mq_map(nq);
-  for (long iq = 0; iq < nq; ++iq) {
-    int found = -1;
-    for (long ip = 0; ip < nq; ++ip) {
-      double d0 = std::abs(kpts_crys(ip, 0) + kpts_crys(iq, 0));
-      double d1 = std::abs(kpts_crys(ip, 1) + kpts_crys(iq, 1));
-      double d2 = std::abs(kpts_crys(ip, 2) + kpts_crys(iq, 2));
-      d0 -= std::floor(d0); d1 -= std::floor(d1); d2 -= std::floor(d2);
-      d0 -= std::round(d0); d1 -= std::round(d1); d2 -= std::round(d2);
-      if (d0*d0 + d1*d1 + d2*d2 < tol2) { found = (int)ip; break; }
-    }
-    utils::check(found >= 0,
-                 "lr_thc_new::compute_delta_V_new: cannot find -k on the "
-                 "BZ k-grid for iq={}.", iq);
-    iq_mq_map(iq) = found;
-  }
-
-  nda::array<int, 1> iq_mqmQ_map(nq);
-  for (long iq = 0; iq < nq; ++iq) {
-    int found = -1;
-    for (long ip = 0; ip < nq; ++ip) {
-      double d0 = std::abs(kpts_crys(ip, 0) + kpts_crys(iq, 0) + q_pert_cryst(0));
-      double d1 = std::abs(kpts_crys(ip, 1) + kpts_crys(iq, 1) + q_pert_cryst(1));
-      double d2 = std::abs(kpts_crys(ip, 2) + kpts_crys(iq, 2) + q_pert_cryst(2));
-      d0 -= std::floor(d0); d1 -= std::floor(d1); d2 -= std::floor(d2);
-      d0 -= std::round(d0); d1 -= std::round(d1); d2 -= std::round(d2);
-      if (d0*d0 + d1*d1 + d2*d2 < tol2) { found = (int)ip; break; }
-    }
-    utils::check(found >= 0,
-                 "lr_thc_new::compute_delta_V_new: cannot find -k - Q on the "
-                 "BZ k-grid for iq={}.", iq);
-    iq_mqmQ_map(iq) = found;
-  }
-
   // Step 8: δV^q for every q. Pass BZ-folded slot k-points (not literal ±q /
   // q+Q) so the Coulomb factors match the slab Bloch phases termwise.
   nda::array<ComplexType, 3> out(nq, Np, Np);
   out() = ComplexType(0.0);
   for (long iq = 0; iq < nq; ++iq) {
-    long const iq_mq   = iq_mq_map(iq);
-    long const iq_pQ   = iq_pQ_map(iq);
-    long const iq_mqmQ = iq_mqmQ_map(iq);
-    nda::stack_array<double, 3> q_mq_cart, q_pQ_cart;
+    long const iq_mq    = _kqpoint_maps.mk_map(iq);
+    long const iq_qpQ   = _kqpoint_maps.kpQ_map(iq);
+    long const iq_mqmQ  = _kqpoint_maps.mkmQ_map(iq);
+    nda::stack_array<double, 3> q_mq_cart, q_qpQ_cart;
     for (int a = 0; a < 3; ++a) {
-      q_mq_cart(a) = kpts_crys(iq_mq, 0) * recv_mf(0, a)
-                   + kpts_crys(iq_mq, 1) * recv_mf(1, a)
-                   + kpts_crys(iq_mq, 2) * recv_mf(2, a);
-      q_pQ_cart(a) = kpts_crys(iq_pQ, 0) * recv_mf(0, a)
-                   + kpts_crys(iq_pQ, 1) * recv_mf(1, a)
-                   + kpts_crys(iq_pQ, 2) * recv_mf(2, a);
+      q_mq_cart (a) = kpts_crys(iq_mq,  0) * recv_mf(0, a)
+                    + kpts_crys(iq_mq,  1) * recv_mf(1, a)
+                    + kpts_crys(iq_mq,  2) * recv_mf(2, a);
+      q_qpQ_cart(a) = kpts_crys(iq_qpQ, 0) * recv_mf(0, a)
+                    + kpts_crys(iq_qpQ, 1) * recv_mf(1, a)
+                    + kpts_crys(iq_qpQ, 2) * recv_mf(2, a);
     }
     nda::array<ComplexType, 2> dV_q;
-    compute_delta_V_for_q(iq, iq_mq, iq_pQ, iq_mqmQ,
+    compute_delta_V_for_q(iq, iq_mq, iq_qpQ, iq_mqmQ,
                           Xi_uG_all, DeltaXi_uG_all,
-                          q_mq_cart, q_pQ_cart, dV_q);
+                          q_mq_cart, q_qpQ_cart, dV_q);
     out(iq, nda::ellipsis{}) = dV_q;
   }
 

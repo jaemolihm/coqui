@@ -246,6 +246,9 @@ nda::array<ComplexType, 4> compute_delta_X_adj(
     }
   }
 
+  // JML FIXME: Merge Deltapsi reading with lr_thc_new's Step 1. Also, apply phase inside read_Deltapsi_k and maybe also read_wfc_k.
+  // JML FIXME: Here DeltaX(ik) contains [δ^Q]† ψ_{m, kpts(ik)+Q}, while in lr_thc_new, I use the convention Deltapsi(ik) is [δ^Q]† ψ_{m, kpts(ik)}. Unify.
+
   sDeltaX_skPm.all_reduce();
 
   nda::array<ComplexType, 4> out;
