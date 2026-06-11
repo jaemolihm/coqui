@@ -328,10 +328,10 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   utils::check(bsize[1] == 1,
                "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
 
-  app_log(2, "  Evaluation of the LR screened interaction:");
-  app_log(2, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
+  app_log(3, "  Evaluation of the LR screened interaction:");
+  app_log(3, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
           pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
-  app_log(2, "    - q_pert is Γ: {}", _is_q_gamma ? "yes" : "no");
+  app_log(3, "    - q_pert is Γ: {}", _is_q_gamma ? "yes" : "no");
 
   // Intermediate buffer for matrix multiplication. Same distribution as ΔΠ.
   using local_Array_t = std::decay_t<Array_4D_t>;

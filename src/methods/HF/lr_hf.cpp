@@ -94,11 +94,11 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
                      const nda::array<ComplexType, 4>* Dm_skij_unpert) {
   _Timer.start("LR_HF");
-  app_log(2, "Evaluating LR Fock matrix (ΔF from ΔDm):");
-  app_log(2, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
-  app_log(2, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
-  app_log(2, "  - DeltaX correction: {}", ibc ? "yes" : "no");
-  app_log(2, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
+  app_log(3, "Evaluating LR Fock matrix (ΔF from ΔDm):");
+  app_log(3, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
+  app_log(3, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
+  app_log(3, "  - DeltaX correction: {}", ibc ? "yes" : "no");
+  app_log(3, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
 
   // JML FIXME: Why two ways of passing Dm? We should remove one
   // If DeltaV is provided, the unperturbed Dm is required to contract against it.
@@ -170,8 +170,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   nda::matrix<ComplexType> buffer;
   _Timer.stop("ALLOC");
 
-  app_log(2, "  LR-HF J/K evaluation:");
-  app_log(2, "    - processor grid for ΔDm:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
+  app_log(3, "  LR-HF J/K evaluation:");
+  app_log(3, "    - processor grid for ΔDm:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
 
   _Timer.start("ALLOC");
   // ΔDm_skPQ is needed at all k-points in 1st-BZ
@@ -589,7 +589,7 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
                                 const nda::MemoryArrayOfRank<4> auto& DeltaDm_skij,
                                 const nda::MemoryArrayOfRank<4> auto& S_skij,
                                 double madelung) {
-  app_log(2, "  LR finite-size correction (Madelung = {:.6f})", madelung);
+  app_log(3, "  LR finite-size correction (Madelung = {:.6f})", madelung);
 
   decltype(nda::range::all) all;
   long ns = DeltaDm_skij.extent(0);

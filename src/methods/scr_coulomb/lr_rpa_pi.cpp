@@ -199,9 +199,9 @@ namespace methods {
       // τ-dist: distribute over τ and PQ
       auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
 
-      app_log(2, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
-      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
-      app_log(2, "    processor grid for Pi: (t, q, P, Q) = ({}, {}, {}, {})",
+      app_log(3, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
+      app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(3, "    processor grid for Pi: (t, q, P, Q) = ({}, {}, {}, {})",
                  tau_pgrid[0], tau_pgrid[1], tau_pgrid[2], tau_pgrid[3]);
 
       _Timer.start("PI_LR_ALLOC");
@@ -383,7 +383,7 @@ namespace methods {
 
       _Timer.stop("EVALUATE_LR_PI");
 
-      app_log(2, "  LR polarization done.\n");
+      app_log(3, "  LR polarization done.\n");
       print_timers(3);
 
       return dDeltaPi_tqPQ;

@@ -92,14 +92,14 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(2, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space)");
-      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(3, "\n  LR-GW self-energy (fused): ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (R-space)");
+      app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ,
                          ibc, &dG_tsRPQ, &dG_mtau_tsRPQ);
 
-      app_log(2, "  LR-GW self-energy (fused) done.\n");
+      app_log(3, "  LR-GW self-energy (fused) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3
     }
 
@@ -116,14 +116,14 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(2, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space)");
-      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(3, "\n  LR-GW self-energy (term 1): ΔΣ = -ΔG ⊙ W_c (R-space)");
+      app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr,
                          ibc);
 
-      app_log(2, "  LR-GW self-energy (term 1) done.\n");
+      app_log(3, "  LR-GW self-energy (term 1) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3
     }
 
@@ -141,14 +141,14 @@ namespace methods {
 
       _init_kpq_map(thc);
 
-      app_log(2, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
-      app_log(2, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
+      app_log(3, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
+      app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_qtPQ,
                          nullptr, &dG_tsRPQ, &dG_mtau_tsRPQ);
 
-      app_log(2, "  LR-GW self-energy (term 2) done.\n");
+      app_log(3, "  LR-GW self-energy (term 2) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3
     }
 
@@ -164,7 +164,7 @@ namespace methods {
         thc_reader_t& thc,
         const nda::array<ComplexType, 1>& eps_inv_head) {
       _init_kpq_map(thc);
-      app_log(2, "  LR div correction (term 1, ΔG): S(k+q) · ΔG · S(k)");
+      app_log(3, "  LR div correction (term 1, ΔG): S(k+q) · ΔG · S(k)");
       _Timer.start("SIGMA_DIV_CORR");
       _sigma_div_correction(sDeltaSigma_tskij, DeltaG_tskij, S_skij, thc, eps_inv_head);
       _Timer.stop("SIGMA_DIV_CORR");
@@ -184,7 +184,7 @@ namespace methods {
       utils::check(utils::is_q_gamma(_q_pert),
                    "apply_div_correction_G: term 2 is only valid at q_pert=0, "
                    "but q_pert = ({}, {}, {})", _q_pert(0), _q_pert(1), _q_pert(2));
-      app_log(2, "  LR div correction (term 2, G): S(k) · G · S(k) [q_pert=0]");
+      app_log(3, "  LR div correction (term 2, G): S(k) · G · S(k) [q_pert=0]");
       _Timer.start("SIGMA_DIV_CORR");
       _gw.Sigma_div_correction(sDeltaSigma_tskij, G_tskij, S_skij, thc, delta_eps_inv_head);
       _Timer.stop("SIGMA_DIV_CORR");
@@ -258,7 +258,7 @@ namespace methods {
         _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
         if (do_term2)
           _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
-        app_log(2, "    Sigma k<->R transform: FFT (k), {} (q)",
+        app_log(3, "    Sigma k<->R transform: FFT (k), {} (q)",
                 do_term2 ? "FFT" : "n/a");
       }
       _Timer.stop("SIGMA_FT_COEFF");
@@ -344,7 +344,7 @@ namespace methods {
                      "lr_gw: term1 t_origin={} != term2 t_origin={}", t_origin, dDeltaW_qtPQ->origin()[1]);
       }
 
-      app_log(2, "    nt_loc={}, nkpts={}, t_origin={}, NP_loc={}, NQ_loc={}",
+      app_log(3, "    nt_loc={}, nkpts={}, t_origin={}, NP_loc={}, NQ_loc={}",
               nt_loc, nkpts, t_origin, NP_loc, NQ_loc);
 
       // The G^R cache (it,s,R,P,Q) must share this call's τ-dist (hard check).
@@ -549,10 +549,10 @@ namespace methods {
         thc_reader_t& thc,
         const nda::array<ComplexType, 1>& eps_inv_head) {
       auto div_treatment = _gw.div_treatmemnt();
-      app_log(2, "  LR divergence correction: {}", div_enum_to_string(div_treatment));
+      app_log(3, "  LR divergence correction: {}", div_enum_to_string(div_treatment));
 
       if (thc.MF()->nqpts_ibz() == 1 and div_treatment != ignore_g0) {
-        app_log(2, "    nqpts_ibz == 1, taking div_treatment = ignore_g0");
+        app_log(3, "    nqpts_ibz == 1, taking div_treatment = ignore_g0");
         div_treatment = ignore_g0;
       }
 
@@ -561,7 +561,7 @@ namespace methods {
       } else if (div_treatment == gygi or div_treatment == gygi_extrplt or div_treatment == gygi_extrplt_2d) {
         auto MF = thc.MF();
         auto mpi = thc.mpi();
-        app_log(2, "    - madelung = {}", MF->madelung());
+        app_log(3, "    - madelung = {}", MF->madelung());
         using math::shm::make_shared_array;
         auto [nts, ns, nkpts, nbnd, nbnd2] = sDeltaSigma_tskij.shape();
         auto nt_half = (nts % 2 == 0) ? nts / 2 : nts / 2 + 1;
@@ -601,7 +601,7 @@ namespace methods {
       } else {
         utils::check(false, "Unsupported divergence treatment: {}", div_enum_to_string(div_treatment));
       }
-      app_log(2, "");
+      app_log(3, "");
     }
 
   } // solvers

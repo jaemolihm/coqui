@@ -87,7 +87,7 @@ double lr_dyson::solve_lr_dyson(
                  "solve_lr_dyson: fix_density=true but dN/dμ not cached. "
                  "Call compute_dN_dmu() before the SCF loop.");
 
-    app_log(2, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
+    app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
 
     // First pass: solve with Δμ=0
     solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
@@ -111,8 +111,8 @@ double lr_dyson::solve_lr_dyson(
       // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
       // (The LR Dyson equation is linear in Δμ, so this is exact)
       Delta_mu = -DeltaN_0 / dN_dmu;
-      app_log(2, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
-      app_log(2, "  Computed Δμ = {:.6e}", Delta_mu);
+      app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
+      app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
 
       // Second pass: solve with computed Δμ
       solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
@@ -125,12 +125,12 @@ double lr_dyson::solve_lr_dyson(
       _Timer.start("LR_DYSON_NELEC");
       double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
       _Timer.stop("LR_DYSON_NELEC");
-      app_log(2, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
+      app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
     }
   } else {
     // Standard mode: use provided Delta_mu
     if (fix_density && !_is_q_gamma) {
-      app_log(2, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
+      app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
     }
     // For q≠0, Δμ is meaningless — force to zero to prevent silent pollution
     if (!_is_q_gamma) Delta_mu = 0.0;
@@ -164,13 +164,13 @@ void lr_dyson::solve_lr_dyson_impl(
                "solve_lr_dyson_impl: Delta_mu = {:.6e} but q≠0. "
                "Delta_mu must be zero for q≠0 perturbations.", Delta_mu);
 
-  app_log(2, "Solving LR Dyson equation:");
+  app_log(3, "Solving LR Dyson equation:");
   if (sDeltaSigma_tskij) {
-    app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
+    app_log(3, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
   } else {
-    app_log(2, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) - Δμ·S(k+q,k)] · G(k,iω)");
+    app_log(3, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) - Δμ·S(k+q,k)] · G(k,iω)");
   }
-  app_log(2, "  Δμ = {:.6e}", Delta_mu);
+  app_log(3, "  Δμ = {:.6e}", Delta_mu);
 
   // Cached G(iω) in shared memory — all (iω, k) points accessible to all ranks
   auto G_w = _cached_G_wskij->local();
@@ -375,7 +375,7 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
     app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN) = {:.2e}", DeltaN.imag());
   }
 
-  app_log(2, "compute_lr_Nelec: ΔN = {:.6e}", DeltaN.real());
+  app_log(3, "compute_lr_Nelec: ΔN = {:.6e}", DeltaN.real());
   return DeltaN.real();
 }
 

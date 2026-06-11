@@ -120,7 +120,7 @@ public:
     if (iter <= static_cast<int>(_warmup_iter) + 1 || _x_vectors.size() < 2) {
       store_vectors(DeltaF_new, res_F, DeltaSigma_new, res_Sigma, has_sigma);
 
-      app_log(2, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
+      app_log(3, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
               iter, _mixing, _x_vectors.size());
 
       if (_mixing < 1.0) {
@@ -167,7 +167,7 @@ public:
       result_Sigma = make_linear_comb_5d(C);
     }
 
-    app_log(2, "    DIIS: extrapolation with subspace size {}", _x_vectors.size());
+    app_log(3, "    DIIS: extrapolation with subspace size {}", _x_vectors.size());
 
     return {std::move(result_F), std::move(result_Sigma)};
   }
@@ -308,7 +308,7 @@ private:
 
     const double eig_thresh = 1E-12;
 
-    app_log(2, "    DIIS: B condition number = {:.2e}", cond);
+    app_log(3, "    DIIS: B condition number = {:.2e}", cond);
 
     for (long i = 0; i < eig.size(); ++i) {
       if (eig(i) * cond > eig_thresh) {
