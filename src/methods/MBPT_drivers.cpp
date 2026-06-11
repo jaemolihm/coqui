@@ -59,6 +59,7 @@
 #include "numerics/shared_array/shared_array_io.hpp"
 #include "utilities/lr_utils.hpp"
 #include "utilities/proc_meminfo.hpp"
+#include "utilities/Timer.hpp"
 #include "MBPT_drivers.h"
 
 namespace mpi3 = boost::mpi3;
@@ -1171,6 +1172,13 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     } else {
       utils::check(grp.has_subgroup("iter" + std::to_string(input_iter)),
                    "run_lr_calc: Checkpoint {}/{}/ does not contain 'iter{}'. "
+  utils::TimerManager lr_init_timer;
+  for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
+                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W"}) {
+    lr_init_timer.add(v);
+  }
+  lr_init_timer.start("LR_INIT");
+
                    "Check input_iter parameter.", input_file, input_grp, input_iter);
     }
   }
@@ -1181,9 +1189,11 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // Create simple_dyson
   utils::check(h0_source == "compute" || h0_source == "checkpoint",
                "run_lr_calc: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
+  lr_init_timer.start("LR_INIT_DYSON");
   simple_dyson dyson = (h0_source == "checkpoint")
       ? simple_dyson(mf.get(), &ft, prefix)
       : simple_dyson(mf.get(), &ft);
+  lr_init_timer.stop("LR_INIT_DYSON");
 
   utils::memlog("run_lr_calc: after simple_dyson ctor");
 
@@ -1201,16 +1211,20 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   // Read F and Sigma from checkpoint
   double mu = 0.0;
+  lr_init_timer.start("LR_INIT_READ_SCF");
   chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
                   prefix, input_grp, input_iter);
   mpi->comm.barrier();
+  lr_init_timer.stop("LR_INIT_READ_SCF");
 
   // Compute G from F and Sigma via Dyson equation
   app_log(2, "Computing unperturbed Green's function from checkpoint...");
   app_log(2, "  h0_source = {}", h0_source);
   app_log(2, "  mu = {:.8f}", mu);
+  lr_init_timer.start("LR_INIT_UPDATE_G");
   update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
   mpi->comm.barrier();
+  lr_init_timer.stop("LR_INIT_UPDATE_G");
 
   // Validate DeltaH0 shape on root before broadcasting
   if (mpi->comm.root()) {
@@ -1250,9 +1264,11 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
   if (include_gw_sigma) {
+    lr_init_timer.start("LR_INIT_LOAD_W");
     auto [dW, eps_inv] = load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f());
     opt_dW.emplace(std::move(dW));
     opt_eps_inv.emplace(std::move(eps_inv));
+    lr_init_timer.stop("LR_INIT_LOAD_W");
   }
 
   // Bcast presence flag for optional inputs so non-root ranks know whether
@@ -1285,6 +1301,20 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     opt_sDeltaV_qPQ.emplace(
         math::shm::make_shared_from_root_input<ComplexType, 3>(*mpi, DeltaV_qPQ_root));
   }
+
+  lr_init_timer.stop("LR_INIT");
+  app_log(2, "\n  LR_INIT timers");
+  app_log(2, "  --------------");
+  app_log(2, "    LR Init:                    {0:8.3f} sec  {1:4d} calls",
+          lr_init_timer.elapsed("LR_INIT"), lr_init_timer.number_of_calls("LR_INIT"));
+  app_log(2, "      - simple_dyson ctor:      {0:8.3f} sec  {1:4d} calls",
+          lr_init_timer.elapsed("LR_INIT_DYSON"), lr_init_timer.number_of_calls("LR_INIT_DYSON"));
+  app_log(2, "      - read_scf (F + Σ):       {0:8.3f} sec  {1:4d} calls",
+          lr_init_timer.elapsed("LR_INIT_READ_SCF"), lr_init_timer.number_of_calls("LR_INIT_READ_SCF"));
+  app_log(2, "      - update_G (G unpert.):   {0:8.3f} sec  {1:4d} calls",
+          lr_init_timer.elapsed("LR_INIT_UPDATE_G"), lr_init_timer.number_of_calls("LR_INIT_UPDATE_G"));
+  app_log(2, "      - load W + eps_inv_head:  {0:8.3f} sec  {1:4d} calls\n",
+          lr_init_timer.elapsed("LR_INIT_LOAD_W"), lr_init_timer.number_of_calls("LR_INIT_LOAD_W"));
 
   utils::memlog("run_lr_calc: before driver.run_lr");
 
