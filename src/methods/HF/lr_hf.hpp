@@ -111,19 +111,27 @@ public:
                 const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
 
-  inline void print_timers() {
-    app_log(2, "\n  LR_HF timers");
-    app_log(2, "  ------------");
-    app_log(2, "    LR Fock eval:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
-    app_log(2, "      - Misc (init/cleanup):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("MISC"), _Timer.number_of_calls("MISC"));
-    app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("ALLOC"), _Timer.number_of_calls("ALLOC"));
-    app_log(2, "      - Z fetch (U(q)):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("Z_FETCH"), _Timer.number_of_calls("Z_FETCH"));
-    app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("PRIM_TO_AUX"), _Timer.number_of_calls("PRIM_TO_AUX"));
-    app_log(2, "      - U(q)->U(R) FT:              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("UQ_TO_UR"), _Timer.number_of_calls("UQ_TO_UR"));
-    app_log(2, "      - Coulomb (J):                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("COULOMB"), _Timer.number_of_calls("COULOMB"));
-    app_log(2, "      - Exchange (K):               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EXCHANGE"), _Timer.number_of_calls("EXCHANGE"));
-    app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
-    app_log(2, "      - Madelung correction:        {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("MADELUNG"), _Timer.number_of_calls("MADELUNG"));
+  /// Print the LR HF timer block (header + total + subclocks) at log level `level`.
+  inline void print_timers(int level = 2) {
+    app_log(level, "\n  LR_HF timers");
+    app_log(level, "  ------------");
+    app_log(level, "    LR Fock eval:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
+    print_subclocks(level, "    ");
+    app_log(level, "");
+  }
+
+  /// Print only the component clocks, each line prefixed by `indent`.
+  /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
+  inline void print_subclocks(int level, const std::string& indent) {
+    app_log(level, "{0}  - Misc (init/cleanup):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("MISC"), _Timer.number_of_calls("MISC"));
+    app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("ALLOC"), _Timer.number_of_calls("ALLOC"));
+    app_log(level, "{0}  - Z fetch (U(q)):             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("Z_FETCH"), _Timer.number_of_calls("Z_FETCH"));
+    app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("PRIM_TO_AUX"), _Timer.number_of_calls("PRIM_TO_AUX"));
+    app_log(level, "{0}  - U(q)->U(R) FT:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("UQ_TO_UR"), _Timer.number_of_calls("UQ_TO_UR"));
+    app_log(level, "{0}  - Coulomb (J):                {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("COULOMB"), _Timer.number_of_calls("COULOMB"));
+    app_log(level, "{0}  - Exchange (K):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EXCHANGE"), _Timer.number_of_calls("EXCHANGE"));
+    app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
+    app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("MADELUNG"), _Timer.number_of_calls("MADELUNG"));
   }
 
   // Accessors

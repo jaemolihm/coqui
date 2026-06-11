@@ -1172,16 +1172,16 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     } else {
       utils::check(grp.has_subgroup("iter" + std::to_string(input_iter)),
                    "run_lr_calc: Checkpoint {}/{}/ does not contain 'iter{}'. "
+                   "Check input_iter parameter.", input_file, input_grp, input_iter);
+    }
+  }
+
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
                   "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W"}) {
     lr_init_timer.add(v);
   }
   lr_init_timer.start("LR_INIT");
-
-                   "Check input_iter parameter.", input_file, input_grp, input_iter);
-    }
-  }
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -1574,9 +1574,13 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
     });
   }
 
+  // Precompute G^R(τ) and G^R(β−τ) used in evaluate_lr_Pi.
+  auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+
   auto dDeltaPi = lr.evaluate_lr_Pi(sG_tskij.local(),
                                      sDeltaG_tskij.local(),
                                      thc,
+                                     dG_tsRPQ, dG_mtau_tsRPQ,
                                      opt_ibc ? &(*opt_ibc) : nullptr);
   mpi->comm.barrier();
 
@@ -1911,7 +1915,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc);
+  // Precompute G^R(τ) and G^R(β−τ) used in evaluate_sigma_DeltaW.
+  auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc,
+                           dG_tsRPQ, dG_mtau_tsRPQ);
 
   // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
   if (div_corr && utils::is_q_gamma(q_pert)) {

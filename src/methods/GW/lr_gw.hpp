@@ -22,8 +22,11 @@
 #ifndef COQUI_LR_GW_HPP
 #define COQUI_LR_GW_HPP
 
+#include <optional>
+
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/fft/fft_kR.hpp"
 #include "numerics/shared_array/nda.hpp"
 
 #include "utilities/mpi_context.h"
@@ -45,6 +48,7 @@ namespace methods {
 
     using sArrv_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
     using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+    using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
 
     /**
      * Linear response GW self-energy: ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW.
@@ -99,6 +103,11 @@ namespace methods {
        *   Axis order: (q, t, P, Q).
        *   Distribution: pgrid = (1, tpools, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
+       * @param dG_tsRPQ          - [INPUT] cached G^R(τ) in aux basis from
+       *   lr_precompute_G_R_pair (it, s, R, P, Q). Term 2 reads G^R from the
+       *   cache and skips the per-τ G Primary→Aux + k→R FT.
+       * @param dG_mtau_tsRPQ     - [INPUT] cached G^R(β−τ), same layout
+       * @param ibc               - [INPUT] optional DeltaX IBC correction data
        */
       void evaluate_sigma(
           sArrv_5D_t& sDeltaSigma_tskij,
@@ -107,6 +116,8 @@ namespace methods {
           const nda::array_view<ComplexType, 5>& G_tskij,
           dArr_4D_t& dDeltaW_qtPQ,
           thc_reader_t& thc,
+          const dArr_5D_t& dG_tsRPQ,
+          const dArr_5D_t& dG_mtau_tsRPQ,
           const lr_ibc_DeltaX* ibc = nullptr);
 
       /**
@@ -135,12 +146,16 @@ namespace methods {
        *   Axis order: (q, t, P, Q).
        *   Distribution: pgrid = (1, tpools, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
+       * @param dG_tsRPQ          - [INPUT] cached G^R(τ) in aux basis (it,s,R,P,Q)
+       * @param dG_mtau_tsRPQ     - [INPUT] cached G^R(β−τ), same layout
        */
       void evaluate_sigma_DeltaW(
           sArrv_5D_t& sDeltaSigma_tskij,
           const nda::array_view<ComplexType, 5>& G_tskij,
           dArr_4D_t& dDeltaW_qtPQ,
-          thc_reader_t& thc);
+          thc_reader_t& thc,
+          const dArr_5D_t& dG_tsRPQ,
+          const dArr_5D_t& dG_mtau_tsRPQ);
 
       /**
        * Divergence correction term 1 (all q_pert):
@@ -167,18 +182,32 @@ namespace methods {
           thc_reader_t& thc,
           const nda::array<ComplexType, 1>& delta_eps_inv_head);
 
-    inline void print_timers() {
-      app_log(2, "\n  LR_GW timers");
-      app_log(2, "  -------------");
-      if (_Timer.has("EVALUATE_SIGMA_R")) {
-        app_log(2, "    LR Sigma (R-space):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
-        app_log(2, "      - Alloc:                      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
-        app_log(2, "      - Primary->Aux:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
-        app_log(2, "      - FT (k<->R):                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
-        app_log(2, "      - Hadamard product:           {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
-        app_log(2, "      - Aux->Primary:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
-      }
-      app_log(2, "");
+    /// Print the LR Sigma timer block (header + subclocks) at log level `level`.
+    inline void print_timers(int level = 2) {
+      app_log(level, "\n  LR_GW timers");
+      app_log(level, "  -------------");
+      print_subclocks(level, "  ");
+      app_log(level, "");
+    }
+
+    /// Print only the component clocks, each line prefixed by `indent`.
+    /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
+    /// The R-space total leads; transpose/div-correction siblings live outside
+    /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
+    /// to the driver's "LR GW Sigma (total)".
+    inline void print_subclocks(int level, const std::string& indent) {
+      app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
+      app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
+      app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_COEFF"), _Timer.number_of_calls("SIGMA_FT_COEFF"));
+      app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_W_COPY"), _Timer.number_of_calls("SIGMA_W_COPY"));
+      app_log(level, "{0}  - Zero Sigma buffer:          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ZERO_BUF"), _Timer.number_of_calls("SIGMA_ZERO_BUF"));
+      app_log(level, "{0}  - Pre-loop fence (sync):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRE_FENCE"), _Timer.number_of_calls("SIGMA_PRE_FENCE"));
+      app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
+      app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
+      app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
+      app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
+      app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FINAL_REDUCE"), _Timer.number_of_calls("SIGMA_FINAL_REDUCE"));
+      app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_DIV_CORR"), _Timer.number_of_calls("SIGMA_DIV_CORR"));
     }
 
     private:
@@ -188,8 +217,41 @@ namespace methods {
       nda::array<int, 1> _kpq_map;   // k → k+q_pert mapping (full BZ); identity for q_pert=0
       utils::TimerManager _Timer;
 
+      // Cached per-run setup for _eval_sigma_Rspace, built lazily on the first
+      // call by _setup_workspace and reused across SCF iterations (comm split +
+      // node split inside make_mpi_context are collective; shm windows and
+      // distributed buffers are expensive to recreate). The τ-dist is fixed for
+      // the solver's lifetime, so a plain _setup_done guard suffices. Member
+      // order matters: the darray buffers store a pointer to _tau_comm, and the
+      // shm arrays reference _tau_mpi — both must outlive (= be declared
+      // before) them.
+      using sArr_2D_t = math::shm::shared_array<nda::array_view<ComplexType, 2>>;
+      using sArr_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+      using dArr_loc_4D_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+      bool _setup_done = false;
+      std::optional<mpi3::communicator> _tau_comm;
+      std::optional<utils::mpi_context_t<mpi3::communicator>> _tau_mpi;
+      std::optional<dArr_loc_4D_t> _dG_skPQ, _dSigma_skPQ;
+      std::optional<sArr_4D_t> _sSigma_skij;
+      std::optional<sArr_2D_t> _sf_Rk, _sf_kR, _sf_qR;
+      // Blocked-FFT k<->R transforms; empty (→ gemm fallback with the
+      // coefficient matrices above) when the grid is not an unshifted full mesh.
+      std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
+      nda::matrix<ComplexType> _ft_buffer;
+      nda::array<ComplexType, 3> _W2_tau_RPQ;
+
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(thc_reader_t& thc);
+
+      /**
+       * Build the cached per-run workspace (tau subcommunicator, work arrays,
+       * shm windows, FT coefficients / FFT objects) on the first call; no-op
+       * once built. PQ grid/block and t_origin are read from dW_ref (term1:
+       * t,R,P,Q layout; term2: q,t,P,Q layout).
+       */
+      void _setup_workspace(thc_reader_t& thc, dArr_4D_t const& dW_ref,
+                            bool do_term1, bool do_term2,
+                            long ns, long nk_ibz, long nbnd);
 
       /**
        * R-space convolution workhorse: ΔΣ = -ΔG⊙W - G⊙ΔW.
@@ -215,7 +277,9 @@ namespace methods {
           dArr_4D_t* dW_tRPQ,
           const nda::array_view<ComplexType, 5>* G_tskij,
           dArr_4D_t* dDeltaW_qtPQ,
-          const lr_ibc_DeltaX* ibc = nullptr);
+          const lr_ibc_DeltaX* ibc = nullptr,
+          const dArr_5D_t* dG_tsRPQ = nullptr,
+          const dArr_5D_t* dG_mtau_tsRPQ = nullptr);
 
       /**
        * LR-aware divergence correction: ΔΣ^div = factor · S(k+q) · ΔG · S(k)

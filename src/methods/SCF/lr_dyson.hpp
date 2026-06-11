@@ -187,19 +187,27 @@ public:
   template<typename DeltaDm_t>
   double compute_Delta_mu(const DeltaDm_t& sDeltaDm_skij);
 
-  inline void print_timers() {
-    app_log(2, "\n  LR_DYSON timers");
-    app_log(2, "  ----------------");
-    app_log(2, "    LR Dyson eqn:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
-    app_log(2, "      - Alloc (dist arrays):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_ALLOC"), _Timer.number_of_calls("LR_DYSON_ALLOC"));
-    app_log(2, "      - ΔΣ(τ)->ΔΣ(iω):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_TAU_TO_W"), _Timer.number_of_calls("LR_DYSON_TAU_TO_W"));
-    app_log(2, "      - LR Dyson loop:              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
-    app_log(2, "      - Redistribute ΔG(iω):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
-    app_log(2, "      - ΔG(iω)->ΔG(τ):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
-    app_log(2, "      - Gather:                     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
-    app_log(2, "      - Compute ΔDm:                {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
-    app_log(2, "      - Compute ΔN:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
-    app_log(2, "      - Misc (barrier/reset):       {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
+  /// Print the LR Dyson timer block (header + total + subclocks) at log level `level`.
+  inline void print_timers(int level = 2) {
+    app_log(level, "\n  LR_DYSON timers");
+    app_log(level, "  ----------------");
+    app_log(level, "    LR Dyson eqn:                   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
+    print_subclocks(level, "    ");
+    app_log(level, "");
+  }
+
+  /// Print only the component clocks, each line prefixed by `indent`.
+  /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
+  inline void print_subclocks(int level, const std::string& indent) {
+    app_log(level, "{0}  - Alloc (dist arrays):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_ALLOC"), _Timer.number_of_calls("LR_DYSON_ALLOC"));
+    app_log(level, "{0}  - ΔΣ(τ)->ΔΣ(iω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_TAU_TO_W"), _Timer.number_of_calls("LR_DYSON_TAU_TO_W"));
+    app_log(level, "{0}  - LR Dyson loop:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
+    app_log(level, "{0}  - Redistribute ΔG(iω):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
+    app_log(level, "{0}  - ΔG(iω)->ΔG(τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
+    app_log(level, "{0}  - Gather:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
+    app_log(level, "{0}  - Compute ΔDm:                {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
+    app_log(level, "{0}  - Compute ΔN:                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
+    app_log(level, "{0}  - Misc (barrier/reset):       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
   }
 
   // Accessors

@@ -142,7 +142,7 @@ double lr_dyson::solve_lr_dyson(
   }
 
   _Timer.stop("LR_DYSON");
-  print_timers();
+  print_timers(3);  // per-step diagnostics only at verbosity >= 3
 
   return Delta_mu;
 }

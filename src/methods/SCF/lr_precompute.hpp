@@ -28,8 +28,10 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "utilities/kpoint_utils.hpp"
+#include "utilities/lr_utils.hpp"
 #include "utilities/mpi_context.h"
 #include "methods/ERI/detail/concepts.hpp"
+#include "methods/HF/thc_solver_comm.hpp"
 #include "mean_field/MF.hpp"
 
 namespace methods {
@@ -149,6 +151,110 @@ auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
   mpi->comm.barrier();
   app_log(2, "lr_precompute_W_tRPQ: done");
   return dW_tqPQ;
+}
+
+/**
+ * @brief Precompute the unperturbed G in the THC aux basis, in R-space, for
+ *        the (τ, β−τ) pair at every local first-half τ point.
+ *
+ * G is constant during the LR SCF loop, and evaluate_lr_Pi needs it. This caches
+ *   G^R_{PQ}(τ_it)        → dG_tsRPQ  (it, s, R, P, Q)
+ *   G^R_{PQ}(β − τ_it)    → dG_mtau_tsRPQ (it, s, R, P, Q)
+ * for it in the local τ range of the LR τ-dist (lr_W_q_local_dist), which is
+ * the distribution shared by Π, dW_tRPQ and ΔW in the gw_full pipeline.
+ * The pair covers all G accesses: Π term 1 uses conj(G^R(β−τ)), Π term 2 uses
+ * G^R(τ), Σ term 2 uses G^R(τ) (forward pass) and G^R(β−τ) (backward pass).
+ * (β−τ_it lives at grid index nt−1−it: the IAFT τ-grid is symmetric about β/2,
+ * so the index reflection x→−x is exactly τ→β−τ.)
+ *
+ * For nkpts == 1 no k→R FT is applied (k-space == R-space), matching the
+ * consumers' Γ-only branches.
+ *
+ * Memory: 2 · nt_loc · ns · nkpts · NP_loc · NQ_loc complex per rank
+ * (≈ 2× the local footprint of ΔΠ).
+ *
+ * @param G_tskij - [INPUT] Unperturbed G(τ), (nt_f, ns, nkpts_ibz, nbnd, nbnd)
+ * @param thc     - [INPUT] THC-ERI handler
+ * @return pair (dG_tsRPQ, dG_mtau_tsRPQ), global shape (nt_half, ns, nkpts, NP, NP),
+ *         pgrid {tpools, 1, 1, np_P, np_Q}
+ */
+template<THC_ERI THC_t>
+auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
+                            THC_t& thc) {
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using local_Array_5D_t = nda::array<ComplexType, 5>;
+  using math::nda::make_distributed_array;
+  decltype(nda::range::all) all;
+
+  auto mpi = thc.mpi();
+  auto MF = thc.MF();
+  long nt_f = G_tskij.shape(0);
+  long ns = G_tskij.shape(1);
+  long nkpts = MF->nkpts();
+  long Np = thc.Np();
+  long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
+
+  auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
+  auto [tpools, q_dummy, np_P, np_Q] = tau_pgrid;
+
+  app_log(2, "lr_precompute_G_R_pair: caching G^R(τ) / G^R(β−τ) in aux basis");
+  app_log(2, "  global: ({}, {}, {}, {}, {}) x2, pgrid: ({}, 1, 1, {}, {})",
+          nt_half, ns, nkpts, Np, Np, tpools, np_P, np_Q);
+
+  auto dG_tsRPQ = make_distributed_array<local_Array_5D_t>(
+      mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
+      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
+  auto dG_mtau_tsRPQ = make_distributed_array<local_Array_5D_t>(
+      mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
+      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
+
+  long t_origin = dG_tsRPQ.origin()[0];
+  auto [nt_loc, ns_loc, nk_loc, NP_loc, NQ_loc] = dG_tsRPQ.local_shape();
+
+  // Work buffer in the same PQ tiling, built on the t-intra subgroup
+  mpi3::communicator t_intra_comm = mpi->comm.split(t_origin, mpi->comm.rank());
+  utils::check(t_intra_comm.size() == np_P * np_Q,
+               "lr_precompute_G_R_pair: t_intra_comm.size() = {} != np_P*np_Q",
+               t_intra_comm.size());
+  auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
+      t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
+      {1, 1, tau_bsize[2], tau_bsize[3]});
+
+  // f_Rk (same transform as Π's term factors and Σ term 2)
+  math::shm::shared_array<nda::array_view<ComplexType, 2>> sf_Rk(*mpi, {nkpts, nkpts});
+  if (nkpts != 1)
+    utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+  auto f_Rk = sf_Rk.local();
+
+  nda::matrix<ComplexType> ft_out(nkpts, NP_loc * NQ_loc);
+
+  for (long it = 0; it < nt_loc; ++it) {
+    long it_g = t_origin + it;
+    for (int pass = 0; pass < 2; ++pass) {
+      long idx = (pass == 0) ? it_g : nt_f - 1 - it_g;
+      auto& target = (pass == 0) ? dG_tsRPQ : dG_mtau_tsRPQ;
+
+      solvers::thc_solver_comm::primary_to_aux(0, 0, G_tskij(idx, nda::ellipsis{}),
+                                               dG_skPQ, thc, MF->kp_to_ibz(), MF->kp_trev());
+
+      auto G_skPQ_loc = dG_skPQ.local();
+      if (nkpts != 1) {
+        for (long is = 0; is < ns; ++is) {
+          auto G_2D = nda::reshape(G_skPQ_loc(is, nda::ellipsis{}),
+                                   std::array<long, 2>{nkpts, NP_loc * NQ_loc});
+          nda::blas::gemm(f_Rk, G_2D, ft_out);
+          target.local()(it, is, all, all, all) =
+              nda::reshape(ft_out, std::array<long, 3>{nkpts, NP_loc, NQ_loc});
+        }
+      } else {
+        target.local()(it, nda::ellipsis{}) = G_skPQ_loc;
+      }
+    }
+  }
+  mpi->comm.barrier();
+  app_log(2, "lr_precompute_G_R_pair: done");
+
+  return std::make_pair(std::move(dG_tsRPQ), std::move(dG_mtau_tsRPQ));
 }
 
 } // namespace methods

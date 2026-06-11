@@ -120,7 +120,7 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
   }
 
   _Timer.stop("LR_HF");
-  print_timers();
+  print_timers(3);  // per-step diagnostics only at verbosity >= 3
 }
 
 

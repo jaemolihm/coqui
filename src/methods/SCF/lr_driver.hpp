@@ -125,7 +125,16 @@ public:
       const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr);
 
   void print_setup_timers();
-  void print_timers();
+
+  /**
+   * Final hierarchical timer report, printed once after the LR SCF loop.
+   * Each "LR_* (total)" line is followed by the corresponding solver's
+   * subclocks (indented). The Pi/W/Sigma solvers live in run_lr's scope, so
+   * they are passed in as pointers (null = solver not used, subclocks skipped).
+   */
+  void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
+                    solvers::lr_scr_coulomb_t* scr_solver = nullptr,
+                    solvers::lr_gw* gw_solver = nullptr);
 
   // Accessors
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }
