@@ -26,7 +26,7 @@ namespace solvers {
 
   lr_scr_coulomb_t::lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft,
                                      nda::array<double, 1> q_pert)
-    : _ft(ft), _Timer(), _q_pert(std::move(q_pert)) {
+    : _ft(ft), _Timer(), _scr(ft, "rpa"), _q_pert(std::move(q_pert)) {
 
     utils::check(_q_pert.size() == 3,
                  "lr_scr_coulomb_t: q_pert must have size 3, got {}",
@@ -38,6 +38,9 @@ namespace solvers {
                     "LR_W_COMPUTE_W_FULL", "LR_W_COMM_QPQ"}) {
       _Timer.add(v);
     }
+    // Register _scr's redistribute clock (accumulated across both FT directions)
+    // so print_subclocks can read it as zero even if no FT has run yet.
+    _scr.timer().add("FT_REDISTRIBUTE");
   }
 
   // Note: lr_dyson_W_in_place and solve_lr_dyson_W are templates with

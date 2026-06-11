@@ -20,6 +20,7 @@
 
 
 #include <algorithm>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -46,11 +47,40 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   long nproc = thc.mpi()->comm.size();
   long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
 
-  // LR ω-side distribution: {nwpools, nqpools, np_P, np_Q}
-  auto [w_pgrid, w_bsize] = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
+  // Distribution for W_full(iω).
+  // ft_buffer_dist keeps w local, distributes over q, then P and Q.
+  // lr_W_proc_grid distributes over w and q, then P and Q.
+  // If FT buffer has P and Q local, use it for W_full to skip the redundant redistributions.
+  // If not, use a separate lr_W_proc_grid distribution to make P and Q as local as possible.
+  auto [b_pgrid, b_bsize] =
+      scr_coulomb_t::ft_buffer_dist(nproc, {nw_half, nqpts, NP, NQ});
+  std::array<long, 4> w_pgrid, w_bsize;
+  if (b_pgrid[2] == 1 && b_pgrid[3] == 1) {
+    w_pgrid = b_pgrid;
+    w_bsize = b_bsize;
+  } else {
+    std::tie(w_pgrid, w_bsize) = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
+  }
 
-  // FT τ → ω directly into the LR ω-side distribution
+  // Allocate the LR-owned FT staging buffers once (in the FT-buffer dist), then
+  // thread them into every per-iteration _scr.tau_to_w / w_to_tau so they are
+  // reused instead of reallocated. τ-shaped and ω-shaped; ft_buffer_dist depends
+  // only on (q, P, Q), so both share b_pgrid / b_bsize.
+  _ft_buffer_t = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+      thc.mpi()->comm, b_pgrid, {nt_half, nqpts, NP, NQ}, b_bsize);
+  _ft_buffer_w = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+      thc.mpi()->comm, b_pgrid, {nw_half, nqpts, NP, NQ}, b_bsize);
+
+  // FT τ → ω directly into the chosen distribution.
+  // Deliberately uses a local scr_coulomb_t (not _scr): this is one-time setup,
+  // and keeping it separate leaves _scr's FT component clocks attributable to
+  // the per-iteration solve_lr_dyson_W calls only.
   scr_coulomb_t scr(_ft, "rpa");
+  // Rank-uniform leak-check gate (see solve_lr_dyson_W): __app_output_level__
+  // is a sentinel on non-root ranks and check_leakage is collective.
+  int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
+  thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
+  scr.set_check_ft_leakage(chk_leak != 0);
   auto dW_c_wqPQ = scr.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, true);
 
   // Add bare interaction Z(q) at each (w, q) slice. PQ may be split across the
@@ -94,6 +124,8 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   }
 
   app_log(2, "  compute_W_full_omega:");
+  app_log(2, "    - FT-buffer pgrid: ({}, {}, {}, {})",
+          b_pgrid[0], b_pgrid[1], b_pgrid[2], b_pgrid[3]);
   app_log(2, "    - ω-side pgrid: ({}, {}, {}, {})",
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
@@ -339,21 +371,35 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   _Timer.start("SOLVE_LR_DYSON_W");
   _init_kpq_map(thc);
 
+  // Leakage diagnostics inside the FT are verbosity-gated on the LR path.
+  // __app_output_level__ holds a sentinel (-10000) on non-root ranks, and
+  // check_leakage is collective (internal barrier + max-reduce), so broadcast
+  // root's decision to keep the gate rank-uniform.
+  int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
+  thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
+  _scr.set_check_ft_leakage(chk_leak != 0);
+
   long nproc = thc.mpi()->comm.size();
   long NP = thc.Np();
-  auto [nt_half, nqpts, NP_g, NQ_g] = dDeltaPi_tqPQ.global_shape();
-  long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
+  long nt_half = dDeltaPi_tqPQ.global_shape()[0];
 
   // --- Validate input: τ-dist ---
   utils::check_W_tau_dist(dDeltaPi_tqPQ, "solve_lr_dyson_W(DeltaPi)");
 
-  // LR ω-side distribution (matches dW_full_wqPQ)
-  auto [w_pgrid, w_bsize] = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
+  // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
+  // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
+  // so just adopt W_full's distribution. compute_W_full_omega already chose it
+  // (fused FT-buffer layout when nproc ≤ nq, else the LR ω-side grid); tau_to_w
+  // / w_to_tau then fuse away the matching redistribute automatically whenever
+  // that layout is the FT-buffer one.
+  auto w_pgrid = dW_full_wqPQ.grid();
+  auto w_bsize = dW_full_wqPQ.block_size();
 
-  // FT ΔΠ: τ → ω, output in LR ω-side distribution
-  scr_coulomb_t scr(_ft, "rpa");
+  // FT ΔΠ: τ → ω, output in LR ω-side distribution. Reuse the LR-owned staging
+  // buffers (built in compute_W_full_omega) across iterations.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
+  auto dDeltaPi_wqPQ = _scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true,
+                                     &_ft_buffer_t, &_ft_buffer_w);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
@@ -372,13 +418,14 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = scr.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true);
+  dDeltaPi_tqPQ = _scr.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true,
+                                &_ft_buffer_t, &_ft_buffer_w);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");
 
-  // --- Print timers ---
-  print_timers();
+  // --- Per-step timer print (verbosity >= 3 only) ---
+  print_timers(3);
 }
 
 } // solvers

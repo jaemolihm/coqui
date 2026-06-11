@@ -127,23 +127,42 @@ namespace solvers {
 
     bool is_q_gamma() const { return _is_q_gamma; }
 
-  inline void print_timers() {
-    app_log(2, "\n  LR_SCR_COULOMB timers");
-    app_log(2, "  ----------------------");
-    app_log(2, "    Solve LR W Dyson:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SOLVE_LR_DYSON_W"), _Timer.number_of_calls("SOLVE_LR_DYSON_W"));
-    if (_Timer.has("LR_W_FT_TAU_TO_W") && _Timer.elapsed("LR_W_FT_TAU_TO_W") > 0) {
-      app_log(2, "      - LR W FT (τ→ω):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
-    }
-    app_log(2, "      - LR W Dyson (iω):            {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
-    if (_Timer.has("LR_W_FT_W_TO_TAU") && _Timer.elapsed("LR_W_FT_W_TO_TAU") > 0) {
-      app_log(2, "      - LR W FT (ω→τ):              {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
-    }
-    app_log(2, "");
+  /**
+   * Print the LR W Dyson timer block (header + total + subclocks) at log
+   * level `level` (2: standard, 3: per-step diagnostics).
+   */
+  inline void print_timers(int level = 2) {
+    app_log(level, "\n  LR_SCR_COULOMB timers");
+    app_log(level, "  ----------------------");
+    app_log(level, "    Solve LR W Dyson:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("SOLVE_LR_DYSON_W"), _Timer.number_of_calls("SOLVE_LR_DYSON_W"));
+    print_subclocks(level, "    ");
+    app_log(level, "");
+  }
+
+  /**
+   * Print only the component clocks, each line prefixed by `indent`.
+   * Embedded (with deeper indent) in lr_driver's final hierarchical report.
+   * The flat FT component clocks (redistribute / gemm / alloc / leak check)
+   * come from the member scr_coulomb_t's internal timers; they only cover
+   * solve_lr_dyson_W calls (compute_W_full_omega uses a separate local
+   * scr_coulomb_t so the one-time setup FT does not pollute them).
+   */
+  inline void print_subclocks(int level, const std::string& indent) {
+    auto& ftT = _scr.timer();
+    app_log(level, "{0}  - LR W FT (τ→ω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
+    app_log(level, "{0}  - LR W Dyson (iω):            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
+    app_log(level, "{0}  - LR W (q+Q)-operand comm:    {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_COMM_QPQ"), _Timer.number_of_calls("LR_W_COMM_QPQ"));
+    app_log(level, "{0}  - LR W FT (ω→τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
+    app_log(level, "{0}    - redistribute (τ→ω, ω→τ): {1:8.3f} sec  {2:4d} calls", indent, ftT.elapsed("FT_REDISTRIBUTE"), ftT.number_of_calls("FT_REDISTRIBUTE"));
   }
 
   private:
     const imag_axes_ft::IAFT* _ft;
     utils::TimerManager _Timer;
+    // Persistent FT engine: keeps the internal redistribute/gemm/leak-check
+    // timers of tau_to_w / w_to_tau accumulating across solve_lr_dyson_W calls
+    // (a per-call local instance would lose them before printing).
+    scr_coulomb_t _scr;
     nda::array<double, 1> _q_pert;     // perturbation wavevector (size 3, crystal coords)
     bool _is_q_gamma;                  // set in constructor; true iff _q_pert ≈ Γ
     bool _kpq_map_initialized = false; // lazy init for _kpq_map (needs THC handle)
@@ -152,6 +171,14 @@ namespace solvers {
     // q-shifted W_full(q+Q) for the Q≠Γ Dyson. Built once during setup and reused during
     // LR iterations. Empty for Q=Γ (the operand is then W_full itself).
     std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
+
+    // τ- and ω-shaped FT staging buffers (in the ft_buffer_dist distribution),
+    // owned by the LR solver and threaded into every _scr.tau_to_w / w_to_tau
+    // call so they are reused across SCF iterations instead of reallocated.
+    // Default-constructed empty; populated once in compute_W_full_omega (always
+    // runs before the SCF loop), so they are live by the time the FTs use them.
+    dArr4D_concrete_t _ft_buffer_t;
+    dArr4D_concrete_t _ft_buffer_w;
 
     void _init_kpq_map(THC_ERI auto& thc);
 
