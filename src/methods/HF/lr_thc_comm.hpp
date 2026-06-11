@@ -583,7 +583,9 @@ namespace methods {
         auto O_iab_3D = nda::reshape(O_tskab, shape_t<3>{dim0, nbnd, nbnd});
 
         nda::array<ComplexType, 2> Ask_aQ(nbnd, NQ_loc);
-        nda::array<ComplexType, 2> Oab_buffer(nbnd, nbnd);
+
+        // buffer array to hold local (t,s,k) slices of O_iab for reduction
+        nda::array<ComplexType, 3> O_buf_iab(dim0, nbnd, nbnd);
 
         for (size_t i = 0; i < dim0; ++i) {
           // i = (it * ns_loc + is) * nk_loc + ik
@@ -596,13 +598,15 @@ namespace methods {
           nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_aQ);
 
           // Osk_ab = Ask_aQ * Xsk_Qb
-          nda::blas::gemm(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_buffer);
-
-          dim0_comm.reduce_in_place_n(Oab_buffer.data(), Oab_buffer.size(), std::plus<>{}, 0);
-          if (dim0_comm.root()) {
-            O_iab_3D(i, all, all) += scl*Oab_buffer;
-          }
+          auto Oab_i = O_buf_iab(i, all, all);
+          nda::blas::gemm(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_i);
         } // i
+
+        // Accumulate all (t,s,k) slices locally and reduce once.
+        dim0_comm.reduce_in_place_n(O_buf_iab.data(), O_buf_iab.size(), std::plus<>{}, 0);
+        if (dim0_comm.root()) {
+          O_iab_3D += scl*O_buf_iab;
+        }
       }
 
     }; // lr_thc_comm
