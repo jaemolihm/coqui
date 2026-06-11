@@ -98,6 +98,10 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
 
+  // Eagerly build the Q≠Γ left operand _dW_full_qpQ_wqPQ = W_full(q+Q).
+  // This is used for the Dyson equation for DeltaW at Q≠Γ.
+  _build_W_full_qpQ(dW_c_wqPQ, thc);
+
   _Timer.stop("LR_W_COMPUTE_W_FULL");
   return dW_c_wqPQ;
 }
@@ -116,87 +120,26 @@ void lr_scr_coulomb_t::_init_kpq_map(THC_ERI auto& thc) {
 }
 
 /**
- * LR W Dyson in Matsubara frequency space (in-place):
- *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
- *
- * Both arrays use the LR ω-side distribution {nwpools, nqpools, np_P, np_Q}
- * (matched grids). For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the
- * required W_full slices from peers within q_pool_comm via Alltoallv.
- *
- * The two PQ multiplies are routed through nda::slate_ops::multiply, which
- * batches over the (iw, iq) leading axes and dispatches a SLATE GEMM on the
- * (P, Q) subgrid.
+ * Build the Q≠Γ Dyson (q+Q) operand W_full(q+Q) into _dW_full_qpQ_wqPQ:
+ *   dW_full_qpQ[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
+ * via an Alltoallv inside the q-pool subgroup (ranks sharing the same w/P/Q
+ * tile, varying q-tile). No-op for Q=Γ (the Dyson then reuses W_full(q) for both
+ * operands). Built once from compute_W_full_omega — W_full is constant across the
+ * SCF loop. Concrete (not templated on the array type) so it can touch the
+ * concrete member cache directly, keeping compute_W_full_omega's call out of an
+ * `if constexpr` (and pinning setup to the concrete LR instantiation — a future
+ * GPU build fails to compile here; see TODO_lr_cleanup.md).
  */
-template<nda::MemoryArray Array_4D_t, typename communicator_t,
-         typename dW_full_t>
-void lr_scr_coulomb_t::lr_dyson_W_in_place(
-    memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
-    const dW_full_t& dW_full_wqPQ) {
+void lr_scr_coulomb_t::_build_W_full_qpQ(
+    const dArr4D_concrete_t& dW_full_wqPQ, THC_ERI auto& thc) {
+  if (_is_q_gamma) return;  // W_full(q+Q) = W_full(q); no separate operand needed
+  _init_kpq_map(thc);
+  _Timer.start("LR_W_COMM_QPQ");
 
-  _Timer.start("EVALUATE_LR_W");
-
-  long nq_g = dDeltaPi_wqPQ.global_shape()[1];
-  auto pgrid = dDeltaPi_wqPQ.grid();
-  auto bsize = dDeltaPi_wqPQ.block_size();
-  auto& comm = *dDeltaPi_wqPQ.communicator();
-
-  utils::check(pgrid == dW_full_wqPQ.grid(),
-               "lr_dyson_W_in_place: pgrid mismatch between ΔΠ and W_full");
-  utils::check(bsize[1] == 1,
-               "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
-
-  app_log(2, "  Evaluation of the LR screened interaction:");
-  app_log(2, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
-          pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
-  app_log(2, "    - q_pert is Γ: {}", _is_q_gamma ? "yes" : "no");
-
-  // Intermediate buffer for Tmp = W_full(q+Q) · ΔΠ. Same pgrid as ΔΠ.
-  using local_Array_t = std::decay_t<Array_4D_t>;
-  auto dTmp_wqPQ = math::nda::make_distributed_array<local_Array_t>(
-      comm, pgrid, dDeltaPi_wqPQ.global_shape(), bsize);
-
-  // SLATE's tileInsert is not const-correct (takes scalar_t*, not const
-  // scalar_t*) even though it does not write to the input matrix. Cast away
-  // const for the call. This is also the convention in scr_coulomb_t::dyson_W_in_place.
-  auto& dW_full_nc = const_cast<std::decay_t<dW_full_t>&>(dW_full_wqPQ);
-
-  if (_is_q_gamma) {
-    // Q = Γ: ΔW = W_full · ΔΠ · W_full   (W_full(q+Q) = W_full(q))
-    math::nda::slate_ops::multiply(dW_full_nc, dDeltaPi_wqPQ, dTmp_wqPQ);
-    math::nda::slate_ops::multiply(dTmp_wqPQ, dW_full_nc, dDeltaPi_wqPQ);
-    _Timer.stop("EVALUATE_LR_W");
-    return;
-  }
-
-  // Q ≠ Γ: gather W_full(kpq_map(iq)) into dW_full_left and use it as the
-  // left operand. ΔW = dW_full_left · ΔΠ · dW_full.
-  utils::check(_kpq_map_initialized && _kpq_map.size() == nq_g,
-               "lr_dyson_W_in_place: kpq_map not initialized for Q≠Γ "
-               "(call solve_lr_dyson_W or _init_kpq_map first); "
-               "got size {} vs nq_g {}", _kpq_map.size(), nq_g);
-
-  auto dW_full_left = math::nda::make_distributed_array<local_Array_t>(
-      comm, pgrid, dW_full_wqPQ.global_shape(), bsize);
-  _communicate_W_full_left(dW_full_wqPQ, dW_full_left);
-
-  // ΔW = W_full(q+Q) · ΔΠ · W_full(q)
-  math::nda::slate_ops::multiply(dW_full_left, dDeltaPi_wqPQ, dTmp_wqPQ);
-  math::nda::slate_ops::multiply(dTmp_wqPQ, dW_full_nc, dDeltaPi_wqPQ);
-
-  _Timer.stop("EVALUATE_LR_W");
-}
-
-/**
- * Build dW_full_left[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
- * via Alltoallv inside the q-pool subgroup (ranks sharing the same w/P/Q tile,
- * varying q-tile).
- *
- * Precondition: Q ≠ Γ and _kpq_map is populated. dW_full_wqPQ and dW_full_left
- * share pgrid, global_shape, bsize, and are built on the same communicator.
- */
-template<typename darray_t>
-void lr_scr_coulomb_t::_communicate_W_full_left(
-    const darray_t& dW_full_wqPQ, darray_t& dW_full_left) const {
+  _dW_full_qpQ_wqPQ.emplace(math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+      *dW_full_wqPQ.communicator(), dW_full_wqPQ.grid(),
+      dW_full_wqPQ.global_shape(), dW_full_wqPQ.block_size()));
+  auto& dW_full_qpQ = *_dW_full_qpQ_wqPQ;
 
   auto pgrid = dW_full_wqPQ.grid();
   auto [nw_loc, nq_loc, NP_loc, NQ_loc] = dW_full_wqPQ.local_shape();
@@ -214,7 +157,7 @@ void lr_scr_coulomb_t::_communicate_W_full_left(
   long color = w_idx * (pgrid[2] * pgrid[3]) + P_idx * pgrid[3] + Q_idx;
   mpi3::communicator q_pool_comm = comm.split(color, q_idx);
   utils::check((long)q_pool_comm.size() == pgrid[1],
-               "_communicate_W_full_left: q_pool_comm size {} != pgrid[1] {}",
+               "_build_W_full_qpQ: q_pool_comm size {} != pgrid[1] {}",
                (long)q_pool_comm.size(), pgrid[1]);
 
   // q-pool decomposition (bsize[1]==1, contiguous chunks).
@@ -237,7 +180,7 @@ void lr_scr_coulomb_t::_communicate_W_full_left(
   for (long iq = 0; iq < nq_g; ++iq) {
     long jq = _kpq_map(iq);
     utils::check(jq >= 0 && jq < nq_g && kpq_inv(jq) == -1,
-                 "_communicate_W_full_left: kpq_map is not a valid permutation");
+                 "_build_W_full_qpQ: kpq_map is not a valid permutation");
     kpq_inv(jq) = iq;
   }
 
@@ -245,7 +188,7 @@ void lr_scr_coulomb_t::_communicate_W_full_left(
   // - I send my W_full(:, iq_loc, :, :) (global iq_g = q_origin + iq_loc) to the
   //   rank that owns kpq_inv(iq_g) (the rank whose ΔΠ at that local slot needs
   //   W_full at iq_g as its left operand).
-  // - I receive into my dW_full_left(:, iq_loc, :, :) the slice W_full(kpq_map(iq_g))
+  // - I receive into my dW_full_qpQ(:, iq_loc, :, :) the slice W_full(kpq_map(iq_g))
   //   from the rank that owns kpq_map(iq_g).
   std::vector<std::vector<std::pair<long,long>>> send_groups(pgrid[1]);
   std::vector<std::vector<std::pair<long,long>>> recv_groups(pgrid[1]);
@@ -298,14 +241,14 @@ void lr_scr_coulomb_t::_communicate_W_full_left(
     }
   }
   utils::check(offset == total_send,
-               "_communicate_W_full_left: send pack offset mismatch ({} != {})",
+               "_build_W_full_qpQ: send pack offset mismatch ({} != {})",
                offset, total_send);
 
   q_pool_comm.all_to_all_v_n(
       sendbuf.data(), send_counts.data(), send_disps.data(),
       recvbuf.data(), recv_counts.data(), recv_disps.data());
 
-  auto W_full_left_loc = dW_full_left.local();
+  auto W_full_qpQ_loc = dW_full_qpQ.local();
   offset = 0;
   for (long r = 0; r < pgrid[1]; ++r) {
     for (auto const& [iq_loc_dst, src_iq_loc] : recv_groups[r]) {
@@ -313,12 +256,68 @@ void lr_scr_coulomb_t::_communicate_W_full_left(
       for (long iw = 0; iw < nw_loc; ++iw)
         for (long iP = 0; iP < NP_loc; ++iP)
           for (long iQ = 0; iQ < NQ_loc; ++iQ)
-            W_full_left_loc(iw, iq_loc_dst, iP, iQ) = recvbuf(offset++);
+            W_full_qpQ_loc(iw, iq_loc_dst, iP, iQ) = recvbuf(offset++);
     }
   }
   utils::check(offset == total_recv,
-               "_communicate_W_full_left: recv unpack offset mismatch ({} != {})",
+               "_build_W_full_qpQ: recv unpack offset mismatch ({} != {})",
                offset, total_recv);
+
+  _Timer.stop("LR_W_COMM_QPQ");
+}
+
+/**
+ * LR W Dyson in Matsubara frequency space (in-place):
+ *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
+ *
+ * Both arrays use the LR ω-side distribution {nwpools, nqpools, np_P, np_Q}
+ * (matched grids). For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the
+ * required W_full slices from peers within q_pool_comm via Alltoallv.
+ *
+ * The two PQ multiplies are routed through nda::slate_ops::multiply, which
+ * batches over the (iw, iq) leading axes and dispatches a SLATE GEMM on the
+ * (P, Q) subgrid.
+ */
+template<nda::MemoryArray Array_4D_t, typename communicator_t,
+         typename dW_full_t>
+void lr_scr_coulomb_t::lr_dyson_W_in_place(
+    memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
+    const dW_full_t& dW_full_wqPQ,
+    const dW_full_t& dW_full_qpQ_wqPQ) {
+
+  _Timer.start("EVALUATE_LR_W");
+
+  auto pgrid = dDeltaPi_wqPQ.grid();
+  auto bsize = dDeltaPi_wqPQ.block_size();
+  auto& comm = *dDeltaPi_wqPQ.communicator();
+
+  utils::check(pgrid == dW_full_wqPQ.grid() && pgrid == dW_full_qpQ_wqPQ.grid(),
+               "lr_dyson_W_in_place: pgrid mismatch between ΔΠ and W_full operands");
+  utils::check(bsize[1] == 1,
+               "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
+
+  app_log(2, "  Evaluation of the LR screened interaction:");
+  app_log(2, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
+          pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+  app_log(2, "    - q_pert is Γ: {}", _is_q_gamma ? "yes" : "no");
+
+  // Intermediate buffer for matrix multiplication. Same distribution as ΔΠ.
+  using local_Array_t = std::decay_t<Array_4D_t>;
+  auto dTmp_wqPQ = math::nda::make_distributed_array<local_Array_t>(
+      comm, pgrid, dDeltaPi_wqPQ.global_shape(), bsize);
+
+  // SLATE's tileInsert is not const-correct (takes scalar_t*, not const
+  // scalar_t*) even though it does not write to the input matrix. Cast away
+  // const for the call. This is also the convention in scr_coulomb_t::dyson_W_in_place.
+  auto& dW_full_nc     = const_cast<std::decay_t<dW_full_t>&>(dW_full_wqPQ);
+  auto& dW_full_qpQ_nc = const_cast<std::decay_t<dW_full_t>&>(dW_full_qpQ_wqPQ);
+
+  // ΔW = W_full(q+Q) · ΔΠ · W_full(q). For Q=Γ the caller passes the same object
+  // for both operands, since W_full(q+Q) = W_full(q).
+  math::nda::slate_ops::multiply(dW_full_qpQ_nc, dDeltaPi_wqPQ, dTmp_wqPQ);
+  math::nda::slate_ops::multiply(dTmp_wqPQ, dW_full_nc, dDeltaPi_wqPQ);
+
+  _Timer.stop("EVALUATE_LR_W");
 }
 
 /**
@@ -357,8 +356,18 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   auto dDeltaPi_wqPQ = scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
-  // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω))
-  lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ);
+  // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
+  // operand is built once in compute_W_full_omega; thread the member cache into
+  // the (stateless) Dyson. For Q=Γ, W_full(q+Q) = W_full(q) → pass dW_full_wqPQ
+  // for both operands.
+  if (_is_q_gamma) {
+    lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ, dW_full_wqPQ);
+  } else {
+    utils::check(_dW_full_qpQ_wqPQ.has_value(),
+                 "solve_lr_dyson_W: W_full(q+Q) not prepared for Q≠Γ "
+                 "(compute_W_full_omega must run before the SCF loop)");
+    lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ, *_dW_full_qpQ_wqPQ);
+  }
 
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);

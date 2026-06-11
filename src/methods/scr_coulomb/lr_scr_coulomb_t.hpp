@@ -22,6 +22,9 @@
 #ifndef COQUI_LR_SCR_COULOMB_T_HPP
 #define COQUI_LR_SCR_COULOMB_T_HPP
 
+#include <optional>
+#include <type_traits>
+
 #include "configuration.hpp"
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
@@ -55,6 +58,10 @@ namespace solvers {
    */
   class lr_scr_coulomb_t {
   public:
+    // Concrete LR distributed-array type (host, mpi3); used by the W_full(q+Q)
+    // member cache below.
+    using dArr4D_concrete_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+
     lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft,
                      nda::array<double, 1> q_pert);
 
@@ -102,14 +109,21 @@ namespace solvers {
      * Both arrays must be in PQ-local distribution (pgrid[2]==1, pgrid[3]==1).
      * On output, dDeltaPi_wqPQ contains ΔW_c(iω).
      *
-     * @param dDeltaPi_wqPQ - [IN/OUT] ΔΠ on input, ΔW_c on output
-     * @param dW_full_wqPQ  - [IN] W_full = W_c(iω) + V in PQ-local distribution
+     * Stateless: both W operands are passed in (not read from a member), so the
+     * function is a pure function of its arguments. solve_lr_dyson_W supplies the
+     * (q+Q) operand from _dW_full_qpQ_wqPQ (built once in compute_W_full_omega);
+     * for Q=Γ it passes dW_full_wqPQ for both, since W_full(q+Q) = W_full(q).
+     *
+     * @param dDeltaPi_wqPQ    - [IN/OUT] ΔΠ on input, ΔW_c on output
+     * @param dW_full_wqPQ     - [IN] W_full(q) = W_c(iω) + V in PQ-local distribution
+     * @param dW_full_qpQ_wqPQ - [IN] W_full(q+Q) left operand (== dW_full_wqPQ for Q=Γ)
      */
     template<nda::MemoryArray Array_4D_t, typename communicator_t,
              typename dW_full_t>
     void lr_dyson_W_in_place(
         memory::darray_t<Array_4D_t, communicator_t>& dDeltaPi_wqPQ,
-        const dW_full_t& dW_full_wqPQ);
+        const dW_full_t& dW_full_wqPQ,
+        const dW_full_t& dW_full_qpQ_wqPQ);
 
     bool is_q_gamma() const { return _is_q_gamma; }
 
@@ -135,16 +149,20 @@ namespace solvers {
     bool _kpq_map_initialized = false; // lazy init for _kpq_map (needs THC handle)
     nda::array<int, 1> _kpq_map;       // iq → iq+q_pert (full BZ); only built for Q≠Γ
 
+    // q-shifted W_full(q+Q) for the Q≠Γ Dyson. Built once during setup and reused during
+    // LR iterations. Empty for Q=Γ (the operand is then W_full itself).
+    std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
+
     void _init_kpq_map(THC_ERI auto& thc);
 
     /**
-     * Build dW_full_left[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
-     * via Alltoallv within the q-pool subgroup. Precondition: Q ≠ Γ and
-     * _kpq_map is populated; both arrays must share pgrid/global_shape/bsize.
+     * Build the Q≠Γ Dyson (q+Q) operand W_full(q+Q) into _dW_full_qpQ_wqPQ:
+     *   dW_full_qpQ[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
+     * via an Alltoallv within the q-pool subgroup. No-op for Q=Γ (the Dyson then
+     * reuses W_full(q) for both operands). Precondition: _kpq_map populated.
      */
-    template<typename darray_t>
-    void _communicate_W_full_left(const darray_t& dW_full_wqPQ,
-                                  darray_t& dW_full_left) const;
+    void _build_W_full_qpQ(const dArr4D_concrete_t& dW_full_wqPQ,
+                           THC_ERI auto& thc);
 
   }; // lr_scr_coulomb_t
 
