@@ -200,7 +200,16 @@ namespace methods {
     void lr_gw::_setup_workspace(thc_reader_t& thc, dArr_4D_t const& dW_ref,
                                   bool do_term1, bool do_term2,
                                   long ns, long nk_ibz, long nbnd) {
-      if (_setup_done) return;
+      if (_setup_done) {
+        // The cached workspace is specific to the term combination it was built
+        // for (term2-only buffers are conditionally allocated); reusing it under
+        // different flags would deref an empty optional. Fail loudly instead.
+        utils::check(do_term1 == _setup_term1 && do_term2 == _setup_term2,
+                     "lr_gw::_setup_workspace: workspace built for (term1={}, term2={}) "
+                     "but reused with (term1={}, term2={})",
+                     _setup_term1, _setup_term2, do_term1, do_term2);
+        return;
+      }
       using local_Array_4D_t = memory::array<HOST_MEMORY, ComplexType, 4>;
       using math::nda::make_distributed_array;
       using Arrv_4D_t = nda::array_view<ComplexType, 4>;
@@ -263,6 +272,8 @@ namespace methods {
       }
       _Timer.stop("SIGMA_FT_COEFF");
 
+      _setup_term1 = do_term1;
+      _setup_term2 = do_term2;
       _setup_done = true;
     }
 

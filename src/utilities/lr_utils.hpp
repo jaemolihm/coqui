@@ -401,6 +401,10 @@ std::pair<double, double> lr_distributed_norm(Comm& comm,
   // The Frobenius norm is partition-invariant, so view the (contiguous) array
   // as 1D and give each rank a contiguous slice of the element range.
   const long n = A.size();
+  if (compute_diff) {
+    check(static_cast<long>(A_prev.size()) == n,
+          "lr_distributed_norm: A and A_prev sizes differ ({} vs {})", A_prev.size(), n);
+  }
   const long nr = comm.size();
   const long r = comm.rank();
   const long chunk = (n + nr - 1) / nr;

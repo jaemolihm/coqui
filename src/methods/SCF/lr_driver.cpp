@@ -438,6 +438,11 @@ std::tuple<int, double> lr_driver::run_lr(
                                        + (1.0 - mixing) * sDeltaSigma_prev_tskij.local();
         }
       }
+      // Distributed DIIS writes each node_comm rank's slice of the shared
+      // ΔF/ΔΣ buffer in place with no trailing collective, so node root must
+      // wait for every peer rank's slice to land before it reads the whole
+      // buffer below.
+      _mpi->node_comm.barrier();
       // The iter-alg step is computed independently on each node's shared replica,
       // so the per-node results can drift apart by floating-point noise (different
       // all_reduce instances within each node_comm). Broadcast rank 0's result to

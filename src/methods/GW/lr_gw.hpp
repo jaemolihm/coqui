@@ -221,14 +221,19 @@ namespace methods {
       // call by _setup_workspace and reused across SCF iterations (comm split +
       // node split inside make_mpi_context are collective; shm windows and
       // distributed buffers are expensive to recreate). The τ-dist is fixed for
-      // the solver's lifetime, so a plain _setup_done guard suffices. Member
-      // order matters: the darray buffers store a pointer to _tau_comm, and the
-      // shm arrays reference _tau_mpi — both must outlive (= be declared
+      // the solver's lifetime. The guard is keyed on the (do_term1, do_term2)
+      // combination, not a bare bool: the term2-only buffers (_fft_q, _W2_tau_RPQ,
+      // _sf_qR) are built only when do_term2 is set, so reusing a workspace built
+      // for a different term combination would dereference an empty optional.
+      // _setup_workspace aborts loudly if asked to reuse under different flags.
+      // Member order matters: the darray buffers store a pointer to _tau_comm,
+      // and the shm arrays reference _tau_mpi — both must outlive (= be declared
       // before) them.
       using sArr_2D_t = math::shm::shared_array<nda::array_view<ComplexType, 2>>;
       using sArr_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
       using dArr_loc_4D_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
       bool _setup_done = false;
+      bool _setup_term1 = false, _setup_term2 = false;
       std::optional<mpi3::communicator> _tau_comm;
       std::optional<utils::mpi_context_t<mpi3::communicator>> _tau_mpi;
       std::optional<dArr_loc_4D_t> _dG_skPQ, _dSigma_skPQ;

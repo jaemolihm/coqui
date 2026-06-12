@@ -65,8 +65,15 @@ struct lr_iter_params {
  *   we have a single 4D ΔF with a simple difference residual.
  *
  *   This class reuses the same B-matrix solve algorithm (eigendecomposition
- *   pseudoinverse from diis_alg.hpp::compute_coefs_c1) with in-memory
- *   std::vector<Array_4D> storage instead of HDF5-backed VSpace.
+ *   pseudoinverse from diis_alg.hpp::compute_coefs_c1) with in-memory storage
+ *   instead of HDF5-backed VSpace.
+ *
+ *   SPMD / distributed: next_step_combined is called on every rank of the
+ *   supplied communicator. Each rank stores and operates on only its own
+ *   contiguous element-slice of every trial/residual vector (std::vector<Vec1D>),
+ *   so the DIIS history is partitioned across the node rather than replicated.
+ *   The B-matrix overlaps are formed from per-rank partial dot products combined
+ *   with a single all_reduce, so every rank computes identical coefficients.
  *
  * Uses difference residual: res = ΔF_new - ΔF_prev
  */
