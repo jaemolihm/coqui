@@ -27,6 +27,7 @@
 #include "methods/HF/thc_solver_comm.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
+#include "utilities/lr_utils.hpp"
 #include "utilities/proc_meminfo.hpp"
 #include "methods/GW/g0_div_utils.hpp"
 #include "nda/nda.hpp"
@@ -294,6 +295,7 @@ std::tuple<int, double> lr_driver::run_lr(
   for (iter = 1; iter <= max_iter; ++iter) {
 
     // Save previous density matrix and Fock matrix
+    _Timer.start("LR_SAVE");
     if (_mpi->node_comm.root() && iter > 1) {
       sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
       sDeltaF_prev_skij.local() = sDeltaF_skij.local();
@@ -302,6 +304,7 @@ std::tuple<int, double> lr_driver::run_lr(
       }
     }
     _mpi->comm.barrier();
+    _Timer.stop("LR_SAVE");
 
     // Step 1: Solve LR Dyson equation
     // ΔG = G_{k+q} · [ΔH0 + ΔF + ΔΣ - Δμ·S] · G_k
@@ -313,27 +316,18 @@ std::tuple<int, double> lr_driver::run_lr(
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
-    // Compute norms for logging
-    double norm_DeltaDm = 0.0;
-    double norm_DeltaDm_diff = 0.0;
-    if (_mpi->node_comm.root()) {
-      for (int is = 0; is < _ns; ++is) {
-        for (int ik = 0; ik < _nkpts_ibz; ++ik) {
-          auto DeltaDm_k = sDeltaDm_skij.local()(is, ik, nda::range::all, nda::range::all);
-          norm_DeltaDm += std::pow(nda::frobenius_norm(DeltaDm_k), 2);
-
-          if (iter > 1) {
-            auto DeltaDm_prev_k = sDeltaDm_prev_skij.local()(is, ik, nda::range::all, nda::range::all);
-            nda::matrix<ComplexType> diff = DeltaDm_k - DeltaDm_prev_k;
-            norm_DeltaDm_diff += std::pow(nda::frobenius_norm(diff), 2);
-          }
-        }
-      }
-      norm_DeltaDm = std::sqrt(norm_DeltaDm);
-      norm_DeltaDm_diff = std::sqrt(norm_DeltaDm_diff);
-    }
+    // Compute norms for logging. lr_distributed_norm stripes the (s,k) blocks
+    // over node_comm ranks and reduces within the node; the shared array is
+    // node-replicated, so the trailing broadcast from global rank 0 preserves
+    // exact global agreement.
+    _Timer.start("LR_CONVERGENCE");
+    auto norms_Dm = utils::lr_distributed_norm(
+        _mpi->node_comm, sDeltaDm_skij.local(), sDeltaDm_prev_skij.local(), iter > 1);
+    double norm_DeltaDm = norms_Dm.first;
+    double norm_DeltaDm_diff = norms_Dm.second;
     _mpi->comm.broadcast_n(&norm_DeltaDm, 1, 0);
     _mpi->comm.broadcast_n(&norm_DeltaDm_diff, 1, 0);
+    _Timer.stop("LR_CONVERGENCE");
 
     // Step 2: Compute LR Fock matrix (if requested)
     if (need_hf) {
@@ -420,29 +414,40 @@ std::tuple<int, double> lr_driver::run_lr(
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
     _Timer.start("LR_ITER_ALG");
     if (iter > 1 && (need_hf || include_gw_sigma)) {
+      if (use_diis) {
+        // Distributed DIIS: every node rank participates, each operating on its
+        // element-slice of the shared ΔF/ΔΣ and writing the mixed result back in
+        // place. Pass .local() views directly (in/out).
+        if (include_gw_sigma) {
+          _lr_diis->next_step_combined(
+              _mpi->node_comm,
+              sDeltaF_skij.local(), sDeltaF_prev_skij.local(),
+              sDeltaSigma_tskij->local(), sDeltaSigma_prev_tskij.local(), iter);
+        } else {
+          nda::array<ComplexType, 5> empty_sigma;
+          _lr_diis->next_step_combined(
+              _mpi->node_comm,
+              sDeltaF_skij.local(), sDeltaF_prev_skij.local(),
+              empty_sigma, empty_sigma, iter);
+        }
+      } else if (mixing < 1.0 && _mpi->node_comm.root()) {
+        sDeltaF_skij.local() = mixing * sDeltaF_skij.local()
+                               + (1.0 - mixing) * sDeltaF_prev_skij.local();
+        if (include_gw_sigma) {
+          sDeltaSigma_tskij->local() = mixing * sDeltaSigma_tskij->local()
+                                       + (1.0 - mixing) * sDeltaSigma_prev_tskij.local();
+        }
+      }
+      // The iter-alg step is computed independently on each node's shared replica,
+      // so the per-node results can drift apart by floating-point noise (different
+      // all_reduce instances within each node_comm). Broadcast rank 0's result to
+      // all nodes so every node's replica is bit-identical before the next iter.
       if (_mpi->node_comm.root()) {
-        if (use_diis) {
-          nda::array<ComplexType, 4> DeltaF_new{sDeltaF_skij.local()};
-          nda::array<ComplexType, 4> DeltaF_prev{sDeltaF_prev_skij.local()};
-          nda::array<ComplexType, 5> DeltaSigma_new;
-          nda::array<ComplexType, 5> DeltaSigma_prev;
-          if (include_gw_sigma) {
-            DeltaSigma_new = nda::array<ComplexType, 5>{sDeltaSigma_tskij->local()};
-            DeltaSigma_prev = nda::array<ComplexType, 5>{sDeltaSigma_prev_tskij.local()};
-          }
-          auto [F_mixed, Sigma_mixed] = _lr_diis->next_step_combined(
-              DeltaF_new, DeltaF_prev, DeltaSigma_new, DeltaSigma_prev, iter);
-          sDeltaF_skij.local() = F_mixed;
-          if (include_gw_sigma && Sigma_mixed.size() > 0) {
-            sDeltaSigma_tskij->local() = Sigma_mixed;
-          }
-        } else if (mixing < 1.0) {
-          sDeltaF_skij.local() = mixing * sDeltaF_skij.local()
-                                 + (1.0 - mixing) * sDeltaF_prev_skij.local();
-          if (include_gw_sigma) {
-            sDeltaSigma_tskij->local() = mixing * sDeltaSigma_tskij->local()
-                                         + (1.0 - mixing) * sDeltaSigma_prev_tskij.local();
-          }
+        _mpi->internode_comm.broadcast_n(sDeltaF_skij.local().data(),
+                                         sDeltaF_skij.local().size(), 0);
+        if (include_gw_sigma) {
+          _mpi->internode_comm.broadcast_n(sDeltaSigma_tskij->local().data(),
+                                           sDeltaSigma_tskij->local().size(), 0);
         }
       }
       _mpi->comm.barrier();
@@ -450,49 +455,22 @@ std::tuple<int, double> lr_driver::run_lr(
     _Timer.stop("LR_ITER_ALG");
 
     // Compute norms of ΔF and ΔF-ΔF_prev for logging
-    double norm_DeltaF = 0.0;
-    double norm_DeltaF_diff = 0.0;
-    if (_mpi->node_comm.root()) {
-      for (int is = 0; is < _ns; ++is) {
-        for (int ik = 0; ik < _nkpts_ibz; ++ik) {
-          auto DeltaF_k = sDeltaF_skij.local()(is, ik, nda::range::all, nda::range::all);
-          norm_DeltaF += std::pow(nda::frobenius_norm(DeltaF_k), 2);
-
-          if (iter > 1) {
-            auto DeltaF_prev_k = sDeltaF_prev_skij.local()(is, ik, nda::range::all, nda::range::all);
-            nda::matrix<ComplexType> diff_F = DeltaF_k - DeltaF_prev_k;
-            norm_DeltaF_diff += std::pow(nda::frobenius_norm(diff_F), 2);
-          }
-        }
-      }
-      norm_DeltaF = std::sqrt(norm_DeltaF);
-      norm_DeltaF_diff = std::sqrt(norm_DeltaF_diff);
-    }
+    _Timer.start("LR_CONVERGENCE");
+    auto norms_F = utils::lr_distributed_norm(
+        _mpi->node_comm, sDeltaF_skij.local(), sDeltaF_prev_skij.local(), iter > 1);
+    double norm_DeltaF = norms_F.first;
+    double norm_DeltaF_diff = norms_F.second;
     _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
     _mpi->comm.broadcast_n(&norm_DeltaF_diff, 1, 0);
 
     // Compute norms of ΔΣ and ΔΣ-ΔΣ_prev for logging
     double norm_DeltaSigma = 0.0;
     double norm_DeltaSigma_diff = 0.0;
-    if (include_gw_sigma && _mpi->node_comm.root()) {
-      for (int it = 0; it < _nts; ++it) {
-        for (int is = 0; is < _ns; ++is) {
-          for (int ik = 0; ik < _nkpts_ibz; ++ik) {
-            auto DeltaSigma_k = sDeltaSigma_tskij->local()(it, is, ik, nda::range::all, nda::range::all);
-            norm_DeltaSigma += std::pow(nda::frobenius_norm(DeltaSigma_k), 2);
-
-            if (iter > 1) {
-              auto DeltaSigma_prev_k = sDeltaSigma_prev_tskij.local()(it, is, ik, nda::range::all, nda::range::all);
-              nda::matrix<ComplexType> diff_S = DeltaSigma_k - DeltaSigma_prev_k;
-              norm_DeltaSigma_diff += std::pow(nda::frobenius_norm(diff_S), 2);
-            }
-          }
-        }
-      }
-      norm_DeltaSigma = std::sqrt(norm_DeltaSigma);
-      norm_DeltaSigma_diff = std::sqrt(norm_DeltaSigma_diff);
-    }
     if (include_gw_sigma) {
+      auto norms_Sigma = utils::lr_distributed_norm(
+          _mpi->node_comm, sDeltaSigma_tskij->local(), sDeltaSigma_prev_tskij.local(), iter > 1);
+      norm_DeltaSigma = norms_Sigma.first;
+      norm_DeltaSigma_diff = norms_Sigma.second;
       _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
       _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     }
@@ -516,6 +494,8 @@ std::tuple<int, double> lr_driver::run_lr(
                 iter, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
       }
     }
+
+    _Timer.stop("LR_CONVERGENCE");
 
     // Step 5: Check convergence (all active quantities must converge)
     if (iter > 1) {
@@ -591,7 +571,9 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_DW_TRANSPOSE"), _Timer.number_of_calls("LR_GW_DW_TRANSPOSE"));
   if (gw_solver) gw_solver->print_subclocks(2, sub_indent);
   app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
-  app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
+  app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
+  app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
+  app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));
 }
 
 
