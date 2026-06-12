@@ -96,7 +96,7 @@ namespace methods {
       if (nkpts != 1) {
         _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
         _fft_q.emplace(MF->Qpts_ibz(), MF->lattv(), MF->kp_grid());
-        app_log(2, "    k<->R transform: FFT");
+        app_log(3, "    k<->R transform: FFT");
       }
 
       // phase_ipR(iR) = e^{ip·R} where p = _q_pert (crystal coords), R = integer lattice indices

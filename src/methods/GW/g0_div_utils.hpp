@@ -149,9 +149,9 @@ namespace methods {
               fit_order = new_order;
             }
             if (two_dim)
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
             else
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
             nda::array<ComplexType, 1> eps_inv_q0_w(nw);
             for (int n = 0; n < nw; ++n) {
               eps_inv_q0_w(n) = extrapolate_to_q0(Q_filtered, eps_inv_filtered(n, nda::range::all), fit_order,
@@ -227,9 +227,9 @@ namespace methods {
               fit_order = new_order;
             }
             if (two_dim)
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-shells on the xy-plane", n_shells);
             else
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-shells", n_shells);
             for (int n = 0; n < nw; ++n) {
               eps_inv_q0_w(n) = extrapolate_to_q0(Q_filter, eps_inv_filter(n, nda::range::all), fit_order,
                                                   (dW_wqPQ.communicator()->root() and n==0)? true : false);
@@ -381,8 +381,8 @@ namespace methods {
 
         if (print) {
           for (size_t n=0; n<=fit_order; ++n)
-            app_log(2, "    x({}) = {}", n, x(n));
-          app_log(2, "");
+            app_log(3, "    x({}) = {}", n, x(n));
+          app_log(3, "");
         }
 
         return x(0);
