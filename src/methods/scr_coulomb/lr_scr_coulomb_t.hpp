@@ -37,7 +37,7 @@
 
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
-#include "methods/scr_coulomb/scr_coulomb_t.h"
+#include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 
 namespace methods {
 namespace solvers {
@@ -143,12 +143,12 @@ namespace solvers {
    * Print only the component clocks, each line prefixed by `indent`.
    * Embedded (with deeper indent) in lr_driver's final hierarchical report.
    * The flat FT component clocks (redistribute / gemm / alloc / leak check)
-   * come from the member scr_coulomb_t's internal timers; they only cover
+   * come from the member scr_coulomb_fourier_t's internal timers; they only cover
    * solve_lr_dyson_W calls (compute_W_full_omega uses a separate local
-   * scr_coulomb_t so the one-time setup FT does not pollute them).
+   * scr_coulomb_fourier_t so the one-time setup FT does not pollute them).
    */
   inline void print_subclocks(int level, const std::string& indent) {
-    auto& ftT = _scr.timer();
+    auto& ftT = _scr_fourier.timer();
     app_log(level, "{0}  - LR W FT (τ→ω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
     app_log(level, "{0}  - LR W Dyson (iω):            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
     app_log(level, "{0}  - LR W (q+Q)-operand comm:    {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_COMM_QPQ"), _Timer.number_of_calls("LR_W_COMM_QPQ"));
@@ -162,7 +162,7 @@ namespace solvers {
     // Persistent FT engine: keeps the internal redistribute/gemm/leak-check
     // timers of tau_to_w / w_to_tau accumulating across solve_lr_dyson_W calls
     // (a per-call local instance would lose them before printing).
-    scr_coulomb_t _scr;
+    scr_coulomb_fourier_t _scr_fourier;
     nda::array<double, 1> _q_pert;     // perturbation wavevector (size 3, crystal coords)
     bool _is_q_gamma;                  // set in constructor; true iff _q_pert ≈ Γ
     bool _kpq_map_initialized = false; // lazy init for _kpq_map (needs THC handle)
@@ -173,7 +173,7 @@ namespace solvers {
     std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
 
     // τ- and ω-shaped FT staging buffers (in the ft_buffer_dist distribution),
-    // owned by the LR solver and threaded into every _scr.tau_to_w / w_to_tau
+    // owned by the LR solver and threaded into every _scr_fourier.tau_to_w / w_to_tau
     // call so they are reused across SCF iterations instead of reallocated.
     // Default-constructed empty; populated once in compute_W_full_omega (always
     // runs before the SCF loop), so they are live by the time the FTs use them.

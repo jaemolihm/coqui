@@ -53,7 +53,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   // If FT buffer has P and Q local, use it for W_full to skip the redundant redistributions.
   // If not, use a separate lr_W_proc_grid distribution to make P and Q as local as possible.
   auto [b_pgrid, b_bsize] =
-      scr_coulomb_t::ft_buffer_dist(nproc, {nw_half, nqpts, NP, NQ});
+      scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nw_half, nqpts, NP, NQ});
   std::array<long, 4> w_pgrid, w_bsize;
   if (b_pgrid[2] == 1 && b_pgrid[3] == 1) {
     w_pgrid = b_pgrid;
@@ -63,7 +63,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   }
 
   // Allocate the LR-owned FT staging buffers once (in the FT-buffer dist), then
-  // thread them into every per-iteration _scr.tau_to_w / w_to_tau so they are
+  // thread them into every per-iteration _scr_fourier.tau_to_w / w_to_tau so they are
   // reused instead of reallocated. τ-shaped and ω-shaped; ft_buffer_dist depends
   // only on (q, P, Q), so both share b_pgrid / b_bsize.
   _ft_buffer_t = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
@@ -72,16 +72,18 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
       thc.mpi()->comm, b_pgrid, {nw_half, nqpts, NP, NQ}, b_bsize);
 
   // FT τ → ω directly into the chosen distribution.
-  // Deliberately uses a local scr_coulomb_t (not _scr): this is one-time setup,
-  // and keeping it separate leaves _scr's FT component clocks attributable to
-  // the per-iteration solve_lr_dyson_W calls only.
-  scr_coulomb_t scr(_ft, "rpa");
+  // Deliberately uses a local scr_coulomb_fourier_t (not the member _scr_fourier):
+  // this is one-time setup, and keeping it separate leaves _scr_fourier's FT
+  // component clocks attributable to the per-iteration solve_lr_dyson_W calls
+  // only. The local engine is a trivial object (IAFT ptr + timer + flag), so
+  // this carries none of the cost of the old throwaway scr_coulomb_t.
+  scr_coulomb_fourier_t setup_ft(_ft);
   // Rank-uniform leak-check gate (see solve_lr_dyson_W): __app_output_level__
   // is a sentinel on non-root ranks and check_leakage is collective.
   int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
   thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
-  scr.set_check_ft_leakage(chk_leak != 0);
-  auto dW_c_wqPQ = scr.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, true);
+  setup_ft.set_check_ft_leakage(chk_leak != 0);
+  auto dW_c_wqPQ = setup_ft.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, true);
 
   // Add bare interaction Z(q) at each (w, q) slice. PQ may be split across the
   // wq_intra subgroup, so use the sub-block version of thc.Z.
@@ -377,7 +379,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // root's decision to keep the gate rank-uniform.
   int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
   thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
-  _scr.set_check_ft_leakage(chk_leak != 0);
+  _scr_fourier.set_check_ft_leakage(chk_leak != 0);
 
   long nproc = thc.mpi()->comm.size();
   long NP = thc.Np();
@@ -398,8 +400,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // FT ΔΠ: τ → ω, output in LR ω-side distribution. Reuse the LR-owned staging
   // buffers (built in compute_W_full_omega) across iterations.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = _scr.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true,
-                                     &_ft_buffer_t, &_ft_buffer_w);
+  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true,
+                                           &_ft_buffer_t, &_ft_buffer_w);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
@@ -418,8 +420,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = _scr.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true,
-                                &_ft_buffer_t, &_ft_buffer_w);
+  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true,
+                                      &_ft_buffer_t, &_ft_buffer_w);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");
