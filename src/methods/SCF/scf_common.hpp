@@ -45,11 +45,14 @@ using Array_view_3D_t = nda::array_view<ComplexType, 3>;
 using Array_view_4D_t = nda::array_view<ComplexType, 4>;
 using Array_view_5D_t = nda::array_view<ComplexType, 5>;
 
+// check_leakage gates the IAFT leakage diagnostic (which can take some small but
+// non-negligible time). Enabled by defauly.
 template<math::shm::SharedArray sArr_t>
 auto distributed_tau_to_w(mpi3::communicator& comm,
                           const sArr_t& X_tau_shm,
                           const imag_axes_ft::IAFT& FT,
-                          std::array<long, 5> w_grid, std::array<long, 5> w_bsize={0})
+                          std::array<long, 5> w_grid, std::array<long, 5> w_bsize={0},
+                          bool check_leakage = true)
   requires( ::nda::get_rank<std::decay_t<sArr_t>> == 5 ) {
   decltype(nda::range::all) all;
   using math::nda::make_distributed_array;
@@ -57,7 +60,7 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   auto [nts, ns, nkpts, nbnd, _] = X_tau_shm.shape();
   auto nw = FT.nw_f();
 
-  if (nda::sum(X_tau_shm.local()) != ComplexType(0.0))
+  if (check_leakage and nda::sum(X_tau_shm.local()) != ComplexType(0.0))
     FT.check_leakage(X_tau_shm, imag_axes_ft::fermi, "self-energy");
 
   int np = comm.size();

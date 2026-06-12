@@ -41,8 +41,6 @@
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/gw_t.h"
-// Include thc_gw.icc for Sigma_div_correction definition (template in gw_t)
-#include "methods/GW/thc_gw.icc"
 #include "methods/GW/lr_gw.hpp"
 
 namespace methods {
@@ -184,9 +182,14 @@ namespace methods {
       utils::check(utils::is_q_gamma(_q_pert),
                    "apply_div_correction_G: term 2 is only valid at q_pert=0, "
                    "but q_pert = ({}, {}, {})", _q_pert(0), _q_pert(1), _q_pert(2));
+      _init_kpq_map(thc);  // identity at q_pert=0
       app_log(3, "  LR div correction (term 2, G): S(k) · G · S(k) [q_pert=0]");
       _Timer.start("SIGMA_DIV_CORR");
-      _gw.Sigma_div_correction(sDeltaSigma_tskij, G_tskij, S_skij, thc, delta_eps_inv_head);
+      // At q_pert=0, _kpq_map is the identity, so the LR kernel
+      // S(k+q)·G·S(k) reduces exactly to gw_t::Sigma_div_correction's
+      // S(k)·G·S(k). Route through the node-local LR kernel to avoid the
+      // ground-state version's per-call shm window + global all_reduce.
+      _sigma_div_correction(sDeltaSigma_tskij, G_tskij, S_skij, thc, delta_eps_inv_head);
       _Timer.stop("SIGMA_DIV_CORR");
     }
 
@@ -552,6 +555,13 @@ namespace methods {
     // =========================================================================
     // _sigma_div_correction: LR-aware divergence correction
     //   ΔΣ^div_{ij} = factor · S(k+q) · ΔG · S(k)
+    //
+    // sDeltaSigma_tskij is shared memory, so the full ΔΣ is already replicated
+    // on every node. gw_t::Sigma_div_correction splits the work across all
+    // ranks into a temp and recombines with an internode all_reduce; profiling
+    // showed that all_reduce dominated here. Instead, each node recomputes the
+    // full (t,s,k) set (cheap gemms) and accumulates in place — trading
+    // redundant flops for zero internode comm.
     // =========================================================================
     void lr_gw::_sigma_div_correction(
         sArrv_5D_t& sDeltaSigma_tskij,
@@ -571,24 +581,23 @@ namespace methods {
         return;
       } else if (div_treatment == gygi or div_treatment == gygi_extrplt or div_treatment == gygi_extrplt_2d) {
         auto MF = thc.MF();
-        auto mpi = thc.mpi();
         app_log(3, "    - madelung = {}", MF->madelung());
-        using math::shm::make_shared_array;
         auto [nts, ns, nkpts, nbnd, nbnd2] = sDeltaSigma_tskij.shape();
         auto nt_half = (nts % 2 == 0) ? nts / 2 : nts / 2 + 1;
 
-        int rank = mpi->comm.rank();
-        int size = mpi->comm.size();
-
-        using Array_view_5D_t = nda::array_view<ComplexType, 5>;
         decltype(nda::range::all) all;
 
-        // ΔΣ^div_{ij} = factor · S(k+q) · ΔG · S(k)
+        // ΔΣ^div_{ij} += factor · S(k+q) · ΔG · S(k), accumulated in place.
+        // Each node computes the full (t,s,k) set. The calculation is distributed
+        // only over node_comm (single node). Avoid inter-node communication.
+        auto node_comm = sDeltaSigma_tskij.node_comm();
+        size_t node_rank = node_comm->rank();
+        size_t node_size = node_comm->size();
+
         nda::array<ComplexType, 2> buffer_ib(nbnd, nbnd);
-        auto sDelta_tskij = make_shared_array<Array_view_5D_t>(*mpi, sDeltaSigma_tskij.shape());
-        auto Delta_loc = sDelta_tskij.local();
-        sDelta_tskij.win().fence();
-        for (size_t tsk = rank; tsk < nts * ns * nkpts; tsk += size) {
+        auto Sigma_loc = sDeltaSigma_tskij.local();
+        sDeltaSigma_tskij.win().fence();
+        for (size_t tsk = node_rank; tsk < nts * ns * nkpts; tsk += node_size) {
           size_t it = tsk / (ns * nkpts);
           size_t is = (tsk / nkpts) % ns;
           size_t ik = tsk % nkpts;
@@ -597,17 +606,13 @@ namespace methods {
           RealType factor = -1.0 * MF->madelung() * eps_inv_head(it_pos).real();
 
           auto DeltaG_ab = DeltaG_tskij(it, is, ik, nda::ellipsis{});
-          auto Delta_ij = Delta_loc(it, is, ik, nda::ellipsis{});
+          auto Sigma_ij = Sigma_loc(it, is, ik, nda::ellipsis{});
           auto S_kq = S_skij(is, _kpq_map(ik), all, all);  // S at k+q
           auto S_k = S_skij(is, ik, all, all);              // S at k
           nda::blas::gemm(S_kq, DeltaG_ab, buffer_ib);
-          nda::blas::gemm(ComplexType(factor), buffer_ib, S_k, ComplexType(0.0), Delta_ij);
+          nda::blas::gemm(ComplexType(factor), buffer_ib, S_k, ComplexType(1.0), Sigma_ij);
         }
-        sDelta_tskij.win().fence();
-        sDelta_tskij.all_reduce();
-
-        if (sDeltaSigma_tskij.node_comm()->root())
-          sDeltaSigma_tskij.local() += sDelta_tskij.local();
+        sDeltaSigma_tskij.win().fence();
         sDeltaSigma_tskij.communicator()->barrier();
       } else {
         utils::check(false, "Unsupported divergence treatment: {}", div_enum_to_string(div_treatment));

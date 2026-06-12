@@ -172,8 +172,8 @@ namespace methods {
       /**
        * Divergence correction term 2 (q_pert=0 only):
        *   ΔΣ += -madelung * Δeps_inv_head(τ) * S(k) · G · S(k)
-       * Uses gw_t::Sigma_div_correction (S_L = S_R at q=0).
-       * Asserts q_pert=0; calling at q_pert≠0 is a programming error.
+       * Uses _sigma_div_correction, called only for q_pert = 0 so S(k+q) = S(k)
+       * on the left and right.
        */
       void apply_div_correction_G(
           sArrv_5D_t& sDeltaSigma_tskij,
