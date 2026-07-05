@@ -120,6 +120,73 @@ namespace methods {
   bool read_pi_local(shared_array_t &sPi_imp, shared_array_t &sPi_dc,
                      std::string filename, long weiss_b_iter=-1);
 
+  /**
+   * Read linear response perturbation ΔH0 from HDF5 file.
+   *
+   * Expected HDF5 structure:
+   *   /linear_response/
+   *     q_vec              # (3,) perturbation wavevector in crystal coords
+   *     DeltaH0_skij       # (ns, nk, nb, nb) complex perturbation matrix
+   *
+   * @param comm           - [INPUT] MPI communicator (shared or regular)
+   * @param filename       - [INPUT] HDF5 file path
+   * @param q_vec          - [OUTPUT] perturbation wavevector
+   * @param sDeltaH0_skij  - [OUTPUT] perturbation matrix
+   * @return true if read successful, false otherwise
+   */
+  template<typename communicator_t, typename shared_array_t>
+  bool read_DeltaH0(communicator_t& comm,
+                    std::string filename,
+                    nda::array<double, 1>& q_vec,
+                    shared_array_t& sDeltaH0_skij);
+
+  /**
+   * Write linear response perturbation ΔH0 to HDF5 file.
+   *
+   * @param comm           - [INPUT] MPI communicator
+   * @param filename       - [INPUT] HDF5 file path
+   * @param q_vec          - [INPUT] perturbation wavevector
+   * @param sDeltaH0_skij  - [INPUT] perturbation matrix
+   */
+  template<typename communicator_t, typename shared_array_t>
+  void write_DeltaH0(communicator_t& comm,
+                     std::string filename,
+                     nda::array<double, 1> const& q_vec,
+                     shared_array_t const& sDeltaH0_skij);
+
+  /**
+   * Write unified LR results to HDF5 checkpoint file.
+   *
+   * Always writes ΔG and ΔDm. Writes ΔF only if include_hartree || include_exchange.
+   * Writes ΔΣ only if include_gw_sigma.
+   *
+   * @param comm              - [INPUT] MPI communicator
+   * @param filename          - [INPUT] HDF5 file path (e.g., "coqui.mbpt.h5")
+   * @param q_vec             - [INPUT] perturbation wavevector
+   * @param sDeltaG_tskij     - [INPUT] LR Green's function
+   * @param sDeltaDm_skij     - [INPUT] LR density matrix
+   * @param sDeltaF_skij      - [INPUT] LR Fock matrix
+   * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nullptr if not used)
+   * @param Delta_mu          - [INPUT] chemical potential shift
+   * @param niter             - [INPUT] number of SCF iterations
+   * @param include_hartree   - [INPUT] whether Hartree was included
+   * @param include_exchange  - [INPUT] whether Exchange was included
+   * @param include_gw_sigma  - [INPUT] whether GW self-energy was included
+   */
+  template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
+  void dump_lr(communicator_t& comm,
+               std::string filename,
+               nda::array<double, 1> const& q_vec,
+               G_t const& sDeltaG_tskij,
+               Dm_t const& sDeltaDm_skij,
+               F_t const& sDeltaF_skij,
+               Sigma_t const* sDeltaSigma_tskij,
+               double Delta_mu,
+               int niter,
+               bool include_hartree,
+               bool include_exchange,
+               bool include_gw_sigma);
+
   }; // chkpt
 
 } // methods

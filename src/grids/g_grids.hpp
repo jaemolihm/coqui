@@ -50,8 +50,8 @@ public:
    */ 
   truncated_g_grid():
     ecut_(0.0),
-    fft_mesh(0),
-    recv(0,0),
+    fft_mesh{0, 0, 0},
+    recv{{0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
     generate_fft2gv(false),
     ngm(0),
     gvecs(ngm,3),

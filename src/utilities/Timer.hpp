@@ -131,10 +131,13 @@ public:
     id2pos.clear();
   }
 
-  // returns the integer associated with a timer id. If the timer does not exist, it will be added. 
+  // returns the integer associated with a timer id. If the timer does not exist, it will be added.
   int add(const std::string& str) { return getOrAdd(str); }
 
-  // starts a timer with name 'str'. If the timer does not exist, it will be added. 
+  // returns true if a timer with name 'str' exists
+  bool has(const std::string& str) const { return id2pos.find(str) != id2pos.end(); }
+
+  // starts a timer with name 'str'. If the timer does not exist, it will be added.
   void start(const std::string& str) { timers[ getOrAdd(str) ].start(); }
 
   void start(int n) { timers[ checkPos(n) ].start(); }
