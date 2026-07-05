@@ -34,7 +34,7 @@ namespace solvers {
                                std::string screen_type,
                                std::string div):
     _ft(ft), _screen_type(screen_type),
-    _div_treatment(div), _Timer() {
+    _div_treatment(div), _Timer(), _scr_fourier(ft) {
 
     const std::unordered_set<std::string> valid_pi_scheme = {
         "rpa", "rpa_r", "rpa_k",
@@ -378,146 +378,32 @@ namespace solvers {
     return dPi_tqPQ;
   }
 
+  // The distributed bosonic τ↔ω transforms live in scr_coulomb_fourier_t;
+  // these public methods are wrappers to the functions in _scr_fourier.
   template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
   auto scr_coulomb_t::tau_to_w(
       memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
       std::array<long, 4> w_pgrid_out, std::array<long, 4> w_bsize_out,
-      bool reset_input)
+      bool reset_input,
+      memory::darray_t<local_Array_t, communicator_t>* buffer_t,
+      memory::darray_t<local_Array_t, communicator_t>* buffer_w)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    using math::nda::make_distributed_array;
-
-    _Timer.start("IMAG_FT_TtoW");
-    auto comm = dPi_tqPQ_pos.communicator();
-    long npts = dPi_tqPQ_pos.global_shape()[1];
-    long Np = dPi_tqPQ_pos.global_shape()[3];
-    long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
-    std::array<long, 4> w_gshape = {nw_half, npts, Np, Np};
-    std::array<long, 4> t_gshape = dPi_tqPQ_pos.global_shape();
-
-    if (dPi_tqPQ_pos.communicator()->size() == 1) {
-      _ft->check_leakage(dPi_tqPQ_pos, imag_axes_ft::boson, "polarizability", true);
-      auto dPi_wqPQ = make_distributed_array<local_Array_t>(
-          *comm, {1, 1, 1, 1}, w_gshape, dPi_tqPQ_pos.block_size());
-      // local arrays cover all tau and w points
-      auto Pi_ti_loc = dPi_tqPQ_pos.local();
-      auto Pi_wi_loc = dPi_wqPQ.local();
-      _ft->tau_to_w_PHsym(Pi_ti_loc, Pi_wi_loc);
-      if (reset_input) dPi_tqPQ_pos.reset();
-      _Timer.stop("IMAG_FT_TtoW");
-      return dPi_wqPQ;
-    }
-    // redistribute to cover (tau, w)-axes locally -> FT locally -> redistribute back
-    std::array<long, 4> b_pgrid = {1, 1, 1, 1}; // pgrid for buffer
-    {
-      int np = comm->size();
-      if (t_gshape[2] * t_gshape[3] >= np) {
-        b_pgrid[2] = utils::find_proc_grid_min_diff(np, t_gshape[2], t_gshape[3]);
-        b_pgrid[3] = np / b_pgrid[2];
-      } else {
-        APP_ABORT("scr_coulomb_t::tau_to_w: Error finding proper pgrid: gshape[2]*gshape[3] < np.");
-      }
-    }
-    auto buffer_ti  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, t_gshape, dPi_tqPQ_pos.block_size());
-    _Timer.start("FT_REDISTRIBUTE");
-    math::nda::redistribute(dPi_tqPQ_pos, buffer_ti);
-    _Timer.stop("FT_REDISTRIBUTE");
-    if (reset_input) dPi_tqPQ_pos.reset();
-    _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "polarizability", true);
-    buffer_ti.communicator()->barrier();
-
-    auto buffer_wi  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, w_gshape, buffer_ti.block_size());
-    {
-      auto buf_ti_loc = buffer_ti.local();
-      auto buf_wi_loc = buffer_wi.local();
-      _ft->tau_to_w_PHsym(buf_ti_loc, buf_wi_loc);
-    }
-    buffer_ti.reset();
-    buffer_wi.communicator()->barrier();
-
-    auto dPi_wqPQ = make_distributed_array<local_Array_t>(
-        *comm, w_pgrid_out, w_gshape, w_bsize_out);
-
-    _Timer.start("FT_REDISTRIBUTE");
-    math::nda::redistribute(buffer_wi, dPi_wqPQ);
-    _Timer.stop("FT_REDISTRIBUTE");
-    buffer_wi.reset();
-    dPi_wqPQ.communicator()->barrier();
-
-    _Timer.stop("IMAG_FT_TtoW");
-    return dPi_wqPQ;
+    return _scr_fourier.tau_to_w(dPi_tqPQ_pos, w_pgrid_out, w_bsize_out,
+                               reset_input, buffer_t, buffer_w);
   }
 
   template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
   auto scr_coulomb_t::w_to_tau(
       memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
       std::array<long, 4> t_pgrid_out, std::array<long, 4> t_bsize_out,
-      bool reset_input)
+      bool reset_input,
+      memory::darray_t<local_Array_t, communicator_t>* buffer_t,
+      memory::darray_t<local_Array_t, communicator_t>* buffer_w)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    using math::nda::make_distributed_array;
-
-    _Timer.start("IMAG_FT_WtoT");
-    auto comm = dW_wqPQ_pos.communicator();
-    long npts = dW_wqPQ_pos.global_shape()[1];
-    long Np = dW_wqPQ_pos.global_shape()[3];
-    auto w_gshape = dW_wqPQ_pos.global_shape();
-    size_t nt_half = (_ft->nt_b()%2==0)? _ft->nt_b() / 2 : _ft->nt_b() / 2 + 1;
-    std::array<long, 4> t_gshape = {nt_half, npts, Np, Np};
-
-    if (dW_wqPQ_pos.communicator()->size() == 1) {
-      auto dW_tqPQ = make_distributed_array<local_Array_t>(
-          *comm, {1, 1, 1, 1}, t_gshape, {1, 1, 1, 1});
-      // local arrays cover all tau and w points
-      auto W_wi_loc = dW_wqPQ_pos.local();
-      auto W_ti_loc = dW_tqPQ.local();
-      _ft->w_to_tau_PHsym(W_wi_loc, W_ti_loc);
-      if (reset_input) dW_wqPQ_pos.reset();
-      _ft->check_leakage(dW_tqPQ, imag_axes_ft::boson, "screened interation", true);
-      _Timer.stop("IMAG_FT_WtoT");
-      return dW_tqPQ;
-    }
-
-    // redistribute to cover (tau, w)-axes locally -> FT locally -> redistribute back
-    std::array<long, 4> b_pgrid = {1, 1, 1, 1}; // pgrid for buffer
-    {
-      int np = comm->size();
-      if (t_gshape[2] * t_gshape[3] >= np) {
-        b_pgrid[2] = utils::find_proc_grid_min_diff(np, t_gshape[2], t_gshape[3]);
-        b_pgrid[3] = np / b_pgrid[2];
-      } else {
-        APP_ABORT("scr_coulomb_t::W_w_to_tau: Error finding proper pgrid: gshape[2]*gshape[3] < np.");
-      }
-    }
-    auto buffer_wi  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, w_gshape, dW_wqPQ_pos.block_size());
-    _Timer.start("FT_REDISTRIBUTE");
-    math::nda::redistribute(dW_wqPQ_pos, buffer_wi);
-    _Timer.stop("FT_REDISTRIBUTE");
-    if (reset_input) dW_wqPQ_pos.reset();
-
-    auto buffer_ti  = make_distributed_array<local_Array_t>(
-        *comm, b_pgrid, t_gshape, buffer_wi.block_size());
-    {
-      auto buf_ti_loc = buffer_ti.local();
-      auto buf_wi_loc = buffer_wi.local();
-      _ft->w_to_tau_PHsym(buf_wi_loc, buf_ti_loc);
-    }
-    buffer_wi.reset();
-    _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "screened interaction", true);
-
-    auto dW_tqPQ = make_distributed_array<local_Array_t>(
-        *comm, t_pgrid_out, t_gshape, t_bsize_out);
-
-    _Timer.start("FT_REDISTRIBUTE");
-    math::nda::redistribute(buffer_ti, dW_tqPQ);
-    _Timer.stop("FT_REDISTRIBUTE");
-    buffer_ti.reset();
-
-    _Timer.stop("IMAG_FT_WtoT");
-    return dW_tqPQ;
+    return _scr_fourier.w_to_tau(dW_wqPQ_pos, t_pgrid_out, t_bsize_out,
+                               reset_input, buffer_t, buffer_w);
   }
 
   template<typename comm_t>
@@ -542,6 +428,13 @@ namespace solvers {
       auto scf_grp = (grp.has_subgroup("scf")) ? grp.open_group("scf") : grp.create_group("scf");
       auto iter_grp = (scf_grp.has_subgroup(grp_name)) ?
                       scf_grp.open_group(grp_name) : scf_grp.create_group(grp_name);
+
+      // Stash div_treatment at scf_grp so post-processing (e.g. LR
+      // load_W_and_eps_inv_head) can recompute eps_inv_head consistently
+      // with the value scGW used. Same value across all iters.
+      if (!scf_grp.has_dataset("div_treatment")) {
+        h5::h5_write(scf_grp, "div_treatment", _div_treatment);
+      }
 
       nda::h5_write(iter_grp, "eps_inv_head_wq", eps_inv_head_wq, false);
       nda::h5_write(iter_grp, "eps_inv_head_tq", eps_inv_head_tq, false);
@@ -583,11 +476,15 @@ namespace solvers {
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_t::w_to_tau(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool);
+                 std::array<long, 4>, std::array<long, 4>, bool,
+                 memory::darray_t<Arr4D, mpi3::communicator>*,
+                 memory::darray_t<Arr4D, mpi3::communicator>*);
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_t::tau_to_w(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool);
+                 std::array<long, 4>, std::array<long, 4>, bool,
+                 memory::darray_t<Arr4D, mpi3::communicator>*,
+                 memory::darray_t<Arr4D, mpi3::communicator>*);
 
   // instantiate templates
   template void scr_coulomb_t::dump_eps_inv_head(

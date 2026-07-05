@@ -35,6 +35,7 @@
 
 #include "mean_field/MF.hpp"
 #include "methods/embedding/projector_boson_t.h"
+#include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/ERI/detail/concepts.hpp"
@@ -194,18 +195,25 @@ namespace solvers {
     /**
      * Specialized version of FT function for distributed array along (tau, w)-axes
      */
+    // buffer_t / buffer_w: optional caller-owned τ- and ω-shaped staging buffers
+    // (in the ft_buffer_dist distribution). When provided they are reused across
+    // calls. If not set, allocate per-call buffers.
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto tau_to_w(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
                   std::array<long, 4> w_pgrid_out,
                   std::array<long, 4> w_bsize_out = {},
-                  bool reset_input = false)
+                  bool reset_input = false,
+                  memory::darray_t<local_Array_t, communicator_t>* buffer_t = nullptr,
+                  memory::darray_t<local_Array_t, communicator_t>* buffer_w = nullptr)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto w_to_tau(memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
                   std::array<long, 4> t_pgrid_out,
                   std::array<long, 4> t_bsize_out = {},
-                  bool reset_input = false)
+                  bool reset_input = false,
+                  memory::darray_t<local_Array_t, communicator_t>* buffer_t = nullptr,
+                  memory::darray_t<local_Array_t, communicator_t>* buffer_w = nullptr)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     template<typename comm_t>
@@ -260,6 +268,14 @@ namespace solvers {
 
     std::string _div_treatment;
     utils::TimerManager _Timer;
+
+    // Distributed bosonic τ↔ω FT engine. The public tau_to_w / w_to_tau
+    // delegate to this; it owns the FT timers and the leak-check gate.
+    scr_coulomb_fourier_t _scr_fourier;
+  public:
+    utils::TimerManager& timer() { return _Timer; }
+
+  private:
 
     // optional container for screened interaction
     // TODO Remove these
