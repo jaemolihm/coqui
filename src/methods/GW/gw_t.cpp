@@ -126,6 +126,23 @@ namespace methods {
       app_log(2, "    Chol-ERI reader:       {0:.3f} sec\n", _Timer.elapsed("ERI_READER"));
     }
 
+    void gw_t::print_eval_sigma_timers() {
+      if (_Timer.has("EVALUATE_SIGMA_R") && _Timer.elapsed("EVALUATE_SIGMA_R") > 0.0) {
+        app_log(2, "      gw_t Sigma (R):               {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
+        app_log(2, "        - Alloc:                    {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC_R"));
+        app_log(2, "        - Gij -> Guv:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
+        app_log(2, "        - FT (k<->R):               {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
+        app_log(2, "        - Hadamard product:         {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));
+        app_log(2, "        - Sigma_uv -> Sigma_ij:     {0:.3f} sec", _Timer.elapsed("SIGMA_AUX_TO_PRIM"));
+      } else if (_Timer.has("EVALUATE_SIGMA_K") && _Timer.elapsed("EVALUATE_SIGMA_K") > 0.0) {
+        app_log(2, "      gw_t Sigma (K):               {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_K"));
+        app_log(2, "        - Alloc:                    {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC_K"));
+        app_log(2, "        - Gij -> Guv:               {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
+        app_log(2, "        - Hadamard product:         {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_K"));
+        app_log(2, "        - Sigma_uv -> Sigma_ij:     {0:.3f} sec", _Timer.elapsed("SIGMA_AUX_TO_PRIM"));
+      }
+    }
+
   } // solvers
 } // methods
 

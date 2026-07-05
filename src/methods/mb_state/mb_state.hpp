@@ -125,6 +125,8 @@ public:
   std::optional<sArray_t<nda::array_view<ComplexType, 5> > > sSigma_tskij;
   // Static part of the self-energy
   std::optional<sArray_t<nda::array_view<ComplexType, 4> > > sF_skij;
+  // Overlap matrix
+  std::optional<sArray_t<nda::array_view<ComplexType, 4> > > sS_skij;
   // Dynamically screened interaction w/o bare term
   std::optional<dArray_t<nda::array<ComplexType, 4> > > dW_qtPQ;
   // Flag to determine screening recipe to calculate the dynamically screened interaction. 

@@ -95,8 +95,11 @@ namespace methods {
       }
 
       _Timer.start("TOTAL");
-      thc_gw_Xqindep(mb_state.sG_tskij.value().local(), mb_state.sSigma_tskij.value(), thc,
-                     mb_state.dW_qtPQ.value(), mb_state.eps_inv_head.value());
+      utils::check(mb_state.sS_skij.has_value(),
+                   "gw_t::evaluate: sS_skij (overlap matrix) is not initialized in MBState.");
+      thc_gw_Xqindep(mb_state.sG_tskij.value().local(), mb_state.sSigma_tskij.value(),
+                     mb_state.sS_skij.value().local(),
+                     thc, mb_state.dW_qtPQ.value(), mb_state.eps_inv_head.value());
       _Timer.stop("TOTAL");
 
       print_thc_gw_timers();
@@ -108,6 +111,7 @@ namespace methods {
     template<nda::MemoryArray Array_view_5D_t>
     void gw_t::evaluate(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                         sArray_t<Array_view_5D_t> &sSigma_tskij,
+                        const nda::MemoryArrayOfRank<4> auto &S_skij,
                         THC_ERI auto const& thc, scr_coulomb_t* scr_eri, bool verbose) {
       if (verbose) {
         //http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20thc-gw
@@ -157,7 +161,7 @@ namespace methods {
       if (thc.thc_X_type() == "q_dep") {
         APP_ABORT("gw_t::thc_gw_Xqdep: not implemented yet");
       } else if (thc.thc_X_type() == "q_indep") {
-        thc_gw_Xqindep(G_tskij, sSigma_tskij, thc,  scr_eri->get_mutable(), scr_eri->eps_inv_head());
+        thc_gw_Xqindep(G_tskij, sSigma_tskij, S_skij, thc, scr_eri->get_mutable(), scr_eri->eps_inv_head());
       } else {
         APP_ABORT("gw_t::evaluate: Invalid thc_X_type.\n");
       }
@@ -203,9 +207,11 @@ namespace methods {
     using Arrv = nda::array_view<ComplexType, 5>;
     using Arrv2 = nda::array_view<ComplexType, 5, nda::C_layout>;
 
-    template void gw_t::evaluate(const Arr &, sArray_t<Arrv> &, const thc_reader_t &, scr_coulomb_t*, bool);
-    template void gw_t::evaluate(const Arrv &, sArray_t<Arrv> &, const thc_reader_t &, scr_coulomb_t*, bool);
-    template void gw_t::evaluate(const Arrv2 &, sArray_t<Arrv> &, const thc_reader_t &, scr_coulomb_t*, bool);
+    using Arrv4D = nda::array_view<ComplexType, 4>;
+
+    template void gw_t::evaluate(const Arr &, sArray_t<Arrv> &, const Arrv4D &, const thc_reader_t &, scr_coulomb_t*, bool);
+    template void gw_t::evaluate(const Arrv &, sArray_t<Arrv> &, const Arrv4D &, const thc_reader_t &, scr_coulomb_t*, bool);
+    template void gw_t::evaluate(const Arrv2 &, sArray_t<Arrv> &, const Arrv4D &, const thc_reader_t &, scr_coulomb_t*, bool);
 
     template void gw_t::evaluate(MBState&, const thc_reader_t&, bool);
 
@@ -215,6 +221,11 @@ namespace methods {
           thc_reader_t&, std::string); 
     template void gw_t::eval_Sigma_all(const Arrv2 &, memory::darray_t<Arr4D, mpi3::communicator> &, sArray_t<Arrv> &,
           thc_reader_t&, std::string); 
+
+    template void gw_t::Sigma_div_correction(sArray_t<Arrv> &, const Arr &, const Arrv4D &, thc_reader_t &,
+          const nda::array<ComplexType, 1> &);
+    template void gw_t::Sigma_div_correction(sArray_t<Arrv> &, const Arrv &, const Arrv4D &, thc_reader_t &,
+          const nda::array<ComplexType, 1> &);
 
   }
 }

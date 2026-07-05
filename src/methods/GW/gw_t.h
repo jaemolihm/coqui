@@ -80,11 +80,13 @@ namespace methods {
        * Evalaute THC-GW self-energy
        * @param G_tskij      - [INPUT] Green's function in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param sSigma_tskij - [OUTPUT] Self-energy in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
+       * @param S_skij       - [INPUT] Overlap matrix (ns, nkpts_ibz, nbnd, nbnd)
        * @param thc          - [INPUT] THC ERI object
        */
       template<nda::MemoryArray Array_view_5D_t>
       void evaluate(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                     sArray_t<Array_view_5D_t> &sSigma_tskij,
+                    const nda::MemoryArrayOfRank<4> auto &S_skij,
                     THC_ERI auto const& thc, scr_coulomb_t* scr_eri=nullptr,
                     bool verbose=true);
 
@@ -163,13 +165,23 @@ namespace methods {
                           int batch_size = -1,
                           bool print_mpi = false);
 
+      template<nda::MemoryArray Array_view_5D_t>
+      void Sigma_div_correction(sArray_t<Array_view_5D_t> &sSigma_tskij,
+                                const nda::MemoryArrayOfRank<5> auto &G_tskij,
+                                const nda::MemoryArrayOfRank<4> auto &S_skij,
+                                THC_ERI auto &thc,
+                                const nda::array<ComplexType, 1> &eps_inv_head);
+
       void print_thc_gw_timers();
- 
-      void print_thc_rpa_timers(); 
 
-      void print_chol_gw_timers(); 
+      void print_thc_rpa_timers();
 
-      void print_rpa_gw_timers(); 
+      void print_chol_gw_timers();
+
+      void print_rpa_gw_timers();
+
+      /// Print only the Sigma evaluation sub-timers (used by lr_gw for G⊙ΔW term)
+      void print_eval_sigma_timers();
 
       //void set_MF(mf::MF *MF) { _MF = MF; }
 
@@ -178,6 +190,7 @@ namespace methods {
       template<nda::MemoryArray Array_view_5D_t, typename dArray_4D_t>
       void thc_gw_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                           sArray_t<Array_view_5D_t> &sSigma_tskij,
+                          const nda::MemoryArrayOfRank<4> auto &S_skij,
                           THC_ERI auto &thc, dArray_4D_t &dW_qtPQ,
                           const nda::MemoryArrayOfRank<1> auto &eps_inv_head);
 
@@ -228,12 +241,6 @@ namespace methods {
                                  const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
                                  memory::darray_t<Array_4D_t, communicator_t> &dSigma_skPQ,
                                  THC_ERI auto &thc, long isym);
-
-      template<nda::MemoryArray Array_view_5D_t>
-      void Sigma_div_correction(sArray_t<Array_view_5D_t> &sSigma_tskij,
-                                const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                                THC_ERI auto &thc,
-                                const nda::array<ComplexType, 1> &eps_inv_head);
 
       double thc_rpa_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij, THC_ERI auto &thc);
 

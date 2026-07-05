@@ -25,11 +25,12 @@ namespace methods {
     template<nda::MemoryArray Array_view_5D_t, typename dArray_4D_t>
     void gw_t::thc_gw_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                               sArray_t<Array_view_5D_t> &sSigma_tskij,
+                              const nda::MemoryArrayOfRank<4> auto &S_skij,
                               THC_ERI auto &thc, dArray_4D_t &dW_qtPQ,
                               const nda::MemoryArrayOfRank<1> auto &eps_inv_head) {
       eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc,
                      (thc.MF()->nqpts() == thc.MF()->nqpts_ibz()? "R" : "k"));
-      Sigma_div_correction(sSigma_tskij, G_tskij, thc, eps_inv_head);
+      Sigma_div_correction(sSigma_tskij, G_tskij, S_skij, thc, eps_inv_head);
     }
 
     template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
@@ -444,9 +445,10 @@ namespace methods {
     template<nda::MemoryArray Array_view_5D_t>
     void gw_t::Sigma_div_correction(sArray_t<Array_view_5D_t> &sSigma_tskij,
                               const nda::MemoryArrayOfRank<5> auto &G_tskij,
+                              const nda::MemoryArrayOfRank<4> auto &S_skij,
                               THC_ERI auto &thc,
                               const nda::array<ComplexType, 1> &eps_inv_head) {
-      app_log(1, "  Treatment of long-wavelength divergence in GW self-energy: {}",
+      app_log(2, "  Treatment of long-wavelength divergence in GW self-energy: {}",
               _div_treatment);
 
       auto div_treatment = _div_treatment;
@@ -461,36 +463,15 @@ namespace methods {
       } else if (div_treatment.find("gygi") != std::string::npos) {
         auto MF = thc.MF();
         auto mpi = thc.mpi();
-        app_log(1, "    - madelung = {}", MF->madelung());
+        app_log(2, "    - madelung = {}", MF->madelung());
         using math::shm::make_shared_array;
         auto [nts, ns, nkpts, nbnd, nbnd2] = sSigma_tskij.shape();
         auto nt_half = (nts%2==0)? nts / 2 : nts / 2 + 1;
-        auto NP = thc.Np();
 
         int rank = mpi->comm.rank();
         int size = mpi->comm.size();
 
-        using Array_view_4D_t = nda::array_view<ComplexType, 4>;
-        auto T_skia = make_shared_array<Array_view_4D_t>(*mpi, {ns, nkpts, nbnd, nbnd});
-        auto T_skia_loc = T_skia.local();
-        auto chi_head = thc.basis_head()(0, nda::range::all);
-        // T^{k}_{ia} = conj(X^{k}_{Pi}) * X^{k}_{Pa} * conj(chi_head(P) )
-        T_skia.win().fence();
-        for (size_t skia = rank; skia < ns * nkpts * nbnd * nbnd; skia += size) {
-          // skia = is * nkpts*nbnd*nbnd + ik * nbnd*nbnd + i * nbnd + a
-          size_t is = skia / (nkpts * nbnd * nbnd);
-          size_t ik = (skia / (nbnd * nbnd)) % nkpts;
-          size_t i = (skia / nbnd) % nbnd;
-          size_t a = skia % nbnd;
-
-          auto Xsk = thc.X(is, 0, ik);
-          for (size_t P = 0; P < NP; ++P) {
-            T_skia_loc(is, ik, i, a) += nda::conj(Xsk(P, i)) * Xsk(P, a) * nda::conj(chi_head(P));
-          }
-        }
-        T_skia.win().fence();
-        T_skia.all_reduce();
-
+        decltype(nda::range::all) all;
         nda::array<ComplexType, 2> buffer_ib(nbnd, nbnd);
 
         auto sDelta_tskij = make_shared_array<Array_view_5D_t>(*mpi, sSigma_tskij.shape());
@@ -507,10 +488,10 @@ namespace methods {
 
           auto G_ab = G_tskij(it, is, ik, nda::ellipsis{});
           auto Delta_ij = Delta_loc(it, is, ik, nda::ellipsis{});
-          auto T_ia = T_skia_loc(is, ik, nda::ellipsis{});
-          nda::blas::gemm(T_ia, G_ab, buffer_ib);
-          nda::blas::gemm(ComplexType(factor), buffer_ib, nda::dagger(T_skia_loc(is, ik, nda::ellipsis{})), 
-                     ComplexType(0.0), Delta_ij);
+          auto Ssk = S_skij(is, ik, all, all);
+          // Delta_ij = factor * S_ia * G_ab * S_bj
+          nda::blas::gemm(Ssk, G_ab, buffer_ib);
+          nda::blas::gemm(ComplexType(factor), buffer_ib, Ssk, ComplexType(0.0), Delta_ij);
         }
         sDelta_tskij.win().fence();
         sDelta_tskij.all_reduce();
@@ -521,7 +502,7 @@ namespace methods {
       } else {
         utils::check(false, "Unsupported divergence treatment: {}", div_treatment);
       }
-      app_log(1, "");
+      app_log(2, "");
     }
 
   }
