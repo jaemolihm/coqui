@@ -64,6 +64,61 @@ inline std::string resolve_mbpt_output_stem(ptree const& pt) {
   return outdir + "/" + prefix;
 }
 
+/**
+ * Factory function for creating simple_dyson with conditional H0 source.
+ *
+ * @param h0_source     - [INPUT] Source of H0: "compute" or "checkpoint"
+ * @param mf_ptr        - [INPUT] Mean-field object pointer
+ * @param ft_ptr        - [INPUT] IAFT pointer
+ * @param chkpt_prefix  - [INPUT] Checkpoint file prefix (used if h0_source="checkpoint")
+ * @param mu_tol        - [INPUT] Chemical potential tolerance (default 1e-9)
+ * @param mu_update_alg - [INPUT] Chemical potential update algorithm
+ * @return simple_dyson object
+ */
+inline simple_dyson make_dyson_with_h0_source(
+    std::string_view h0_source,
+    mf::MF* mf_ptr,
+    imag_axes_ft::IAFT* ft_ptr,
+    const std::string& chkpt_prefix,
+    double mu_tol = 1e-9,
+    std::string mu_update_alg = "bisection") {
+  if (h0_source == "checkpoint") {
+    app_log(1, "  H0 source                = checkpoint ({}.mbpt.h5)", chkpt_prefix);
+    return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix, mu_tol, mu_update_alg);
+  } else {
+    app_log(1, "  H0 source                = computed from orbitals");
+    return simple_dyson(mf_ptr, ft_ptr, mu_tol, mu_update_alg);
+  }
+}
+
+/**
+ * Compute a 4D processor grid for nproc ranks and a given global shape.
+ * Axes 0 and 1 get pool-style splits; the remainder goes to axes 2 and 3.
+ * Axes flagged in skip_axes stay undivided.
+ *
+ * @return processor grid {n0, n1, n2, n3} with n0*n1*n2*n3 == nproc
+ */
+inline std::array<long, 4> compute_proc_grid_4D(long nproc, std::array<long, 4> shape,
+                                                 std::array<bool, 4> skip_axes = {false, false, false, false}) {
+  long np = nproc;
+  std::array<long, 4> grid = {1, 1, 1, 1};
+  for (int ax = 0; ax < 2; ++ax) {
+    if (!skip_axes[ax]) {
+      grid[ax] = utils::find_proc_grid_max_npools(np, shape[ax], 0.2);
+      np /= grid[ax];
+    }
+  }
+  if (!skip_axes[2] && !skip_axes[3]) {
+    grid[2] = utils::find_proc_grid_min_diff(np, shape[2], shape[3]);
+    grid[3] = np / grid[2];
+  } else if (!skip_axes[2]) {
+    grid[2] = np;
+  } else if (!skip_axes[3]) {
+    grid[3] = np;
+  }
+  return grid;
+}
+
 // Helper function to prepare checkpoint file for downfold_coulomb
 inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& output, 
                               std::string const& greens_func_source, ptree const& pt) {
@@ -137,6 +192,11 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
+  auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
+  io::tolower(h0_source);
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+      "mbpt: unknown h0_source=\"{}\". Valid options: \"compute\", \"checkpoint\"", h0_source);
 
   auto restart = io::get_value_with_default<bool>(pt,"restart",false);
   auto greens_func_source = io::get_value_with_default<std::string>(pt,"greens_func_source", "scf");
@@ -174,14 +234,14 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   hf_t hf(hf_div_treatment);
   if(solver_type == "rpa") {
 
-    simple_dyson dyson(mf.get(), &ft, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
     rpa_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf,&gw));
 
   } else if(solver_type == "hf") {
 
-    simple_dyson dyson(mf.get(), &ft, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -191,13 +251,14 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf),
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
-             io::get_value_with_default<bool>(pt, "eval_thermodynamics", false));
+             /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
+             /*compute_exchange=*/compute_exchange);
 
   } else if(solver_type == "gw") {
 
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson(mf.get(), &ft, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -214,13 +275,15 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration, 
-               io::get_value_with_default<bool>(pt, "eval_thermodynamics", false));
+               /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
+               /*compute_exchange=*/compute_exchange);
 
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
-          h5::file file("thc_screened_interaction.h5", 'w');
+          h5::file file(w_path, 'w');
           h5::group grp(file);
           math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
         } else {
@@ -235,13 +298,15 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration, 
-               io::get_value_with_default<bool>(pt, "eval_thermodynamics", false));
+               /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
+               /*compute_exchange=*/compute_exchange);
 
       auto dump_w_to_h5 = io::get_value_with_default<bool>(pt,"dump_w_to_h5", false);
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
-          h5::file file("thc_screened_interaction.h5", 'w');
+          h5::file file(w_path, 'w');
           h5::group grp(file);
           math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
         } else {
@@ -265,7 +330,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       utils::check(false, "thermodynamic-property (grand potential) evaluation is not yet supported for the GF2 solver.");
     }
 
-    simple_dyson dyson(mf.get(), &ft, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -281,12 +346,14 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     if (gf2_direct_type == "gf2") {
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration, eval_thermodynamics);
+               greens_func_source, greens_func_iteration,
+               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange);
     } else {
       solvers::scr_coulomb_t scr_eri(&ft, "rpa", div_treatment);
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
-               greens_func_source, greens_func_iteration, eval_thermodynamics);
+               greens_func_source, greens_func_iteration,
+               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange);
     }
 
   } else if(solver_type == "gw_dca") {
@@ -313,7 +380,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     qp_params.mu_tolerance = mu_tol;
     qp_params.mu_update_alg = mu_update_alg;
     qp_scf_loop(mb_state, eri, ft, qp_params, mb_solver_t(&hf), iter_solver.get(),
-                niter, restart, conv_thr);
+                niter, restart, conv_thr, /*compute_exchange=*/compute_exchange);
 
   } else if (solver_type == "evgw") {
 
@@ -335,7 +402,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     solvers::gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
     qp_scf_loop(mb_state, eri, ft, qp_params, mb_solver_t(&hf,&gw,&scr_eri), iter_solver.get(),
-                niter, restart, conv_thr);
+                niter, restart, conv_thr, /*compute_exchange=*/compute_exchange);
 
   } else if (solver_type == "qpgw") {
 
@@ -358,7 +425,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     solvers::gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
     qp_scf_loop(mb_state, eri, ft, qp_params, mb_solver_t(&hf,&gw,&scr_eri), iter_solver.get(),
-                niter, restart, conv_thr);
+                niter, restart, conv_thr, /*compute_exchange=*/compute_exchange);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);
@@ -389,6 +456,11 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
+  auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
+  io::tolower(h0_source);
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+      "mbpt: unknown h0_source=\"{}\". Valid options: \"compute\", \"checkpoint\"", h0_source);
 
   auto restart = io::get_value_with_default<bool>(pt,"restart",false);
   auto greens_func_source = io::get_value_with_default<std::string>(pt,"greens_func_source", "scf");
@@ -429,7 +501,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
 
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson(mf.get(), &ft, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -446,7 +518,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
     scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gw, &scr_eri),
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
-             io::get_value_with_default<bool>(pt, "eval_thermodynamics", false));
+             /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
+             /*compute_exchange=*/compute_exchange);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);

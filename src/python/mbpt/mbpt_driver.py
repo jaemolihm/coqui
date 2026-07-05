@@ -105,6 +105,12 @@ def run_hf(params, h_int, h_int_exchange=None):
           ``"scf"`` reads from the checkpoint.
         - ``greens_func_iteration`` *(int, optional, default ``-1``)* — checkpoint
           iteration to read the Green's function from. ``-1`` selects the latest.
+        - ``h0_source`` *(str, optional, default ``"compute"``)* — source of the H0
+          matrix. ``"compute"`` calculates H0 from the plane-wave orbitals;
+          ``"checkpoint"`` reads it from ``outdir/prefix.mbpt.h5``.
+        - ``compute_exchange`` *(bool, optional, default ``True``)* — whether to
+          compute the exchange (K) term in the Fock matrix. Set to ``False`` for
+          Hartree-only calculations.
         - ``iaft`` *(dict, optional)* — imaginary-axis frequency-grid settings:
 
           - ``wmax`` *(float, optional, units: Hartree)* — maximum frequency in Hartree. If omitted,
