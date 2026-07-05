@@ -547,7 +547,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
 
     // resize data structures
     if(nchol+newv > nmax) {
-      int nmax_new = nmax + 2*int(sqrt(a_range.size()*b_range.size()));
+      int nmax_new = std::max<long>(nchol + newv, nmax + 2*int(sqrt(a_range.size()*b_range.size())));
       comm_buff = memory::array<MEM,ComplexType,1>(block_size*(nmax_new +
                 max_ns_per_kibz*nspins*nkpts_ibz*a_range.size()));
       {
@@ -1270,7 +1270,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 
     // resize data structures
     if(nchol+newv > nmax) {
-      int nmax_new = nmax + 2*int(sqrt(a_range.size()*b_range.size()));
+      int nmax_new = std::max<long>(nchol + newv, nmax + 2*int(sqrt(a_range.size()*b_range.size())));
       comm_buff = memory::array<MEM,ComplexType,1>(block_size*(nmax_new +
                 nspins*nkpts*(a_range.size()+b_scale*b_range.size())*npol));
       {
