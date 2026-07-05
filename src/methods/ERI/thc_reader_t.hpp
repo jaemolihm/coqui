@@ -95,6 +95,7 @@ namespace methods {
       _Y_shm{std::nullopt},
       _dSinv_Ivec(std::nullopt),
       _Timer() {
+      _ecut = _thc_builder_opt.value().get_ecut();
       utils::check(x_range.first() >= 0 and x_range.last() <= _nbnd, 
                    "X orbitals out of range: ({},{}), nbnd:{}",x_range.first(),x_range.last(),_nbnd);
       utils::check(y_range.first() >= 0 and y_range.last() <= _nbnd,
@@ -177,6 +178,16 @@ namespace methods {
     }
 
   private:
+
+    // Copy rho_g and vG out of the thc builder, then discard the builder. Called
+    // from each build path (build / build_from_CD / build_isdf_only) so that
+    // downstream consumers that need √v(G+q) after init can still access the
+    // original configuration.
+    void capture_builder_state() {
+      _rho_g = _thc_builder_opt.value().get_rho_g();
+      _vG_opt.emplace(_thc_builder_opt.value().get_vG());
+      _thc_builder_opt.reset();
+    }
 
     void print_thc_reader_info(bool build_eri) {
       // http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20ThcCoulomb
@@ -273,6 +284,8 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
             auto X_0 = _X_shm.local(); 
             nda::h5_write(grp, "collocation_matrix", X_0, false);
             if(_Y_shm.has_value()) {
@@ -298,7 +311,7 @@ namespace methods {
       _Timer.stop("BUILD_TOTAL");
 
       _thc_builder_opt.value().print_timers();
-      _thc_builder_opt.reset();
+      capture_builder_state();
       app_log(2, "  THC-READER::BUILD()");
       app_log(2, "  -------------------");
       app_log(2, "    Build total:                     {0:.3f} sec", _Timer.elapsed("BUILD_TOTAL"));
@@ -423,6 +436,8 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
             auto X_0 = _X_shm.local();
             nda::h5_write(grp, "collocation_matrix", X_0, false);
             if(_Y_shm.has_value()) {
@@ -447,7 +462,7 @@ namespace methods {
       if (_storage == eri_storage_e::outcore) _dZ.reset();
       _Timer.stop("BUILD_TOTAL");
       _thc_builder_opt.value().print_timers();
-      _thc_builder_opt.reset();
+      capture_builder_state();
       app_log(2, "\n  THC-READER::BUILD_FROM_CD()");
       app_log(2, "  ---------------------------");
       app_log(2, "    Build total:                     {0:.3f} sec", _Timer.elapsed("BUILD_TOTAL"));
@@ -498,6 +513,8 @@ namespace methods {
             nda::h5_write(grp, "qpts", _MF->Qpts(), false);
             h5::h5_write(grp, "nkpts_ibz", _nkpts_ibz);
             h5::h5_write(grp, "nqpts_ibz", _nqpts_ibz);
+            h5::h5_write(grp, "ecut", _thc_builder_opt.value().get_ecut());
+            nda::h5_write(grp, "fft_grid", _thc_builder_opt.value().get_fft_mesh(), false);
             nda::h5_write(grp, "collocation_matrix", _X_shm.local(), false);
             _thc_builder_opt.value().save(grp, _format, _rp, dzeta_qur, write_zeta_on_fft_mesh);
           } else {
@@ -517,7 +534,7 @@ namespace methods {
       if (_storage == eri_storage_e::outcore) _dZ.reset();
       _Timer.stop("BUILD_TOTAL");
       _thc_builder_opt.value().print_timers();
-      _thc_builder_opt.reset();
+      capture_builder_state();
       app_log(2, "***************************************************");
       app_log(2, "                  THC-READER::BUILD_ISDF_ONLY() ");
       app_log(2, "***************************************************");
@@ -537,6 +554,17 @@ namespace methods {
       h5::group grp(file);
 
       utils::check( not _get_Sinv_Ivec, "Finish: SinvIvec not yet written to file. Finish!!!");
+
+      if (grp.has_dataset("ecut") and grp.has_dataset("fft_grid")) {
+        h5::h5_read(grp, "ecut", _ecut);
+        nda::array<long, 1> fft_grid;
+        nda::h5_read(grp, "fft_grid", fft_grid);
+        _rho_g = grids::truncated_g_grid(_ecut, fft_grid, _MF->recv());
+        _vG_opt.emplace(ptree{}, false);
+      } else {
+        app_warning("thc_reader_t::read: THC file lacks 'ecut'/'fft_grid' datasets "
+                    "(written by older versions); rho_g()/vG() will be unavailable.");
+      }
 
       {
         std::vector<int> arng(2);  
@@ -826,6 +854,23 @@ namespace methods {
 
     bool initialized() const { return _initialized; }
     bool thc_builder_is_null() const { return _thc_builder_opt == std::nullopt; }
+
+    // Truncated G-space grid (ecut, FFT mesh, reciprocal vectors) captured
+    // from the thc builder at init time. Survives builder reset.
+    grids::truncated_g_grid const& rho_g() const { return _rho_g; }
+    // Potential evaluator (defines v(G+q)) captured from the thc builder at
+    // init time. Survives builder reset.
+    pots::potential_t& vG() {
+      utils::check(_vG_opt != std::nullopt,
+                   "thc_reader_t::vG: potential not initialized; call init() first.");
+      return _vG_opt.value();
+    }
+
+    // Saved interpolating-point indices on the FFT grid. Populated by both init
+    // and read paths; use this instead of re-running interpolating_points() to
+    // guarantee MPI-independent r_P (ordinary THC pivot selection can be slightly
+    // MPI-nondeterministic at loose thresholds).
+    auto const& ri() const { return _rp; }
     int Np() const { return _Np; }
     int nkpts() const { return _nkpts; }
     int nkpts_ibz() const { return _nkpts_ibz; }
@@ -957,6 +1002,14 @@ namespace methods {
     std::string _X_type;
 
     std::optional<thc> _thc_builder_opt;
+    // Plane-wave cutoff. Captured from the builder on the build path; read from
+    // the THC checkpoint ("ecut") on the read path.
+    double _ecut = 0.0;
+    // rho_g and vG copied from the thc builder before it is reset at the end of
+    // init(). Persisted so downstream consumers can still apply √v(G+q) after
+    // the builder is gone.
+    grids::truncated_g_grid   _rho_g;
+    std::optional<pots::potential_t> _vG_opt;
 
     int _Np;
     int _nkpts;

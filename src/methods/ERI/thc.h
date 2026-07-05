@@ -93,6 +93,12 @@ class thc
 
   void print_metadata();
 
+  auto get_ecut() const { return ecut; }
+  auto const& get_fft_mesh() const { return rho_g.mesh(); }
+  // Accessors used by thc_reader_t to persist rho_g and vG beyond the builder's lifetime.
+  auto const& get_rho_g() const { return rho_g; }
+  auto const& get_vG()   const { return vG; }
+
   template<MEMORY_SPACE MEM = HOST_MEMORY>
   auto interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq=0,
               nda::range k_range = nda::range(-1,-1), 
