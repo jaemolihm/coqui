@@ -32,6 +32,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_diis.hpp"
+#include "methods/HF/lr_hf.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
@@ -135,6 +136,7 @@ private:
   const mf::MF* _MF;
 
   lr_dyson _lr_dyson;
+  std::unique_ptr<solvers::lr_hf> _lr_hf;
   std::unique_ptr<lr_diis> _lr_diis;
 
   int _nts;
