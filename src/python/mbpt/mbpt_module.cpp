@@ -22,6 +22,8 @@
 #include <c2py/c2py.hpp>
 #include "IO/app_loggers.h"
 #include "methods/MBPT_drivers.h"
+#include "methods/HF/lr_hf.hpp"
+#include "methods/HF/hf_t.h"
 #include "utilities/lr_utils.hpp"
 
 #include "python/interaction/eri_module.hpp"
@@ -116,6 +118,119 @@ namespace coqui_py {
     utils::calculate_kpq_map(kpts_crys, q_vec, kpq_map);
     return kpq_map;
   }
+
+
+  /**
+   * @brief Compute LR Fock matrix from LR density matrix
+   *
+   * Computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm.
+   *
+   * @param h_int           - [INPUT] THC ERI handler
+   * @param q_vec           - [INPUT] Perturbation wavevector (3,)
+   * @param DeltaDm_skij    - [INPUT] LR density matrix (ns, nk, nb, nb)
+   * @param S_skij          - [INPUT] Overlap matrix (ns, nk, nb, nb)
+   * @param compute_hartree - [INPUT] Whether to compute Hartree term
+   * @param compute_exchange - [INPUT] Whether to compute Exchange term
+   * @return                - [OUTPUT] LR Fock matrix (ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 4> lr_hf(
+      ThcCoulomb& h_int,
+      nda::array<double, 1> const& q_vec,
+      nda::array<ComplexType, 4> const& DeltaDm_skij,
+      nda::array<ComplexType, 4> const& S_skij,
+      bool compute_hartree,
+      bool compute_exchange) {
+
+    using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+
+    auto& thc = h_int.get_eri();
+    auto mf = thc.MF();
+    auto mpi = thc.mpi();
+
+    long ns = DeltaDm_skij.shape(0);
+    long nkpts_ibz = DeltaDm_skij.shape(1);
+    long nbnd = DeltaDm_skij.shape(2);
+
+    auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+    auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+
+    if (mpi->node_comm.root()) {
+      sDeltaDm_skij.local() = DeltaDm_skij;
+    }
+    mpi->comm.barrier();
+
+    methods::solvers::lr_hf lr_hf_solver(mpi, mf.get(), q_vec);
+    lr_hf_solver.evaluate(sDeltaF_skij, sDeltaDm_skij, thc, S_skij,
+                          compute_hartree, compute_exchange);
+
+    // Shared memory is visible to all ranks on a node
+    nda::array<ComplexType, 4> DeltaF_skij(ns, nkpts_ibz, nbnd, nbnd);
+    DeltaF_skij = sDeltaF_skij.local();
+    mpi->comm.barrier();
+
+    return DeltaF_skij;
+  }
+
+
+  /**
+   * @brief Compute HF self-energy (Fock matrix) from a density matrix
+   *
+   * @param h_int           - [INPUT] THC or Cholesky ERI handler
+   * @param Dm_skij         - [INPUT] Density matrix (ns, nk, nb, nb)
+   * @param S_skij          - [INPUT] Overlap matrix (ns, nk, nb, nb)
+   * @param compute_hartree - [INPUT] Whether to compute Hartree term
+   * @param compute_exchange - [INPUT] Whether to compute Exchange term
+   * @return                - [OUTPUT] Fock matrix (ns, nk, nb, nb)
+   */
+  template<typename eri_handler>
+  nda::array<ComplexType, 4> hf_evaluate(
+      eri_handler& h_int,
+      nda::array<ComplexType, 4> const& Dm_skij,
+      nda::array<ComplexType, 4> const& S_skij,
+      bool compute_hartree,
+      bool compute_exchange) {
+
+    using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+
+    auto& eri = h_int.get_eri();
+    auto mpi = eri.mpi();
+
+    long ns = Dm_skij.shape(0);
+    long nkpts_ibz = Dm_skij.shape(1);
+    long nbnd = Dm_skij.shape(2);
+
+    auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+
+    if (mpi->node_comm.root()) {
+      sF_skij.local() = ComplexType(0.0, 0.0);
+    }
+    mpi->comm.barrier();
+
+    methods::solvers::hf_t hf_solver;
+    hf_solver.evaluate(sF_skij, Dm_skij, eri, S_skij,
+                       compute_hartree, compute_exchange);
+
+    // Shared memory is visible to all ranks on a node
+    nda::array<ComplexType, 4> F_skij(ns, nkpts_ibz, nbnd, nbnd);
+    F_skij = sF_skij.local();
+    mpi->comm.barrier();
+
+    return F_skij;
+  }
+
+  template nda::array<ComplexType, 4> hf_evaluate(
+      ThcCoulomb&,
+      nda::array<ComplexType, 4> const&,
+      nda::array<ComplexType, 4> const&,
+      bool, bool);
+  template nda::array<ComplexType, 4> hf_evaluate(
+      CholCoulomb&,
+      nda::array<ComplexType, 4> const&,
+      nda::array<ComplexType, 4> const&,
+      bool, bool);
 
 
   template<typename eri_handler>

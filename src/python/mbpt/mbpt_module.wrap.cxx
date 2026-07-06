@@ -34,8 +34,41 @@ static auto const fun_0 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "kpts_crys", "q_vec")};
 
-// mbpt
+// hf_evaluate
 static auto const fun_1 = c2py::dispatcher_f_kw_t{
+    c2py::cfun(
+        [](coqui_py::ThcCoulomb &h_int,
+           const nda::array<ComplexType, 4> &Dm_skij,
+           const nda::array<ComplexType, 4> &S_skij, bool compute_hartree,
+           bool compute_exchange) {
+          return coqui_py::hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree,
+                                       compute_exchange);
+        },
+        "h_int", "Dm_skij", "S_skij", "compute_hartree", "compute_exchange"),
+    c2py::cfun(
+        [](coqui_py::CholCoulomb &h_int,
+           const nda::array<ComplexType, 4> &Dm_skij,
+           const nda::array<ComplexType, 4> &S_skij, bool compute_hartree,
+           bool compute_exchange) {
+          return coqui_py::hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree,
+                                       compute_exchange);
+        },
+        "h_int", "Dm_skij", "S_skij", "compute_hartree", "compute_exchange")};
+
+// lr_hf
+static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &h_int, const nda::array<double, 1> &q_vec,
+       const nda::array<ComplexType, 4> &DeltaDm_skij,
+       const nda::array<ComplexType, 4> &S_skij, bool compute_hartree,
+       bool compute_exchange) {
+      return coqui_py::lr_hf(h_int, q_vec, DeltaDm_skij, S_skij,
+                             compute_hartree, compute_exchange);
+    },
+    "h_int", "q_vec", "DeltaDm_skij", "S_skij", "compute_hartree",
+    "compute_exchange")};
+
+// mbpt
+static auto const fun_3 = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int,
@@ -172,7 +205,7 @@ static auto const fun_1 = c2py::dispatcher_f_kw_t{
         "h_int_exchange")};
 
 // run_lr
-static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
        const nda::array<double, 1> &q_vec,
        std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
@@ -212,8 +245,70 @@ Returns
               {{c2py::python_typename<const nda::array<double, 2> &>()},
                {c2py::python_typename<const nda::array<double, 1> &>()}},
               {c2py::python_typename<nda::array<long, 1>>()});
-static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
-static const auto doc_d_2 = fun_2.doc(
+static const auto doc_d_1 =
+    fun_1.doc(R"DOC(
+Compute HF self-energy (Fock matrix) from a density matrix
+
+Parameters
+----------
+h_int : {par_0}
+   - [INPUT] THC or Cholesky ERI handler
+Dm_skij : {par_1}
+   - [INPUT] Density matrix (ns, nk, nb, nb)
+S_skij : {par_2}
+   - [INPUT] Overlap matrix (ns, nk, nb, nb)
+compute_hartree : {par_3}
+   - [INPUT] Whether to compute Hartree term
+compute_exchange : {par_4}
+   - [INPUT] Whether to compute Exchange term
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] Fock matrix (ns, nk, nb, nb)
+)DOC",
+              {{c2py::python_typename<coqui_py::ThcCoulomb &>(),
+                c2py::python_typename<coqui_py::CholCoulomb &>()},
+               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+               {c2py::python_typename<bool>()},
+               {c2py::python_typename<bool>()}},
+              {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_2 =
+    fun_2.doc(R"DOC(
+Compute LR Fock matrix from LR density matrix
+
+Computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm.
+
+Parameters
+----------
+h_int : {par_0}
+   - [INPUT] THC ERI handler
+q_vec : {par_1}
+   - [INPUT] Perturbation wavevector (3,)
+DeltaDm_skij : {par_2}
+   - [INPUT] LR density matrix (ns, nk, nb, nb)
+S_skij : {par_3}
+   - [INPUT] Overlap matrix (ns, nk, nb, nb)
+compute_hartree : {par_4}
+   - [INPUT] Whether to compute Hartree term
+compute_exchange : {par_5}
+   - [INPUT] Whether to compute Exchange term
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] LR Fock matrix (ns, nk, nb, nb)
+)DOC",
+              {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
+               {c2py::python_typename<const nda::array<double, 1> &>()},
+               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+               {c2py::python_typename<bool>()},
+               {c2py::python_typename<bool>()}},
+              {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_3 = fun_3.doc(R"DOC()DOC");
+static const auto doc_d_4 = fun_4.doc(
     R"DOC(
 Unified linear response calculation
 
@@ -287,10 +382,14 @@ Returns
 static PyMethodDef module_methods[] = {
     {"calculate_kpq_map", (PyCFunction)c2py::pyfkw<fun_0>,
      METH_VARARGS | METH_KEYWORDS, doc_d_0.c_str()},
-    {"mbpt", (PyCFunction)c2py::pyfkw<fun_1>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_1.c_str()},
-    {"run_lr", (PyCFunction)c2py::pyfkw<fun_2>, METH_VARARGS | METH_KEYWORDS,
+    {"hf_evaluate", (PyCFunction)c2py::pyfkw<fun_1>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_1.c_str()},
+    {"lr_hf", (PyCFunction)c2py::pyfkw<fun_2>, METH_VARARGS | METH_KEYWORDS,
      doc_d_2.c_str()},
+    {"mbpt", (PyCFunction)c2py::pyfkw<fun_3>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_3.c_str()},
+    {"run_lr", (PyCFunction)c2py::pyfkw<fun_4>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_4.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

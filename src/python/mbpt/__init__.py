@@ -18,7 +18,7 @@ limitations under the License.
 ==========================================================================
 """
 
-from .mbpt_driver import run_hf, run_gw, run_evgw, run_qpgw, run_lr
+from .mbpt_driver import run_hf, run_gw, run_evgw, run_qpgw, run_lr, run_lr_hf, hf_evaluate
 from .lr_driver import (
     calculate_kpq_map,
     is_q_commensurate,
@@ -32,6 +32,8 @@ __all__ = [
     "run_hf", "run_gw", "run_evgw", "run_qpgw",
     # Linear response
     "run_lr",
+    "run_lr_hf",
+    "hf_evaluate",
     "calculate_kpq_map",
     "is_q_commensurate",
     "is_q_gamma",

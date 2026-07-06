@@ -498,4 +498,91 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                       alg, mixing, max_subsp_size, diis_warmup,
                       dx_left, dx_right, dv_qPQ)
 
+def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):
+    """
+    Compute linear response Fock matrix from LR density matrix.
 
+    Computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm using THC-ERI.
+    This function is used for Step 2.1 of LR-HF Phase 2 implementation.
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb
+        THC ERI handler (currently only THC is supported)
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaDm_skij : np.ndarray
+        LR density matrix, shape (ns, nk, nb, nb)
+    S_skij : np.ndarray, optional
+        Overlap matrix, shape (ns, nk, nb, nb). If None, identity is assumed.
+    compute_hartree : bool, optional
+        Whether to compute the Hartree (Coulomb) term, default True
+    compute_exchange : bool, optional
+        Whether to compute the Exchange term, default True
+
+    Returns
+    -------
+    np.ndarray
+        LR Fock matrix ΔF, shape (ns, nk, nb, nb)
+
+    Notes
+    -----
+    The LR Fock matrix is computed as:
+        ΔF(k) = ΔJ(k) + ΔK(k)
+
+    where:
+        - ΔJ is the LR Hartree term (diagonal in THC auxiliary basis)
+        - ΔK is the LR Exchange term
+
+    If S_skij is not provided, an identity overlap matrix is assumed (orthonormal basis).
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_hf as lr_hf_cpp
+
+    q_vec = np.asarray(q_vec, dtype=np.float64)
+    DeltaDm_skij = np.asarray(DeltaDm_skij, dtype=np.complex128)
+
+    # If S not provided, assume identity matrix (orthonormal basis)
+    if S_skij is None:
+        ns, nk, nb, _ = DeltaDm_skij.shape
+        S_skij = np.zeros((ns, nk, nb, nb), dtype=np.complex128)
+        for s in range(ns):
+            for k in range(nk):
+                S_skij[s, k] = np.eye(nb, dtype=np.complex128)
+    else:
+        S_skij = np.asarray(S_skij, dtype=np.complex128)
+
+    return lr_hf_cpp(h_int, q_vec, DeltaDm_skij, S_skij, compute_hartree, compute_exchange)
+
+
+def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=True):
+    """
+    Compute HF self-energy (Fock matrix) from density matrix.
+
+    Computes F = J + K from the density matrix Dm.
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb or CholCoulomb
+        ERI handler (THC or Cholesky)
+    Dm_skij : np.ndarray
+        Density matrix, shape (ns, nk, nb, nb)
+    S_skij : np.ndarray
+        Overlap matrix, shape (ns, nk, nb, nb)
+    compute_hartree : bool, optional
+        Whether to compute the Hartree (Coulomb) term, default True
+    compute_exchange : bool, optional
+        Whether to compute the Exchange term, default True
+
+    Returns
+    -------
+    np.ndarray
+        Fock matrix F, shape (ns, nk, nb, nb)
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import hf_evaluate as hf_evaluate_cpp
+
+    Dm_skij = np.asarray(Dm_skij, dtype=np.complex128)
+    S_skij = np.asarray(S_skij, dtype=np.complex128)
+
+    return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)

@@ -5,6 +5,7 @@ SET(SRCS
   hf_t.cpp
   thc_hf.cpp 
   cholesky_hf.cpp 
+  lr_hf.cpp
   )
 
 if(USE_DEVICE_COMPILER)
