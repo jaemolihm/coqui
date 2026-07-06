@@ -562,8 +562,10 @@ namespace methods {
         _rho_g = grids::truncated_g_grid(_ecut, fft_grid, _MF->recv());
         _vG_opt.emplace(ptree{}, false);
       } else {
-        app_warning("thc_reader_t::read: THC file lacks 'ecut'/'fft_grid' datasets "
-                    "(written by older versions); rho_g()/vG() will be unavailable.");
+        // app_log: the read path can run before the loggers are initialized,
+        // where app_warning would abort.
+        app_log(1, "[WARNING] thc_reader_t::read: THC file lacks 'ecut'/'fft_grid' datasets "
+                   "(written by older versions); rho_g()/vG() will be unavailable.");
       }
 
       {
