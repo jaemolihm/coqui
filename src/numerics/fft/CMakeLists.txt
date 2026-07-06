@@ -19,8 +19,14 @@ if(ENABLE_CUDA)
 endif()
 
 
-add_library(fft_lib ${fft_src})
-target_link_libraries(fft_lib PUBLIC utils nda_c) 
+# Build shared under Python so the FFT symbols live in a single libfft_lib.so
+# shared by all c2py modules. Gated on COQUI_PYTHON_SUPPORT like io_lib (see 56645d9).
+if(COQUI_PYTHON_SUPPORT)
+  add_library(fft_lib SHARED ${fft_src})
+else()
+  add_library(fft_lib ${fft_src})
+endif()
+target_link_libraries(fft_lib PUBLIC utils nda_c)
 if(ENABLE_FFTW)
   target_link_libraries(fft_lib PUBLIC FFTW::Double) 
 endif()
