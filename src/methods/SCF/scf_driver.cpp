@@ -39,7 +39,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver,
               int niter, bool restart, double conv_tol, bool const_mu,
               std::string input_grp, int input_iter, bool eval_thermodynamics,
-              bool compute_exchange)
+              bool compute_exchange, bool keep_w)
               -> std::tuple<double, double> {
   utils::TimerManager Timer;
   auto mpi = mb_eri.corr_eri->get().mpi();
@@ -160,7 +160,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
       mb_solver.corr->iter() = output_iter;
       mb_solver.corr->evaluate(mb_state, mb_eri.corr_eri->get());
       // deallocate mb_state.dW_qtPQ after this since it's only used in the corr solver and can be very large for GW.
-      mb_state.dW_qtPQ.reset();
+      // keep_w preserves the final W for post-loop consumers (e.g. dump_w_to_h5).
+      if (!keep_w) mb_state.dW_qtPQ.reset();
       mpi->comm.barrier();
     }
 
@@ -464,7 +465,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gw_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GW_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -495,7 +496,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gf2_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GF2_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)

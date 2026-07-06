@@ -18,115 +18,92 @@
 
 using c2py::operator""_a;
 
+// ==================== Wrapped classes =====================
+
 // ==================== enums =====================
 
 // ==================== module classes =====================
 
 // ==================== module functions ====================
 
+// calculate_kpq_map
+static auto const fun_0 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<double, 2> &kpts_crys,
+       const nda::array<double, 1> &q_vec) {
+      return coqui_py::calculate_kpq_map(kpts_crys, q_vec);
+    },
+    "kpts_crys", "q_vec")};
+
 // mbpt
-static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
+static auto const fun_1 = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int,
-           const nda::basic_array<std::complex<double>, 5, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>> &C_ksIai,
-           const nda::basic_array<long, 3, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>>
-               &band_window,
-           const nda::basic_array<double, 2, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>>
-               &kpts_crys,
-           std::optional<std::map<
-               std::string,
-               nda::basic_array<std::complex<double>, 5, nda::C_layout, 'A',
-                                nda::heap_basic<nda::mem::mallocator<
-                                    nda::mem::AddressSpace::Host>>>>>
+           const nda::array<ComplexType, 5> &C_ksIai,
+           const nda::array<long, 3> &band_window,
+           const nda::array<double, 2> &kpts_crys,
+           std::optional<std::map<std::string, nda::array<ComplexType, 5>>>
                local_polarizabilities) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, C_ksIai, band_window, kpts_crys,
-              local_polarizabilities);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, C_ksIai,
+                                band_window, kpts_crys, local_polarizabilities);
         },
         "solver_type", "mbpt_params", "h_int", "C_ksIai", "band_window",
         "kpts_crys", "local_polarizabilities"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int,
-           const nda::basic_array<std::complex<double>, 5, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>> &C_ksIai,
-           const nda::basic_array<long, 3, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>>
-               &band_window,
-           const nda::basic_array<double, 2, nda::C_layout, 'A',
-                                  nda::heap_basic<nda::mem::mallocator<
-                                      nda::mem::AddressSpace::Host>>>
-               &kpts_crys,
-           std::optional<std::map<
-               std::string,
-               nda::basic_array<std::complex<double>, 5, nda::C_layout, 'A',
-                                nda::heap_basic<nda::mem::mallocator<
-                                    nda::mem::AddressSpace::Host>>>>>
+           const nda::array<ComplexType, 5> &C_ksIai,
+           const nda::array<long, 3> &band_window,
+           const nda::array<double, 2> &kpts_crys,
+           std::optional<std::map<std::string, nda::array<ComplexType, 5>>>
                local_polarizabilities) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, C_ksIai, band_window, kpts_crys,
-              local_polarizabilities);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, C_ksIai,
+                                band_window, kpts_crys, local_polarizabilities);
         },
         "solver_type", "mbpt_params", "h_int", "C_ksIai", "band_window",
         "kpts_crys", "local_polarizabilities"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb>(solver_type, mbpt_params,
-                                                      h_int);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int);
         },
         "solver_type", "mbpt_params", "h_int"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb>(solver_type, mbpt_params,
-                                                       h_int);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int);
         },
         "solver_type", "mbpt_params", "h_int"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hf) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hf);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hf);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hf"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::CholCoulomb &h_int_hf) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hf);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hf);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hf"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hf) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hf);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hf);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hf"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::CholCoulomb &h_int_hf) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hf);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hf);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hf"),
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hartree,
            coqui_py::ThcCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::ThcCoulomb,
-                                coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -134,9 +111,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hartree,
            coqui_py::CholCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::CholCoulomb,
-                                coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -144,9 +120,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::CholCoulomb &h_int_hartree,
            coqui_py::ThcCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::ThcCoulomb,
-                                coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -154,9 +129,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int, coqui_py::CholCoulomb &h_int_hartree,
            coqui_py::CholCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::CholCoulomb,
-                                coqui_py::ThcCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -164,9 +138,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hartree,
            coqui_py::ThcCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::ThcCoulomb,
-                                coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -174,9 +147,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::ThcCoulomb &h_int_hartree,
            coqui_py::CholCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::ThcCoulomb, coqui_py::CholCoulomb,
-                                coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -184,9 +156,8 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::CholCoulomb &h_int_hartree,
            coqui_py::ThcCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::ThcCoulomb,
-                                coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange"),
@@ -194,19 +165,132 @@ static auto const _c2py_fun_0 = c2py::dispatcher_f_kw_t{
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::CholCoulomb &h_int, coqui_py::CholCoulomb &h_int_hartree,
            coqui_py::CholCoulomb &h_int_exchange) {
-          return coqui_py::mbpt<coqui_py::CholCoulomb, coqui_py::CholCoulomb,
-                                coqui_py::CholCoulomb>(
-              solver_type, mbpt_params, h_int, h_int_hartree, h_int_exchange);
+          return coqui_py::mbpt(solver_type, mbpt_params, h_int, h_int_hartree,
+                                h_int_exchange);
         },
         "solver_type", "mbpt_params", "h_int", "h_int_hartree",
         "h_int_exchange")};
 
-static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
+// run_lr
+static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       const nda::array<double, 1> &q_vec,
+       std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
+       bool include_hartree, bool include_exchange, std::string gw_mode_str,
+       int max_iter, double tol, bool fix_density, std::string iter_alg,
+       double mixing, int max_subsp_size, int diis_warmup,
+       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+       std::optional<nda::array<ComplexType, 4>> DeltaX_right,
+       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
+      return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
+                              include_hartree, include_exchange, gw_mode_str,
+                              max_iter, tol, fix_density, iter_alg, mixing,
+                              max_subsp_size, diis_warmup, DeltaX_left,
+                              DeltaX_right, DeltaV_qPQ);
+    },
+    "lr_params", "h_int", "q_vec", "DeltaH0_skij", "include_hartree",
+    "include_exchange", "gw_mode_str", "max_iter", "tol", "fix_density",
+    "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "DeltaX_left",
+    "DeltaX_right", "DeltaV_qPQ")};
+
+static const auto doc_d_0 =
+    fun_0.doc(R"DOC(
+Compute k+q mapping for linear response calculations
+
+Parameters
+----------
+kpts_crys : {par_0}
+   - [INPUT] k-points in crystal coordinates (nkpts, 3)
+q_vec : {par_1}
+   - [INPUT] perturbation wavevector in crystal coordinates (3,)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] k → k+q index mapping (nkpts,)
+)DOC",
+              {{c2py::python_typename<const nda::array<double, 2> &>()},
+               {c2py::python_typename<const nda::array<double, 1> &>()}},
+              {c2py::python_typename<nda::array<long, 1>>()});
+static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
+static const auto doc_d_2 = fun_2.doc(
+    R"DOC(
+Unified linear response calculation
+
+Reads the unperturbed state from the checkpoint, runs the LR SCF loop
+  ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence,
+and writes results to the "linear_response" group of the output checkpoint.
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+q_vec : {par_2}
+   - [INPUT] Perturbation wavevector in crystal coords (3,)
+DeltaH0_skij : {par_3}
+   - [INPUT] Perturbation matrix (ns, nk, nb, nb);
+                              required on the MPI global root, None elsewhere.
+include_hartree : {par_4}
+   - [INPUT] Include ΔJ in SCF loop
+include_exchange : {par_5}
+   - [INPUT] Include ΔK in SCF loop
+gw_mode : {par_6}
+   - [INPUT] GW mode: "none", "fixed_W", or "full"
+max_iter : {par_7}
+   - [INPUT] Maximum SCF iterations (1 = one-shot)
+tol : {par_8}
+   - [INPUT] Convergence tolerance
+fix_density : {par_9}
+   - [INPUT] If true, compute Δμ to enforce ΔN=0
+iter_alg : {par_10}
+   - [INPUT] Iteration algorithm: "damping" or "DIIS"
+mixing : {par_11}
+   - [INPUT] Damping/mixing parameter
+max_subsp_size : {par_12}
+   - [INPUT] DIIS subspace size
+diis_warmup : {par_13}
+   - [INPUT] DIIS warmup iterations
+DeltaX_left : {par_14}
+   - [INPUT] Optional δ^q X collocation perturbation (root only)
+DeltaX_right : {par_15}
+   - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
+DeltaV_qPQ : {par_16}
+   - [INPUT] Optional THC Coulomb perturbation δV (root only)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] Tuple of (niter, Delta_mu)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<bool>()},
+     {c2py::python_typename<bool>()},
+     {},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<double>()},
+     {c2py::python_typename<bool>()},
+     {c2py::python_typename<std::string>()},
+     {c2py::python_typename<double>()},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
+    {c2py::python_typename<std::tuple<int, double>>()});
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
-    {"mbpt", (PyCFunction)c2py::pyfkw<_c2py_fun_0>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_0.c_str()},
+    {"calculate_kpq_map", (PyCFunction)c2py::pyfkw<fun_0>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_0.c_str()},
+    {"mbpt", (PyCFunction)c2py::pyfkw<fun_1>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_1.c_str()},
+    {"run_lr", (PyCFunction)c2py::pyfkw<fun_2>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_2.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
@@ -253,9 +337,6 @@ PyInit_mbpt_module() {
 
   conv_table[std::type_index(typeid(c2py::py_range)).name()] =
       &c2py::wrap_pytype<c2py::py_range>;
-#define _add_type(T, N) c2py::add_type_object_to_main<T>(N, m, conv_table)
-
-#undef _add_type
 
   return m;
 }

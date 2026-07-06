@@ -35,6 +35,8 @@
 
 #include "mean_field/MF.hpp"
 #include "methods/mb_state/mb_state.hpp"
+#include "methods/SCF/lr_diis.hpp"
+#include "methods/SCF/lr_driver.hpp"
 
 namespace mpi3 = boost::mpi3;
 namespace methods
@@ -179,5 +181,42 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
                 std::optional<std::map<std::string, nda::array<ComplexType, 4> > > local_hf_potentials,
                 std::optional<std::map<std::string, nda::array<ComplexType, 5> > > local_selfenergies);
 
+/**
+ * @brief Unified linear response calculation
+ *
+ * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
+ *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
+ *
+ * @param eri              - [INPUT] ERI handler (must be THC)
+ * @param pt               - [INPUT] Parameters as property tree
+ * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
+ * @param DeltaH0_skij_root - [INPUT] Perturbation matrix (ns, nk, nb, nb) on the
+ *                            MPI global root; std::nullopt on every other rank.
+ * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
+ * @param include_exchange - [INPUT] Include ΔK in SCF loop
+ * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
+ * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
+ * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
+ * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
+ * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
+ * @return Tuple of (number of iterations, final Δμ)
+ */
+template<typename eri_t>
+std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
+                                     nda::array<double, 1> const& q_vec,
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaH0_skij_root,
+                                     bool include_hartree,
+                                     bool include_exchange,
+                                     lr_gw_update_mode gw_mode,
+                                     int max_iter,
+                                     double tol,
+                                     bool fix_density,
+                                     const lr_iter_params& iter_params,
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
+                                     std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);
+
 }
+
+
 #endif

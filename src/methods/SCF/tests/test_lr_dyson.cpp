@@ -1,0 +1,286 @@
+/**
+ * ==========================================================================
+ * CoQuí: Correlated Quantum ínterface
+ *
+ * Copyright (c) 2022-2026 Simons Foundation & The CoQuí developer team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * ==========================================================================
+ */
+
+
+#undef NDEBUG
+
+#include "catch2/catch.hpp"
+
+#include "configuration.hpp"
+#include "mpi3/environment.hpp"
+#include "mpi3/communicator.hpp"
+#include "mpi3/shared_communicator.hpp"
+
+#include "utilities/test_common.hpp"
+
+#include "nda/nda.hpp"
+#include "nda/h5.hpp"
+
+#include "utilities/mpi_context.h"
+#include "mean_field/MF.hpp"
+#include "mean_field/mf_utils.hpp"
+#include "methods/SCF/scf_common.hpp"
+#include "methods/SCF/simple_dyson.h"
+#include "methods/SCF/lr_dyson.hpp"
+#include "methods/SCF/lr_precompute.hpp"
+#include "hamiltonian/pseudo/pseudopot.h"
+
+namespace lr_dyson_tests {
+
+  using utils::mpi_context_t;
+  using utils::VALUE_EQUAL;
+  using utils::ARRAY_EQUAL;
+  namespace mpi3 = boost::mpi3;
+  using namespace methods;
+
+  TEST_CASE("lr_dyson_init", "[methods_scf]") {
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 1000;
+    double wmax = 1.2;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis);
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+
+    // Test with q = 0 (Gamma point)
+    nda::array<double, 1> q_vec{0.0, 0.0, 0.0};
+    lr_dyson lr_dys(dyson, q_vec);
+
+    // Check that k+q mapping is identity for q=0
+    CHECK(lr_dys.is_q_gamma() == true);
+    auto kpq_map = lr_dys.kpq_map();
+    for (int ik = 0; ik < mf.nkpts(); ++ik) {
+      CHECK(kpq_map(ik) == ik);
+    }
+    context->comm.barrier();
+  }
+
+  TEST_CASE("lr_dyson_fixed_sigma_q0", "[methods_scf]") {
+    /**
+     * Test LR Dyson equation: ΔG = G @ ΔH0 @ G for q=0
+     *
+     * Validation: Compare with finite difference:
+     *   ΔG_fd = (G[H0+ε·ΔH0] - G[H0-ε·ΔH0]) / (2ε)
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;  // Lower beta for faster test
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+
+    // Create simple_dyson and lr_dyson
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    nda::array<double, 1> q_vec{0.0, 0.0, 0.0};
+    lr_dyson lr_dys(dyson, q_vec);
+
+    // Create shared arrays
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> DeltaH0(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> DeltaG(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> DeltaDm(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+
+    // Initialize F (Fock matrix from non-interacting system)
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+
+    // Get converged G at mu=0 with zero self-energy
+    if (context->node_comm.root()) {
+      Sigma.local()() = 0.0;
+    }
+    context->comm.barrier();
+
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    context->comm.barrier();
+
+    // Create a random Hermitian perturbation
+    if (context->node_comm.root()) {
+      std::srand(42);
+      auto DH0_loc = DeltaH0.local();
+      for (int is = 0; is < ns; ++is) {
+        for (int ik = 0; ik < nk; ++ik) {
+          for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j <= i; ++j) {
+              double re = 0.01 * (std::rand() / double(RAND_MAX) - 0.5);
+              double im = (i == j) ? 0.0 : 0.01 * (std::rand() / double(RAND_MAX) - 0.5);
+              DH0_loc(is, ik, i, j) = ComplexType(re, im);
+              DH0_loc(is, ik, j, i) = ComplexType(re, -im);
+            }
+          }
+        }
+      }
+    }
+    context->comm.barrier();
+
+    // Create zero ΔF for LR Dyson call (no ΔΣ)
+    sArray_t<Array_view_4D_t> DeltaF(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    if (context->node_comm.root()) {
+      DeltaF.local() = ComplexType(0.0);
+    }
+    context->comm.barrier();
+
+    // Precompute G(iω) in shared memory and pass to lr_dyson before solving
+    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    lr_dys.set_cached_G_omega(&sG_wskij);
+
+    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
+    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, DeltaH0, DeltaF,
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+    context->comm.barrier();
+
+    // Compute ΔG using finite difference
+    double eps = 1e-5;
+    sArray_t<Array_view_5D_t> G_plus(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_minus(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm_tmp(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+
+    // G[H0 + eps*DeltaH0]
+    {
+      // Temporarily modify H0
+      auto H0_orig = dyson.sH0_skij().local();
+      auto DH0_loc = DeltaH0.local();
+      if (context->node_comm.root()) {
+        for (int is = 0; is < ns; ++is) {
+          for (int ik = 0; ik < nk; ++ik) {
+            for (int i = 0; i < nb; ++i) {
+              for (int j = 0; j < nb; ++j) {
+                H0_orig(is, ik, i, j) += eps * DH0_loc(is, ik, i, j);
+              }
+            }
+          }
+        }
+      }
+      context->comm.barrier();
+
+      update_G(dyson, mf, ft, Dm_tmp, G_plus, F, Sigma, mu, true);
+
+      // Restore H0
+      if (context->node_comm.root()) {
+        for (int is = 0; is < ns; ++is) {
+          for (int ik = 0; ik < nk; ++ik) {
+            for (int i = 0; i < nb; ++i) {
+              for (int j = 0; j < nb; ++j) {
+                H0_orig(is, ik, i, j) -= eps * DH0_loc(is, ik, i, j);
+              }
+            }
+          }
+        }
+      }
+      context->comm.barrier();
+    }
+
+    // G[H0 - eps*DeltaH0]
+    {
+      auto H0_orig = dyson.sH0_skij().local();
+      auto DH0_loc = DeltaH0.local();
+      if (context->node_comm.root()) {
+        for (int is = 0; is < ns; ++is) {
+          for (int ik = 0; ik < nk; ++ik) {
+            for (int i = 0; i < nb; ++i) {
+              for (int j = 0; j < nb; ++j) {
+                H0_orig(is, ik, i, j) -= eps * DH0_loc(is, ik, i, j);
+              }
+            }
+          }
+        }
+      }
+      context->comm.barrier();
+
+      update_G(dyson, mf, ft, Dm_tmp, G_minus, F, Sigma, mu, true);
+
+      // Restore H0
+      if (context->node_comm.root()) {
+        for (int is = 0; is < ns; ++is) {
+          for (int ik = 0; ik < nk; ++ik) {
+            for (int i = 0; i < nb; ++i) {
+              for (int j = 0; j < nb; ++j) {
+                H0_orig(is, ik, i, j) += eps * DH0_loc(is, ik, i, j);
+              }
+            }
+          }
+        }
+      }
+      context->comm.barrier();
+    }
+
+    // Compute finite difference: (G_plus - G_minus) / (2*eps)
+    double max_error = 0.0;
+    double max_DeltaG = 0.0;
+    if (context->node_comm.root()) {
+      auto DG_lr = DeltaG.local();
+      auto Gp = G_plus.local();
+      auto Gm = G_minus.local();
+
+      for (int it = 0; it < nt; ++it) {
+        for (int is = 0; is < ns; ++is) {
+          for (int ik = 0; ik < nk; ++ik) {
+            for (int i = 0; i < nb; ++i) {
+              for (int j = 0; j < nb; ++j) {
+                ComplexType DG_fd = (Gp(it, is, ik, i, j) - Gm(it, is, ik, i, j)) / (2.0 * eps);
+                ComplexType diff = DG_lr(it, is, ik, i, j) - DG_fd;
+                max_error = std::max(max_error, std::abs(diff));
+                max_DeltaG = std::max(max_DeltaG, std::abs(DG_lr(it, is, ik, i, j)));
+              }
+            }
+          }
+        }
+      }
+    }
+    context->comm.barrier();
+
+    // Broadcast max_error to all processes
+    context->comm.broadcast_value(max_error, 0);
+    context->comm.broadcast_value(max_DeltaG, 0);
+
+    // Check that error is small (should be O(eps^2) for central difference)
+    double rel_error = max_error / (max_DeltaG + 1e-15);
+    INFO("Max |ΔG_lr - ΔG_fd| = " << max_error);
+    INFO("Max |ΔG_lr| = " << max_DeltaG);
+    INFO("Relative error = " << rel_error);
+    CHECK(max_error < 1e-4);  // Should be much smaller due to O(eps^2)
+    CHECK(rel_error < 1e-3);
+    context->comm.barrier();
+  }
+
+} // lr_dyson_tests

@@ -361,3 +361,141 @@ def run_qpgw(params, h_int,
     _run_mbpt("qpgw", params, h_int,
               h_int_hf = h_int_hf, h_int_hartree = h_int_hartree, h_int_exchange = h_int_exchange,
               projector_info = None, local_polarizabilities = None)
+
+def run_lr(params, h_int, q_vec, DeltaH0_skij,
+           include_hartree=True, include_exchange=True,
+           gw_mode="none",
+           max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
+           include_gw_sigma=None,
+           DeltaX_left=None, DeltaX_right=None,
+           DeltaV_qPQ=None,
+           div_corr=True):
+    """
+    Run unified linear response calculation.
+
+    Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
+        ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
+
+    Subsumes both run_lr_dyson (one-shot, all flags false) and
+    run_lr_hf_scf (HF, no GW).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+        - output: Output checkpoint prefix (default: same as prefix)
+        - input_type: HDF5 group to read checkpoint from (default: "scf")
+        - input_iter: Iteration number to read (default: -1 = use final_iter)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaH0_skij : np.ndarray or None
+        External perturbation matrix, shape (ns, nk, nb, nb).
+        Required on the MPI global root; ignored on non-root ranks.
+    include_hartree : bool, optional
+        Include Hartree (Coulomb) term in SCF loop (default True)
+    include_exchange : bool, optional
+        Include Exchange term in SCF loop (default True)
+    gw_mode : str, optional
+        GW self-energy update mode (default "none"):
+        - "none": No GW self-energy
+        - "fixed_W": ΔΣ = -ΔG⊙W (W frozen)
+        - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
+    max_iter : int, optional
+        Maximum number of SCF iterations (default 50). Use 1 for one-shot.
+    tol : float, optional
+        Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
+    fix_density : bool, optional
+        If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
+        Only meaningful for q=0 perturbations.
+    iter_alg : dict or None, optional
+        Iteration algorithm configuration. If None, uses damping with mixing=1.0.
+        Keys:
+        - alg : str - "damping" (default) or "DIIS"
+        - mixing : float - Damping/mixing parameter (default 1.0)
+        - max_subsp_size : int - DIIS subspace size (default 5)
+        - diis_warmup : int - Warmup iterations before DIIS (default 3)
+    include_gw_sigma : bool or None, optional
+        Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
+        False -> "none". Overrides gw_mode if both are specified.
+    DeltaX_left : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Required together with DeltaX_right. Required on the
+        MPI global root; ignored on non-root ranks.
+    DeltaX_right : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^{-q} X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Required together with DeltaX_left. Required on the
+        MPI global root; ignored on non-root ranks.
+    DeltaV_qPQ : np.ndarray or None, optional
+        Perturbation of THC auxiliary-basis Coulomb matrix δV^q, shape
+        (nkpts, Np, Np), full-BZ q-grid. When provided, adds the δV
+        correction terms to ΔJ (δV^{q=q_pert}·Dm) and ΔK (δV^R ⊙ Dm^R).
+
+    Returns
+    -------
+    tuple[int, float]
+        (niter, Delta_mu) - number of iterations and final chemical potential shift
+
+    Notes
+    -----
+    Results are written to {output}.mbpt.h5 under the "linear_response" group.
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import run_lr as run_lr_cpp
+
+    q_vec = np.asarray(q_vec, dtype=np.float64)
+    # Force non-root ranks to pass None: tolerates legacy callers that
+    # still hand a replicated array on every rank.
+    from mpi4py import MPI
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if DeltaH0_skij is None:
+            raise ValueError("run_lr: DeltaH0_skij must be provided on the MPI root rank")
+        DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
+    else:
+        DeltaH0_skij = None
+
+    # Handle deprecated include_gw_sigma parameter
+    if include_gw_sigma is not None:
+        import warnings
+        warnings.warn(
+            "include_gw_sigma is deprecated, use gw_mode='fixed_W' or gw_mode='full' instead",
+            DeprecationWarning, stacklevel=2)
+        gw_mode = "fixed_W" if include_gw_sigma else "none"
+
+    if gw_mode not in ("none", "fixed_W", "full"):
+        raise ValueError(f"Unknown gw_mode '{gw_mode}'. Must be 'none', 'fixed_W', or 'full'.")
+
+    # Parse iter_alg dict with defaults
+    if iter_alg is None:
+        iter_alg = {}
+    alg = str(iter_alg.get("alg", "damping"))
+    if alg not in ("damping", "DIIS"):
+        raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
+    mixing = float(iter_alg.get("mixing", 1.0))
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
+    diis_warmup = int(iter_alg.get("diis_warmup", 3))
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if (DeltaX_left is None) != (DeltaX_right is None):
+            raise ValueError("DeltaX_left and DeltaX_right must both be provided or both be None.")
+        dx_left = np.asarray(DeltaX_left, dtype=np.complex128) if DeltaX_left is not None else None
+        dx_right = np.asarray(DeltaX_right, dtype=np.complex128) if DeltaX_right is not None else None
+        dv_qPQ = np.asarray(DeltaV_qPQ, dtype=np.complex128) if DeltaV_qPQ is not None else None
+    else:
+        dx_left = None
+        dx_right = None
+        dv_qPQ = None
+
+    # Pass div_corr flag through params dict (read by C++ run_lr_calc)
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
+                      bool(include_hartree), bool(include_exchange), str(gw_mode),
+                      int(max_iter), float(tol), bool(fix_density),
+                      alg, mixing, max_subsp_size, diis_warmup,
+                      dx_left, dx_right, dv_qPQ)
+
+
