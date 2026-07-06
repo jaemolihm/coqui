@@ -29,6 +29,7 @@
 
 #include "IO/ptree/InputParser.hpp"
 #include "methods/ERI/eri_utils.hpp"
+#include "methods/ERI/lr_thc_interp.hpp"
 
 namespace coqui_py {
 
@@ -119,6 +120,38 @@ namespace coqui_py {
     methods::chol_reader_t _cholesky;
 
   }; // CholCoulomb
+
+  // Linear response of the THC collocation matrix X(k, P, m) = ψ_{mk}(r_P).
+  // See methods::compute_delta_X in src/methods/ERI/lr_thc_interp.hpp for the
+  // full mathematical setup (term 1 = δψ(r_P), term 2 = ∇ψ(r_P)·Δr_P).
+  nda::array<ComplexType, 4> compute_delta_X(
+      const Mf &mf,
+      const std::string &Deltapsi_prefix,
+      nda::array<long, 1> const& r_P,
+      nda::array<double, 2> const& delta_r_P,
+      nda::array<double, 1> const& q_vec_cryst,
+      nda::array<long, 1> const& fft_grid)
+  {
+    return methods::compute_delta_X(
+        *mf.get_mf(), Deltapsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid);
+  }
+
+  // Adjoint (−q) companion of compute_delta_X. At index ik the returned array
+  // stores δ^{-q} X evaluated at k_{ik}+q — the consumer convention of
+  // DeltaX_right in lr_thc_comm. Term 1 reads [δ^q]†ψ_{k+q} from
+  // {Deltapsi_adj_prefix}_ik{ik+1}.hdf5 (adjoint Sternheimer output).
+  nda::array<ComplexType, 4> compute_delta_X_adj(
+      const Mf &mf,
+      const std::string &Deltapsi_adj_prefix,
+      nda::array<long, 1> const& r_P,
+      nda::array<double, 2> const& delta_r_P,
+      nda::array<double, 1> const& q_vec_cryst,
+      nda::array<long, 1> const& fft_grid)
+  {
+    return methods::compute_delta_X_adj(
+        *mf.get_mf(), Deltapsi_adj_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid);
+  }
+
 
 } // coqui_py
 

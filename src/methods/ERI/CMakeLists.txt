@@ -4,6 +4,7 @@
 SET(ERI_SRCS
   cholesky.cpp
   thc.cpp
+  lr_thc_interp.cpp
   mb_eri_context.h
   eri_utils.cpp
 )
