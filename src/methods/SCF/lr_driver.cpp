@@ -29,6 +29,7 @@
 #include "utilities/check.hpp"
 #include "utilities/lr_utils.hpp"
 #include "utilities/proc_meminfo.hpp"
+#include "methods/GW/g0_div_utils.hpp"
 #include "nda/nda.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
@@ -69,6 +70,25 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 }
 
 
+// Distribution flow through the LR-GW pipeline
+// Three distribution patterns:
+//   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
+//   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
+//   ω-side:            pgrid = {nwpools, nqpools, np_P, np_Q}  — distributed over (w, q, P, Q)
+//
+//   W_c loaded:          (q,t,P,Q), τ-dist
+//   compute_W_full_omega: τ-dist → FT(τ→ω) → ω-side, + Z(q) → W_full(iω) [cached]
+//
+//   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
+//   solve_lr_dyson_W (in-place):
+//     tau_to_w:          τ-dist → ω-side (via q-distributed FT buffer)
+//     lr_dyson_W_in_place: ω-side; SLATE GEMM batched over (iw, iq).
+//                          For Q≠Γ, gathers W_full(kpq_map(iq)) via Alltoallv on q_pool_comm.
+//     w_to_tau:          ω-side → τ-dist (via q-distributed FT buffer)
+//     output:            τ-dist (overwrites input)
+//   transpose (t,q)→(q,t): τ-dist
+//   evaluate_sigma_*:    τ-dist in (q,t) order
+
 template<THC_ERI THC_t, typename dW_t>
 std::tuple<int, double> lr_driver::run_lr(
     sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -87,22 +107,22 @@ std::tuple<int, double> lr_driver::run_lr(
     const nda::array<ComplexType, 4>* Dm_ab,
     bool div_corr,
     const nda::array_view<ComplexType, 3>* DeltaV_qPQ) {
-  (void) dW_qtPQ; (void) eps_inv_head; (void) div_corr;
 
   _Timer.start("LR_SCF");
 
   bool need_hf = include_hartree || include_exchange;
   bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
-
-  // Not yet ported: filled in by the LR-GW / IBC / delta-V steps.
-  utils::check(!include_gw_sigma, "lr_driver::run_lr: LR-GW self-energy not yet ported.");
-  utils::check(!sDeltaX_left && !sDeltaX_right,
-               "lr_driver::run_lr: DeltaX IBC correction not yet ported.");
-  utils::check(!DeltaV_qPQ, "lr_driver::run_lr: DeltaV correction not yet ported.");
+  bool gw_full = (gw_mode == lr_gw_update_mode::full);
 
   utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS",
                "lr_driver::run_lr: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
                iter_params.alg);
+  if (include_gw_sigma) {
+    utils::check(sDeltaSigma_tskij != nullptr,
+                 "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
+    utils::check(dW_qtPQ != nullptr && eps_inv_head != nullptr,
+                 "lr_driver::run_lr: gw_mode != none but dW_qtPQ or eps_inv_head is null.");
+  }
 
   const char* gw_mode_str = "none";
   switch (gw_mode) {
@@ -133,7 +153,56 @@ std::tuple<int, double> lr_driver::run_lr(
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
   }
 
+  // Create lr_gw solver if needed (local to this call, no need to store as member)
+  std::unique_ptr<solvers::lr_gw> lr_gw_solver;
+  if (include_gw_sigma) {
+    lr_gw_solver = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec());
+  }
+
+  // Create lr_rpa_pi and lr_scr_coulomb_t solvers for full mode
+  std::unique_ptr<solvers::lr_rpa_pi> lr_pi_solver;
+  std::unique_ptr<solvers::lr_scr_coulomb_t> lr_scr_solver;
+  if (gw_full) {
+    lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
+    lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT(), _lr_dyson.q_vec());
+  }
+  // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_DRIVER_SETUP");
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
+  if (gw_full) {
+    _Timer.start("LR_DRIVER_SETUP_W_FULL");
+    // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q), then compute W_full(iω)
+    auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
+    opt_dW_full_wqPQ.emplace(
+        lr_scr_solver->compute_W_full_omega(dW_tqPQ, thc));
+    // dW_tqPQ is consumed (reset) by compute_W_full_omega
+    _Timer.stop("LR_DRIVER_SETUP_W_FULL");
+  }
+
+  // Precompute W in R-space: transpose (q,t)→(t,R), with q→R FT.
+  // Result: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+  std::optional<dW_t> opt_dW_tRPQ;
+  if (include_gw_sigma) {
+    _Timer.start("LR_DRIVER_SETUP_W_TRPQ");
+    opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_qtPQ, thc));
+    dW_qtPQ->reset();  // free (q,t,P,Q) memory; no longer needed
+    _Timer.stop("LR_DRIVER_SETUP_W_TRPQ");
+  }
+
+  // Precompute the unperturbed G^R(τ)/G^R(β−τ) pair in aux basis (constant
+  // across SCF iterations; consumed by evaluate_lr_Pi and Σ term 2).
+  using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
+  std::optional<dArr_5D_t> opt_dG_tsRPQ, opt_dG_mtau_tsRPQ;
+  if (gw_full) {
+    _Timer.start("LR_DRIVER_SETUP_G_R");
+    utils::memlog("lr_driver::run_lr: before G^R pair precompute");
+    auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+    opt_dG_tsRPQ.emplace(std::move(dG_tsRPQ));
+    opt_dG_mtau_tsRPQ.emplace(std::move(dG_mtau_tsRPQ));
+    utils::memlog("lr_driver::run_lr: after G^R pair precompute");
+    _Timer.stop("LR_DRIVER_SETUP_G_R");
+  }
 
   // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT per iteration)
   utils::memlog("lr_driver::run_lr: before sG_wskij precompute");
@@ -183,6 +252,27 @@ std::tuple<int, double> lr_driver::run_lr(
   }
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
+
+  // DeltaX IBC correction setup
+  bool has_deltax = sDeltaX_left && sDeltaX_right;
+  std::optional<lr_ibc_DeltaX> opt_ibc;
+  if (has_deltax) {
+    _Timer.start("LR_DRIVER_SETUP_IBC");
+    app_log(2, "  DeltaX IBC correction: building lr_ibc_DeltaX...");
+
+    utils::memlog("lr_driver::run_lr: before build_lr_ibc");
+    opt_ibc.emplace(build_lr_ibc(
+        *_mpi, _MF, thc,
+        sDeltaX_left->local(), sDeltaX_right->local(),
+        _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
+        Dm_ab, &sG_tskij,
+        opt_dW_tRPQ ? &(*opt_dW_tRPQ) : nullptr,
+        include_hartree, include_exchange, include_gw_sigma));
+
+    app_log(2, "  DeltaX IBC correction: setup complete.");
+    utils::memlog("lr_driver::run_lr: after build_lr_ibc");
+    _Timer.stop("LR_DRIVER_SETUP_IBC");
+  }
   _Timer.stop("LR_DRIVER_SETUP");
   utils::memlog("lr_driver::run_lr: end of LR_DRIVER_SETUP");
   print_setup_timers();
@@ -240,11 +330,83 @@ std::tuple<int, double> lr_driver::run_lr(
     // Step 2: Compute LR Fock matrix (if requested)
     if (need_hf) {
       _Timer.start("LR_HF");
+      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       _lr_hf->evaluate(sDeltaF_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                       include_hartree, include_exchange, nullptr,
+                       include_hartree, include_exchange, ibc_ptr,
                        DeltaV_qPQ, Dm_ab);
       _Timer.stop("LR_HF");
       _mpi->comm.barrier();
+    }
+
+    // Step 3: Compute LR GW self-energy
+    if (include_gw_sigma && !gw_full) {
+      // DeltaG-only mode: ΔΣ = -ΔG ⊙ W_c
+      _Timer.start("LR_GW_SIGMA");
+      {
+        const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
+        lr_gw_solver->evaluate_sigma_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc,
+            ibc_ptr);
+      }
+      // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+      if (div_corr) {
+        lr_gw_solver->apply_div_correction_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+      }
+      _Timer.stop("LR_GW_SIGMA");
+      _mpi->comm.barrier();
+    }
+
+    if (gw_full) {
+      // Step 3b: ΔP = -ΔG·G - G·ΔG
+      _Timer.start("LR_GW_PI");
+      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
+      auto dDeltaPi_tqPQ = lr_pi_solver->evaluate_lr_Pi(
+          sG_tskij.local(), sDeltaG_tskij.local(), thc,
+          *opt_dG_tsRPQ, *opt_dG_mtau_tsRPQ, ibc_ptr);
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_PI");
+
+      // Step 3c-3d: ΔW_c(τ) via solve_lr_dyson_W (in-place, uses cached W_full)
+      _Timer.start("LR_GW_W");
+      lr_scr_solver->solve_lr_dyson_W(dDeltaPi_tqPQ, *opt_dW_full_wqPQ, thc);
+      // dDeltaPi_tqPQ now contains ΔW_c(τ) in q-local distribution
+      auto& dDeltaW_tqPQ = dDeltaPi_tqPQ;  // alias for clarity
+
+      // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
+      nda::array<ComplexType, 1> delta_eps_inv_head;
+      if (div_corr && is_q_gamma()) {
+        auto [delta_eps_inv_q, delta_head] =
+            solvers::div_utils::eps_inv_head_t(
+                dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT());
+        delta_eps_inv_head = std::move(delta_head);
+      }
+
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_W");
+
+      // Step 3e-3f: Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
+      _Timer.start("LR_GW_SIGMA");
+      _Timer.start("LR_GW_DW_TRANSPOSE");
+      auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, _mpi->comm);
+      dDeltaW_tqPQ.reset();
+      _Timer.stop("LR_GW_DW_TRANSPOSE");
+      lr_gw_solver->evaluate_sigma(
+          *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
+          sG_tskij.local(), dDeltaW_qtPQ, thc,
+          *opt_dG_tsRPQ, *opt_dG_mtau_tsRPQ, ibc_ptr);
+      // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
+      if (div_corr) {
+        lr_gw_solver->apply_div_correction_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+        // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+        if (is_q_gamma()) {
+          lr_gw_solver->apply_div_correction_G(
+              *sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+        }
+      }
+      _mpi->comm.barrier();
+      _Timer.stop("LR_GW_SIGMA");
     }
 
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
@@ -354,6 +516,10 @@ std::tuple<int, double> lr_driver::run_lr(
 
   _Timer.stop("LR_SCF");
 
+  // Free the G^R cache (not needed by the post-loop HF/IBC epilogue)
+  opt_dG_tsRPQ.reset();
+  opt_dG_mtau_tsRPQ.reset();
+
   // Report results
   if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
@@ -364,7 +530,7 @@ std::tuple<int, double> lr_driver::run_lr(
 
   // Final hierarchical timer report (printed once, at verbosity >= 2).
   // Per-step solver prints inside the loop are gated to verbosity >= 3.
-  print_timers();
+  print_timers(lr_pi_solver.get(), lr_scr_solver.get(), lr_gw_solver.get());
 
   return std::make_tuple(iter, Delta_mu);
 }
@@ -385,9 +551,12 @@ void lr_driver::print_setup_timers() {
 }
 
 
-void lr_driver::print_timers() {
+void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
+                             solvers::lr_scr_coulomb_t* scr_solver,
+                             solvers::lr_gw* gw_solver) {
   // Driver totals in execution order, each followed by the corresponding
-  // solver's subclocks (deeper indent).
+  // solver's subclocks (deeper indent). Solver pointers may be null when the
+  // step was not active; subclocks are then skipped.
   const std::string sub_indent = "        ";
   app_log(2, "\n  LR_DRIVER timers");
   app_log(2, "  -----------------");
@@ -397,6 +566,14 @@ void lr_driver::print_timers() {
   _lr_dyson.print_subclocks(2, sub_indent);
   app_log(2, "      - LR HF (total):          {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
   if (_lr_hf) _lr_hf->print_subclocks(2, sub_indent);
+  app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_PI"), _Timer.number_of_calls("LR_GW_PI"));
+  if (pi_solver) pi_solver->print_subclocks(2, sub_indent);
+  app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W"), _Timer.number_of_calls("LR_GW_W"));
+  if (scr_solver) scr_solver->print_subclocks(2, sub_indent);
+  app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA"), _Timer.number_of_calls("LR_GW_SIGMA"));
+  app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_DW_TRANSPOSE"), _Timer.number_of_calls("LR_GW_DW_TRANSPOSE"));
+  if (gw_solver) gw_solver->print_subclocks(2, sub_indent);
+  app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
   app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
   app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));

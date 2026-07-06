@@ -7,6 +7,7 @@ SET(SRCS
   cholesky_gw.cpp  
   thc_rpa.cpp
   thc_gw.cpp  
+  lr_gw.cpp
   )
 
 if(USE_DEVICE_COMPILER)

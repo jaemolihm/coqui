@@ -216,6 +216,176 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);
 
+/**
+ * @brief Linear response GW self-energy with fixed W (term 1)
+ *
+ * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space Hadamard product).
+ * Reads W and eps_inv_head from checkpoint.
+ *
+ * @param eri               - [INPUT] THC ERI handler
+ * @param pt                - [INPUT] Parameters as property tree (prefix, output)
+ * @param q_pert            - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param DeltaG_tskij_root - [INPUT] LR Green's function (nt, ns, nk, nb, nb) on the
+ *                            MPI global root; std::nullopt elsewhere.
+ * @return ΔΣ(τ,s,k,i,j) on rank 0 (nt, ns, nk, nb, nb); empty array on non-root.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root);
+
+/**
+ * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
+ *
+ * Same R-space computation as lr_gw but for a full (non-LR) Green's function.
+ * Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix, output)
+ * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @param div_corr - [INPUT] Whether to apply divergence correction (default true)
+ * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    bool div_corr = true);
+
+/**
+ * @brief Linear response GW self-energy term 2: -G ⊙ ΔW + div_corr
+ *
+ * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+ * At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
+ *
+ * @param eri          - [INPUT] THC ERI handler
+ * @param pt           - [INPUT] Parameters as property tree (prefix)
+ * @param q_pert       - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param G_tskij      - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaW_qtPQ  - [INPUT] LR screened interaction (nkpts, nt_half, NP, NP)
+ * @return ΔΣ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaW_qtPQ_root);
+
+/**
+ * @brief Evaluate GW self-energy with provided W and G (FD helper)
+ *
+ * Computes Σ = -G ⊙ W_c [+ div_corr] using provided G and W_c arrays
+ * (not from file). Used for finite-difference testing of full LR-GW.
+ *
+ * @param eri           - [INPUT] THC ERI handler
+ * @param pt            - [INPUT] Parameters as property tree (prefix)
+ * @param G_tskij       - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @param W_c_qtPQ      - [INPUT] Screened interaction (nkpts, nt_half, NP, NP)
+ * @param eps_inv_head  - [INPUT] Inverse dielectric head (nt_half,)
+ * @param div_corr      - [INPUT] Whether to apply divergence correction
+ * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_qtPQ_root,
+    nda::array<ComplexType, 1> const& eps_inv_head,
+    bool div_corr);
+
+/**
+ * @brief Compute eps_inv_head from W_c in THC product basis
+ *
+ * Extracts (ε⁻¹-1) head from W_c and extrapolates to q→0.
+ * Matches the convention used by Sigma_div_correction.
+ *
+ * @param W_c_tqPQ  - [INPUT] Screened interaction W_c (nt_half, nkpts, NP, NP)
+ * @return eps_inv_head at q=0, shape (nt_half,)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root);
+
+/**
+ * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)
+ *
+ * Computes LR polarization via product-rule differentiation of P = -G·G.
+ * Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
+ * thc_solver_comm for G factors (symmetric).
+ *
+ * @param eri           - [INPUT] THC ERI handler
+ * @param q_pert        - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param G_tskij       - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+ * @param DeltaX_left   - [INPUT, optional] δ^q X(k), (ns, nkpts, NP, nb). Full BZ.
+ * @param DeltaX_right  - [INPUT, optional] δ^{-q} X(k+q) at storage k, same shape.
+ *                        When both DeltaX arrays are provided, the primary→aux
+ *                        IBC correction is applied inside evaluate_lr_Pi.
+ * @return ΔP(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt);
+
+/**
+ * @brief Evaluate standard RPA polarization P[G] (FD helper)
+ *
+ * Computes the standard RPA polarization from a given G. Used for
+ * finite-difference testing: P[G+εΔG] computed by passing G+εΔG.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix)
+ * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @return P(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root);
+
+/**
+ * @brief Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+ *
+ * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
+ * then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
+ *
+ * @param eri           - [INPUT] THC ERI handler
+ * @param pt            - [INPUT] Parameters as property tree (prefix)
+ * @param q_pert        - [INPUT] LR perturbation wavevector in crystal coords (3,)
+ * @param DeltaPi_tqPQ  - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+ * @return ΔW_c(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root);
+
+/**
+ * @brief Evaluate screened interaction W_c from polarization Π (FD helper)
+ *
+ * Exposes scr_coulomb_t::dyson_W_from_Pi_tau for finite-difference testing.
+ * Reads IAFT from checkpoint, applies W Dyson equation Π→W_c.
+ *
+ * @param eri      - [INPUT] THC ERI handler
+ * @param pt       - [INPUT] Parameters as property tree (prefix)
+ * @param Pi_tqPQ  - [INPUT] Polarization (nt_half, nkpts, NP, NP)
+ * @return W_c(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 4>> const& Pi_tqPQ_root);
+
+
 }
 
 

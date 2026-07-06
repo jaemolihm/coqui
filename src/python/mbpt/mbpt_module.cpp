@@ -233,6 +233,192 @@ namespace coqui_py {
       bool, bool);
 
 
+  /**
+   * @brief Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space)
+   *
+   * @param lr_params     - [INPUT] JSON string with params (prefix)
+   * @param h_int         - [INPUT] THC ERI handler
+   * @param q_pert        - [INPUT] LR perturbation wavevector (3,)
+   * @param DeltaG_tskij  - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> lr_gw_sigma_DeltaG(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      std::optional<nda::array<ComplexType, 5>> DeltaG_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_sigma_DeltaG_calc(mb_eri, parser.get_root(), q_pert, DeltaG_tskij);
+  }
+
+
+  /**
+   * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @param div_corr   - [INPUT] Whether to apply divergence correction
+   * @return           - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> gw_evaluate_sigma(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      bool div_corr) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_sigma_calc(mb_eri, parser.get_root(), G_tskij, div_corr);
+  }
+
+
+  /**
+   * @brief Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space)
+   *
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
+   * @param G_tskij        - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaG_tskij   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaX_left    - [INPUT, optional] δ^q X(k) (ns, nkpts, NP, nb)
+   * @param DeltaX_right   - [INPUT, optional] δ^{-q} X(k+q) at storage k
+   *                         When both are provided, primary→aux IBC is applied.
+   * @return               - [OUTPUT] ΔP (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> lr_gw_Pi(
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      std::optional<nda::array<ComplexType, 5>> DeltaG_tskij,
+      std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+      std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_Pi_calc(mb_eri, q_pert, G_tskij, DeltaG_tskij,
+                                    DeltaX_left, DeltaX_right);
+  }
+
+
+  /**
+   * @brief Evaluate standard RPA polarization P[G] (FD helper)
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @return           - [OUTPUT] P (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> gw_evaluate_Pi(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      std::optional<nda::array<ComplexType, 5>> G_tskij) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_Pi_calc(mb_eri, parser.get_root(), G_tskij);
+  }
+
+
+  /**
+   * @brief Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
+   * @param DeltaPi_tqPQ   - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+   * @return               - [OUTPUT] ΔW_c (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> lr_gw_W(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_W_calc(mb_eri, parser.get_root(), q_pert, DeltaPi_tqPQ);
+  }
+
+
+  /**
+   * @brief Evaluate W_c from Π via W Dyson equation (FD helper)
+   *
+   * @param lr_params  - [INPUT] JSON string with params (prefix)
+   * @param h_int      - [INPUT] THC ERI handler
+   * @param Pi_tqPQ    - [INPUT] Polarization (nt_half, nkpts, NP, NP)
+   * @return           - [OUTPUT] W_c (nt_half, nkpts, NP, NP)
+   */
+  nda::array<ComplexType, 4> gw_evaluate_W_from_Pi(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      std::optional<nda::array<ComplexType, 4>> Pi_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_W_from_Pi_calc(mb_eri, parser.get_root(), Pi_tqPQ);
+  }
+
+
+  /**
+   * @brief Compute LR GW self-energy term 2: -G ⊙ ΔW (no div correction)
+   *
+   * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+   *
+   * @param lr_params     - [INPUT] JSON string with params (prefix)
+   * @param h_int         - [INPUT] THC ERI handler
+   * @param q_pert        - [INPUT] LR perturbation wavevector (3,)
+   * @param G_tskij       - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+   * @param DeltaW_qtPQ   - [INPUT] LR screened interaction (nkpts, nt_half, NP, NP)
+   * @return              - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> lr_gw_sigma_DeltaW(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_pert,
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      std::optional<nda::array<ComplexType, 4>> DeltaW_qtPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_gw_sigma_DeltaW_calc(mb_eri, parser.get_root(), q_pert, G_tskij, DeltaW_qtPQ);
+  }
+
+
+  /**
+   * @brief Compute eps_inv_head from W_c in THC product basis
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix for IAFT)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param W_c_tqPQ       - [INPUT] Correlation screened interaction W_c (nt_half, nkpts, NP, NP)
+   * @return               - [OUTPUT] eps_inv_head (nt_half,)
+   */
+  nda::array<ComplexType, 1> compute_eps_inv_head(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      std::optional<nda::array<ComplexType, 4>> W_c_tqPQ) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::compute_eps_inv_head_calc(mb_eri, parser.get_root(), W_c_tqPQ);
+  }
+
+  /**
+   * @brief Evaluate GW self-energy with provided W and G (FD helper)
+   *
+   * @param lr_params      - [INPUT] JSON string with params (prefix)
+   * @param h_int          - [INPUT] THC ERI handler
+   * @param G_tskij        - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @param W_c_qtPQ       - [INPUT] Screened interaction (nkpts, nt_half, NP, NP)
+   * @param eps_inv_head   - [INPUT] Inverse dielectric head (nt_half,)
+   * @param div_corr       - [INPUT] Whether to apply divergence correction
+   * @return               - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 5> gw_evaluate_sigma_with_W(
+      const std::string &lr_params,
+      ThcCoulomb &h_int,
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      std::optional<nda::array<ComplexType, 4>> W_c_qtPQ,
+      nda::array<ComplexType, 1> const& eps_inv_head,
+      bool div_corr) {
+    auto parser = InputParser(lr_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::gw_evaluate_sigma_with_W_calc(mb_eri, parser.get_root(), G_tskij, W_c_qtPQ, eps_inv_head, div_corr);
+  }
+
+
   template<typename eri_handler>
   void mbpt(const std::string &solver_type, const std::string &mbpt_params, eri_handler &h_int,
             const nda::array<ComplexType, 5> &C_ksIai,

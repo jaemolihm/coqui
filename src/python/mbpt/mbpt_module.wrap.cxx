@@ -34,8 +34,51 @@ static auto const fun_0 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "kpts_crys", "q_vec")};
 
+// compute_eps_inv_head
+static auto const fun_1 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       std::optional<nda::array<ComplexType, 4>> W_c_tqPQ) {
+      return coqui_py::compute_eps_inv_head(lr_params, h_int, W_c_tqPQ);
+    },
+    "lr_params", "h_int", "W_c_tqPQ")};
+
+// gw_evaluate_Pi
+static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       std::optional<nda::array<ComplexType, 5>> G_tskij) {
+      return coqui_py::gw_evaluate_Pi(lr_params, h_int, G_tskij);
+    },
+    "lr_params", "h_int", "G_tskij")};
+
+// gw_evaluate_W_from_Pi
+static auto const fun_3 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       std::optional<nda::array<ComplexType, 4>> Pi_tqPQ) {
+      return coqui_py::gw_evaluate_W_from_Pi(lr_params, h_int, Pi_tqPQ);
+    },
+    "lr_params", "h_int", "Pi_tqPQ")};
+
+// gw_evaluate_sigma
+static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       std::optional<nda::array<ComplexType, 5>> G_tskij, bool div_corr) {
+      return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij, div_corr);
+    },
+    "lr_params", "h_int", "G_tskij", "div_corr")};
+
+// gw_evaluate_sigma_with_W
+static auto const fun_5 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       std::optional<nda::array<ComplexType, 5>> G_tskij,
+       std::optional<nda::array<ComplexType, 4>> W_c_qtPQ,
+       const nda::array<ComplexType, 1> &eps_inv_head, bool div_corr) {
+      return coqui_py::gw_evaluate_sigma_with_W(
+          lr_params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr);
+    },
+    "lr_params", "h_int", "G_tskij", "W_c_qtPQ", "eps_inv_head", "div_corr")};
+
 // hf_evaluate
-static auto const fun_1 = c2py::dispatcher_f_kw_t{
+static auto const fun_6 = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](coqui_py::ThcCoulomb &h_int,
            const nda::array<ComplexType, 4> &Dm_skij,
@@ -55,8 +98,51 @@ static auto const fun_1 = c2py::dispatcher_f_kw_t{
         },
         "h_int", "Dm_skij", "S_skij", "compute_hartree", "compute_exchange")};
 
+// lr_gw_Pi
+static auto const fun_7 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &h_int, const nda::array<double, 1> &q_pert,
+       std::optional<nda::array<ComplexType, 5>> G_tskij,
+       std::optional<nda::array<ComplexType, 5>> DeltaG_tskij,
+       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
+       std::optional<nda::array<ComplexType, 4>> DeltaX_right) {
+      return coqui_py::lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
+                                DeltaX_left, DeltaX_right);
+    },
+    "h_int", "q_pert", "G_tskij", "DeltaG_tskij", "DeltaX_left",
+    "DeltaX_right")};
+
+// lr_gw_W
+static auto const fun_8 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       const nda::array<double, 1> &q_pert,
+       std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ) {
+      return coqui_py::lr_gw_W(lr_params, h_int, q_pert, DeltaPi_tqPQ);
+    },
+    "lr_params", "h_int", "q_pert", "DeltaPi_tqPQ")};
+
+// lr_gw_sigma_DeltaG
+static auto const fun_9 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       const nda::array<double, 1> &q_pert,
+       std::optional<nda::array<ComplexType, 5>> DeltaG_tskij) {
+      return coqui_py::lr_gw_sigma_DeltaG(lr_params, h_int, q_pert,
+                                          DeltaG_tskij);
+    },
+    "lr_params", "h_int", "q_pert", "DeltaG_tskij")};
+
+// lr_gw_sigma_DeltaW
+static auto const fun_10 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
+       const nda::array<double, 1> &q_pert,
+       std::optional<nda::array<ComplexType, 5>> G_tskij,
+       std::optional<nda::array<ComplexType, 4>> DeltaW_qtPQ) {
+      return coqui_py::lr_gw_sigma_DeltaW(lr_params, h_int, q_pert, G_tskij,
+                                          DeltaW_qtPQ);
+    },
+    "lr_params", "h_int", "q_pert", "G_tskij", "DeltaW_qtPQ")};
+
 // lr_hf
-static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](coqui_py::ThcCoulomb &h_int, const nda::array<double, 1> &q_vec,
        const nda::array<ComplexType, 4> &DeltaDm_skij,
        const nda::array<ComplexType, 4> &S_skij, bool compute_hartree,
@@ -68,7 +154,7 @@ static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "compute_exchange")};
 
 // mbpt
-static auto const fun_3 = c2py::dispatcher_f_kw_t{
+static auto const fun_12 = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int,
@@ -205,7 +291,7 @@ static auto const fun_3 = c2py::dispatcher_f_kw_t{
         "h_int_exchange")};
 
 // run_lr
-static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
        const nda::array<double, 1> &q_vec,
        std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
@@ -245,8 +331,130 @@ Returns
               {{c2py::python_typename<const nda::array<double, 2> &>()},
                {c2py::python_typename<const nda::array<double, 1> &>()}},
               {c2py::python_typename<nda::array<long, 1>>()});
-static const auto doc_d_1 =
-    fun_1.doc(R"DOC(
+static const auto doc_d_1 = fun_1.doc(
+    R"DOC(
+Compute eps_inv_head from W_c in THC product basis
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix for IAFT)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+W_c_tqPQ : {par_2}
+   - [INPUT] Correlation screened interaction W_c (nt_half, nkpts, NP, NP)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] eps_inv_head (nt_half,)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 1>>()});
+static const auto doc_d_2 = fun_2.doc(
+    R"DOC(
+Evaluate standard RPA polarization P[G] (FD helper)
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+G_tskij : {par_2}
+   - [INPUT] Green's function (nt, ns, nk, nb, nb)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] P (nt_half, nkpts, NP, NP)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_3 = fun_3.doc(
+    R"DOC(
+Evaluate W_c from Π via W Dyson equation (FD helper)
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+Pi_tqPQ : {par_2}
+   - [INPUT] Polarization (nt_half, nkpts, NP, NP)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] W_c (nt_half, nkpts, NP, NP)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_4 = fun_4.doc(
+    R"DOC(
+Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+G_tskij : {par_2}
+   - [INPUT] Green's function (nt, ns, nk, nb, nb)
+div_corr : {par_3}
+   - [INPUT] Whether to apply divergence correction
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<bool>()}},
+    {c2py::python_typename<nda::array<ComplexType, 5>>()});
+static const auto doc_d_5 = fun_5.doc(
+    R"DOC(
+Evaluate GW self-energy with provided W and G (FD helper)
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+G_tskij : {par_2}
+   - [INPUT] Green's function (nt, ns, nk, nb, nb)
+W_c_qtPQ : {par_3}
+   - [INPUT] Screened interaction (nkpts, nt_half, NP, NP)
+eps_inv_head : {par_4}
+   - [INPUT] Inverse dielectric head (nt_half,)
+div_corr : {par_5}
+   - [INPUT] Whether to apply divergence correction
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] Σ (nt, ns, nk, nb, nb)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<const nda::array<ComplexType, 1> &>()},
+     {c2py::python_typename<bool>()}},
+    {c2py::python_typename<nda::array<ComplexType, 5>>()});
+static const auto doc_d_6 =
+    fun_6.doc(R"DOC(
 Compute HF self-energy (Fock matrix) from a density matrix
 
 Parameters
@@ -274,8 +482,120 @@ Returns
                {c2py::python_typename<bool>()},
                {c2py::python_typename<bool>()}},
               {c2py::python_typename<nda::array<ComplexType, 4>>()});
-static const auto doc_d_2 =
-    fun_2.doc(R"DOC(
+static const auto doc_d_7 = fun_7.doc(
+    R"DOC(
+Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space)
+
+Parameters
+----------
+h_int : {par_0}
+   - [INPUT] THC ERI handler
+q_pert : {par_1}
+   - [INPUT] LR perturbation wavevector (3,)
+G_tskij : {par_2}
+   - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+DeltaG_tskij : {par_3}
+   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+DeltaX_left : {par_4}
+   - [INPUT, optional] δ^q X(k) (ns, nkpts, NP, nb)
+DeltaX_right : {par_5}
+   - [INPUT, optional] δ^{-q} X(k+q) at storage k
+                           When both are provided, primary→aux IBC is applied.
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] ΔP (nt_half, nkpts, NP, NP)
+)DOC",
+    {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_8 = fun_8.doc(
+    R"DOC(
+Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+q_pert : {par_2}
+   - [INPUT] LR perturbation wavevector (3,)
+DeltaPi_tqPQ : {par_3}
+   - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] ΔW_c (nt_half, nkpts, NP, NP)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_9 = fun_9.doc(
+    R"DOC(
+Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space)
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+q_pert : {par_2}
+   - [INPUT] LR perturbation wavevector (3,)
+DeltaG_tskij : {par_3}
+   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 5>>()});
+static const auto doc_d_10 = fun_10.doc(
+    R"DOC(
+Compute LR GW self-energy term 2: -G ⊙ ΔW (no div correction)
+
+Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+q_pert : {par_2}
+   - [INPUT] LR perturbation wavevector (3,)
+G_tskij : {par_3}
+   - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
+DeltaW_qtPQ : {par_4}
+   - [INPUT] LR screened interaction (nkpts, nt_half, NP, NP)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] ΔΣ (nt, ns, nk, nb, nb)
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 5>>()});
+static const auto doc_d_11 =
+    fun_11.doc(R"DOC(
 Compute LR Fock matrix from LR density matrix
 
 Computes ΔF = ΔJ + ΔK from the LR density matrix ΔDm.
@@ -300,15 +620,15 @@ Returns
 {ret_0}
    - [OUTPUT] LR Fock matrix (ns, nk, nb, nb)
 )DOC",
-              {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
-               {c2py::python_typename<const nda::array<double, 1> &>()},
-               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
-               {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
-               {c2py::python_typename<bool>()},
-               {c2py::python_typename<bool>()}},
-              {c2py::python_typename<nda::array<ComplexType, 4>>()});
-static const auto doc_d_3 = fun_3.doc(R"DOC()DOC");
-static const auto doc_d_4 = fun_4.doc(
+               {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
+                {c2py::python_typename<const nda::array<double, 1> &>()},
+                {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+                {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+                {c2py::python_typename<bool>()},
+                {c2py::python_typename<bool>()}},
+               {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_12 = fun_12.doc(R"DOC()DOC");
+static const auto doc_d_13 = fun_13.doc(
     R"DOC(
 Unified linear response calculation
 
@@ -382,14 +702,32 @@ Returns
 static PyMethodDef module_methods[] = {
     {"calculate_kpq_map", (PyCFunction)c2py::pyfkw<fun_0>,
      METH_VARARGS | METH_KEYWORDS, doc_d_0.c_str()},
-    {"hf_evaluate", (PyCFunction)c2py::pyfkw<fun_1>,
+    {"compute_eps_inv_head", (PyCFunction)c2py::pyfkw<fun_1>,
      METH_VARARGS | METH_KEYWORDS, doc_d_1.c_str()},
-    {"lr_hf", (PyCFunction)c2py::pyfkw<fun_2>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_2.c_str()},
-    {"mbpt", (PyCFunction)c2py::pyfkw<fun_3>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_3.c_str()},
-    {"run_lr", (PyCFunction)c2py::pyfkw<fun_4>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_4.c_str()},
+    {"gw_evaluate_Pi", (PyCFunction)c2py::pyfkw<fun_2>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_2.c_str()},
+    {"gw_evaluate_W_from_Pi", (PyCFunction)c2py::pyfkw<fun_3>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_3.c_str()},
+    {"gw_evaluate_sigma", (PyCFunction)c2py::pyfkw<fun_4>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_4.c_str()},
+    {"gw_evaluate_sigma_with_W", (PyCFunction)c2py::pyfkw<fun_5>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_5.c_str()},
+    {"hf_evaluate", (PyCFunction)c2py::pyfkw<fun_6>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_6.c_str()},
+    {"lr_gw_Pi", (PyCFunction)c2py::pyfkw<fun_7>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_7.c_str()},
+    {"lr_gw_W", (PyCFunction)c2py::pyfkw<fun_8>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_8.c_str()},
+    {"lr_gw_sigma_DeltaG", (PyCFunction)c2py::pyfkw<fun_9>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_9.c_str()},
+    {"lr_gw_sigma_DeltaW", (PyCFunction)c2py::pyfkw<fun_10>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_10.c_str()},
+    {"lr_hf", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_11.c_str()},
+    {"mbpt", (PyCFunction)c2py::pyfkw<fun_12>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_12.c_str()},
+    {"run_lr", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_13.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

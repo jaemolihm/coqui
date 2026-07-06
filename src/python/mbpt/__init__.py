@@ -18,7 +18,14 @@ limitations under the License.
 ==========================================================================
 """
 
-from .mbpt_driver import run_hf, run_gw, run_evgw, run_qpgw, run_lr, run_lr_hf, hf_evaluate
+from .mbpt_driver import (
+    run_hf, run_gw, run_evgw, run_qpgw, run_lr, run_lr_hf,
+    hf_evaluate, run_lr_gw_sigma_DeltaG, gw_evaluate_sigma,
+    run_lr_gw_Pi, gw_evaluate_Pi,
+    run_lr_gw_W, gw_evaluate_W_from_Pi,
+    run_lr_gw_sigma_DeltaW, gw_evaluate_sigma_with_W,
+    compute_eps_inv_head,
+)
 from .lr_driver import (
     calculate_kpq_map,
     is_q_commensurate,
@@ -34,6 +41,19 @@ __all__ = [
     "run_lr",
     "run_lr_hf",
     "hf_evaluate",
+    # LR-GW
+    "run_lr_gw_sigma_DeltaG",
+    "gw_evaluate_sigma",
+    # LR-Pi
+    "run_lr_gw_Pi",
+    "gw_evaluate_Pi",
+    # LR-W
+    "run_lr_gw_W",
+    "gw_evaluate_W_from_Pi",
+    # LR-GW full (term 2)
+    "run_lr_gw_sigma_DeltaW",
+    "gw_evaluate_sigma_with_W",
+    "compute_eps_inv_head",
     "calculate_kpq_map",
     "is_q_commensurate",
     "is_q_gamma",

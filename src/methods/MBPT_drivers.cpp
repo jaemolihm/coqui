@@ -39,6 +39,11 @@
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
+#include "methods/SCF/lr_precompute.hpp"
+#include "methods/GW/lr_gw.hpp"
+#include "methods/GW/g0_div_utils.hpp"
+#include "methods/scr_coulomb/lr_rpa_pi.hpp"
+#include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/tools/chkpt_utils.h"
 #include "numerics/shared_array/shared_array_io.hpp"
 #include "utilities/lr_utils.hpp"
@@ -1020,6 +1025,142 @@ template void mbpt(std::string, \
 #undef MBPT_INST
 
 /**
+ * Wrap a regular 4D array into a distributed array with a proper MPI grid.
+ *
+ * The source array must be fully available on rank 0.
+ * All ranks receive their local portion via broadcast + local copy.
+ *
+ * @param comm   - [INPUT] MPI communicator
+ * @param shape  - [INPUT] Global array shape
+ * @param src    - [INPUT] Source array (only meaningful on rank 0)
+ * @return Distributed array with data from src
+ */
+template<typename communicator_t>
+auto distribute_array_4D(communicator_t& comm,
+                         std::array<long, 4> shape,
+                         nda::array<ComplexType, 4> const& src_in,
+                         std::array<bool, 4> skip_axes = {false, false, false, false})
+{
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto pgrid = compute_proc_grid_4D(comm.size(), shape, skip_axes);
+  auto darray = math::nda::make_distributed_array<local_Array_4D_t>(
+      comm, pgrid, shape);
+
+  // Broadcast full array from root, then each rank extracts its local portion
+  nda::array<ComplexType, 4> src(src_in);
+  comm.broadcast_n(src.data(), src.size(), 0);
+  auto loc = darray.local();
+  auto [o0, o1, o2, o3] = darray.origin();
+  auto [n0, n1, n2, n3] = darray.local_shape();
+  for (long i0 = 0; i0 < n0; ++i0)
+    for (long i1 = 0; i1 < n1; ++i1)
+      for (long i2 = 0; i2 < n2; ++i2)
+        for (long i3 = 0; i3 < n3; ++i3)
+          loc(i0, i1, i2, i3) = src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+  comm.barrier();
+  return darray;
+}
+
+/**
+ * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
+ *
+ * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
+ * Also used by run_lr_calc when include_gw_sigma=true.
+ *
+ * @param mpi         - MPI context
+ * @param thc         - THC ERI (provides Np())
+ * @param input_file  - Path to checkpoint HDF5 file (for eps_inv_head)
+ * @param input_grp   - SCF group name in checkpoint (e.g., "scf")
+ * @param input_iter  - Iteration to read (-1 = final_iter)
+ * @param nt          - Number of tau points (from IAFT)
+ * @return (dW_qtPQ, eps_inv_head) tuple
+ */
+template<typename mpi_context_t, typename THC_t>
+auto load_W_and_eps_inv_head(
+    mpi_context_t& mpi,
+    THC_t& thc,
+    const std::string& input_file,
+    const std::string& input_grp,
+    long input_iter,
+    long nt)
+{
+  auto mf = thc.MF();
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Read W from thc_screened_interaction.h5 (same directory as checkpoint)
+  auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
+  app_log(2, "Reading W from {}...", w_file);
+
+  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
+  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
+  std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
+  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
+
+  // Each rank reads only its local (q,t,P,Q) slab via the distributed h5_read.
+  // A "root reads full + broadcast" pattern OOMs at scale: full W for nkpts=512,
+  // NP=204 is ~30 GB per rank (×2 with broadcast staging), well over per-node RAM
+  // when many ranks share a node.
+  {
+    h5::file file(w_file, 'r');
+    h5::group grp(file);
+    // Verify the W-on-disk matches the THC currently loaded. Silent shape
+    // mismatch between stale W (from scGW build-time) and current THC (from
+    // current ISDF) produces a garbage W that explodes downstream by ~|W|²
+    // amplification in the ΔW = W·ΔΠ·W Dyson step.
+    auto ds_info = h5::array_interface::get_dataset_info(grp, "W_qtPQ");
+    long ds_np_a = ds_info.lengths[2];
+    long ds_np_b = ds_info.lengths[3];
+    utils::check(ds_np_a == NP && ds_np_b == NP,
+                 "load_W_and_eps_inv_head: W_qtPQ in {} has shape (...,{},{}) "
+                 "but current THC has Np={}. The W file was generated with a "
+                 "different THC decomposition; regenerate it (or re-run GW) "
+                 "with the current THC before calling run_lr.",
+                 w_file, ds_np_a, ds_np_b, NP);
+    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
+  }
+  mpi.comm.barrier();
+
+  // Read the div_treatment that scGW used (written to scf_grp by
+  // scr_coulomb_t::dump_eps_inv_head). Required for consistent eps_inv_head
+  // recomputation; checkpoints that predate this dataset must be regenerated.
+  // Root reads the string, then broadcasts it via a fixed-size buffer.
+  char div_buf[64] = {0};
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    auto scf_grp = root_grp.open_group(input_grp);
+    utils::check(scf_grp.has_dataset("div_treatment"),
+                 "load_W_and_eps_inv_head: '{}/div_treatment' missing in {}. "
+                 "This checkpoint predates div_treatment dump; please regenerate "
+                 "the scGW checkpoint with the current code.",
+                 input_grp, input_file);
+    std::string div_str;
+    h5::h5_read(scf_grp, "div_treatment", div_str);
+    utils::check(div_str.size() < sizeof(div_buf),
+                 "load_W_and_eps_inv_head: div_treatment string too long: {}", div_str);
+    std::copy(div_str.begin(), div_str.end(), div_buf);
+  }
+  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
+  std::string div_treatment(div_buf);
+
+  // Recompute eps_inv_head from the loaded W_c
+  // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+  mpi.comm.barrier();
+
+  return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
+}
+
+/**
  * Unified linear response calculation.
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
@@ -1169,9 +1310,17 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
 
-  // GW inputs (W_c + eps_inv_head) are loaded here once the LR-GW steps land.
-  utils::check(gw_mode == lr_gw_update_mode::none,
-               "run_lr_calc: gw_mode != none not yet ported.");
+  // Load W and eps_inv_head if GW self-energy is requested
+  using dW_type = decltype(load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()).first);
+  std::optional<dW_type> opt_dW;
+  std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
+  if (include_gw_sigma) {
+    lr_init_timer.start("LR_INIT_LOAD_W");
+    auto [dW, eps_inv] = load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f());
+    opt_dW.emplace(std::move(dW));
+    opt_eps_inv.emplace(std::move(eps_inv));
+    lr_init_timer.stop("LR_INIT_LOAD_W");
+  }
 
   // Bcast presence flag for optional inputs so non-root ranks know whether
   // to participate in make_shared_from_root_input.
@@ -1243,8 +1392,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       lr_state.sDeltaF_skij.value(), pDeltaSigma,
       sG_tskij, lr_state.sDeltaH0_skij.value(), thc,
       include_hartree, include_exchange, gw_mode,
-      static_cast<memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>*>(nullptr),
-      nullptr,
+      opt_dW ? &(*opt_dW) : nullptr,
+      opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
       pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr,
       pDeltaV_qPQ);
@@ -1277,6 +1426,811 @@ template std::tuple<int, double> run_lr_calc(
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 3>> const&);
+
+
+
+/**
+ * Linear response GW self-energy with fixed W (term 1).
+ *
+ * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space).
+ * Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_sigma_DeltaG_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_sigma_DeltaG_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, DeltaG_tskij_root);
+
+  // Load W and eps_inv_head using helper
+  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // Divergence correction flag (default true)
+  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  if (div_corr) {
+    chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+  }
+
+  // Pre-transform W to R-space: transpose (q,t)→(t,R), with q→R FT
+  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_qtPQ, thc);
+  dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
+
+  // Create lr_gw solver and compute ΔΣ
+  solvers::lr_gw lr(& ft, q_pert);
+
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, sDeltaG_tskij.local(), dW_tRPQ, thc);
+
+  // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
+  if (div_corr) {
+    lr.apply_div_correction_DeltaG(sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  // Rank-0-only return; non-root ranks return an empty array (→ None in Python).
+  nda::array<ComplexType, 5> out;
+  if (mpi->comm.root()) {
+    out = sDeltaSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
+ *
+ * Uses the standard gw_t code path (thc_solver_comm, not lr_thc_comm).
+ * Used for finite-difference testing of LR-GW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    bool div_corr) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_sigma_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_sigma_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+
+  // Load W and eps_inv_head using helper
+  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+
+  // Use standard gw_t code path
+  solvers::gw_t gw(&ft);
+
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  gw.eval_Sigma_all(sG_tskij.local(), dW_qtPQ, sSigma_tskij, thc, "R");
+  if (div_corr) {
+    gw.Sigma_div_correction(sSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  // Rank-0-only return.
+  nda::array<ComplexType, 5> out;
+  if (mpi->comm.root()) {
+    out = sSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space).
+ *
+ * Creates lr_rpa_pi solver, calls evaluate_lr_Pi,
+ * copies distributed result to regular array.
+ *
+ * When DeltaX_left (δ^q X) and DeltaX_right (δ^{-q} X) are both provided,
+ * an lr_ibc_DeltaX struct is constructed on the fly and passed to
+ * evaluate_lr_Pi so the primary→aux IBC correction is applied.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  long nkpts = mf->nkpts();
+  long Np = thc.Np();
+
+  // Distribute G and DeltaG into node-local shared-memory windows.
+  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+  auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, DeltaG_tskij_root);
+
+  long nt = sG_tskij.shape()[0];
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Create lr_rpa_pi solver and compute ΔP
+  solvers::lr_rpa_pi lr(q_pert);
+
+  // Decide whether IBC correction is requested (rank-0 input → bcast presence flag).
+  bool has_deltax_root = false;
+  if (mpi->comm.root()) {
+    has_deltax_root = DeltaX_left_root.has_value() && DeltaX_right_root.has_value();
+  }
+  int has_deltax_int = has_deltax_root ? 1 : 0;
+  mpi->comm.broadcast_n(&has_deltax_int, 1, 0);
+
+  // Build IBC struct on demand. The IBC path for Pi only uses the
+  // primary→aux correction, which needs DeltaX / DeltaX_minusq, q_vec,
+  // kpq_map, and sG_tskij. The aux→primary pieces (DeltaF_ibc_skij,
+  // sDeltaSigma_ibc_tskij) are only consumed by HF/GW self-energy paths
+  // and remain default-initialised here.
+  std::optional<math::shm::shared_array<Array_view_4D_t>> opt_sDeltaX_left, opt_sDeltaX_right;
+  std::optional<lr_ibc_DeltaX> opt_ibc;
+  if (has_deltax_int) {
+    opt_sDeltaX_left.emplace(
+        math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, DeltaX_left_root));
+    opt_sDeltaX_right.emplace(
+        math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, DeltaX_right_root));
+
+    // Compute kpq_map (full BZ) — mirror of lr_rpa_pi::_init_kpq_map.
+    nda::array<int, 1> kpq_map(nkpts);
+    utils::calculate_kpq_map(mf->kpts_crystal(), q_pert, kpq_map);
+
+    opt_ibc.emplace(lr_ibc_DeltaX{
+        opt_sDeltaX_left->local(), opt_sDeltaX_right->local(),
+        q_pert, std::move(kpq_map),
+        nullptr, &sG_tskij,
+        nda::array<ComplexType, 4>{}, std::nullopt
+    });
+  }
+
+  // Precompute G^R(τ) and G^R(β−τ) used in evaluate_lr_Pi.
+  auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+
+  auto dDeltaPi = lr.evaluate_lr_Pi(sG_tskij.local(),
+                                     sDeltaG_tskij.local(),
+                                     thc,
+                                     dG_tsRPQ, dG_mtau_tsRPQ,
+                                     opt_ibc ? &(*opt_ibc) : nullptr);
+  mpi->comm.barrier();
+
+  // Gather to node-local shared window, return on rank 0 only.
+  auto sDeltaPi_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, Np, Np});
+  math::nda::gather_to_shm(dDeltaPi, sDeltaPi_tqPQ);
+
+  nda::array<ComplexType, 4> out;
+  if (mpi->comm.root()) {
+    out = sDeltaPi_tqPQ.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Evaluate standard RPA polarization P[G] (FD helper).
+ *
+ * Reads IAFT from checkpoint, constructs scr_coulomb_t, calls eval_Pi_qdep,
+ * copies distributed result to regular array.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_Pi_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_Pi_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long Np = thc.Np();
+
+  // Require no symmetry (same constraint as lr_rpa_pi)
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "gw_evaluate_Pi_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+
+  long nt = ft.nt_f();
+  utils::check(sG_tskij.shape()[0] == nt,
+               "gw_evaluate_Pi_calc: G tau dimension {} != IAFT nt_f {}",
+               sG_tskij.shape()[0], nt);
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Use standard scr_coulomb_t to compute P
+  solvers::scr_coulomb_t scr_eri(&ft, "rpa");
+
+  auto dPi_tqPQ = scr_eri.eval_Pi_qdep(sG_tskij.local(), thc);
+  mpi->comm.barrier();
+
+  // Gather to node-local shared window, return on rank 0 only.
+  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+  auto sPi_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, Np, Np});
+  math::nda::gather_to_shm(dPi_tqPQ, sPi_tqPQ);
+
+  nda::array<ComplexType, 4> out;
+  if (mpi->comm.root()) {
+    out = sPi_tqPQ.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
+ *
+ * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
+ * then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_gw_W_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,  // Currently unused; reserved for future q→0 head corrections
+    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_W_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_W_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Require no symmetry (same as gw_evaluate_W_from_Pi_calc)
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "lr_gw_W_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+  auto sDeltaPi_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
+      DeltaPi_tqPQ_root);
+
+  // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
+  // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
+  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
+  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
+  dW_qtPQ.reset();
+
+  // Convert ΔΠ shared-memory window → distributed array (τ-dist)
+  auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
+  auto dDeltaPi_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_bsize);
+  {
+    auto pi_src = sDeltaPi_tqPQ_in.local();
+    auto pi_loc = dDeltaPi_tqPQ.local();
+    auto [po0, po1, po2, po3] = dDeltaPi_tqPQ.origin();
+    auto [pn0, pn1, pn2, pn3] = dDeltaPi_tqPQ.local_shape();
+    for (long i0 = 0; i0 < pn0; ++i0)
+      for (long i1 = 0; i1 < pn1; ++i1)
+        for (long i2 = 0; i2 < pn2; ++i2)
+          for (long i3 = 0; i3 < pn3; ++i3)
+            pi_loc(i0, i1, i2, i3) = pi_src(i0+po0, i1+po1, i2+po2, i3+po3);
+    mpi->comm.barrier();
+  }
+
+  // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
+  solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
+  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
+  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
+  // dDeltaPi_tqPQ now contains ΔW_c(τ)
+  mpi->comm.barrier();
+
+  // Gather to node-local shared window, return on rank 0 only.
+  auto sDeltaW_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP});
+  math::nda::gather_to_shm(dDeltaPi_tqPQ, sDeltaW_tqPQ);
+
+  nda::array<ComplexType, 4> out;
+  if (mpi->comm.root()) {
+    out = sDeltaW_tqPQ.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Evaluate screened interaction W_c from polarization Π (FD helper).
+ *
+ * Reads IAFT from checkpoint, converts input to distributed array,
+ * calls scr_coulomb_t::dyson_W_from_Pi_tau<false>, copies result to regular array.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 4>> const& Pi_tqPQ_root) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_W_from_Pi_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_W_from_Pi_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts = mf->nkpts();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  // Require no symmetry
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "gw_evaluate_W_from_Pi_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+  auto sPi_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP}, Pi_tqPQ_root);
+
+  // Scatter shared-memory input into a distributed array (each rank owns
+  // a slab). The shared window is already synchronised across nodes by
+  // make_shared_from_root_input, so no broadcast is needed.
+  auto pgrid = compute_proc_grid_4D(mpi->comm.size(), {nt_half, nkpts, NP, NP},
+                                     {false, false, false, false});
+  auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pgrid, {nt_half, nkpts, NP, NP});
+  {
+    auto pi_src = sPi_tqPQ_in.local();
+    auto pi_loc = dPi_tqPQ.local();
+    auto [o0, o1, o2, o3] = dPi_tqPQ.origin();
+    auto [n0, n1, n2, n3] = dPi_tqPQ.local_shape();
+    for (long i0 = 0; i0 < n0; ++i0)
+      for (long i1 = 0; i1 < n1; ++i1)
+        for (long i2 = 0; i2 < n2; ++i2)
+          for (long i3 = 0; i3 < n3; ++i3)
+            pi_loc(i0, i1, i2, i3) = pi_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+    mpi->comm.barrier();
+  }
+
+  // Use scr_coulomb_t to solve W Dyson equation: Π → W_c(τ)
+  solvers::scr_coulomb_t scr(&ft, "rpa");
+  auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+  mpi->comm.barrier();
+
+  // Gather to node-local shared window, return on rank 0 only.
+  auto sW_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP});
+  math::nda::gather_to_shm(dW_tqPQ, sW_tqPQ);
+
+  nda::array<ComplexType, 4> out;
+  if (mpi->comm.root()) {
+    out = sW_tqPQ.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Linear response GW self-energy term 2: -G ⊙ ΔW + div_corr.
+ *
+ * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+ * Uses lr_gw::evaluate_sigma_DeltaW for the G⊙ΔW convolution.
+ * At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    eri_t &eri, ptree const& pt,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaW_qtPQ_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("lr_gw_sigma_DeltaW_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "lr_gw_sigma_DeltaW_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts = mf->nkpts();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half_dw = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+
+  auto sDeltaW_qtPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nkpts, nt_half_dw, NP, NP},
+      DeltaW_qtPQ_root);
+
+  // Scatter into distributed array (τ-dist with axes swapped for (q,t)).
+  auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP);
+  std::array<long,4> qt_pgrid_dw = {tq_pgrid_dw[1], tq_pgrid_dw[0], tq_pgrid_dw[2], tq_pgrid_dw[3]};
+  std::array<long,4> qt_bsize_dw = {tq_bsize_dw[1], tq_bsize_dw[0], tq_bsize_dw[2], tq_bsize_dw[3]};
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto dDeltaW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, qt_pgrid_dw,
+      {nkpts, nt_half_dw, NP, NP}, qt_bsize_dw);
+  {
+    auto dw_src = sDeltaW_qtPQ_in.local();
+    auto dw_loc = dDeltaW_qtPQ.local();
+    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_qtPQ.origin();
+    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_qtPQ.local_shape();
+    for (long i0 = 0; i0 < dwn0; ++i0)
+      for (long i1 = 0; i1 < dwn1; ++i1)
+        for (long i2 = 0; i2 < dwn2; ++i2)
+          for (long i3 = 0; i3 < dwn3; ++i3)
+            dw_loc(i0, i1, i2, i3) = dw_src(i0+dwo0, i1+dwo1, i2+dwo2, i3+dwo3);
+    mpi->comm.barrier();
+  }
+
+  // Divergence correction flag (default true)
+  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  if (div_corr) {
+    chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+  }
+
+  // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
+  app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
+  solvers::lr_gw lr(&ft, q_pert);
+
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  // Precompute G^R(τ) and G^R(β−τ) used in evaluate_sigma_DeltaW.
+  auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc,
+                           dG_tsRPQ, dG_mtau_tsRPQ);
+
+  // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+  if (div_corr && utils::is_q_gamma(q_pert)) {
+    // Transpose (q,t,P,Q) → (t,q,P,Q) for eps_inv_head_t
+    auto dDeltaW_tqPQ = utils::transpose_axes_01(dDeltaW_qtPQ, mpi->comm);
+    auto [delta_eps_inv_q, delta_eps_inv_head] =
+        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft);
+    lr.apply_div_correction_G(sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  // Rank-0-only return.
+  nda::array<ComplexType, 5> out;
+  if (mpi->comm.root()) {
+    out = sDeltaSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+/**
+ * Compute eps_inv_head from screened interaction W_c(t,q,P,Q).
+ *
+ * Extracts the G=0,G'=0 component of (ε⁻¹ - 1) from W_c in the THC product
+ * basis, and extrapolates to q→0. This matches the convention used by the
+ * SCF loop and Sigma_div_correction (which stores/uses ε⁻¹-1, not ε⁻¹).
+ *
+ * @param W_c_tqPQ - [INPUT] W_c in (nt_half, nkpts, NP, NP) layout
+ * @return eps_inv_head at q=0, shape (nt_half,)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("compute_eps_inv_head_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "compute_eps_inv_head_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts_ibz = mf->nkpts_ibz();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half_w = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  auto sW_c_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nt_half_w, nkpts_ibz, NP, NP}, W_c_tqPQ_root);
+
+  // Scatter into distributed (t,q,P,Q) array.
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto pgrid = compute_proc_grid_4D(mpi->comm.size(),
+      {nt_half_w, nkpts_ibz, NP, NP}, {false, false, false, false});
+  auto dW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pgrid, {nt_half_w, nkpts_ibz, NP, NP});
+  {
+    auto wc_src = sW_c_tqPQ_in.local();
+    auto wc_loc = dW_tqPQ.local();
+    auto [o0, o1, o2, o3] = dW_tqPQ.origin();
+    auto [n0, n1, n2, n3] = dW_tqPQ.local_shape();
+    for (long i0 = 0; i0 < n0; ++i0)
+      for (long i1 = 0; i1 < n1; ++i1)
+        for (long i2 = 0; i2 < n2; ++i2)
+          for (long i3 = 0; i3 < n3; ++i3)
+            wc_loc(i0, i1, i2, i3) = wc_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+    mpi->comm.barrier();
+  }
+
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft);
+  mpi->comm.barrier();
+
+  return eps_inv_head;
+}
+
+
+/**
+ * Evaluate GW self-energy with provided W and G (FD helper).
+ *
+ * Computes Σ = -G ⊙ W_c [+ div_corr] using provided G and W_c arrays.
+ * Used for finite-difference testing of full LR-GW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_qtPQ_root,
+    nda::array<ComplexType, 1> const& eps_inv_head,
+    bool div_corr) {
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  using math::nda::make_distributed_array;
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_sigma_with_W_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_sigma_with_W_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts = mf->nkpts();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half_w = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto sW_c_qtPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nkpts, nt_half_w, NP, NP}, W_c_qtPQ_root);
+
+  // Scatter into distributed array (q-axis undivided).
+  auto pgrid_w = compute_proc_grid_4D(mpi->comm.size(),
+      {nkpts, nt_half_w, NP, NP}, {true, false, false, false});
+  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pgrid_w, {nkpts, nt_half_w, NP, NP});
+  {
+    auto wc_src = sW_c_qtPQ_in.local();
+    auto wc_loc = dW_qtPQ.local();
+    auto [o0, o1, o2, o3] = dW_qtPQ.origin();
+    auto [n0, n1, n2, n3] = dW_qtPQ.local_shape();
+    for (long i0 = 0; i0 < n0; ++i0)
+      for (long i1 = 0; i1 < n1; ++i1)
+        for (long i2 = 0; i2 < n2; ++i2)
+          for (long i3 = 0; i3 < n3; ++i3)
+            wc_loc(i0, i1, i2, i3) = wc_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+    mpi->comm.barrier();
+  }
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+
+  // Use standard gw_t code path
+  solvers::gw_t gw(&ft);
+
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  gw.eval_Sigma_all(sG_tskij.local(), dW_qtPQ, sSigma_tskij, thc, "R");
+  if (div_corr) {
+    gw.Sigma_div_correction(sSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  // Rank-0-only return.
+  nda::array<ComplexType, 5> out;
+  if (mpi->comm.root()) {
+    out = sSigma_tskij.local();
+  }
+  mpi->comm.barrier();
+  return out;
+}
+
+
+// lr_gw_sigma_DeltaG_calc instantiations (THC only — lr_gw requires THC)
+template nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    std::optional<nda::array<ComplexType, 5>> const&);
+
+// gw_evaluate_sigma_calc instantiations (THC only)
+template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    bool);
+
+// lr_gw_Pi_calc instantiations (THC only — lr_gw requires THC)
+template nda::array<ComplexType, 4> lr_gw_Pi_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    nda::array<double, 1> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    std::optional<nda::array<ComplexType, 4>> const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// gw_evaluate_Pi_calc instantiations (THC only)
+template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 5>> const&);
+
+// lr_gw_W_calc instantiations (THC only)
+template nda::array<ComplexType, 4> lr_gw_W_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// gw_evaluate_W_from_Pi_calc instantiations (THC only)
+template nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// lr_gw_sigma_DeltaW_calc instantiations (THC only)
+template nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    nda::array<double, 1> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// compute_eps_inv_head_calc instantiations (THC only)
+template nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// gw_evaluate_sigma_with_W_calc instantiations (THC only)
+template nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    std::optional<nda::array<ComplexType, 4>> const&,
+    nda::array<ComplexType, 1> const&,
+    bool);
+
 
 
 }

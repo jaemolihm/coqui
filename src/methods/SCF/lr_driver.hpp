@@ -32,7 +32,11 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_diis.hpp"
+#include "methods/SCF/lr_ibc.hpp"
 #include "methods/HF/lr_hf.hpp"
+#include "methods/GW/lr_gw.hpp"
+#include "methods/scr_coulomb/lr_rpa_pi.hpp"
+#include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 
 namespace methods {
@@ -122,8 +126,15 @@ public:
 
   void print_setup_timers();
 
-  /// Final hierarchical timer report, printed once after the LR SCF loop.
-  void print_timers();
+  /**
+   * Final hierarchical timer report, printed once after the LR SCF loop.
+   * Each "LR_* (total)" line is followed by the corresponding solver's
+   * subclocks (indented). The Pi/W/Sigma solvers live in run_lr's scope, so
+   * they are passed in as pointers (null = solver not used, subclocks skipped).
+   */
+  void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
+                    solvers::lr_scr_coulomb_t* scr_solver = nullptr,
+                    solvers::lr_gw* gw_solver = nullptr);
 
   // Accessors
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }

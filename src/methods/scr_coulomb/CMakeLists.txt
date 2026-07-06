@@ -5,6 +5,8 @@ SET(SRCS
   scr_coulomb_fourier_t.cpp
   scr_coulomb_t.cpp
   scr_coulomb_chol.cpp
+  lr_rpa_pi.cpp
+  lr_scr_coulomb_t.cpp
   )
 
 if(USE_DEVICE_COMPILER)

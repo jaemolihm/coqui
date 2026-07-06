@@ -586,3 +586,401 @@ def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=T
     S_skij = np.asarray(S_skij, dtype=np.complex128)
 
     return hf_evaluate_cpp(h_int, Dm_skij, S_skij, compute_hartree, compute_exchange)
+
+def run_lr_gw_sigma_DeltaG(params, h_int, q_pert, DeltaG_tskij, div_corr=True):
+    """
+    Compute LR GW self-energy term 1: ΔΣ = -ΔG ⊙ W_c + div_corr (fixed W, R-space).
+
+    Reads W from thc_screened_interaction.h5 and eps_inv_head from checkpoint.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaG_tskij : np.ndarray or None
+        LR Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
+        global root; ignored on non-root ranks.
+    div_corr : bool, optional
+        Apply q→0 divergence correction (default True).
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt, ns, nk, nb, nb)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import lr_gw_sigma_DeltaG as lr_gw_sigma_DeltaG_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if DeltaG_tskij is None:
+            raise ValueError("run_lr_gw_sigma_DeltaG: DeltaG_tskij must be provided on the MPI root rank")
+        DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+    else:
+        DeltaG_tskij = None
+
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    arr = lr_gw_sigma_DeltaG_cpp(json.dumps(params_with_div), h_int, q_pert, DeltaG_tskij)
+    return arr if arr.size else None
+
+def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
+                  DeltaX_left=None, DeltaX_right=None):
+    """
+    Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space Hadamard product).
+
+    Uses lr_thc_comm for ΔG factors (asymmetric X(k+q)/X(k)),
+    thc_solver_comm for G factors (symmetric).
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    G_tskij : np.ndarray
+        Unperturbed Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaG_tskij : np.ndarray
+        LR Green's function, shape (nt, ns, nk, nb, nb)
+    DeltaX_left : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
+        Full BZ indexed. Must be provided together with DeltaX_right. Required
+        on the MPI global root; ignored on non-root ranks.
+        When both DeltaX arrays are given, the primary→aux IBC correction is
+        applied inside ``lr_rpa_pi::evaluate_lr_Pi``. Without IBC the primary→
+        aux transform of ΔG is incomplete (see run_4 in 43_lr_vs_fd_THC for
+        the rationale), so the FD comparison typically needs IBC.
+    DeltaX_right : np.ndarray or None, optional
+        Perturbation of collocation matrix δ^{-q} X at storage k+q, shape
+        (ns, nkpts, Np, nb). Full BZ indexed. Must be provided together with
+        DeltaX_left. Required on the MPI global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray
+        LR polarization ΔP, shape (nt_half, nkpts, NP, NP)
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import lr_gw_Pi as lr_gw_Pi_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("run_lr_gw_Pi: G_tskij must be provided on the MPI root rank")
+        if DeltaG_tskij is None:
+            raise ValueError("run_lr_gw_Pi: DeltaG_tskij must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+        DeltaG_tskij = np.asarray(DeltaG_tskij, dtype=np.complex128)
+        if (DeltaX_left is None) != (DeltaX_right is None):
+            raise ValueError("DeltaX_left and DeltaX_right must both be provided or both be None.")
+        if DeltaX_left is not None:
+            DeltaX_left = np.asarray(DeltaX_left, dtype=np.complex128)
+        if DeltaX_right is not None:
+            DeltaX_right = np.asarray(DeltaX_right, dtype=np.complex128)
+    else:
+        G_tskij = None
+        DeltaG_tskij = None
+        DeltaX_left = None
+        DeltaX_right = None
+
+    arr = lr_gw_Pi_cpp(h_int, q_pert, G_tskij, DeltaG_tskij,
+                       DeltaX_left=DeltaX_left, DeltaX_right=DeltaX_right)
+    return arr if arr.size else None
+
+def gw_evaluate_Pi(params, h_int, G_tskij):
+    """
+    Evaluate standard RPA polarization P[G].
+
+    Computes the RPA polarization from a given Green's function.
+    Used for finite-difference testing of LR polarization.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray or None
+        Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
+        global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt_half, nkpts, NP, NP)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import gw_evaluate_Pi as gw_evaluate_Pi_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("gw_evaluate_Pi: G_tskij must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    else:
+        G_tskij = None
+
+    arr = gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
+    return arr if arr.size else None
+
+def gw_evaluate_sigma(params, h_int, G_tskij, div_corr=True):
+    """
+    Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
+
+    Same R-space computation as lr_gw_sigma_DeltaG but for a full Green's function.
+    Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray or None
+        Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
+        global root; ignored on non-root ranks.
+    div_corr : bool, optional
+        Whether to apply divergence correction (default True).
+        Set to False for FD testing of LR code (which has no div_corr).
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt, ns, nk, nb, nb)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import gw_evaluate_sigma as gw_evaluate_sigma_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("gw_evaluate_sigma: G_tskij must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    else:
+        G_tskij = None
+
+    arr = gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij, bool(div_corr))
+    return arr if arr.size else None
+
+def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
+    """
+    Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
+
+    Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
+    then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    DeltaPi_tqPQ : np.ndarray or None
+        LR polarization, shape (nt_half, nkpts, NP, NP). Required on the MPI
+        global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt_half, nkpts, NP, NP)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import lr_gw_W as lr_gw_W_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if DeltaPi_tqPQ is None:
+            raise ValueError("run_lr_gw_W: DeltaPi_tqPQ must be provided on the MPI root rank")
+        DeltaPi_tqPQ = np.asarray(DeltaPi_tqPQ, dtype=np.complex128)
+    else:
+        DeltaPi_tqPQ = None
+
+    arr = lr_gw_W_cpp(json.dumps(params), h_int, q_pert, DeltaPi_tqPQ)
+    return arr if arr.size else None
+
+def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):
+    """
+    Evaluate screened interaction W_c from polarization Π via Dyson equation.
+
+    Reads IAFT from checkpoint, applies W Dyson equation Π → W_c(τ).
+    Used for finite-difference testing of LR screened interaction.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    Pi_tqPQ : np.ndarray or None
+        Polarization, shape (nt_half, nkpts, NP, NP). Required on the MPI
+        global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt_half, nkpts, NP, NP)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import gw_evaluate_W_from_Pi as gw_evaluate_W_from_Pi_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if Pi_tqPQ is None:
+            raise ValueError("gw_evaluate_W_from_Pi: Pi_tqPQ must be provided on the MPI root rank")
+        Pi_tqPQ = np.asarray(Pi_tqPQ, dtype=np.complex128)
+    else:
+        Pi_tqPQ = None
+
+    arr = gw_evaluate_W_from_Pi_cpp(json.dumps(params), h_int, Pi_tqPQ)
+    return arr if arr.size else None
+
+def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ, div_corr=True):
+    """
+    Compute LR GW self-energy term 2: ΔΣ = -G ⊙ ΔW + div_corr.
+
+    Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
+    At q_pert=0, also applies term 2 divergence correction using Δeps_inv_head from ΔW.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    q_pert : array-like
+        LR perturbation wavevector in crystal coordinates, shape (3,)
+    G_tskij : np.ndarray or None
+        Unperturbed Green's function, shape (nt, ns, nk, nb, nb). Required on
+        the MPI global root; ignored on non-root ranks.
+    DeltaW_qtPQ : np.ndarray
+        LR screened interaction, shape (nk, nt_half, NP, NP)
+    div_corr : bool, optional
+        Apply q→0 divergence correction (default True).
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt, ns, nk, nb, nb)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import lr_gw_sigma_DeltaW as lr_gw_sigma_DeltaW_cpp
+
+    q_pert = np.asarray(q_pert, dtype=np.float64)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("run_lr_gw_sigma_DeltaW: G_tskij must be provided on the MPI root rank")
+        if DeltaW_qtPQ is None:
+            raise ValueError("run_lr_gw_sigma_DeltaW: DeltaW_qtPQ must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+        DeltaW_qtPQ = np.asarray(DeltaW_qtPQ, dtype=np.complex128)
+    else:
+        G_tskij = None
+        DeltaW_qtPQ = None
+
+    params_with_div = dict(params)
+    params_with_div["div_corr"] = bool(div_corr)
+
+    arr = lr_gw_sigma_DeltaW_cpp(json.dumps(params_with_div), h_int, q_pert, G_tskij, DeltaW_qtPQ)
+    return arr if arr.size else None
+
+def compute_eps_inv_head(params, h_int, W_c_tqPQ):
+    """
+    Compute eps_inv_head from correlation screened interaction W_c in THC product basis.
+
+    Extracts the G=0,G'=0 component of (ε⁻¹ - 1) and extrapolates to q→0
+    using Gygi extrapolation. This matches the convention used by
+    Sigma_div_correction (which uses ε⁻¹-1, not ε⁻¹).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+    h_int : ThcCoulomb
+        THC ERI handler
+    W_c_tqPQ : np.ndarray or None
+        Correlation screened interaction W_c = W - V, shape (nt_half, nkpts, NP, NP).
+        NOT the full W. Required on the MPI global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray
+        (ε⁻¹ - 1) head at q=0, shape (nt_half,) — replicated on all ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import compute_eps_inv_head as compute_eps_inv_head_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if W_c_tqPQ is None:
+            raise ValueError("compute_eps_inv_head: W_c_tqPQ must be provided on the MPI root rank")
+        W_c_tqPQ = np.asarray(W_c_tqPQ, dtype=np.complex128)
+    else:
+        W_c_tqPQ = None
+
+    return compute_eps_inv_head_cpp(json.dumps(params), h_int, W_c_tqPQ)
+
+def gw_evaluate_sigma_with_W(params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr=True):
+    """
+    Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] with provided G and W_c.
+
+    Uses the provided G and W_c arrays (not from file). Used for finite-difference
+    testing of the full LR-GW self-energy.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray or None
+        Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
+        global root; ignored on non-root ranks.
+    W_c_qtPQ : np.ndarray
+        Screened interaction, shape (nkpts, nt_half, NP, NP)
+    eps_inv_head : np.ndarray
+        Inverse dielectric head, shape (nt_half,)
+    div_corr : bool, optional
+        Whether to apply divergence correction (default True)
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt, ns, nk, nb, nb)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import gw_evaluate_sigma_with_W as gw_evaluate_sigma_with_W_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("gw_evaluate_sigma_with_W: G_tskij must be provided on the MPI root rank")
+        if W_c_qtPQ is None:
+            raise ValueError("gw_evaluate_sigma_with_W: W_c_qtPQ must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+        W_c_qtPQ = np.asarray(W_c_qtPQ, dtype=np.complex128)
+    else:
+        G_tskij = None
+        W_c_qtPQ = None
+    eps_inv_head = np.asarray(eps_inv_head, dtype=np.complex128)
+
+    arr = gw_evaluate_sigma_with_W_cpp(json.dumps(params), h_int, G_tskij, W_c_qtPQ, eps_inv_head, bool(div_corr))
+    return arr if arr.size else None
