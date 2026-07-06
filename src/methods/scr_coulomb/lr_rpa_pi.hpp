@@ -139,8 +139,8 @@ namespace methods {
       std::optional<mpi3::communicator> _t_intra_comm;
       std::optional<sArr_2D_t> _sf_Rk, _sf_qR;
       nda::matrix<ComplexType> _f_minus_Rk;
-      // Blocked-FFT k<->R transforms; empty (→ gemm fallback with the
-      // coefficient matrices above) when the grid is not an unshifted full mesh.
+      // Blocked-FFT k<->R transforms; COQUI_LR_DEBUG_GEMM_FT=1 leaves these
+      // empty and uses the gemm path (coefficient matrices above) instead.
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::array<ComplexType, 1> _phase_ipR;
       std::optional<dArr_4D_t> _dDeltaG_skPQ;

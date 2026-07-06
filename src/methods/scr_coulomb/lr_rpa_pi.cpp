@@ -83,21 +83,23 @@ namespace methods {
       auto tau_bsize = dDeltaPi_tqPQ.block_size();
       long np_P = tau_pgrid[2], np_Q = tau_pgrid[3];
 
-      // FT matrices
-      _sf_Rk.emplace(*mpi, std::array<long, 2>{nkpts, nkpts});
-      utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), *_sf_Rk);
-      _sf_qR.emplace(*mpi, std::array<long, 2>{nkpts, nkpts});
-      utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts_ibz(), MF->lattv(), MF->kp_grid(), *_sf_qR);
-
-      // f_minus_Rk for k→(-R) transform in Term 2: conj(e^{-ikR}/Nk) = e^{+ikR}/Nk
-      _f_minus_Rk = nda::conj(_sf_Rk->local());
-
-      // Blocked-FFT k<->R transforms (2-4x faster than the gemms above).
-      if (nkpts != 1) {
+      // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
+      // selects the gemm path with explicit FT coefficients (kept for testing).
+      const bool use_gemm_ft = utils::lr_debug_gemm_ft();
+      if (nkpts != 1 && use_gemm_ft) {
+        _sf_Rk.emplace(*mpi, std::array<long, 2>{nkpts, nkpts});
+        utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), *_sf_Rk);
+        _sf_qR.emplace(*mpi, std::array<long, 2>{nkpts, nkpts});
+        utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts_ibz(), MF->lattv(), MF->kp_grid(), *_sf_qR);
+        // f_minus_Rk for k→(-R) transform in Term 2: conj(e^{-ikR}/Nk) = e^{+ikR}/Nk
+        _f_minus_Rk = nda::conj(_sf_Rk->local());
+      }
+      if (nkpts != 1 && !use_gemm_ft) {
         _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
         _fft_q.emplace(MF->Qpts_ibz(), MF->lattv(), MF->kp_grid());
-        app_log(3, "    k<->R transform: FFT");
       }
+      if (nkpts != 1)
+        app_log(3, "    k<->R transform: {}", use_gemm_ft ? "gemm (COQUI_LR_DEBUG_GEMM_FT)" : "FFT");
 
       // phase_ipR(iR) = e^{ip·R} where p = _q_pert (crystal coords), R = integer lattice indices
       // p·R = 2π(p[0]*a + p[1]*b + p[2]*c) by biorthogonality of direct/reciprocal lattice
@@ -216,8 +218,8 @@ namespace methods {
       _setup_workspace(thc, dDeltaPi_tqPQ, ns);
 
       // Local aliases so the loop body below reads as before
-      auto f_Rk = _sf_Rk->local();
-      auto f_qR = _sf_qR->local();
+      // gemm-path coefficients (_sf_Rk/_sf_qR/_f_minus_Rk) are dereferenced
+      // lazily inside the gemm branches; empty in FFT mode
       auto& f_minus_Rk = _f_minus_Rk;
       auto& phase_ipR = _phase_ipR;
       auto& dDeltaG_skPQ = *_dDeltaG_skPQ;
@@ -278,7 +280,7 @@ namespace methods {
                                            shape_t<2>{nkpts, NP_loc * NQ_loc});
             _Timer.start("PI_LR_FT_R");
             if (_fft_k) _fft_k->k_to_R(DeltaG_2D, fft_out);
-            else        nda::blas::gemm(f_Rk, DeltaG_2D, fft_out);
+            else        nda::blas::gemm(_sf_Rk->local(), DeltaG_2D, fft_out);
             _Timer.stop("PI_LR_FT_R");
 
             _Timer.start("PI_LR_HADPROD");
@@ -374,7 +376,7 @@ namespace methods {
                                               shape_t<2>{nkpts, NP_loc * NQ_loc});
           auto DeltaPi_R_2D = nda::reshape(DeltaPi_RPQ, shape_t<2>{nkpts, NP_loc * NQ_loc});
           if (_fft_q) _fft_q->R_to_k(DeltaPi_R_2D, DeltaPi_tq_2D);
-          else        nda::blas::gemm(f_qR, DeltaPi_R_2D, DeltaPi_tq_2D);
+          else        nda::blas::gemm(_sf_qR->local(), DeltaPi_R_2D, DeltaPi_tq_2D);
           _Timer.stop("PI_LR_FT_R");
         } else {
           DeltaPi_tqPQ_loc(it, nda::ellipsis{}) = DeltaPi_RPQ;

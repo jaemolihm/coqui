@@ -138,6 +138,9 @@ def read_DeltaH0(filename: str) -> Tuple[np.ndarray, np.ndarray]:
     -------
     tuple
         (q_vec, DeltaH0_skij)
+
+    Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the
+    same file can contend on the file lock.
     """
     with h5py.File(filename, 'r') as f:
         lr_grp = f['linear_response']
@@ -159,20 +162,27 @@ def write_DeltaH0(filename: str, q_vec: np.ndarray,
         Perturbation wavevector in crystal coords, shape (3,)
     DeltaH0_skij : np.ndarray
         Perturbation matrix, shape (ns, nk, nb, nb)
+
+    MPI-safe: only rank 0 writes (concurrent h5py writers contend on the
+    file lock); all ranks synchronize before returning.
     """
-    with h5py.File(filename, 'a') as f:
-        if 'linear_response' not in f:
-            lr_grp = f.create_group('linear_response')
-        else:
-            lr_grp = f['linear_response']
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    if comm.Get_rank() == 0:
+        with h5py.File(filename, 'a') as f:
+            if 'linear_response' not in f:
+                lr_grp = f.create_group('linear_response')
+            else:
+                lr_grp = f['linear_response']
 
-        if 'q_vec' in lr_grp:
-            del lr_grp['q_vec']
-        if 'DeltaH0_skij' in lr_grp:
-            del lr_grp['DeltaH0_skij']
+            if 'q_vec' in lr_grp:
+                del lr_grp['q_vec']
+            if 'DeltaH0_skij' in lr_grp:
+                del lr_grp['DeltaH0_skij']
 
-        lr_grp.create_dataset('q_vec', data=q_vec)
-        lr_grp.create_dataset('DeltaH0_skij', data=DeltaH0_skij)
+            lr_grp.create_dataset('q_vec', data=q_vec)
+            lr_grp.create_dataset('DeltaH0_skij', data=DeltaH0_skij)
+    comm.Barrier()
 
 
 def read_lr_results(filename: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -188,6 +198,9 @@ def read_lr_results(filename: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     -------
     tuple
         (q_vec, DeltaG_tskij, DeltaDm_skij)
+
+    Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the
+    same file can contend on the file lock.
     """
     with h5py.File(filename, 'r') as f:
         lr_grp = f['linear_response']

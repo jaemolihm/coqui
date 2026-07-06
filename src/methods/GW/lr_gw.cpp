@@ -244,34 +244,35 @@ namespace methods {
       _sSigma_skij.emplace(math::shm::make_shared_array<Arrv_4D_t>(
           *_tau_mpi, std::array<long, 4>{ns, nk_ibz, nbnd, nbnd}));
 
-      _ft_buffer.resize(nkpts, NP_loc * NQ_loc);
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
 
-      // FT coefficients
+      // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
+      // selects the gemm path with explicit FT coefficients (kept for testing).
       _Timer.start("SIGMA_FT_COEFF");
-      _sf_Rk.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
-      _sf_kR.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
-      if (nkpts != 1) {
+      const bool use_gemm_ft = utils::lr_debug_gemm_ft();
+      if (nkpts != 1 && use_gemm_ft) {
+        _ft_buffer.resize(nkpts, NP_loc * NQ_loc);
+        _sf_Rk.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
+        _sf_kR.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
         utils::k_to_R_coefficients(*_tau_comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), *_sf_Rk);
         utils::R_to_k_coefficients(*_tau_comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), *_sf_kR);
+        if (do_term2) {
+          _sf_qR.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
+          utils::k_to_R_coefficients(*_tau_comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), *_sf_qR);
+        }
       }
-      if (nkpts != 1 && do_term2) {
-        _sf_qR.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
-        utils::k_to_R_coefficients(*_tau_comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), *_sf_qR);
-      }
-
-      // Blocked-FFT k<->R transforms (2-4x faster than the gemms above).
       // _fft_q is built only for term 2.
       _fft_k.reset();
       _fft_q.reset();
-      if (nkpts != 1) {
+      if (nkpts != 1 && !use_gemm_ft) {
         _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
         if (do_term2)
           _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
-        app_log(3, "    Sigma k<->R transform: FFT (k), {} (q)",
-                do_term2 ? "FFT" : "n/a");
       }
+      if (nkpts != 1)
+        app_log(3, "    Sigma k<->R transform: {}",
+                use_gemm_ft ? "gemm (COQUI_LR_DEBUG_GEMM_FT)" : "FFT");
       _Timer.stop("SIGMA_FT_COEFF");
 
       _setup_term1 = do_term1;
@@ -349,12 +350,21 @@ namespace methods {
                      "lr_gw: q-axis must be undivided, pgrid[0]={}", dDeltaW_qtPQ->grid()[0]);
       }
 
-      // Cross-check term 2 tau distribution if both terms active
+      // Cross-check term 2 tau distribution and PQ tiling if both terms active
       if (do_term1 && do_term2) {
         utils::check(dDeltaW_qtPQ->local_shape()[1] == nt_loc,
                      "lr_gw: term1 nt_loc={} != term2 nt_loc={}", nt_loc, dDeltaW_qtPQ->local_shape()[1]);
         utils::check(dDeltaW_qtPQ->origin()[1] == t_origin,
                      "lr_gw: term1 t_origin={} != term2 t_origin={}", t_origin, dDeltaW_qtPQ->origin()[1]);
+        utils::check(dDeltaW_qtPQ->local_shape()[2] == NP_loc &&
+                     dDeltaW_qtPQ->local_shape()[3] == NQ_loc &&
+                     dDeltaW_qtPQ->origin()[2] == dW_tRPQ->origin()[2] &&
+                     dDeltaW_qtPQ->origin()[3] == dW_tRPQ->origin()[3],
+                     "lr_gw: term2 PQ tiling mismatch vs term1 "
+                     "(local ({},{}) origin ({},{}) vs local ({},{}) origin ({},{}))",
+                     dDeltaW_qtPQ->local_shape()[2], dDeltaW_qtPQ->local_shape()[3],
+                     dDeltaW_qtPQ->origin()[2], dDeltaW_qtPQ->origin()[3],
+                     NP_loc, NQ_loc, dW_tRPQ->origin()[2], dW_tRPQ->origin()[3]);
       }
 
       app_log(3, "    nt_loc={}, nkpts={}, t_origin={}, NP_loc={}, NQ_loc={}",
@@ -389,8 +399,9 @@ namespace methods {
       auto& sSigma_skij = *_sSigma_skij;
       auto& ft_buffer = _ft_buffer;
       auto& W2_tau_RPQ = _W2_tau_RPQ;
-      auto& sf_Rk = *_sf_Rk;
-      auto& sf_kR = *_sf_kR;
+      // gemm-path coefficients; engaged only when the FFT optionals are empty
+      auto& opt_sf_Rk = _sf_Rk;
+      auto& opt_sf_kR = _sf_kR;
       auto& opt_sf_qR = _sf_qR;
       _Timer.stop("SIGMA_ALLOC");
 
@@ -471,7 +482,7 @@ namespace methods {
                 if (_fft_k) {
                   _fft_k->k_to_R(G_3D(s, nda::ellipsis{}), G_3D(s, nda::ellipsis{}));
                 } else {
-                  auto f_Rk = sf_Rk.local();
+                  auto f_Rk = opt_sf_Rk->local();
                   nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
                   G_3D(s, nda::ellipsis{}) = ft_buffer;
                 }
@@ -511,7 +522,7 @@ namespace methods {
               if (_fft_k) {
                 _fft_k->R_to_k(Sigma_3D(s, nda::ellipsis{}), Sigma_3D(s, nda::ellipsis{}));
               } else {
-                auto f_kR = sf_kR.local();
+                auto f_kR = opt_sf_kR->local();
                 nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), ft_buffer);
                 Sigma_3D(s, nda::ellipsis{}) = ft_buffer;
               }

@@ -122,6 +122,7 @@ public:
       const sArray_t<Array_view_4D_t>* sDeltaX_right = nullptr,
       const nda::array<ComplexType, 4>* Dm_ab = nullptr,
       bool div_corr = true,
+      std::string div_treatment = "gygi",
       const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr);
 
   void print_setup_timers();

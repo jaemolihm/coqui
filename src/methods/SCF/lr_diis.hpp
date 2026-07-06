@@ -161,9 +161,6 @@ public:
     if (has_sigma) {
       _xS.push_back(std::move(xS));
       _resS.push_back(std::move(resS));
-    } else if (!_xS.empty()) {
-      _xS.push_back(Vec1D{});
-      _resS.push_back(Vec1D{});
     }
 
     update_B(comm, has_sigma);

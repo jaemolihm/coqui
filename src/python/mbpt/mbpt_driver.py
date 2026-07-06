@@ -384,7 +384,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     params : dict
         Parameters including:
         - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
-        - output: Output checkpoint prefix (default: same as prefix)
+        - output: Output checkpoint prefix (default: same as prefix).
+          Must refer to an existing .mbpt.h5 checkpoint; results are appended.
         - input_type: HDF5 group to read checkpoint from (default: "scf")
         - input_iter: Iteration number to read (default: -1 = use final_iter)
     h_int : ThcCoulomb

@@ -63,7 +63,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                   "LR_DRIVER_SETUP_DN_DMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA", "LR_GW_DW_TRANSPOSE",
                    "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2",
-                   "LR_ITER_ALG"}) {
+                   "LR_ITER_ALG", "LR_SAVE", "LR_CONVERGENCE"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -106,6 +106,7 @@ std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_4D_t>* sDeltaX_right,
     const nda::array<ComplexType, 4>* Dm_ab,
     bool div_corr,
+    std::string div_treatment,
     const nda::array_view<ComplexType, 3>* DeltaV_qPQ) {
 
   _Timer.start("LR_SCF");
@@ -156,7 +157,7 @@ std::tuple<int, double> lr_driver::run_lr(
   // Create lr_gw solver if needed (local to this call, no need to store as member)
   std::unique_ptr<solvers::lr_gw> lr_gw_solver;
   if (include_gw_sigma) {
-    lr_gw_solver = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec());
+    lr_gw_solver = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), div_treatment);
   }
 
   // Create lr_rpa_pi and lr_scr_coulomb_t solvers for full mode
@@ -245,11 +246,9 @@ std::tuple<int, double> lr_driver::run_lr(
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
 
   _Timer.start("LR_DRIVER_SETUP_MISC");
-  // Initialize ΔF = 0 (and ΔΣ = 0 if GW active)
-  if (_mpi->node_comm.root()) {
-    sDeltaF_skij.local() = ComplexType(0.0);
-    if (sDeltaSigma_tskij) sDeltaSigma_tskij->local() = ComplexType(0.0);
-  }
+  // Initialize ΔF = 0 (and ΔΣ = 0 if GW active); set_zero ends with fence + node_sync
+  sDeltaF_skij.set_zero();
+  if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -378,7 +377,7 @@ std::tuple<int, double> lr_driver::run_lr(
       if (div_corr && is_q_gamma()) {
         auto [delta_eps_inv_q, delta_head] =
             solvers::div_utils::eps_inv_head_t(
-                dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT());
+                dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), div_treatment);
         delta_eps_inv_head = std::move(delta_head);
       }
 
@@ -437,9 +436,12 @@ std::tuple<int, double> lr_driver::run_lr(
         }
       }
       // Distributed DIIS writes each node_comm rank's slice of the shared
-      // ΔF/ΔΣ buffer in place with no trailing collective, so node root must
-      // wait for every peer rank's slice to land before it reads the whole
-      // buffer below.
+      // ΔF/ΔΣ buffer in place with no trailing collective. Fence + barrier
+      // make every slice visible to node root before it reads the whole
+      // buffer below (barrier alone is insufficient under the MPI-3
+      // separate shared-memory model).
+      sDeltaF_skij.win().fence();
+      if (sDeltaSigma_tskij) sDeltaSigma_tskij->win().fence();
       _mpi->node_comm.barrier();
       // The iter-alg step is computed independently on each node's shared replica,
       // so the per-node results can drift apart by floating-point noise (different
@@ -453,6 +455,9 @@ std::tuple<int, double> lr_driver::run_lr(
                                            sDeltaSigma_tskij->local().size(), 0);
         }
       }
+      // Make node root's overwrite visible to its node peers
+      sDeltaF_skij.win().fence();
+      if (sDeltaSigma_tskij) sDeltaSigma_tskij->win().fence();
       _mpi->comm.barrier();
     }
     _Timer.stop("LR_ITER_ALG");
@@ -596,7 +601,7 @@ template std::tuple<int, double> lr_driver::run_lr(
     dW_concrete_t*, const nda::array<ComplexType, 1>*,
     int, double, bool, const lr_iter_params&,
     const sArray_t<Array_view_4D_t>*, const sArray_t<Array_view_4D_t>*,
-    const nda::array<ComplexType, 4>*, bool,
+    const nda::array<ComplexType, 4>*, bool, std::string,
     const nda::array_view<ComplexType, 3>*);
 
 } // namespace methods

@@ -24,7 +24,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
+#include <string_view>
 #include <utility>
 
 #include "IO/app_loggers.h"
@@ -79,8 +81,6 @@ inline void calculate_kpq_map(nda::ArrayOfRank<2> auto const& kpts_crys,
       d2 -= std::round(d2);
 
       if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
-        utils::check(kpq_map(ik) == -1,
-                     "calculate_kpq_map: Found duplicate k+q mapping for ik={}.", ik);
         kpq_map(ik) = ikp;
         break;
       }
@@ -319,14 +319,24 @@ inline auto lr_W_proc_grid(long nproc, long nq, long nw_half, long NP)
   return {pgrid, bsize};
 }
 
-/// Validate that a distributed 4D array has τ-dist pattern:
+/// Validate that a distributed 4D array follows the lr_W_q_local_dist pattern:
 /// pgrid[1] == 1 (q undivided).
 template<typename darray_t>
-void check_W_tau_dist(const darray_t& d, const std::string& caller) {
+void check_W_q_local_dist(const darray_t& d, const std::string& caller) {
   auto pgrid = d.grid();
   check(pgrid[1] == 1,
-        "{}: expected τ-dist (pgrid[1]==1), got pgrid=({},{},{},{})",
+        "{}: expected q-local dist (pgrid[1]==1), got pgrid=({},{},{},{})",
         caller, pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
+}
+
+/// Debug switch: force the gemm k<->R path (instead of the blocked FFT) in the
+/// LR solvers when the env var COQUI_LR_DEBUG_GEMM_FT is set to a non-zero value.
+inline bool lr_debug_gemm_ft() {
+  static const bool flag = [] {
+    const char* env = std::getenv("COQUI_LR_DEBUG_GEMM_FT");
+    return env != nullptr && std::string_view(env) != "0";
+  }();
+  return flag;
 }
 
 /**

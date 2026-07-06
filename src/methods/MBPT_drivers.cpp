@@ -1025,40 +1025,35 @@ template void mbpt(std::string, \
 #undef MBPT_INST
 
 /**
- * Wrap a regular 4D array into a distributed array with a proper MPI grid.
- *
- * The source array must be fully available on rank 0.
- * All ranks receive their local portion via broadcast + local copy.
- *
- * @param comm   - [INPUT] MPI communicator
- * @param shape  - [INPUT] Global array shape
- * @param src    - [INPUT] Source array (only meaningful on rank 0)
- * @return Distributed array with data from src
+ * Read the div_treatment the scGW run used (stashed in the checkpoint scf
+ * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
+ * dataset must be regenerated. Root reads, then broadcasts via a fixed-size
+ * buffer. LR/GW evaluators must reuse this value so divergence heads stay
+ * consistent with how W and Sigma were computed.
  */
-template<typename communicator_t>
-auto distribute_array_4D(communicator_t& comm,
-                         std::array<long, 4> shape,
-                         nda::array<ComplexType, 4> const& src_in,
-                         std::array<bool, 4> skip_axes = {false, false, false, false})
+template<typename mpi_context_t>
+std::string read_div_treatment(mpi_context_t& mpi,
+                               const std::string& input_file,
+                               const std::string& input_grp)
 {
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-  auto pgrid = compute_proc_grid_4D(comm.size(), shape, skip_axes);
-  auto darray = math::nda::make_distributed_array<local_Array_4D_t>(
-      comm, pgrid, shape);
-
-  // Broadcast full array from root, then each rank extracts its local portion
-  nda::array<ComplexType, 4> src(src_in);
-  comm.broadcast_n(src.data(), src.size(), 0);
-  auto loc = darray.local();
-  auto [o0, o1, o2, o3] = darray.origin();
-  auto [n0, n1, n2, n3] = darray.local_shape();
-  for (long i0 = 0; i0 < n0; ++i0)
-    for (long i1 = 0; i1 < n1; ++i1)
-      for (long i2 = 0; i2 < n2; ++i2)
-        for (long i3 = 0; i3 < n3; ++i3)
-          loc(i0, i1, i2, i3) = src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
-  comm.barrier();
-  return darray;
+  char div_buf[64] = {0};
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    auto scf_grp = root_grp.open_group(input_grp);
+    utils::check(scf_grp.has_dataset("div_treatment"),
+                 "read_div_treatment: '{}/div_treatment' missing in {}. "
+                 "This checkpoint predates div_treatment dump; please regenerate "
+                 "the scGW checkpoint with the current code.",
+                 input_grp, input_file);
+    std::string div_str;
+    h5::h5_read(scf_grp, "div_treatment", div_str);
+    utils::check(div_str.size() < sizeof(div_buf),
+                 "read_div_treatment: div_treatment string too long: {}", div_str);
+    std::copy(div_str.begin(), div_str.end(), div_buf);
+  }
+  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
+  return std::string(div_buf);
 }
 
 /**
@@ -1073,7 +1068,7 @@ auto distribute_array_4D(communicator_t& comm,
  * @param input_grp   - SCF group name in checkpoint (e.g., "scf")
  * @param input_iter  - Iteration to read (-1 = final_iter)
  * @param nt          - Number of tau points (from IAFT)
- * @return (dW_qtPQ, eps_inv_head) tuple
+ * @return (dW_qtPQ, eps_inv_head, div_treatment) tuple
  */
 template<typename mpi_context_t, typename THC_t>
 auto load_W_and_eps_inv_head(
@@ -1126,28 +1121,7 @@ auto load_W_and_eps_inv_head(
   }
   mpi.comm.barrier();
 
-  // Read the div_treatment that scGW used (written to scf_grp by
-  // scr_coulomb_t::dump_eps_inv_head). Required for consistent eps_inv_head
-  // recomputation; checkpoints that predate this dataset must be regenerated.
-  // Root reads the string, then broadcasts it via a fixed-size buffer.
-  char div_buf[64] = {0};
-  if (mpi.comm.root()) {
-    h5::file file(input_file, 'r');
-    auto root_grp = h5::group(file);
-    auto scf_grp = root_grp.open_group(input_grp);
-    utils::check(scf_grp.has_dataset("div_treatment"),
-                 "load_W_and_eps_inv_head: '{}/div_treatment' missing in {}. "
-                 "This checkpoint predates div_treatment dump; please regenerate "
-                 "the scGW checkpoint with the current code.",
-                 input_grp, input_file);
-    std::string div_str;
-    h5::h5_read(scf_grp, "div_treatment", div_str);
-    utils::check(div_str.size() < sizeof(div_buf),
-                 "load_W_and_eps_inv_head: div_treatment string too long: {}", div_str);
-    std::copy(div_str.begin(), div_str.end(), div_buf);
-  }
-  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
-  std::string div_treatment(div_buf);
+  auto div_treatment = read_div_treatment(mpi, input_file, input_grp);
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
@@ -1157,7 +1131,8 @@ auto load_W_and_eps_inv_head(
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   mpi.comm.barrier();
 
-  return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
+  return std::make_tuple(std::move(dW_qtPQ), std::move(eps_inv_head),
+                         std::move(div_treatment));
 }
 
 /**
@@ -1198,6 +1173,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   std::string err = std::string("run_lr_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  // NOTE: output must be an existing .mbpt.h5 checkpoint (dump_lr appends)
   auto output = io::get_value_with_default<std::string>(pt, "output", prefix);
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
@@ -1311,14 +1287,17 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   }
 
   // Load W and eps_inv_head if GW self-energy is requested
-  using dW_type = decltype(load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()).first);
+  using dW_type = std::tuple_element_t<0, decltype(load_W_and_eps_inv_head(
+      *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()))>;
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
+  std::string div_treatment = "gygi";
   if (include_gw_sigma) {
     lr_init_timer.start("LR_INIT_LOAD_W");
-    auto [dW, eps_inv] = load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f());
+    auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f());
     opt_dW.emplace(std::move(dW));
     opt_eps_inv.emplace(std::move(eps_inv));
+    div_treatment = div_str;
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }
 
@@ -1395,7 +1374,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
-      pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr,
+      pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
       pDeltaV_qPQ);
   lr_state.Delta_mu.emplace(Delta_mu);
   mpi->comm.barrier();
@@ -1466,7 +1445,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
       *mpi, DeltaG_tskij_root);
 
   // Load W and eps_inv_head using helper
-  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
   // Divergence correction flag (default true)
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
@@ -1483,7 +1462,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
 
   // Create lr_gw solver and compute ΔΣ
-  solvers::lr_gw lr(& ft, q_pert);
+  solvers::lr_gw lr(&ft, q_pert, div_treatment);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
@@ -1543,7 +1522,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
       *mpi, G_tskij_root);
 
   // Load W and eps_inv_head using helper
-  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
   // Read overlap matrix from checkpoint for divergence correction
   auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -1551,7 +1530,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
 
   // Use standard gw_t code path
-  solvers::gw_t gw(&ft);
+  solvers::gw_t gw(&ft, div_treatment);
 
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
@@ -1740,7 +1719,7 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
 template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_W_calc(
     eri_t &eri, ptree const& pt,
-    nda::array<double, 1> const& q_pert,  // Currently unused; reserved for future q→0 head corrections
+    nda::array<double, 1> const& q_pert,
     std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root) {
 
   using local_Array_4D_t = nda::array<ComplexType, 4>;
@@ -1779,7 +1758,8 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 
   // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_qtPQ, eps_inv_head] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  (void)div_treatment;
 
   // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
   auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
@@ -1929,6 +1909,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   utils::check(std::filesystem::exists(input_file),
                "lr_gw_sigma_DeltaW_calc: Input checkpoint {} does not exist!", input_file);
 
+  // Same div_treatment as the scGW run, so the Δε⁻¹ head stays consistent
+  // with how W and Σ were computed
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
@@ -1980,7 +1965,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
   // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
   app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
-  solvers::lr_gw lr(&ft, q_pert);
+  solvers::lr_gw lr(&ft, q_pert, div_treatment);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
@@ -1996,7 +1981,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     // Transpose (q,t,P,Q) → (t,q,P,Q) for eps_inv_head_t
     auto dDeltaW_tqPQ = utils::transpose_axes_01(dDeltaW_qtPQ, mpi->comm);
     auto [delta_eps_inv_q, delta_eps_inv_head] =
-        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft);
+        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment);
     lr.apply_div_correction_G(sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
   }
   mpi->comm.barrier();
@@ -2037,6 +2022,10 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
   utils::check(std::filesystem::exists(input_file),
                "compute_eps_inv_head_calc: Input checkpoint {} does not exist!", input_file);
 
+  // Same div_treatment as the scGW run (consistent head extrapolation)
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
@@ -2068,7 +2057,7 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
   }
 
   auto [eps_inv_head_q, eps_inv_head] =
-      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft);
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   mpi->comm.barrier();
 
   return eps_inv_head;
@@ -2102,6 +2091,10 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
                "gw_evaluate_sigma_with_W_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Same div_treatment as the scGW run (consistent divergence handling)
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -2145,7 +2138,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
 
   // Use standard gw_t code path
-  solvers::gw_t gw(&ft);
+  solvers::gw_t gw(&ft, div_treatment);
 
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});

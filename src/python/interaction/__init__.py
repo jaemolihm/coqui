@@ -35,31 +35,46 @@ from coqui._lib.eri_module import (
 )
 
 
-def compute_delta_X(*args, **kwargs):
+def compute_delta_X(mf, Deltapsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid):
     """Linear response of the THC collocation matrix X(k, P, m) = ψ_{mk}(r_P).
 
     ΔX(k, P, m) = δψ_{mk}(r_P) + ∇ψ_{mk}(r_P) · Δr_P
 
-    See ``coqui._lib.eri_module.compute_delta_X`` for parameter details.
+    Parameters
+    ----------
+    mf : Mf
+        Mean-field handler.
+    Deltapsi_prefix : str
+        Prefix of the QE δψ HDF5 files ({prefix}_ik{ik+1}.hdf5).
+    r_P : np.ndarray of long, shape (nP,)
+        THC interpolation-point indices on the FFT grid.
+    delta_r_P : np.ndarray of float, shape (nP, 3)
+        Displacements of the interpolation points (crystal coordinates).
+    q_vec_cryst : np.ndarray of float, shape (3,)
+        Perturbation wavevector in crystal coordinates.
+    fft_grid : np.ndarray of long, shape (3,)
+        FFT grid dimensions.
 
     Returns
     -------
     np.ndarray of shape (nspin, nk_ibz, nP, nbnd) on rank 0; ``None`` on non-root ranks.
     """
-    arr = _compute_delta_X_cpp(*args, **kwargs)
+    arr = _compute_delta_X_cpp(mf, Deltapsi_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid)
     return arr if arr.size else None
 
 
-def compute_delta_X_adj(*args, **kwargs):
+def compute_delta_X_adj(mf, Deltapsi_adj_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid):
     """Adjoint (-q) companion of compute_delta_X.
 
-    See ``coqui._lib.eri_module.compute_delta_X_adj`` for parameter details.
+    At index ik the returned array stores δ^{-q} X evaluated at k_{ik}+q (the
+    DeltaX_right consumer convention). Parameters as in ``compute_delta_X``,
+    with ``Deltapsi_adj_prefix`` naming the adjoint Sternheimer δψ files.
 
     Returns
     -------
     np.ndarray of shape (nspin, nk_ibz, nP, nbnd) on rank 0; ``None`` on non-root ranks.
     """
-    arr = _compute_delta_X_adj_cpp(*args, **kwargs)
+    arr = _compute_delta_X_adj_cpp(mf, Deltapsi_adj_prefix, r_P, delta_r_P, q_vec_cryst, fft_grid)
     return arr if arr.size else None
 
 

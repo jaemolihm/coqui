@@ -133,12 +133,12 @@ namespace methods {
                 nda::reshape(O_5d_loc, shape_t<4>{nt_loc_ * ns_, nk_, nb_, nb_})};
             _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
                                  kp_to_ibz, kp_trev, kpq_map,
-                                 1, 0, 1, P_offset, Q_offset,
+                                 P_offset, Q_offset,
                                  DeltaX_ptr, DeltaX_mq_ptr, &O_unpert_loc);
           } else {
             _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
                                  kp_to_ibz, kp_trev, kpq_map,
-                                 1, 0, 1, P_offset, Q_offset);
+                                 P_offset, Q_offset);
           }
         } else if constexpr (rank == 4) {
           auto P_offset = O_IPQ.origin()[2];
@@ -150,7 +150,7 @@ namespace methods {
 
           _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
                                kp_to_ibz, kp_trev, kpq_map,
-                               1, 0, 1, P_offset, Q_offset,
+                               P_offset, Q_offset,
                                DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
         }
       }
@@ -292,16 +292,18 @@ namespace methods {
 
         _primary_to_aux_transposed_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
                              kp_to_ibz, kp_trev, kpq_map,
-                             1, 0, 1, P_offset, Q_offset,
+                             P_offset, Q_offset,
                              DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
       }
 
     private:
       /**
        * LR primary→aux impl. Matches thc_solver_comm::_primary_to_aux_impl
-       * (lines 383-450) line-by-line, except the X lookup:
+       * except the X lookup:
        *   - Left X uses X(kpq_map(k)) instead of X(k)
        *   - Right X uses X(k) (unchanged)
+       * Serial over the caller's local PQ tile (thc_solver_comm's P-batching
+       * is dropped: every LR caller runs one rank per tile).
        */
       template<nda::Array Array_primary_t, nda::Array Array_aux_t, typename O_unpert_t = nda::array<ComplexType, 4>>
       static void _primary_to_aux_impl(int ip, int iq,
@@ -311,8 +313,6 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kp_trev,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       long nbatch,
-                                       int rank, int comm_size,
                                        long P_offset = 0, long Q_offset = 0,
                                        const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
                                        const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
@@ -348,14 +348,7 @@ namespace methods {
         auto O_ikPQ_4D = nda::reshape(O_tskPQ, shape_t<4>{dim_i, nkpts, NP_loc, NQ_loc});
         auto O_ikab_4D = nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd});
 
-        if (nbatch < 0) nbatch = utils::find_min_col(comm_size, dim_i*nkpts);
-        utils::check(comm_size % nbatch == 0, "lr_thc_comm::_primary_to_aux_impl: comm_size % nbatch != 0");
-        auto [origin, end] = itertools::chunk_range(0, NP_loc, nbatch, rank % nbatch);
-        int batch_size = end - origin;
-        int n_large_batch = NP_loc - nbatch * (NP_loc / nbatch);
-        int offset = (rank % nbatch < n_large_batch)? 0 : 0 + n_large_batch;
-
-        nda::array<ComplexType, 2> Ask_Pb(batch_size, nbnd);
+        nda::array<ComplexType, 2> Ask_Pb(NP_loc, nbnd);
 
         // DeltaX correction buffers (allocated only when needed)
         nda::matrix<ComplexType> U_ab_buf;
@@ -363,15 +356,13 @@ namespace methods {
           U_ab_buf.resize(nbnd, nbnd);
         }
 
-        for (size_t ikP = rank; ikP < dim_i*nkpts*nbatch; ikP += comm_size) {
-          // ikP = (i * nkpts + k) * nbatch + PP
-          size_t i = ikP / (nkpts*nbatch);
+        nda::range X_P_rng(P_offset, P_offset + NP_loc);
+        nda::range O_P_rng(0, NP_loc);
+        nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
+        for (size_t ik = 0; ik < dim_i*nkpts; ++ik) {
+          size_t i = ik / nkpts;
           size_t s = i % ns; // i = it * ns + is
-          size_t k = (ikP / nbatch) % nkpts;
-          size_t PP = ikP % nbatch;
-          nda::range X_P_rng(PP*batch_size + offset + P_offset, (PP+1)*batch_size + offset + P_offset);
-          nda::range O_P_rng(PP*batch_size + offset, (PP+1)*batch_size + offset);
-          nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
+          size_t k = ik % nkpts;
 
           // === LR change: left X uses k+q, right X uses k ===
           auto Xsk_Pa_l = thc.X(s, ip, kpq_map(k));
@@ -423,8 +414,6 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kp_trev,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       long nbatch,
-                                       int rank, int comm_size,
                                        long P_offset = 0, long Q_offset = 0,
                                        const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
                                        const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
@@ -465,14 +454,7 @@ namespace methods {
         auto O_ikPQ_4D = nda::reshape(O_tskPQ, shape_t<4>{dim_i, nkpts, NP_loc, NQ_loc});
         auto O_ikab_4D = nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd});
 
-        if (nbatch < 0) nbatch = utils::find_min_col(comm_size, dim_i*nkpts);
-        utils::check(comm_size % nbatch == 0, "lr_thc_comm::_primary_to_aux_transposed_impl: comm_size % nbatch != 0");
-        auto [origin, end] = itertools::chunk_range(0, NP_loc, nbatch, rank % nbatch);
-        int batch_size = end - origin;
-        int n_large_batch = NP_loc - nbatch * (NP_loc / nbatch);
-        int offset = (rank % nbatch < n_large_batch)? 0 : n_large_batch;
-
-        nda::array<ComplexType, 2> Ask_Pb(batch_size, nbnd);
+        nda::array<ComplexType, 2> Ask_Pb(NP_loc, nbnd);
         nda::matrix<ComplexType> O_H_slice(nbnd, nbnd);
 
         // DeltaX: reshape unperturbed quantity once
@@ -485,14 +467,13 @@ namespace methods {
         }
 
         // Transform with swapped X: left=X(k), right=X(k+q), input=O^H
-        for (size_t ikP = rank; ikP < dim_i*nkpts*nbatch; ikP += comm_size) {
-          size_t i = ikP / (nkpts*nbatch);
+        nda::range X_P_rng(P_offset, P_offset + NP_loc);
+        nda::range O_P_rng(0, NP_loc);
+        nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
+        for (size_t ik = 0; ik < dim_i*nkpts; ++ik) {
+          size_t i = ik / nkpts;
           size_t s = i % ns;
-          size_t k = (ikP / nbatch) % nkpts;
-          size_t PP = ikP % nbatch;
-          nda::range X_P_rng(PP*batch_size + offset + P_offset, (PP+1)*batch_size + offset + P_offset);
-          nda::range O_P_rng(PP*batch_size + offset, (PP+1)*batch_size + offset);
-          nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
+          size_t k = ik % nkpts;
 
           // === Swapped X: left=X(k), right=X(k+q) ===
           auto Xsk_Pa_l = thc.X(s, ip, k);

@@ -385,8 +385,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   long NP = thc.Np();
   long nt_half = dDeltaPi_tqPQ.global_shape()[0];
 
-  // --- Validate input: τ-dist ---
-  utils::check_W_tau_dist(dDeltaPi_tqPQ, "solve_lr_dyson_W(DeltaPi)");
+  // --- Validate input: q-local dist ---
+  utils::check_W_q_local_dist(dDeltaPi_tqPQ, "solve_lr_dyson_W(DeltaPi)");
 
   // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
   // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,

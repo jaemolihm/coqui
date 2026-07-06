@@ -238,8 +238,8 @@ namespace methods {
       std::optional<dArr_loc_4D_t> _dG_skPQ, _dSigma_skPQ;
       std::optional<sArr_4D_t> _sSigma_skij;
       std::optional<sArr_2D_t> _sf_Rk, _sf_kR, _sf_qR;
-      // Blocked-FFT k<->R transforms; empty (→ gemm fallback with the
-      // coefficient matrices above) when the grid is not an unshifted full mesh.
+      // Blocked-FFT k<->R transforms; COQUI_LR_DEBUG_GEMM_FT=1 leaves these
+      // empty and uses the gemm path (coefficient matrices above) instead.
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;

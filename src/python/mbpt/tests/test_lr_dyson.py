@@ -20,8 +20,13 @@ limitations under the License.
 Test suite for Linear Response Dyson equation.
 
 Tests include:
-1. k+q mapping utilities
+1. k+q mapping utilities (C++ binding)
 2. LR Dyson equation validation against finite difference
+
+NOTE: TestLRDyson validates the pure-numpy reference implementation defined in
+this file against numpy finite differences; it does NOT exercise the C++
+lr_dyson solver. C++ coverage lives in src/methods/SCF/tests/test_lr_dyson.cpp
+and the lr_debug / lr_tests suites (via the run_lr Python API).
 """
 
 import numpy as np

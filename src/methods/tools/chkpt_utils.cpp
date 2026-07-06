@@ -544,6 +544,10 @@ bool read_DeltaH0(communicator_t& comm,
     }
   }
   comm.broadcast_n(&success, 1, 0);
+  if (success) {
+    if (!comm.root()) q_vec.resize(3);
+    comm.broadcast_n(q_vec.data(), 3, 0);
+  }
   comm.barrier();
   return success;
 }
