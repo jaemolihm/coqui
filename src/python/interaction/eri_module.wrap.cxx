@@ -43,49 +43,59 @@ const std::string c2py::tp_ctor_doc<coqui_py::ThcCoulomb> =
 static auto const fun_0 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.Np(); }, "self")};
 
-// init
+// compute_delta_V
 static auto const fun_1 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb &self, const std::string &Deltapsi_prefix,
+       const std::string &Deltapsi_adj_prefix,
+       const nda::array<double, 1> &q_pert_cryst) {
+      return self.compute_delta_V(Deltapsi_prefix, Deltapsi_adj_prefix,
+                                  q_pert_cryst);
+    },
+    "self", "Deltapsi_prefix", "Deltapsi_adj_prefix", "q_pert_cryst")};
+
+// init
+static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb &self) { return self.init(); }, "self")};
 
 // initialized
-static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_3 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.initialized(); },
     "self")};
 
 // mf
-static auto const fun_3 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.mf(); }, "self")};
 
 // mpi
-static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_5 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.mpi(); }, "self")};
 
 // nbnd
-static auto const fun_5 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_6 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nbnd(); }, "self")};
 
 // nkpts
-static auto const fun_6 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_7 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nkpts(); }, "self")};
 
 // nkpts_ibz
-static auto const fun_7 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_8 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nkpts_ibz(); }, "self")};
 
 // nqpts
-static auto const fun_8 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_9 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nqpts(); }, "self")};
 
 // nqpts_ibz
-static auto const fun_9 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_10 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nqpts_ibz(); }, "self")};
 
 // nspin
-static auto const fun_10 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nspin(); }, "self")};
 
 // nspin_in_basis
-static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_12 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nspin_in_basis(); },
     "self")};
 
@@ -101,34 +111,37 @@ static const auto doc_d_8 = fun_8.doc(R"DOC()DOC");
 static const auto doc_d_9 = fun_9.doc(R"DOC()DOC");
 static const auto doc_d_10 = fun_10.doc(R"DOC()DOC");
 static const auto doc_d_11 = fun_11.doc(R"DOC()DOC");
+static const auto doc_d_12 = fun_12.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
 PyMethodDef c2py::tp_methods<coqui_py::ThcCoulomb>[] = {
     {"Np", (PyCFunction)c2py::pyfkw<fun_0>, METH_VARARGS | METH_KEYWORDS,
      doc_d_0.c_str()},
-    {"init", (PyCFunction)c2py::pyfkw<fun_1>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_1.c_str()},
-    {"initialized", (PyCFunction)c2py::pyfkw<fun_2>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_2.c_str()},
-    {"mf", (PyCFunction)c2py::pyfkw<fun_3>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_3.c_str()},
-    {"mpi", (PyCFunction)c2py::pyfkw<fun_4>, METH_VARARGS | METH_KEYWORDS,
+    {"compute_delta_V", (PyCFunction)c2py::pyfkw<fun_1>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_1.c_str()},
+    {"init", (PyCFunction)c2py::pyfkw<fun_2>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_2.c_str()},
+    {"initialized", (PyCFunction)c2py::pyfkw<fun_3>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_3.c_str()},
+    {"mf", (PyCFunction)c2py::pyfkw<fun_4>, METH_VARARGS | METH_KEYWORDS,
      doc_d_4.c_str()},
-    {"nbnd", (PyCFunction)c2py::pyfkw<fun_5>, METH_VARARGS | METH_KEYWORDS,
+    {"mpi", (PyCFunction)c2py::pyfkw<fun_5>, METH_VARARGS | METH_KEYWORDS,
      doc_d_5.c_str()},
-    {"nkpts", (PyCFunction)c2py::pyfkw<fun_6>, METH_VARARGS | METH_KEYWORDS,
+    {"nbnd", (PyCFunction)c2py::pyfkw<fun_6>, METH_VARARGS | METH_KEYWORDS,
      doc_d_6.c_str()},
-    {"nkpts_ibz", (PyCFunction)c2py::pyfkw<fun_7>, METH_VARARGS | METH_KEYWORDS,
+    {"nkpts", (PyCFunction)c2py::pyfkw<fun_7>, METH_VARARGS | METH_KEYWORDS,
      doc_d_7.c_str()},
-    {"nqpts", (PyCFunction)c2py::pyfkw<fun_8>, METH_VARARGS | METH_KEYWORDS,
+    {"nkpts_ibz", (PyCFunction)c2py::pyfkw<fun_8>, METH_VARARGS | METH_KEYWORDS,
      doc_d_8.c_str()},
-    {"nqpts_ibz", (PyCFunction)c2py::pyfkw<fun_9>, METH_VARARGS | METH_KEYWORDS,
+    {"nqpts", (PyCFunction)c2py::pyfkw<fun_9>, METH_VARARGS | METH_KEYWORDS,
      doc_d_9.c_str()},
-    {"nspin", (PyCFunction)c2py::pyfkw<fun_10>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_10.c_str()},
-    {"nspin_in_basis", (PyCFunction)c2py::pyfkw<fun_11>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_11.c_str()},
+    {"nqpts_ibz", (PyCFunction)c2py::pyfkw<fun_10>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_10.c_str()},
+    {"nspin", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_11.c_str()},
+    {"nspin_in_basis", (PyCFunction)c2py::pyfkw<fun_12>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_12.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
@@ -155,23 +168,23 @@ template <>
 const std::string c2py::tp_ctor_doc<coqui_py::CholCoulomb> =
     init_1.doc(R"DOC()DOC");
 // mf
-static auto const fun_12 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_13 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::CholCoulomb const &self) { return self.mf(); }, "self")};
 
 // mpi
-static auto const fun_13 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::CholCoulomb const &self) { return self.mpi(); }, "self")};
 
-static const auto doc_d_12 = fun_12.doc(R"DOC()DOC");
 static const auto doc_d_13 = fun_13.doc(R"DOC()DOC");
+static const auto doc_d_14 = fun_14.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
 PyMethodDef c2py::tp_methods<coqui_py::CholCoulomb>[] = {
-    {"mf", (PyCFunction)c2py::pyfkw<fun_12>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_12.c_str()},
-    {"mpi", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
+    {"mf", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
      doc_d_13.c_str()},
+    {"mpi", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_14.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
@@ -189,7 +202,7 @@ const std::string c2py::tp_doc<coqui_py::CholCoulomb> =
 // ==================== module functions ====================
 
 // compute_delta_X
-static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf, const std::string &Deltapsi_prefix,
        const nda::array<long, 1> &r_P, const nda::array<double, 2> &delta_r_P,
        const nda::array<double, 1> &q_vec_cryst,
@@ -200,7 +213,7 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "Deltapsi_prefix", "r_P", "delta_r_P", "q_vec_cryst", "fft_grid")};
 
 // compute_delta_X_adj
-static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf, const std::string &Deltapsi_adj_prefix,
        const nda::array<long, 1> &r_P, const nda::array<double, 2> &delta_r_P,
        const nda::array<double, 1> &q_vec_cryst,
@@ -212,24 +225,24 @@ static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "fft_grid")};
 
 // run_isdf
-static auto const fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_17 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf, const std::string &thc_params) {
       return coqui_py::run_isdf(mf, thc_params);
     },
     "mf", "thc_params")};
 
-static const auto doc_d_14 = fun_14.doc(R"DOC()DOC");
 static const auto doc_d_15 = fun_15.doc(R"DOC()DOC");
 static const auto doc_d_16 = fun_16.doc(R"DOC()DOC");
+static const auto doc_d_17 = fun_17.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
-    {"compute_delta_X", (PyCFunction)c2py::pyfkw<fun_14>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_14.c_str()},
-    {"compute_delta_X_adj", (PyCFunction)c2py::pyfkw<fun_15>,
+    {"compute_delta_X", (PyCFunction)c2py::pyfkw<fun_15>,
      METH_VARARGS | METH_KEYWORDS, doc_d_15.c_str()},
-    {"run_isdf", (PyCFunction)c2py::pyfkw<fun_16>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_16.c_str()},
+    {"compute_delta_X_adj", (PyCFunction)c2py::pyfkw<fun_16>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_16.c_str()},
+    {"run_isdf", (PyCFunction)c2py::pyfkw<fun_17>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_17.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

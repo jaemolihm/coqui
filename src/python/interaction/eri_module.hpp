@@ -30,6 +30,7 @@
 #include "IO/ptree/InputParser.hpp"
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/ERI/lr_thc_interp.hpp"
+#include "methods/ERI/lr_thc.hpp"
 
 namespace coqui_py {
 
@@ -74,6 +75,17 @@ namespace coqui_py {
 
     C2PY_IGNORE
     auto& get_eri() { return _thc; }
+
+    // Linear response of V^q for a single mode / phonon momentum Q at every
+    // internal q on the BZ k-grid. The pivot response (Δr_P) is ignored.
+    // Both +Q (dpsi) and −Q (dpsi_adj) δψ data are required.
+    nda::array<ComplexType, 3> compute_delta_V(
+        const std::string& Deltapsi_prefix,
+        const std::string& Deltapsi_adj_prefix,
+        nda::array<double, 1> const& q_pert_cryst) {
+      methods::lr_thc lr(_thc);
+      return lr.compute_delta_V(Deltapsi_prefix, Deltapsi_adj_prefix, q_pert_cryst);
+    }
     C2PY_IGNORE
     auto get_mpi() const { return _thc.mpi(); }
     C2PY_IGNORE
