@@ -21,6 +21,8 @@
 
 #include <fstream>
 #include <filesystem>
+#include <cmath>
+#include <vector>
 
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
@@ -330,6 +332,58 @@ void pseudopot::read_vnl_pw2bgw(MF_t &mf, std::string outdir)
 }
 
 template<typename MF_t>
+void pseudopot::build_projector_k2g(MF_t& mf, h5::group& grp,
+                                    nda::array_const_view<int,1> npw,
+                                    nda::array_view<long,2> k2g)
+{
+  using nda::range;
+  int rank = mpi->comm.rank();
+  int np   = mpi->comm.size();
+  auto wfc_g   = mf.wfc_truncated_grid();
+  long ngm     = wfc_g->size();
+  long wfc_nnr = wfc_g->nnr();
+  auto fft2gv  = wfc_g->fft_to_gv();
+  long nk = k2g.extent(0);
+  long NX = wfc_g->mesh(0), NY = wfc_g->mesh(1), NZ = wfc_g->mesh(2);
+  for( int ik=0; ik<nk; ik++ ) {
+    if( ik%np != rank ) continue;
+    nda::array<int,2> mill(npw(ik),3);
+    nda::h5_read(grp,"miller_k"+std::to_string(ik),mill);
+    for( int i=0; i<npw(ik); i++ ) {
+      long n1 = mill(i,0); if(n1<0) n1 += NX;
+      long n2 = mill(i,1); if(n2<0) n2 += NY;
+      long n3 = mill(i,2); if(n3<0) n3 += NZ;
+      utils::check(n1 < NX, "build_projector_k2g: Index out of range. i:{}, n:{}, NX:{}",i,n1,NX);
+      utils::check(n2 < NY, "build_projector_k2g: Index out of range. i:{}, n:{}, NY:{}",i,n2,NY);
+      utils::check(n3 < NZ, "build_projector_k2g: Index out of range. i:{}, n:{}, NZ:{}",i,n3,NZ);
+      long N = (n1*NY + n2)*NZ + n3;
+      utils::check( N >= 0 and N < wfc_nnr, "build_projector_k2g: Index out of range. N:{}, nnr:{}",N,wfc_nnr);
+      k2g(ik,i) = fft2gv(N);
+      utils::check( k2g(ik,i) >= 0 and k2g(ik,i) < ngm, "build_projector_k2g: Index not mapped in truncated grid. ");
+    }
+  }
+  mpi->comm.barrier();
+  if(mpi->node_comm.root())
+    mpi->internode_comm.all_reduce_in_place_n(k2g.data(),k2g.size(),std::plus<>{});
+  mpi->comm.barrier();
+}
+
+void pseudopot::read_projector_vkb(h5::group& grp, long k, int ib, int npw_k,
+                                   nda::array_const_view<long,1> k2g_k,
+                                   nda::array_view<ComplexType,2> buff,
+                                   nda::array_view<ComplexType,1> vkb)
+{
+  using nda::range;
+  decltype(range::all) all;
+  auto b_k = buff(all,range(npw_k));
+  auto tpl = std::tuple{range(ib,ib+1),range(npw_k)};
+  nda::h5_read(grp,"projector_k"+std::to_string(k),b_k,tpl);
+  vkb() = ComplexType(0.0);
+  for( auto [in,n] : itertools::enumerate(k2g_k(range(npw_k))) )
+    vkb(n) = std::conj(buff(0,in));
+}
+
+template<typename MF_t>
 void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
 {
   using nda::range;
@@ -531,37 +585,10 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
   // calculate projectors
   sarray_t<nda::array_view<long,2>> sk2g(*mpi,{nk,npwx});
   auto k2g = sk2g.local();
-  auto wfc_g = mf.wfc_truncated_grid();  
-  long ngm = wfc_g->size();
-  auto fft2gv = wfc_g->fft_to_gv();
-  long wfc_nnr = wfc_g->nnr(); 
+  long ngm = mf.wfc_truncated_grid()->size();
 
-  // setup index mappings
-  {
-    long NX = wfc_g->mesh(0), NY = wfc_g->mesh(1), NZ = wfc_g->mesh(2);
-    for( int ik=0; ik<nk; ik++ ) {
-      if(  ik%np != rank ) continue;
-      nda::array<int,2> mill(npw(ik),3);
-      nda::h5_read(grp,"miller_k"+std::to_string(ik),mill);
-      // map miller index to wfc_g truncated grid
-      for( int i=0; i<npw(ik); i++ ) {
-        long n1 = mill(i,0); if(n1<0) n1 += NX;
-        long n2 = mill(i,1); if(n2<0) n2 += NY;
-        long n3 = mill(i,2); if(n3<0) n3 += NZ;
-        utils::check(n1 < NX, "read_vnl_h5: Index out of range. i:{}, n:{}, NX:{}",i,n1,NX);
-        utils::check(n2 < NY, "read_vnl_h5: Index out of range. i:{}, n:{}, NY:{}",i,n2,NY);
-        utils::check(n3 < NZ, "read_vnl_h5: Index out of range. i:{}, n:{}, NZ:{}",i,n3,NZ);
-        long N = (n1*NY + n2)*NZ + n3;
-        utils::check( N >= 0 and N < wfc_nnr, "read_vnl_h5: Index out of range. N:{}, nnr:{}",N,wfc_nnr);
-        k2g(ik,i) = fft2gv(N); 
-        utils::check( k2g(ik,i) >= 0 and k2g(ik,i) < ngm, "read_vnl_h5: Index not mapped in truncated grid. "); 
-      } 
-    }
-    mpi->comm.barrier();
-    if(mpi->node_comm.root()) 
-      mpi->internode_comm.all_reduce_in_place_n(k2g.data(),k2g.size(),std::plus<>{});
-    mpi->comm.barrier();
-  }
+  // setup index mappings (projector miller -> 'w' truncated grid)
+  build_projector_k2g(mf, grp, npw(), k2g);
 
   Pskna = sarray_t<nda::array_view<ComplexType,4>>(*mpi,{nspin,nk,long(nkb)*npol,nbnd});
   auto Ploc = Pskna.local();
@@ -581,29 +608,25 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
   // read and reorder vkb
   for( auto [is,s] : itertools::enumerate(dPsia.local_range(0)) ) {
     for( auto [ik,k] : itertools::enumerate(dPsia.local_range(1)) ) {
-      for( int ib=0; ib<nkb; ++ib ) { 
-        auto b_k = buff(all,range(npw(k)));
-        auto tpl = std::tuple{range(ib,ib+1),range(npw(k))};
-        nda::h5_read(grp,"projector_k"+std::to_string(k),b_k,tpl);
-        vkb() = ComplexType(0.0);
-        for( auto [in,n] : itertools::enumerate(k2g(k,range(npw(k)))) ) 
-          vkb(n) = std::conj(buff(0,in)); 
-        for(int ip=0; ip<npol; ++ip) 
+      for( int ib=0; ib<nkb; ++ib ) {
+        read_projector_vkb(grp, k, ib, npw(k), k2g(k,all), buff, vkb);
+        for(int ip=0; ip<npol; ++ip)
           nda::blas::gemv(ComplexType(1.0),psi(is,ik,all,range(ip*ngm,(ip+1)*ngm)),vkb,
                           ComplexType(0.0),Ploc(s,k,ib*npol+ip,dPsia.local_range(2)));
       }
     }
-  } 
+  }
   mpi->comm.barrier();
-  if(mpi->node_comm.root()) 
+  if(mpi->node_comm.root())
     mpi->internode_comm.all_reduce_in_place_n(Ploc.data(),Ploc.size(),std::plus<>{});
   mpi->comm.barrier();
 
 }
 
+
 // This should only be called by a single task
 void pseudopot::save(std::string fname, bool append)
-{ 
+{
   if(ptype == pp_FILE_t) return; 
   char mode = (append?'a':'w');
   h5::file file;
@@ -921,7 +944,9 @@ using memory::host_array_view;
 
 template pseudopot::pseudopot(mf::MF&,std::string const);
 template void pseudopot::read_vnl_pw2bgw(mf::MF &, std::string);
-template void pseudopot::read_vnl_h5(mf::MF &, h5::group&); 
+template void pseudopot::read_vnl_h5(mf::MF &, h5::group&);
+template void pseudopot::build_projector_k2g(mf::MF &, h5::group&,
+    nda::array_const_view<int,1>, nda::array_view<long,2>);
 
 #define __add_Vpp__(V) \
 template void pseudopot::add_Vpp(boost::mpi3::communicator&,nda::range,nda::range, \

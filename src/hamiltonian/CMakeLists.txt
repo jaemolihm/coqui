@@ -3,6 +3,7 @@
 
 SET(HAMIL
   pseudo/pseudopot.cpp
+  pseudo/pseudopot_eph.cpp
   add_kinetic.cpp
   add_vxc.cpp
 )

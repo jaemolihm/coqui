@@ -294,6 +294,32 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
       utils::check(false,"finish");
     }
 
+    // Per-species radial local potential written by pw2coqui
+    // (Hamiltonian/{type}/{z_valence, vloc_radial/sp{it}/{r,rab,vloc}}). Needed
+    // to rebuild the ionic dvloc for the bare e-ph vertex (compute_bare_eph_vertex) in a
+    // derived/augmented basis. Older MF h5 files may lack it; copy only if
+    // present so those keep working (compute_bare_eph_vertex then aborts with a clear
+    // "vloc_radial" error only when actually used).
+    if(grp_.has_dataset("z_valence")) {
+      nda::array<double,1> zval;
+      nda::h5_read(grp_,"z_valence",zval);
+      nda::h5_write(grp,"z_valence",zval);
+    }
+    if(grp_.has_subgroup("vloc_radial")) {
+      h5::group vr_ = grp_.open_group("vloc_radial");
+      h5::group vr  = grp.create_group("vloc_radial");
+      for(int it=0; it<nsp; ++it) {
+        std::string spn = "sp"+std::to_string(it);
+        if(not vr_.has_subgroup(spn)) continue;
+        h5::group sp_ = vr_.open_group(spn);
+        h5::group sp  = vr.create_group(spn);
+        nda::array<double,1> r, rab, vloc;
+        nda::h5_read(sp_,"r",r);       nda::h5_write(sp,"r",r);
+        nda::h5_read(sp_,"rab",rab);   nda::h5_write(sp,"rab",rab);
+        nda::h5_read(sp_,"vloc",vloc); nda::h5_write(sp,"vloc",vloc);
+      }
+    }
+
     nda::array<ComplexType,2> buff(nkb,npwx);
     for(int ik=0; ik<nk; ++ik)
     {

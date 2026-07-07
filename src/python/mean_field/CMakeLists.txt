@@ -2,7 +2,7 @@
 Python_add_library(mf_module MODULE mf_module.cpp)
 
 # clair is needed only if we want to generate python bindings from scratch
-target_link_libraries(mf_module PRIVATE c2py::c2py nda::nda_py meanfield)
+target_link_libraries(mf_module PRIVATE c2py::c2py nda::nda_py meanfield orbit)
 set_target_properties(mf_module PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${PYTHON_PACKAGE_PATH}/_lib")
 
 install(TARGETS mf_module
