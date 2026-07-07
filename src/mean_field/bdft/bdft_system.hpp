@@ -163,6 +163,13 @@ namespace mf {
       // expect SO term in pseudo?
       bool spinorbit = false;
 
+      // orbitals are an augmented, non-eigenstate basis. When true, the stored
+      // eigval are NaN placeholders (not eigenvalues of any stored H0), so
+      // downstream must recompute H0 from the orbitals (h0_source="compute").
+      bool augmented = false;
+      // provenance tag for the augmentation ("momentum", "dpsi", ...)
+      std::string augment_type = "";
+
       public:
       // dummy members, just to be consistent with qe_readonly class...
       // may use them in the future
@@ -190,6 +197,8 @@ namespace mf {
         h5::h5_write_attribute(sgrp, "madelung_constant", madelung);
         h5::h5_write_attribute(sgrp, "nuclear_energy", enuc);
         h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
+        h5::h5_write_attribute(sgrp, "augmented", int(augmented));
+        if(augmented) h5::h5_write(sgrp, "augment_type", augment_type);
         h5::h5_write(sgrp, "species", species);
         nda::h5_write(sgrp, "atomic_id", at_ids, false);
         nda::h5_write(sgrp, "atomic_positions", at_pos, false);
@@ -261,6 +270,13 @@ namespace mf {
         h5::h5_read_attribute(sgrp, "nuclear_energy", enuc);
         if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") )
           h5::h5_read_attribute(sgrp, "fermi_energy", efermi);
+        // stored as int (h5 has no native bool); absent in pre-augmentation files
+        if( H5Aexists(h5::hid_t(sgrp),"augmented") ) {
+          int augmented_flag = 0;
+          h5::h5_read_attribute(sgrp, "augmented", augmented_flag);
+          augmented = (augmented_flag != 0);
+          if(augmented) h5::h5_read(sgrp, "augment_type", augment_type);
+        }
         species = std::vector<std::string>(nspecies);
         at_ids  = nda::array<int, 1>(natoms);
         at_pos  = nda::array<double, 2>(natoms, 3);

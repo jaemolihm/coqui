@@ -31,6 +31,7 @@
 
 #include "IO/ptree/InputParser.hpp"
 #include "mean_field/mf_utils.hpp"
+#include "orbitals/orbital_augmenter.h"
 #include "orbitals/orbital_generator.h"
 #include "orbitals/eph_vertex.h"
 #include "hamiltonian/pseudo/pseudopot.h"
@@ -102,6 +103,69 @@ namespace coqui_py {
 
     // create a new MpiHandler from mf's mpi context
     auto mpi() const { return MpiHandler(_mf->mpi()); }
+
+    /**
+     * @brief Create an augmented mean-field system from this one.
+     *
+     * Keeps the original nbnd bands and appends orthonormalized augmentation
+     * states generated from the first nbnd_aug bands (e.g. type="momentum" adds
+     * p̂_α ψ_b for α=x,y,z), truncated with singular-value cutoff epstol and
+     * padded to a uniform band count across k-points. The result is written to
+     * {outdir}/{prefix}.h5 as a bdft system and returned. Because the basis is
+     * not an eigenbasis, many-body runs on it must use h0_source="compute".
+     *
+     * @param prefix     prefix of the new mean-field file
+     * @param outdir     directory for the new mean-field file
+     * @param type       augmentation transform ("momentum")
+     * @param nbnd_aug   number of bands to transform (<= nbnd; -1 = all,
+     *                   0 = none: original orbitals in augmented bdft format)
+     * @param epstol singular-value cutoff selecting the number kept per k
+     */
+    Mf augment_basis(const std::string& prefix, const std::string& outdir,
+                     const std::string& type, long nbnd_aug, double epstol) const {
+      std::string fn = outdir + "/" + prefix + ".h5";
+      auto parser = InputParser(std::string("{\"type\": \"") + type + "\"}");
+      auto augmenter = orbitals::make_augmenter(*_mf, parser.get_root());
+      auto new_mf = orbitals::add_augmentation<HOST_MEMORY>(*_mf, fn, augmenter,
+                                                            nbnd_aug, epstol);
+      return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
+    }
+
+    /**
+     * @brief Create a δψ-augmented mean-field system from this one.
+     *
+     * Appends orthonormalized DFPT response wavefunctions (δψ) read from
+     * {deltapsi_dir}/deltapsi_iq{iq}_mode{m}_ik{k}.hdf5, using the first R
+     * (=nbnd_aug) bands of each mode for every phonon iq in iq_list. δψ(n,k)
+     * carries momentum k+q and is deposited on the 'w' grid at k+q. The buffer
+     * bands m ∈ [R, nbnd) are added back using the screened vertex g_scr and
+     * eigenvalues read (and converted Ry→Ha) from
+     * {elph_dir}/elph_bare.iq{iq}.h5 (also the source of q). Requires npol==1
+     * and a full-BZ k-grid. See orbitals::add_augmentation_dpsi.
+     *
+     * @param prefix            prefix of the new mean-field file
+     * @param outdir            directory for the new mean-field file
+     * @param deltapsi_dir      directory holding the deltapsi_*.hdf5 files
+     * @param elph_dir          directory holding the elph_bare.iq*.h5 files
+     * @param iq_list           phonon q indices to include
+     * @param nmodes            modes per q (<=0 → 3*natom)
+     * @param nbnd_aug          δψ bands used per mode (R; -1 → all in file)
+     * @param nbnd_mf           original bands kept M (<=0 or >nbnd → keep all
+     *                          nbnd; buffer fills [M, nbnd))
+     * @param smearing_deltapsi buffer denominator smearing σ (Ha)
+     * @param epstol        singular-value cutoff selecting states kept per k
+     */
+    Mf augment_basis_deltapsi(const std::string& prefix, const std::string& outdir,
+                          const std::string& deltapsi_dir, const std::string& elph_dir,
+                          const std::vector<long>& iq_list, long nmodes,
+                          long nbnd_aug, long nbnd_mf, double smearing_deltapsi,
+                          double epstol) const {
+      std::string fn = outdir + "/" + prefix + ".h5";
+      auto new_mf = orbitals::add_augmentation_dpsi<HOST_MEMORY>(
+          *_mf, fn, deltapsi_dir, elph_dir, iq_list, nmodes, nbnd_aug, nbnd_mf,
+          smearing_deltapsi, epstol);
+      return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
+    }
 
     /// Electron-phonon nonlocal projector overlaps, returned in memory (no file).
     /// Returns a tuple (P, dion, proj_per_species, species_of_atom, proj_offset):

@@ -21,20 +21,29 @@
 
 
 #include <cmath>
+#include <string>
+#include <vector>
+#include <unordered_map>
 
 #include "configuration.hpp"
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
+#include "utilities/check.hpp"
+#include "utilities/kpoint_utils.hpp"
 
 #include "mpi3/environment.hpp"
 
+#include "h5/h5.hpp"
 #include "nda/nda.hpp"
+#include "nda/h5.hpp"
 #include "nda/blas.hpp"
 #include "nda/linalg.hpp"
 #include "utilities/functions.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/shared_array/nda.hpp"
+#include "grids/g_grids.hpp"
 #include "mean_field/MF.hpp"
 #include "mean_field/distributed_orbital_readers.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
@@ -42,6 +51,7 @@
 #include "orbitals/rotate.h"
 
 #include "orbitals/pgto.h"
+#include "orbitals/orbital_augmenter.h"
 
 
 namespace orbitals
@@ -157,9 +167,10 @@ mf::MF add_pgto(mf::MF& mf,
 
 }
 
+
 /*
  * This routine assumes that MF object contains reliable eigenvalue information.
- */ 
+ */
 mf::MF eigenstate_selection(mf::MF& mf, std::string fn,
 			    std::string grid_type, long n0, long nblk)
 {
@@ -274,18 +285,23 @@ void orbital_factory(mf::MF &base_mf, ptree const& pt)
 					   "orbitals::pgto - missing required input: basis");
     auto mf = add_pgto<MEM>(base_mf,outdir+"/"+prefix+".h5",
                             basis,"nwchem",n0,diag_F,ortho,cutoff,ortho_by_shell);
-  } else if(auto node_ = pt.get_child_optional("select")) { 
+  } else if(auto node_ = pt.get_child_optional("select")) {
     auto n0 = io::get_value_with_default<long>(*node_,"n0",ndef);
     auto nblk = io::get_value_with_default<long>(*node_,"n_blocks",0);
     auto grid_type = io::get_value_with_default<std::string>(*node_,"grid","linear");
     auto mf = eigenstate_selection(base_mf,outdir+"/"+prefix+".h5", grid_type,n0,nblk);
+  } else if(auto node_a = pt.get_child_optional("augment")) {
+    auto nbnd_aug = io::get_value_with_default<long>(*node_a,"nbnd_aug",base_mf.nbnd());
+    auto epstol = io::get_value_with_default<double>(*node_a,"epstol",1e-4);
+    auto augmenter = make_augmenter(base_mf,*node_a);
+    auto mf = add_augmentation<MEM>(base_mf,outdir+"/"+prefix+".h5",augmenter,nbnd_aug,epstol);
   } else {
     APP_ABORT("orbital_factory: No orbital modifier found.");
   }
 }
 
 // instantiate templates
-using boost::mpi3::communicator; 
+using boost::mpi3::communicator;
 template mf::MF add_pgto<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,int,bool,bool,double,bool);
 
 template void orbital_factory<HOST_MEMORY>(mf::MF&,ptree const&);

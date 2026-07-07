@@ -324,8 +324,14 @@ class MF
       return a(nda::range::all,nda::range::all,nda::range(nbnd_aux()));
     }
     auto aux_weight(int is, int ik, int n) const { return aux_weight()(is,ik,n); }
-    auto efermi() const 
+    auto efermi() const
     { return std::visit( [&](auto&& v) { return v.get_sys().efermi; }, var ); }
+
+    // True if the orbital basis was produced by basis augmentation (a
+    // non-eigenstate basis). Only the bdft backend carries this flag.
+    bool is_augmented() const
+    { return std::holds_alternative<bdft::bdft_readonly>(var)
+          && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
     decltype(auto) symmetry_rotation(long s, long k) const
     {

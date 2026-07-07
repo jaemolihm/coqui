@@ -104,3 +104,111 @@ def make_mf(mpi, params, mf_type):
         mf = make_mf(mpi, {"prefix": "h2o", "outdir": "pyscf_output/"}, "pyscf")
     """
     return Mf(mpi, json.dumps(params), mf_type)
+
+
+def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
+               nbnd_aug=-1, epstol=1e-4):
+    """Create an augmented mean-field system from an existing one.
+
+    Keeps the original ``nbnd`` bands and appends orthonormalized augmentation
+    states generated from the first ``nbnd_aug`` bands. For ``augment_type =
+    "momentum"`` the raw states are the momentum-operator images p_alpha psi_b
+    (alpha = x, y, z); they are orthogonalized against the originals and among
+    themselves, then truncated with singular-value cutoff ``epstol`` and
+    padded to a uniform band count across k-points.
+
+    The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
+    returned as a new :class:`Mf`. Because the augmented basis is not an
+    eigenbasis, many-body runs on it must use ``h0_source="compute"``.
+
+    Parameters
+    ----------
+    mf : Mf
+        Base mean-field system to augment.
+    prefix : str
+        Prefix of the new mean-field file.
+    outdir : str
+        Directory for the new mean-field file.
+    augment_type : str
+        Augmentation transform. Currently only ``"momentum"``.
+    nbnd_aug : int
+        Number of bands to transform (``<= nbnd``; ``-1`` means all). ``0``
+        adds no states: the original orbitals are rewritten in the augmented
+        bdft format, giving a no-augmentation baseline for the same pipeline.
+    epstol : float
+        Singular-value cutoff selecting the number of states kept per k-point.
+    """
+    return mf.augment_basis(prefix, outdir, augment_type, int(nbnd_aug),
+                            float(epstol))
+
+
+def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
+                    iq_list=(1,), nmodes=None, nbnd_aug=-1, nbnd_mf=None,
+                    smearing_deltapsi=0.02, epstol=1e-4):
+    """Create a δψ-augmented mean-field system from an existing one.
+
+    The base ``mf`` carries ``N = mf.nbnd()`` nscf/h5 bands; ``nbnd_mf`` (=M)
+    selects how many are kept as the originals of the augmented system (``None``
+    keeps all N). Appends orthonormalized DFPT response wavefunctions (δψ) read
+    from ``{deltapsi_dir}/deltapsi_iq{iq}_mode{m}_ik{k}.hdf5``. For each phonon
+    ``iq`` in ``iq_list``, each of ``nmodes`` modes, and each source k-point, the
+    first ``nbnd_aug`` (=R) response bands δψ(n,k) are used. Since δψ(n,k) carries
+    crystal momentum k+q, it augments the wavefunction at **k+q (mod G)**.
+
+    QE orthogonalizes δψ against all N nscf bands, so the contribution of the
+    bands m ∈ [M, N) above the kept originals is added back using the screened
+    electron-phonon vertex ``g_scr`` and eigenvalues (and q) read from
+    ``{elph_dir}/elph_bare.iq{iq}.h5`` (converted Ry→Ha):
+
+        δψ(n,k) += Σ_{m=M}^{N-1} ψ(m,k+q) g_scr(mode,m,n)
+                                 · reg(e(n,k) - e(m,k+q)),
+
+    making the state the response orthogonal to only the M kept bands. ``reg`` is
+    a sharp, continuous 1/x cutoff (``1/x`` for ``|x|>σ``, ``x/σ²`` otherwise,
+    with σ = ``smearing_deltapsi``); with it the augmentation is **independent of
+    N** — a single large dataset
+    (big nbnd, nbnd_dpsi) reproduces any smaller (M, R) calculation. The
+    R·nmodes·len(iq_list) raw states per k are then orthogonalized against the M
+    originals (although they should already be orthogonal), truncated with
+    singular-value cutoff ``epstol``, and padded to a uniform band count.
+
+    The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
+    returned as a new :class:`Mf`. Because the augmented basis is not an
+    eigenbasis, many-body runs on it must use ``h0_source="compute"``. Requires
+    ``npol == 1`` and a full-BZ k-grid (``nkpts == nkpts_ibz``).
+
+    Parameters
+    ----------
+    mf : Mf
+        Base mean-field system to augment (carries all N nscf/h5 bands).
+    prefix : str
+        Prefix of the new mean-field file.
+    outdir : str
+        Directory for the new mean-field file.
+    deltapsi_dir : str
+        Directory holding the ``deltapsi_iq{iq}_mode{m}_ik{k}.hdf5`` files.
+    elph_dir : str
+        Directory holding the ``elph_bare.iq{iq}.h5`` files (source of
+        ``g_scr``, eigenvalues, and the phonon q-vector).
+    iq_list : sequence of int
+        Phonon q indices to include (default ``(1,)``).
+    nmodes : int or None
+        Number of modes per q. ``None`` uses 3*natom.
+    nbnd_aug : int
+        Number of δψ bands used per mode (R; ``-1`` = all bands in the file).
+    nbnd_mf : int or None
+        Number of original bands kept (M). ``None`` (or > N) keeps all N bands,
+        giving an empty buffer [M, N) — use this for a dedicated bundle where
+        N already equals the desired band count. Set M < N to emulate a smaller
+        calculation from a larger dataset.
+    smearing_deltapsi : float
+        Buffer denominator smearing σ in Hartree (default 0.02).
+    epstol : float
+        Singular-value cutoff selecting the number of states kept per k-point.
+    """
+    return mf.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
+                                 [int(i) for i in iq_list],
+                                 -1 if nmodes is None else int(nmodes),
+                                 int(nbnd_aug),
+                                 -1 if nbnd_mf is None else int(nbnd_mf),
+                                 float(smearing_deltapsi), float(epstol))

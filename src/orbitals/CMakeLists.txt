@@ -4,6 +4,7 @@
 SET(SRC
   pgto.cpp
   rotate.cpp
+  orbital_augmenter.cpp
   orbital_generator.cpp
   eph_vertex.cpp
 )
