@@ -23,7 +23,6 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
-#include <limits>
 #include <unordered_map>
 
 #include "configuration.hpp"
@@ -48,6 +47,7 @@
 #include "grids/g_grids.hpp"
 #include "mean_field/MF.hpp"
 #include "mean_field/distributed_orbital_readers.hpp"
+#include "itertools/itertools.hpp"
 
 #include "orbitals/orbital_augmenter.h"
 
@@ -241,21 +241,57 @@ auto orthonormalize_augmentation(
   return psi_out;
 }
 
-namespace {
-// Placeholder eigenvalues for an augmented (non-eigenstate) basis. The basis is
-// not an eigenstate of any mean-field Hamiltonian, so its eigenvalues are
-// undefined and set to NaN; they are kept only as checkpoint metadata
-// (h0_source="compute" rebuilds H0 and its own spectrum). Shape
-// (nspin, nkpts_ibz, nbnd) from psi.
-template<class DArray>
-nda::array<double,3> augmented_eigval_placeholder(DArray const& psi)
+template<MEMORY_SPACE MEM, utils::Communicator comm_t>
+auto rayleigh_eigvals(mf::MF& mf,
+                    darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi)
+  -> nda::array<double, 3>
 {
-  auto eig = nda::array<double,3>(psi.global_shape()[0], psi.global_shape()[1],
-                                  psi.global_shape()[2]);
-  eig() = std::numeric_limits<double>::quiet_NaN();
+  // Kinetic-energy diagonal <phi_i|T|phi_i> = sum_G 0.5*|k+G|^2 |phi_i(G)|^2 on
+  // the 'w' truncated-G grid, stored as the augmented (non-eigen) basis's
+  // eigenvalues. Provides a finite estimate of the single-particle energy scale
+  // (e.g. to bound the imaginary-axis frequency grid / wmax). The full
+  // <phi|H0|phi> cannot be formed here because the base MF's pseudopotential is
+  // sized for the original band count; with h0_source="compute" the SCF still
+  // rebuilds the full H0.
+  auto comm = psi.communicator();
+  long nspin_tot = psi.global_shape()[0];
+  long nkpts_tot = psi.global_shape()[1];
+  long nbnd_tot  = psi.global_shape()[2];
+
+  auto const& wfc_g = *mf.wfc_truncated_grid();
+  long ngm = wfc_g.size();
+  nda::array<int,2> miller(ngm,3);
+  utils::generate_miller_index(wfc_g.gv_to_fft(), miller, wfc_g.mesh());
+  auto recv = mf.recv();          // (3,3) reciprocal vectors, recv(i,:) = i-th (Cartesian)
+  auto kpts = mf.kpts_ibz();      // (nkpts_ibz,3) Cartesian; psi is over the IBZ
+  utils::check(kpts.extent(0) >= nkpts_tot,
+               "rayleigh_eigvals: kpts_ibz has {} < {} k-points.", kpts.extent(0), nkpts_tot);
+
+  long g0 = psi.local_range(3).first();
+  long ngloc = psi.local_shape()[3];
+  auto s_range = psi.local_range(0);
+  auto k_range = psi.local_range(1);
+  auto ploc = psi.local();
+
+  auto eig = nda::array<double,3>::zeros({nspin_tot, nkpts_tot, nbnd_tot});
+  for(auto [is,s] : itertools::enumerate(s_range)) {
+    for(auto [ik,k] : itertools::enumerate(k_range)) {
+      for(long ig=0; ig<ngloc; ++ig) {
+        long g = g0 + ig;
+        double kx = kpts(k,0) + miller(g,0)*recv(0,0) + miller(g,1)*recv(1,0) + miller(g,2)*recv(2,0);
+        double ky = kpts(k,1) + miller(g,0)*recv(0,1) + miller(g,1)*recv(1,1) + miller(g,2)*recv(2,1);
+        double kz = kpts(k,2) + miller(g,0)*recv(0,2) + miller(g,1)*recv(1,2) + miller(g,2)*recv(2,2);
+        double t = 0.5*(kx*kx + ky*ky + kz*kz);
+        for(long b=0; b<nbnd_tot; ++b) {
+          auto c = ploc(is,ik,b,ig);
+          eig(s,k,b) += t*(std::real(c)*std::real(c) + std::imag(c)*std::imag(c));
+        }
+      }
+    }
+  }
+  comm->all_reduce_in_place_n(eig.data(), eig.size(), std::plus<>{});
   return eig;
 }
-} // namespace
 
 template<MEMORY_SPACE MEM>
 mf::MF add_augmentation(mf::MF& mf, std::string fn,
@@ -306,9 +342,9 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   if(nbnd_aug == 0) {
     // No augmentation states: emit the original orbitals in the augmented bdft
-    // format (NaN eigenvalue placeholder + pseudopot, h0_source="compute") so a
+    // format (kinetic-energy eigval seed + pseudopot, h0_source="compute") so a
     // zero-augmentation baseline runs through the same downstream pipeline.
-    auto eig_ibz = augmented_eigval_placeholder(psi_orig);
+    auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
     return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, augmenter->type()));
   }
 
@@ -335,9 +371,8 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
   auto psi_full = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
 
-  // NaN eigenvalue placeholder for the (non-eigen) basis; not used with
-  // h0_source="compute", kept only as checkpoint metadata.
-  auto eig_ibz = augmented_eigval_placeholder(psi_full);
+  // kinetic-energy eigenvalue seed for the (non-eigen) basis
+  auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_full);
 
   return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type()));
 }
@@ -522,10 +557,10 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   if(R == 0) {
     // No δψ states: emit the M kept originals in the augmented bdft format
-    // (NaN eigenvalue placeholder + pseudopot, h0_source="compute") so a
+    // (kinetic-energy eigval seed + pseudopot, h0_source="compute") so a
     // zero-augmentation baseline runs through the same downstream pipeline. Mirrors the momentum
     // add_augmentation(nbnd_aug==0) baseline.
-    auto eig_ibz = augmented_eigval_placeholder(psi_orig);
+    auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
     return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, std::string("dpsi")));
   }
 
@@ -637,7 +672,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
   auto psi_full = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
-  auto eig_ibz  = augmented_eigval_placeholder(psi_full);
+  auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
 
   return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi")));
 }
@@ -645,6 +680,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 // explicit template instantiations
 template mf::MF add_augmentation<HOST_MEMORY>(mf::MF&,std::string,std::shared_ptr<orbital_augmenter_t>,long,double);
 template mf::MF add_augmentation_dpsi<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,std::vector<long> const&,long,long,long,double,double);
+template nda::array<double, 3> rayleigh_eigvals<HOST_MEMORY,communicator>(mf::MF&, darray_t<host_array<ComplexType, 4>, communicator>&);
 template darray_t<host_array<ComplexType, 4>, communicator>
 orthonormalize_augmentation(darray_t<host_array<ComplexType, 4>, communicator>&,
                             darray_t<host_array<ComplexType, 4>, communicator>&, double);

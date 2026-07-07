@@ -144,6 +144,19 @@ auto orthonormalize_augmentation(
                     double epstol)
   -> memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>;
 
+/**
+ * Kinetic-energy diagonal ⟨φ_i|T|φ_i⟩ = Σ_G ½|k+G|²|φ_i(G)|² on the 'w' grid,
+ * (nspin, nkpts_ibz, nbnd), stored as the augmented (non-eigen) basis's
+ * eigenvalues. Provides a finite estimate of the single-particle energy scale
+ * (e.g. to bound the imaginary-axis frequency grid / wmax). The full ⟨φ|H0|φ⟩
+ * cannot be formed here (the base MF's pseudopotential is sized for the original
+ * band count); with h0_source="compute" the SCF still rebuilds the full H0.
+ */
+template<MEMORY_SPACE MEM = HOST_MEMORY, utils::Communicator comm_t>
+auto rayleigh_eigvals(mf::MF& mf,
+                    memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi)
+  -> nda::array<double, 3>;
+
 } // orbitals
 
 #endif // ORBITALS_ORBITAL_AUGMENTER_H

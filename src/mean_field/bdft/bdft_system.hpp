@@ -164,7 +164,7 @@ namespace mf {
       bool spinorbit = false;
 
       // orbitals are an augmented, non-eigenstate basis. When true, the stored
-      // eigval are NaN placeholders (not eigenvalues of any stored H0), so
+      // eigval are kinetic-energy seeds (not eigenvalues of any stored H0), so
       // downstream must recompute H0 from the orbitals (h0_source="compute").
       bool augmented = false;
       // provenance tag for the augmentation ("momentum", "dpsi", ...)
