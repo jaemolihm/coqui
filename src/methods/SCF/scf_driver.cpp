@@ -48,7 +48,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
                "SCF loop: mpi context of mb_state and mb_eri should be the same!");
   utils::check(&FT == mb_state.ft,
                "SCF loop: imag_axes_ft of mb_state and scf_loop should be the same!");
-  for( auto& v: {"SCF_TOTAL", "DYSON", "MBPT_SOLVERS", "ITERATIVE", "WRITE"} ) {
+  for( auto& v: {"SCF_TOTAL", "STATE_ALLOC", "INIT_FOCK", "DYSON", "MBPT_SOLVERS",
+                 "ITERATIVE", "ENERGY", "WRITE"} ) {
     Timer.add(v);
   }
   // http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20dyson-scf
@@ -70,6 +71,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
 
   Timer.start("SCF_TOTAL");
   // Initialize MBState
+  Timer.start("STATE_ALLOC");
   mb_state.sF_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   mb_state.sDm_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
@@ -84,12 +86,17 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   auto& sG_tskij = mb_state.sG_tskij.value();
   auto& sSigma_tskij = mb_state.sSigma_tskij.value();
   double mu = 0.0;
+  Timer.stop("STATE_ALLOC");
+  Timer.start("INIT_FOCK");
   if (!restart) {
-    hamilt::set_fock(*mf, dyson.PSP(), sF_skij, true);
+    // Initial mean-field Fock F = F_full - H0. Reuse the H0 the dyson solver
+    // already computed instead of recomputing the identical one inside set_fock.
+    hamilt::set_fock(*mf, dyson.PSP(), sF_skij, true, &dyson.sH0_skij());
   } else {
     input_iter = chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
                                  mb_state.coqui_prefix, input_grp, input_iter);
   }
+  Timer.stop("INIT_FOCK");
 
   Timer.start("DYSON");
   // init Green's function. By default, we update mu as well.
@@ -192,11 +199,13 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     Timer.stop("DYSON");
 
 
+    Timer.start("ENERGY");
     auto k_weight = mf->k_weight();
     auto [e_1e, e_hf] = eval_hf_energy(sDm_skij, sF_skij, dyson.sH0_skij(), k_weight, false);
     double e_corr = (mb_solver.corr != nullptr)? eval_corr_energy(mpi->comm, FT, sG_tskij, sSigma_tskij, k_weight) : 0.0;
     energies_diff = {e_1e - energies[0], e_hf - energies[1], e_corr - energies[2]};
     energies = {e_1e, e_hf, e_corr, e_1e+e_hf+e_corr};
+    Timer.stop("ENERGY");
 
     // print energies and scf convergence
     app_log(1, "\nEnergy contributions");
@@ -227,9 +236,12 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   app_log(2, "\n  Dyson-SCF timers");
   app_log(2, "  ----------------");
   app_log(2, "    Total:                {0:.3f} sec", Timer.elapsed("SCF_TOTAL"));
+  app_log(2, "    State alloc:          {0:.3f} sec", Timer.elapsed("STATE_ALLOC"));
+  app_log(2, "    Initial Fock:         {0:.3f} sec", Timer.elapsed("INIT_FOCK"));
   app_log(2, "    Dyson:                {0:.3f} sec", Timer.elapsed("DYSON"));
   app_log(2, "    MBPT solvers:         {0:.3f} sec", Timer.elapsed("MBPT_SOLVERS"));
   app_log(2, "    Iterative alg:        {0:.3f} sec", Timer.elapsed("ITERATIVE"));
+  app_log(2, "    Energy eval:          {0:.3f} sec", Timer.elapsed("ENERGY"));
   app_log(2, "    Write:                {0:.3f} sec\n", Timer.elapsed("WRITE"));
 
   if (eval_thermodynamics) {
