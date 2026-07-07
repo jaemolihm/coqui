@@ -256,8 +256,13 @@ class distributed_array
     base(comm_,grid_,gshape,origin_,bsize,local_size),
     A(local_size)
   {
-    // initialize to zero just in case
-    A() = 0;
+    // Complex value types are already zero-initialized by the nda allocator
+    // (nda::mem::init_dcmplx == true → allocate_zero), so an explicit eager
+    // A() = 0 here just wastes a full memory-write pass over the local block.
+    // Keep the explicit zeroing only for value types the allocator leaves
+    // uninitialized (e.g. real), preserving the zero-init contract for all
+    // callers while avoiding the redundant pass for complex arrays.
+    if constexpr (!::nda::is_complex_v<value_type>) A() = 0;
     // enforcing slate compatibility for now
   }
 
