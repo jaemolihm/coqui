@@ -98,7 +98,7 @@ namespace methods {
             if(buffer.shape() != shape_t<2>{nkpts, NP_loc*NQ_loc}) 
               buffer.resize(shape_t<2>{nkpts, NP_loc*NQ_loc});
             for (int s = 0; s < ns; ++s) {
-              nda::blas::gemm(f_Rk, DmR_3D(s, nda::ellipsis{}), buffer);
+              math::detail::gemm_guarded(f_Rk, DmR_3D(s, nda::ellipsis{}), buffer);
               DmR_3D(s, nda::ellipsis{}) = buffer;
             }
           }
@@ -147,7 +147,7 @@ namespace methods {
           auto f_Rk = sf_Rk.local();
           utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), R_grid, sf_Rk);
           auto U_2D = nda::reshape(dU_qPQ_loc, shape_t<2>{nkpts, NP_loc * NQ_loc});
-          nda::blas::gemm(f_Rk, U_2D, buffer);
+          math::detail::gemm_guarded(f_Rk, U_2D, buffer);
           U_2D = buffer;
         }
 
@@ -176,7 +176,7 @@ namespace methods {
               if(buffer.shape() != shape_t<2>{nkpts, NP_loc*NQ_loc})
                 buffer.resize(shape_t<2>{nkpts, NP_loc*NQ_loc});
               for (int s = 0; s < ns; ++s) {
-                nda::blas::gemm(f_Rk, DmR_3D(s, nda::ellipsis{}), buffer);
+                math::detail::gemm_guarded(f_Rk, DmR_3D(s, nda::ellipsis{}), buffer);
                 DmR_3D(s, nda::ellipsis{}) = buffer;
               }
             }
@@ -227,7 +227,7 @@ namespace methods {
               auto Dm_3D = nda::reshape(dDm_skPQ.local(), shape_t < 3 > {ns, nkpts, NP_loc * NQ_loc});
               auto FR_3D = nda::reshape(dF_skPQ.local(), shape_t < 3 > {ns, nkpts_ibz, NP_loc * NQ_loc});
               for (int s = 0; s < ns; ++s) {
-                nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
+                math::detail::gemm_guarded(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
                                 Dm_3D(s, nda::ellipsis{}), ComplexType(1.0), FR_3D(s, nda::ellipsis{}));
               }
             } else {

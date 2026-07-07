@@ -275,6 +275,14 @@ namespace solvers {
   public:
     utils::TimerManager& timer() { return _Timer; }
 
+    /**
+     * Print the RPA polarizability (Π) and screened-interaction (W) timers.
+     * These are recorded by eval_Pi_qdep / dyson_W_in_place and the bosonic
+     * FT engine but were previously never surfaced, leaving the dominant scGW
+     * cost invisible. Called at the end of update_w.
+     */
+    void print_timers(int level = 2);
+
   private:
 
     // optional container for screened interaction

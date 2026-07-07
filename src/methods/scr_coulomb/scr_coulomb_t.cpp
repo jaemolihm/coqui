@@ -129,6 +129,33 @@ namespace solvers {
                         mb_state.coqui_prefix, h5_iter,
                         thc.mpi()->comm, *thc.MF());
     }
+
+    print_timers();
+  }
+
+  void scr_coulomb_t::print_timers(int level) {
+    auto pi = [&](std::string const& n) { return _Timer.has(n) ? _Timer.elapsed(n) : 0.0; };
+    auto& ft = _scr_fourier.timer();
+    auto fw = [&](std::string const& n) { return ft.has(n) ? ft.elapsed(n) : 0.0; };
+
+    app_log(level, "\n  SCR-COULOMB (RPA Pi + W) timers");
+    app_log(level, "  -------------------------------");
+    if (pi("EVALUATE_PI_R") > 0.0) {
+      app_log(level, "    Evaluate Pi (R):       {0:8.3f} sec", pi("EVALUATE_PI_R"));
+      app_log(level, "      - Alloc:             {0:8.3f} sec", pi("PI_ALLOC_R"));
+      app_log(level, "      - Gij -> Guv:        {0:8.3f} sec", pi("PI_PRIM_TO_AUX"));
+      app_log(level, "      - FT (k<->R):        {0:8.3f} sec", pi("PI_FT_R"));
+      app_log(level, "      - Hadamard product:  {0:8.3f} sec", pi("PI_HADPROD_R"));
+    } else if (pi("EVALUATE_PI_K") > 0.0) {
+      app_log(level, "    Evaluate Pi (k):       {0:8.3f} sec", pi("EVALUATE_PI_K"));
+      app_log(level, "      - Alloc:             {0:8.3f} sec", pi("PI_ALLOC_K"));
+      app_log(level, "      - Gij -> Guv:        {0:8.3f} sec", pi("PI_PRIM_TO_AUX"));
+      app_log(level, "      - Hadamard product:  {0:8.3f} sec", pi("PI_HADPROD_K"));
+    }
+    app_log(level, "    Evaluate W (Dyson):    {0:8.3f} sec", pi("EVALUATE_W"));
+    app_log(level, "    Imag FT (tau->w):      {0:8.3f} sec", fw("IMAG_FT_TtoW"));
+    app_log(level, "    Imag FT (w->tau):      {0:8.3f} sec", fw("IMAG_FT_WtoT"));
+    app_log(level, "      - FT redistribute:   {0:8.3f} sec\n", fw("FT_REDISTRIBUTE"));
   }
 
   template<bool w_out, nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>

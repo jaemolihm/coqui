@@ -120,17 +120,17 @@ namespace methods {
         }
         _Timer.stop("SIGMA_PRIM_TO_AUX");
 
-        _Timer.start("SIGMA_ALLOC_R");
         auto G_tskPQ = dG_tskPQ.local();
         auto G_sktPQ = dG_sRtPQ.local();
+        _Timer.start("SIGMA_TRANSPOSE_R");
         for (size_t skt = 0; skt < ns * nkpts * nt_loc; ++skt) {
           size_t is = skt / (nkpts * nt_loc); // skt = is*nkpts*nt_loc + ik*nt_loc + it
           size_t ik = (skt / nt_loc) % nkpts;
           size_t it = skt % nt_loc;
           G_sktPQ(is, ik, it, nda::ellipsis{}) = G_tskPQ(it, is, ik, nda::ellipsis{});
         }
+        _Timer.stop("SIGMA_TRANSPOSE_R");
       }
-      _Timer.stop("SIGMA_ALLOC_R");
 
       math::shm::shared_array<nda::array_view<ComplexType,2>> sf_Rk(*mpi, {nkpts,nkpts});
 
@@ -141,14 +141,14 @@ namespace methods {
         auto GR_3D = nda::reshape(dG_sRtPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
         nda::matrix<ComplexType> R_buffer(nkpts, nt_loc*NP_loc*NQ_loc);
         for (long s = 0; s < ns; ++s) {
-          nda::blas::gemm(f_Rk, GR_3D(s, nda::ellipsis{}), R_buffer);
+          math::detail::gemm_guarded(f_Rk, GR_3D(s, nda::ellipsis{}), R_buffer);
           GR_3D(s, nda::ellipsis{}) = R_buffer;
         }
 
         if constexpr (!Winp_in_Rspace) {
           utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
           auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
-          nda::blas::gemm(f_Rk, WR_2D, R_buffer);
+          math::detail::gemm_guarded(f_Rk, WR_2D, R_buffer);
           WR_2D = R_buffer;
         }
         _Timer.stop("SIGMA_FT_R");
@@ -177,14 +177,14 @@ namespace methods {
         auto SigmaR_3D = nda::reshape(dSigma_sktPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
         nda::matrix <ComplexType> buffer(nkpts, nt_loc*NP_loc*NQ_loc);
         for (long s = 0; s < ns; ++s) {
-          nda::blas::gemm(f_kR, SigmaR_3D(s, nda::ellipsis{}), buffer);
+          math::detail::gemm_guarded(f_kR, SigmaR_3D(s, nda::ellipsis{}), buffer);
           SigmaR_3D(s, nda::ellipsis{}) = buffer;
         }
 
         if constexpr (!Wout_in_Rspace) {
           utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
           auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t < 2 > {nkpts, nt_loc * NP_loc * NQ_loc});
-          nda::blas::gemm(f_kR, WR_2D, buffer);
+          math::detail::gemm_guarded(f_kR, WR_2D, buffer);
           WR_2D = buffer;
         }
         _Timer.stop("SIGMA_FT_R");
@@ -193,18 +193,20 @@ namespace methods {
       _Timer.start("SIGMA_ALLOC_R");
       auto dSigma_tskPQ = make_distributed_array<local_Array_5D_t>(
           mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
+      _Timer.stop("SIGMA_ALLOC_R");
       {
         auto Sigma_tskPQ = dSigma_tskPQ.local();
         auto Sigma_sktPQ = dSigma_sktPQ.local();
+        _Timer.start("SIGMA_TRANSPOSE_R");
         for (size_t tsk = 0; tsk < nt_loc * ns * nkpts; ++tsk) {
           size_t it = tsk / (ns * nkpts); // tsk = it*ns*nkpts + is*nkpts + ik
           size_t is = (tsk / nkpts) % ns;
           size_t ik = tsk % nkpts;
           Sigma_tskPQ(it, is, ik, nda::ellipsis{}) = Sigma_sktPQ(is, ik, it, nda::ellipsis{});
         }
+        _Timer.stop("SIGMA_TRANSPOSE_R");
       }
       dSigma_sktPQ.reset();
-      _Timer.stop("SIGMA_ALLOC_R");
 
       // TODO redistribute over (t, k, P, Q) to minimize MPI along (P, Q)-axes
 
@@ -490,8 +492,8 @@ namespace methods {
           auto Delta_ij = Delta_loc(it, is, ik, nda::ellipsis{});
           auto Ssk = S_skij(is, ik, all, all);
           // Delta_ij = factor * S_ia * G_ab * S_bj
-          nda::blas::gemm(Ssk, G_ab, buffer_ib);
-          nda::blas::gemm(ComplexType(factor), buffer_ib, Ssk, ComplexType(0.0), Delta_ij);
+          math::detail::gemm_guarded(Ssk, G_ab, buffer_ib);
+          math::detail::gemm_guarded(ComplexType(factor), buffer_ib, Ssk, ComplexType(0.0), Delta_ij);
         }
         sDelta_tskij.win().fence();
         sDelta_tskij.all_reduce();

@@ -117,7 +117,7 @@ namespace solvers {
         for (size_t is=0; is<ns; ++is) {
           auto GpR_2D = nda::reshape(Gp_sRPQ_loc(is, nda::ellipsis{}),
                                      shape_t<2>{nkpts, NP_loc * NQ_loc});
-          nda::blas::gemm(f_Rk, GpR_2D, X_R_PQ);
+          math::detail::gemm_guarded(f_Rk, GpR_2D, X_R_PQ);
           GpR_2D = X_R_PQ;
         }
         _Timer.stop("PI_FT_R");
@@ -141,7 +141,7 @@ namespace solvers {
         for (size_t is=0; is<ns; ++is) {
           auto GnR_2D = nda::reshape(Gn_sRPQ_loc(is, nda::ellipsis{}),
                                      shape_t<2>{nkpts, NP_loc * NQ_loc});
-          nda::blas::gemm(f_Rk, GnR_2D, X_R_PQ);
+          math::detail::gemm_guarded(f_Rk, GnR_2D, X_R_PQ);
           GnR_2D = X_R_PQ;
         }
         _Timer.stop("PI_FT_R");
@@ -168,7 +168,7 @@ namespace solvers {
         auto Piq_2D = nda::reshape(Pi_tqPQ_loc(it,nda::ellipsis{}),
                                    shape_t<2>{nqpts_ibz, NP_loc*NQ_loc});
         auto GGR_2D = nda::reshape(GG_RPQ, shape_t<2>{nkpts, NP_loc*NQ_loc});
-        nda::blas::gemm(f_qR, GGR_2D, Piq_2D);
+        math::detail::gemm_guarded(f_qR, GGR_2D, Piq_2D);
         _Timer.stop("PI_FT_R");
       } else {
         Pi_tqPQ_loc(it,nda::ellipsis{}) = GG_RPQ;
@@ -389,7 +389,7 @@ namespace solvers {
         size_t ik = (skI / nImps) % nkpts_ibz;
         size_t imp = skI % nImps;
 
-        nda::blas::gemm(ComplexType(1.0), nda::dagger(C_skIai(is,ik,imp,nda::ellipsis{})),
+        math::detail::gemm_guarded(ComplexType(1.0), nda::dagger(C_skIai(is,ik,imp,nda::ellipsis{})),
                         C_skIai(is,ik,imp,nda::ellipsis{}),
                         ComplexType(0.0), P_ij);
 
@@ -400,8 +400,8 @@ namespace solvers {
 
         size_t nts = G_tskij.shape(0);
         for (size_t it=0; it<nts; ++it) {
-          nda::blas::gemm(G_tskij(it,is,ik,W_rng[imp],W_rng[imp]), P_ij, G_tmp);
-          nda::blas::gemm(ComplexType(1.0), nda::dagger(P_ij), G_tmp,
+          math::detail::gemm_guarded(G_tskij(it,is,ik,W_rng[imp],W_rng[imp]), P_ij, G_tmp);
+          math::detail::gemm_guarded(ComplexType(1.0), nda::dagger(P_ij), G_tmp,
                           ComplexType(0.0), GG_loc(it,is,ik,W_rng[imp],W_rng[imp]));
         }
 
@@ -430,7 +430,7 @@ namespace solvers {
         size_t ik = (skI / nImps) % nkpts_ibz;
         size_t imp = skI % nImps;
 
-        nda::blas::gemm(ComplexType(1.0), nda::dagger(C_skIai(is,ik,imp,nda::ellipsis{})),
+        math::detail::gemm_guarded(ComplexType(1.0), nda::dagger(C_skIai(is,ik,imp,nda::ellipsis{})),
                         C_skIai(is,ik,imp,nda::ellipsis{}),
                         ComplexType(0.0), P_ij);
 
@@ -441,8 +441,8 @@ namespace solvers {
 
         size_t nts = G_tskij.shape(0);
         for (size_t it=0; it<nts; ++it) {
-          nda::blas::gemm(G_tskij(it,is,ik,W_rng[imp],W_rng[imp]), P_ij_reg, G_tmp);
-          nda::blas::gemm(ComplexType(1.0), nda::dagger(P_ij_reg), G_tmp,
+          math::detail::gemm_guarded(G_tskij(it,is,ik,W_rng[imp],W_rng[imp]), P_ij_reg, G_tmp);
+          math::detail::gemm_guarded(ComplexType(1.0), nda::dagger(P_ij_reg), G_tmp,
                           ComplexType(0.0), GG_loc(it,is,ik,W_rng[imp],W_rng[imp]));
         }
 
