@@ -127,6 +127,44 @@ static auto const fun_21 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 static auto const fun_22 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self) { return self.qpts_ibz(); }, "self")};
 
+// eph_projector_overlaps
+static auto const fun_24 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self) {
+      return self.eph_projector_overlaps();
+    },
+    "self")};
+
+// eph_vertex_local
+static auto const fun_25 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self,
+       nda::array_const_view<ComplexType, 2> dV,
+       nda::array_const_view<double, 1> q_cryst) {
+      return self.eph_vertex_local(dV, q_cryst);
+    },
+    "self", "dV", "q_cryst")};
+
+// kpts_crystal
+static auto const fun_26 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self) { return self.kpts_crystal(); }, "self")};
+
+// filename
+static auto const fun_27 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self) { return self.filename(); }, "self")};
+
+// eph_vertex_nonlocal
+static auto const fun_28 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self, nda::array_const_view<double, 1> q_cryst) {
+      return self.eph_vertex_nonlocal(q_cryst);
+    },
+    "self", "q_cryst")};
+
+// compute_bare_eph_vertex
+static auto const fun_30 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self, nda::array_const_view<double, 1> q_cryst) {
+      return self.compute_bare_eph_vertex(q_cryst);
+    },
+    "self", "q_cryst")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -150,6 +188,12 @@ static const auto doc_d_19 = fun_19.doc(R"DOC()DOC");
 static const auto doc_d_20 = fun_20.doc(R"DOC()DOC");
 static const auto doc_d_21 = fun_21.doc(R"DOC()DOC");
 static const auto doc_d_22 = fun_22.doc(R"DOC()DOC");
+static const auto doc_d_24 = fun_24.doc(R"DOC()DOC");
+static const auto doc_d_25 = fun_25.doc(R"DOC()DOC");
+static const auto doc_d_26 = fun_26.doc(R"DOC()DOC");
+static const auto doc_d_27 = fun_27.doc(R"DOC()DOC");
+static const auto doc_d_28 = fun_28.doc(R"DOC()DOC");
+static const auto doc_d_30 = fun_30.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -200,6 +244,18 @@ PyMethodDef c2py::tp_methods<coqui_py::Mf>[] = {
      doc_d_21.c_str()},
     {"qpts_ibz", (PyCFunction)c2py::pyfkw<fun_22>, METH_VARARGS | METH_KEYWORDS,
      doc_d_22.c_str()},
+    {"eph_projector_overlaps", (PyCFunction)c2py::pyfkw<fun_24>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_24.c_str()},
+    {"eph_vertex_local", (PyCFunction)c2py::pyfkw<fun_25>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_25.c_str()},
+    {"kpts_crystal", (PyCFunction)c2py::pyfkw<fun_26>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_26.c_str()},
+    {"filename", (PyCFunction)c2py::pyfkw<fun_27>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_27.c_str()},
+    {"eph_vertex_nonlocal", (PyCFunction)c2py::pyfkw<fun_28>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_28.c_str()},
+    {"compute_bare_eph_vertex", (PyCFunction)c2py::pyfkw<fun_30>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_30.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

@@ -160,6 +160,85 @@ class pseudopot
                    math::nda::DistributedArrayOfRank<4> auto & hpsi,
                    bool symmetrize=false);
 
+  /**
+   * Nonlocal projector overlaps for the electron-phonon vertex, evaluated on
+   * the mean-field single-particle basis. Uses the same projectors β(G)
+   * ("vkb") and D-matrix that build the nonlocal pseudopotential for H0.
+   *
+   *   P(0,s,k,μ,a) = ⟨β_μ,k | φ_a,k⟩
+   *   P(d,s,k,μ,a) = ⟨β_μ,k | (k+G)_d φ_a,k⟩,   d = 1,2,3 → Cartesian x,y,z
+   *
+   * (k+G) is in Cartesian 1/bohr, so P(1..3) are the momentum-operator
+   * projector overlaps ⟨β|p̂_d φ⟩. Together with Dion() and the projector→atom
+   * maps they factorize the bare nonlocal e-ph vertex. Host only; h5 input for MF.
+   */
+  template<typename MF_t>
+  void eph_projector_overlaps(MF_t& mf, nda::array<ComplexType,5>& P);
+
+  /**
+   * Bare nonlocal electron-phonon vertex in the mean-field band basis:
+   *
+   *   g_nl(s, mode, k, m, n) = ⟨φ_{m,k+q}| dV^nl_mode |φ_{n,k}⟩,
+   *   mode = 3·κ + d   (atom κ, Cartesian direction d = x,y,z), nmodes = 3·nat.
+   *
+   * dV^nl is the derivative of the separable Kleinman-Bylander potential
+   *   V^nl = Σ_μ |β_μ⟩ D_μ ⟨β_μ|   (β_μ: projector of atom κ; D_μ: strength, Dion)
+   * w.r.t. the displacement of atom κ along d. The projector rides rigidly on the
+   * atom, β_μ(r) = β(r − τ_κ), so ∂_{τ_κd} β_μ = −∂_{r_d} β_μ = i p̂_d β_μ with the
+   * momentum operator p̂_d = −i∂_{r_d}; hence ⟨∂β_μ|φ⟩ = i⟨β_μ|p̂_d|φ⟩, the
+   * momentum-weighted projector overlap (for the Bloch basis p̂_d φ = (k+G)_d φ).
+   * The derivative hits the bra projector and the ket:
+   *   g_nl ∝ ⟨φ_{k+q}|β_μ⟩ D_μ ⟨∂β_μ|φ_k⟩ + ⟨φ_{k+q}|∂β_μ⟩ D_μ ⟨β_μ|φ_k⟩
+   *        = i D_μ [ ⟨φ_{k+q}|β_μ⟩⟨β_μ|p̂_d|φ_k⟩ − ⟨φ_{k+q}|p̂_d|β_μ⟩⟨β_μ|φ_k⟩ ].
+   *
+   * We fold the two terms into one bilinear conj(B_{k+q})·D_thc·B_k (a single gemm
+   * per mode) via a ± trick:
+   *   B(k,m,μ') = (⟨β_ip|φ_{m,k}⟩ ± i⟨β_ip|p̂_d|φ_{m,k}⟩)/√2,
+   * the '+' block sits at μ'=ip+nproj·d, the '−' block at μ'=ip+nproj·(d+3).
+   * D_thc is block-diagonal in
+   * μ', carrying the diagonal KB strength +D_ii on the '+' block and −D_ii on the
+   * '−' block; that sign flip is what makes conj(B_{k+q})·D_thc·B_k reproduce the
+   * antisymmetric (bra − ket) derivative combination above. (Momentum convention
+   * alphap_QE = i·CoQuí; only diagonal Dion, e.g. ONCV, is supported.)
+   *
+   * Spin-independent (replicated over spin). Requires npol=1 and a full-BZ
+   * k-grid (nkpts == nkpts_ibz).
+   */
+  template<typename MF_t>
+  auto eph_vertex_nonlocal(MF_t& mf, nda::array_const_view<double,1> q_cryst)
+    -> nda::array<ComplexType,5>;
+
+  /**
+   * Ionic local perturbation dV^loc_mode(r) on the dense FFT grid,
+   * for the bare electron-phonon vertex at phonon wavevector q_cryst:
+   *
+   *   dV(G) = -i (q+G)_d · vloc_sp(|q+G|) · e^{-i(q+G)·τ_κ},  mode = 3·κ + d,
+   *
+   * with vloc_sp(|q+G|) reconstructed from the per-species radial local
+   * pseudopotential (h5 group "vloc_radial", written by pw2coqui) via the
+   * erf-compensated Simpson radial FT (QE vloc_of_g/setlocq). Returns
+   * (nmodes, nnr) in **Hartree** (the UPF vloc is Rydberg; converted here),
+   * C order (ix*NY+iy)*NZ+iz — the layout eph_vertex_local expects.
+   */
+  template<typename MF_t>
+  auto build_dvloc_ion(MF_t& mf, nda::array_const_view<double,1> q_cryst)
+    -> nda::array<ComplexType,2>;
+
+  // --- accessors for assembling the nonlocal e-ph vertex ---
+  // number of projectors (per polarization)
+  long n_proj() const { return Pskna.shape()[2]/npol; }
+  // projectors per species, species index of each atom, first-projector offset
+  nda::array<int,1> const& proj_per_species() const { return nh; }
+  nda::array<int,1> const& species_of_atom() const { return ityp; }
+  nda::array<int,1> const& proj_offset() const { return ofs; }
+  int num_polarizations() const { return npol; }
+  // D-matrix (dion, in Hartree) as a host copy: (nsp, nhm*npol, nhm*npol)
+  nda::array<ComplexType,3> Dion() const {
+    nda::array<ComplexType,3> D(Dnn.local().shape());
+    D() = Dnn.local();
+    return D;
+  }
+
   private:
 
   // mpi communicators
@@ -240,9 +319,25 @@ class pseudopot
   void read_vnl_pw2bgw(MF_t &mf, std::string outdir); 
 
   template<typename MF_t>
-  void read_vnl_h5(MF_t &mf, h5::group& grp); 
+  void read_vnl_h5(MF_t &mf, h5::group& grp);
 
-  void add_vnl_impl(nda::range k_range, nda::range b_range, 
+  // Build the projector-miller -> 'w' truncated-grid index map k2g(nk, npwx)
+  // (reads "miller_k{ik}" from grp). Shared by read_vnl_h5 and
+  // eph_projector_overlaps so both use identical G ordering.
+  template<typename MF_t>
+  void build_projector_k2g(MF_t& mf, h5::group& grp,
+                           nda::array_const_view<int,1> npw,
+                           nda::array_view<long,2> k2g);
+
+  // Read projector `ib` at IBZ k-point `k` ("projector_k{k}"), scatter its
+  // conjugate onto the truncated 'w' grid via k2g_k, returning vkb(ngm). `buff`
+  // is a (1, npwx) scratch. Shared by read_vnl_h5 and eph_projector_overlaps.
+  void read_projector_vkb(h5::group& grp, long k, int ib, int npw_k,
+                          nda::array_const_view<long,1> k2g_k,
+                          nda::array_view<ComplexType,2> buff,
+                          nda::array_view<ComplexType,1> vkb);
+
+  void add_vnl_impl(nda::range k_range, nda::range b_range,
                nda::ArrayOfRank<3> auto const& Dion, 
                math::nda::DistributedArrayOfRank<4> auto & Hij);
 

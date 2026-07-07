@@ -347,13 +347,14 @@ subroutine write_pp(h5_f)
   USE wavefunctions, ONLY : psic
   USE mp_wave, ONLY : mergewf
   USE uspp_init,            ONLY : init_us_2
-  USE xc_lib, ONLY : xclib_dft_is 
+  USE xc_lib, ONLY : xclib_dft_is
   USE noncollin_module, ONLY : domag
+  USE atom, ONLY : rgrid, msh
 
   IMPLICIT NONE
 
   type(qeh5_file), intent(inout) :: h5_f
-  type(qeh5_file)    :: h5_h, h5_n
+  type(qeh5_file)    :: h5_h, h5_n, h5_vr, h5_sp
 
   integer :: ns, nk, ikb, j, ig, ik, ik_loc, i, vi3(3), ierr, l2g, ngg, npw, ipsour
   integer :: ngm_s, ngm_e, ngm_l, ih, jh, ijh, nij, is, ir, nt
@@ -369,6 +370,8 @@ subroutine write_pp(h5_f)
   complex (DP), allocatable :: vkb_g ( : ), vloc( :, :, : ) 
   complex (DP), allocatable :: vkb_g_root ( :, : )
   character(len=2) sp_name
+  real(dp), allocatable :: zval(:), r_sp(:), rab_sp(:), vloc_sp(:)
+  integer :: mshn
 
   ns = 1
   if(lsda) ns = 2
@@ -418,8 +421,39 @@ subroutine write_pp(h5_f)
       call h5_write_tensor4_c(h5_n,dvan_so,"dion_so")       
     else
       ! (nhm,nhm,nsp)
-      call h5_write_tensor_r(h5_n,dvan,"dion")       
+      call h5_write_tensor_r(h5_n,dvan,"dion")
     endif
+    !
+    ! Per-species radial ionic local potential, for building dvloc(r) at
+    ! arbitrary q (CoQui e-ph vertex). QE reconstructs vloc_sp(|q+G|) exactly
+    ! from the radial form via the erf-compensated Simpson FT (see vloc_of_g),
+    ! rather than interpolating a |G| table, so the radial data is stored here.
+    ! Arrays are truncated to msh(nt) (r < rcut, forced odd for Simpson) to
+    ! match exactly the mesh QE integrates over. Units: r, rab in bohr;
+    ! vloc in Rydberg (NLCC-free ionic local potential); z_valence = upf%zp.
+    allocate(zval(nsp))
+    do nt = 1, nsp
+      zval(nt) = upf(nt)%zp
+    enddo
+    call h5_write_vector_r(h5_n,zval,"z_valence")
+    deallocate(zval)
+
+    call qeh5_open_group(h5_n, "vloc_radial", h5_vr) ! /Hamiltonian/{pp_type}/vloc_radial
+    do nt = 1, nsp
+      write ( sp_name, '(I2)') nt-1
+      call qeh5_open_group(h5_vr, "sp"//adjustl(trim(sp_name)), h5_sp)
+      mshn = msh(nt)
+      allocate(r_sp(mshn), rab_sp(mshn), vloc_sp(mshn))
+      r_sp(1:mshn)    = rgrid(nt)%r(1:mshn)
+      rab_sp(1:mshn)  = rgrid(nt)%rab(1:mshn)
+      vloc_sp(1:mshn) = upf(nt)%vloc(1:mshn)
+      call h5_write_vector_r(h5_sp,r_sp,"r")
+      call h5_write_vector_r(h5_sp,rab_sp,"rab")
+      call h5_write_vector_r(h5_sp,vloc_sp,"vloc")
+      deallocate(r_sp, rab_sp, vloc_sp)
+      call qeh5_close(h5_sp)
+    enddo
+    call qeh5_close(h5_vr)
     !
   endif ! ionode
 

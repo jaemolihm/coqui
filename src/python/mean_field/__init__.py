@@ -19,6 +19,7 @@ limitations under the License.
 """
 
 from .mf import make_mf
+from .eph import compute_bare_eph_vertex
 
 # import PySCF converter module only if PySCF is available
 try:
@@ -28,4 +29,4 @@ except ImportError:
 else:
     from . import pyscf_interface
 
-__all__ = ["make_mf"]
+__all__ = ["make_mf", "compute_bare_eph_vertex"]
