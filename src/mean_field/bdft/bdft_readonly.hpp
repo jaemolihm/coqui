@@ -340,7 +340,7 @@ public:
 
   // Writer for an augmented (non-eigenstate) orbital basis. `psi` is the full
   // basis (all bands, b0=0 semantics) already assembled by the caller;
-  // `eigval_ibz` holds placeholder (NaN) energies over the IBZ,
+  // `eigval_ibz` holds the kinetic-energy seed energies over the IBZ,
   // (nspin, nkpts_ibz, nbnd). Marks the system augmented and writes the
   // pseudopotential so downstream can recompute H0 (h0_source="compute").
   template<class MF>

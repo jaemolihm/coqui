@@ -94,9 +94,9 @@ inline simple_dyson make_dyson_with_h0_source(
     const std::string& chkpt_prefix,
     double mu_tol = 1e-9,
     std::string mu_update_alg = "bisection") {
-  // An augmented (non-eigenstate) basis carries only NaN placeholder eigval, so
-  // H0 read from a checkpoint would be inconsistent with the basis. Force it to
-  // be recomputed from the orbitals.
+  // An augmented (non-eigenstate) basis carries only kinetic-energy seed eigval,
+  // so H0 read from a checkpoint would be inconsistent with the basis. Force it
+  // to be recomputed from the orbitals.
   utils::check(!(mf_ptr != nullptr && mf_ptr->is_augmented()) || h0_source == "compute",
       "h0_source must be \"compute\" for an augmented mean-field basis (got \"{}\"). "
       "The augmented basis is not an eigenbasis, so H0 must be built from the orbitals.",
