@@ -90,6 +90,27 @@ namespace methods {
       using local_Arrayv_5D_t = memory::array_view<HOST_MEMORY, ComplexType, 5>;
       using math::nda::make_distributed_array;
 
+      // k<->R transform: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1 forces the
+      // dense-gemm path (kept for A/B testing; also the only path in non-FFTW builds).
+      // Preconditions for the FFT (full, Gamma-centered, symmetry-unreduced MP mesh)
+      // are guaranteed by the "Symmetry not allowed" check above.
+#if defined(ENABLE_FFTW)
+      const bool use_fft = (nkpts != 1) && !utils::debug_gemm_ft();
+#else
+      const bool use_fft = false;
+#endif
+      if (use_fft && !_fft_k) {
+        _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
+        _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
+      }
+      if (nkpts != 1) {
+        static bool ft_path_logged = false;
+        if (!ft_path_logged) {
+          app_log(2, "  GW Sigma k<->R transform: {}", use_fft ? "FFT" : "gemm");
+          ft_path_logged = true;
+        }
+      }
+
       // from primary to auxiliary basis: G_ij -> G_PQ
       _Timer.start("SIGMA_ALLOC_R");
       auto dG_sRtPQ = make_distributed_array<local_Array_5D_t>(
@@ -136,20 +157,26 @@ namespace methods {
 
       if (nkpts != 1) {
         _Timer.start("SIGMA_FT_R");
-        auto f_Rk = sf_Rk.local();
-        utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
         auto GR_3D = nda::reshape(dG_sRtPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
-        nda::matrix<ComplexType> R_buffer(nkpts, nt_loc*NP_loc*NQ_loc);
-        for (long s = 0; s < ns; ++s) {
-          math::detail::gemm_guarded(f_Rk, GR_3D(s, nda::ellipsis{}), R_buffer);
-          GR_3D(s, nda::ellipsis{}) = R_buffer;
-        }
-
-        if constexpr (!Winp_in_Rspace) {
-          utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-          auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
-          math::detail::gemm_guarded(f_Rk, WR_2D, R_buffer);
-          WR_2D = R_buffer;
+        auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+        if (use_fft) {
+          // Blocked FFT is safe in-place (block-sequential); k->R on G (kpts) and W (Qpts).
+          for (long s = 0; s < ns; ++s)
+            _fft_k->k_to_R(GR_3D(s, nda::ellipsis{}), GR_3D(s, nda::ellipsis{}));
+          if constexpr (!Winp_in_Rspace) _fft_q->k_to_R(WR_2D, WR_2D);
+        } else {
+          auto f_Rk = sf_Rk.local();
+          utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+          nda::matrix<ComplexType> R_buffer(nkpts, nt_loc*NP_loc*NQ_loc);
+          for (long s = 0; s < ns; ++s) {
+            math::detail::gemm_guarded(f_Rk, GR_3D(s, nda::ellipsis{}), R_buffer);
+            GR_3D(s, nda::ellipsis{}) = R_buffer;
+          }
+          if constexpr (!Winp_in_Rspace) {
+            utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+            math::detail::gemm_guarded(f_Rk, WR_2D, R_buffer);
+            WR_2D = R_buffer;
+          }
         }
         _Timer.stop("SIGMA_FT_R");
       }
@@ -170,22 +197,27 @@ namespace methods {
 
       if (nkpts != 1) {
         // FT back to q-space
-        auto f_kR = sf_Rk.local();
-        utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-
         _Timer.start("SIGMA_FT_R");
         auto SigmaR_3D = nda::reshape(dSigma_sktPQ.local(), shape_t<3>{ns, nkpts, nt_loc * NP_loc * NQ_loc});
-        nda::matrix <ComplexType> buffer(nkpts, nt_loc*NP_loc*NQ_loc);
-        for (long s = 0; s < ns; ++s) {
-          math::detail::gemm_guarded(f_kR, SigmaR_3D(s, nda::ellipsis{}), buffer);
-          SigmaR_3D(s, nda::ellipsis{}) = buffer;
-        }
-
-        if constexpr (!Wout_in_Rspace) {
-          utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-          auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t < 2 > {nkpts, nt_loc * NP_loc * NQ_loc});
-          math::detail::gemm_guarded(f_kR, WR_2D, buffer);
-          WR_2D = buffer;
+        auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+        if (use_fft) {
+          // R->k on Sigma (kpts) and W (Qpts), in-place.
+          for (long s = 0; s < ns; ++s)
+            _fft_k->R_to_k(SigmaR_3D(s, nda::ellipsis{}), SigmaR_3D(s, nda::ellipsis{}));
+          if constexpr (!Wout_in_Rspace) _fft_q->R_to_k(WR_2D, WR_2D);
+        } else {
+          auto f_kR = sf_Rk.local();
+          utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+          nda::matrix<ComplexType> buffer(nkpts, nt_loc*NP_loc*NQ_loc);
+          for (long s = 0; s < ns; ++s) {
+            math::detail::gemm_guarded(f_kR, SigmaR_3D(s, nda::ellipsis{}), buffer);
+            SigmaR_3D(s, nda::ellipsis{}) = buffer;
+          }
+          if constexpr (!Wout_in_Rspace) {
+            utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+            math::detail::gemm_guarded(f_kR, WR_2D, buffer);
+            WR_2D = buffer;
+          }
         }
         _Timer.stop("SIGMA_FT_R");
       }

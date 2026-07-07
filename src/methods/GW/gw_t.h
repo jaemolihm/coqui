@@ -35,6 +35,7 @@
 
 #include "mean_field/MF.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
+#include "numerics/fft/fft_kR.hpp"
 #include "methods/scr_coulomb/scr_coulomb_t.h"
 #include "methods/ERI/detail/concepts.hpp"
 
@@ -271,6 +272,11 @@ namespace methods {
       long _iter = 0;
       std::string _output = "coqui";
       utils::TimerManager _Timer;
+
+      // Blocked-FFT engines for the k<->R self-energy transform (eval_Sigma_all_Rspace).
+      // Built lazily on first use; _fft_k transforms kpts-indexed G/Sigma, _fft_q
+      // the Qpts-indexed W. The dense-gemm path is used when COQUI_DEBUG_GEMM_FT is set.
+      std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
 
     public:
       long& iter() { return _iter; }

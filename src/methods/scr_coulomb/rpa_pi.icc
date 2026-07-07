@@ -68,13 +68,35 @@ namespace solvers {
     auto [t_origin, q_origin, P_origin, Q_origin] = dPi_tqPQ.origin();
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
 
-    // prepare Fourier transform matrices between k-space and R-space
+    // k<->R transform: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1 or a
+    // symmetry-reduced q-mesh (nqpts_ibz < nkpts) selects the dense-gemm path.
+    // The FFT needs the full, Gamma-centered MP mesh, so Qpts_ibz == full Qpts.
+#if defined(ENABLE_FFTW)
+    const bool use_fft = (nkpts != 1) && (nqpts_ibz == nkpts) && !utils::debug_gemm_ft();
+#else
+    const bool use_fft = false;
+#endif
+    if (use_fft && !_fft_k) {
+      _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
+      _fft_q.emplace(MF->Qpts_ibz(), MF->lattv(), MF->kp_grid());
+    }
+    if (nkpts != 1) {
+      static bool pi_ft_path_logged = false;
+      if (!pi_ft_path_logged) {
+        app_log(2, "  RPA Pi k<->R transform: {}", use_fft ? "FFT" : "gemm");
+        pi_ft_path_logged = true;
+      }
+    }
+
+    // Fourier transform matrices between k-space and R-space (dense-gemm path only)
     math::shm::shared_array<nda::array_view<ComplexType,2>> sf_Rk(*mpi, {nkpts,nkpts});
-    utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-    auto f_Rk = sf_Rk.local();
     math::shm::shared_array<nda::array_view<ComplexType,2>> sf_qR(*mpi,{nqpts_ibz,nkpts});
-    utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts_ibz(), MF->lattv(), MF->kp_grid(), sf_qR);
+    auto f_Rk = sf_Rk.local();
     auto f_qR = sf_qR.local();
+    if (!use_fft) {
+      utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
+      utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts_ibz(), MF->lattv(), MF->kp_grid(), sf_qR);
+    }
 
     // Setup t_intra_comm
     mpi3::communicator t_intra_comm = mpi->comm.split(t_origin, mpi->comm.rank());
@@ -117,8 +139,12 @@ namespace solvers {
         for (size_t is=0; is<ns; ++is) {
           auto GpR_2D = nda::reshape(Gp_sRPQ_loc(is, nda::ellipsis{}),
                                      shape_t<2>{nkpts, NP_loc * NQ_loc});
-          math::detail::gemm_guarded(f_Rk, GpR_2D, X_R_PQ);
-          GpR_2D = X_R_PQ;
+          if (use_fft) {
+            _fft_k->k_to_R(GpR_2D, GpR_2D);
+          } else {
+            math::detail::gemm_guarded(f_Rk, GpR_2D, X_R_PQ);
+            GpR_2D = X_R_PQ;
+          }
         }
         _Timer.stop("PI_FT_R");
       }
@@ -141,8 +167,12 @@ namespace solvers {
         for (size_t is=0; is<ns; ++is) {
           auto GnR_2D = nda::reshape(Gn_sRPQ_loc(is, nda::ellipsis{}),
                                      shape_t<2>{nkpts, NP_loc * NQ_loc});
-          math::detail::gemm_guarded(f_Rk, GnR_2D, X_R_PQ);
-          GnR_2D = X_R_PQ;
+          if (use_fft) {
+            _fft_k->k_to_R(GnR_2D, GnR_2D);
+          } else {
+            math::detail::gemm_guarded(f_Rk, GnR_2D, X_R_PQ);
+            GnR_2D = X_R_PQ;
+          }
         }
         _Timer.stop("PI_FT_R");
       }
@@ -168,7 +198,11 @@ namespace solvers {
         auto Piq_2D = nda::reshape(Pi_tqPQ_loc(it,nda::ellipsis{}),
                                    shape_t<2>{nqpts_ibz, NP_loc*NQ_loc});
         auto GGR_2D = nda::reshape(GG_RPQ, shape_t<2>{nkpts, NP_loc*NQ_loc});
-        math::detail::gemm_guarded(f_qR, GGR_2D, Piq_2D);
+        if (use_fft) {
+          _fft_q->R_to_k(GGR_2D, Piq_2D);
+        } else {
+          math::detail::gemm_guarded(f_qR, GGR_2D, Piq_2D);
+        }
         _Timer.stop("PI_FT_R");
       } else {
         Pi_tqPQ_loc(it,nda::ellipsis{}) = GG_RPQ;
