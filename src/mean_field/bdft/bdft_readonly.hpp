@@ -338,6 +338,131 @@ public:
     sys.mpi->comm.barrier();
   }
 
+  // Writer for an augmented (non-eigenstate) orbital basis. `psi` is the full
+  // basis (all bands, b0=0 semantics) already assembled by the caller;
+  // `eigval_ibz` holds placeholder (NaN) energies over the IBZ,
+  // (nspin, nkpts_ibz, nbnd). Marks the system augmented and writes the
+  // pseudopotential so downstream can recompute H0 (h0_source="compute").
+  template<class MF>
+  bdft_readonly(MF& mf, std::string fn,
+                math::nda::DistributedArray auto const& psi,
+                nda::array<double,3> const& eigval_ibz,
+                std::string augment_type_in) :
+    sys(mf,fn,false),
+    h5file(std::nullopt),
+    ecut(sys.ecutrho), fft_mesh(sys.fft_mesh),
+    wfc_g(*mf.wfc_truncated_grid()),
+    ksymms(detail::make_ksymms(sys.bz())),
+    swfc_maps(detail::make_swfc_maps(sys,ksymms,fft_mesh,wfc_g))
+  {
+    constexpr int rank = math::nda::get_rank<std::decay_t<decltype(psi)>>;
+    static_assert( rank==3 or rank==4, "Rank mismatch");
+    constexpr int i0 = (rank==3?0:1);
+    decltype(nda::range::all) all;
+
+    utils::check( sys.nspin == sys.nspin_in_basis, "Error: Finish implementation of nspin_in_basis");
+    utils::check( wfc_g.size() == psi.global_shape()[i0+2], "Shape mismatch.");
+    utils::check( sys.bz().nkpts_ibz == psi.global_shape()[i0+0], "Shape mismatch.");
+    if constexpr (rank==4)
+      utils::check( sys.nspin == psi.global_shape()[0], "Shape mismatch.");
+
+    int norb = psi.global_shape()[i0+1];
+    int ngm = wfc_g.size();
+    int nkpts = sys.bz().nkpts;
+    int nkpts_ibz = sys.bz().nkpts_ibz;
+
+    utils::check( eigval_ibz.extent(0)==sys.nspin and eigval_ibz.extent(1)==nkpts_ibz and
+                  eigval_ibz.extent(2)==norb,
+                  "bdft_readonly(augment): eigval_ibz shape mismatch: ({},{},{}) vs ({},{},{}).",
+                  eigval_ibz.extent(0),eigval_ibz.extent(1),eigval_ibz.extent(2),
+                  sys.nspin,nkpts_ibz,norb);
+
+    sys.nbnd = norb;
+    sys.augmented = true;
+    sys.augment_type = std::move(augment_type_in);
+    // eigval/occ span the full BZ; fill from IBZ and propagate by symmetry.
+    sys.occ    = nda::array<double,3>::zeros({sys.nspin,nkpts,norb});
+    sys.eigval = nda::array<double,3>::zeros({sys.nspin,nkpts,norb});
+    for(int is=0; is<sys.nspin; ++is)
+      for(int ik=0; ik<nkpts; ++ik) {
+        int iks = sys.bz().kp_to_ibz(ik);
+        sys.eigval(is,ik,all) = eigval_ibz(is,iks,all);
+      }
+
+    sys.mpi->comm.barrier();
+    nda::range s_range(sys.nspin);
+    if constexpr (rank==4)
+      s_range = psi.local_range(0);
+    auto k_range = psi.local_range(i0+0);
+    auto a_range = psi.local_range(i0+1);
+    auto g_range = psi.local_range(i0+2);
+    if(sys.mpi->comm.root()) {
+      h5::file file = h5::file(sys.filename, 'w');
+      h5::group grp(file);
+      sys.save(grp);
+      h5::group ogrp = grp.open_group("Orbitals");
+      {
+        nda::array<int,2> miller(ngm,3);
+        utils::generate_miller_index(wfc_g.gv_to_fft(),miller,wfc_g.mesh());
+        nda::h5_write(ogrp,"miller_wfc",miller,false);
+        h5::h5_write(ogrp,"wfc_ecut",wfc_g.ecut());
+        nda::array<int,1> mesh(wfc_g.mesh());
+        nda::h5_write(ogrp,"wfc_fft_grid",mesh,false);
+        h5::h5_write(ogrp,"wfc_ngm",int(wfc_g.size()));
+      }
+      nda::array<ComplexType,2> psik(norb,ngm);
+      for( int ik=0; ik<nkpts_ibz; ++ik ) {
+        for( int is=0; is<sys.nspin; ++is ) {
+          psik() = 0.0;
+          if( is >= s_range.first() and is < s_range.last() and
+              ik >= k_range.first() and ik < k_range.last() ) {
+            if constexpr (rank == 4) {
+              psik(a_range, g_range ) = psi.local()(is-s_range.first(),ik-k_range.first(),all,all);
+            } else {
+              psik(a_range, g_range ) = psi.local()(ik-k_range.first(),all,all);
+            }
+          }
+          sys.mpi->comm.reduce_in_place_n(psik.data(),psik.size(),std::plus<>{},0);
+          nda::h5_write(ogrp,"psi_s"+std::to_string(is)+"_k"+std::to_string(ik),psik,false);
+          sys.mpi->comm.barrier();
+        }
+      }
+      h5::group hgrp = grp.create_group("Hamiltonian");
+      // write pseudopot so H0 can be recomputed in the augmented basis
+      if(mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) {
+        hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.outdir(),mf::xml_input_type);
+      } else if(mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source) {
+        hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.filename(),mf::h5_input_type);
+      }
+    } else {
+      nda::array<ComplexType,2> psik(norb,ngm);
+      for( int ik=0; ik<nkpts_ibz; ++ik ) {
+        for( int is=0; is<sys.nspin; ++is ) {
+          psik() = 0.0;
+          if( is >= s_range.first() and is < s_range.last() and
+              ik >= k_range.first() and ik < k_range.last() ) {
+            if constexpr (rank == 4) {
+              psik( a_range, g_range ) = psi.local()(is-s_range.first(),ik-k_range.first(),all,all);
+            } else {
+              psik( a_range, g_range ) = psi.local()(ik-k_range.first(),all,all);
+            }
+          }
+          sys.mpi->comm.reduce_in_place_n(psik.data(),psik.size(),std::plus<>{},0);
+          sys.mpi->comm.barrier();
+        }
+      }
+    }
+    sys.mpi->comm.barrier();
+
+    // build symmetry rotations
+    auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
+    if(slist.size() > 0)
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+
+    print_metadata("CoQuí mean-field reader (augmented basis)");
+    sys.mpi->comm.barrier();
+  }
+
   template<class MF>
   bdft_readonly(MF& mf, std::string fn, long n0,
     	    nda::array<std::pair<long,double>,2> const& orb_list) :

@@ -127,6 +127,15 @@ static auto const fun_21 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 static auto const fun_22 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self) { return self.qpts_ibz(); }, "self")};
 
+// augment_basis
+static auto const fun_23 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self, const std::string &prefix,
+       const std::string &outdir, const std::string &type, long nbnd_aug,
+       double epstol) {
+      return self.augment_basis(prefix, outdir, type, nbnd_aug, epstol);
+    },
+    "self", "prefix", "outdir", "type", "nbnd_aug", "epstol")};
+
 // eph_projector_overlaps
 static auto const fun_24 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self) {
@@ -158,6 +167,20 @@ static auto const fun_28 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     },
     "self", "q_cryst")};
 
+// augment_basis_deltapsi
+static auto const fun_29 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self, const std::string &prefix,
+       const std::string &outdir, const std::string &deltapsi_dir,
+       const std::string &elph_dir, const std::vector<long> &iq_list,
+       long nmodes, long nbnd_aug, long nbnd_mf, double smearing_deltapsi,
+       double epstol) {
+      return self.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
+                                     iq_list, nmodes, nbnd_aug, nbnd_mf,
+                                     smearing_deltapsi, epstol);
+    },
+    "self", "prefix", "outdir", "deltapsi_dir", "elph_dir", "iq_list", "nmodes",
+    "nbnd_aug", "nbnd_mf", "smearing_deltapsi", "epstol")};
+
 // compute_bare_eph_vertex
 static auto const fun_30 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self, nda::array_const_view<double, 1> q_cryst) {
@@ -188,11 +211,13 @@ static const auto doc_d_19 = fun_19.doc(R"DOC()DOC");
 static const auto doc_d_20 = fun_20.doc(R"DOC()DOC");
 static const auto doc_d_21 = fun_21.doc(R"DOC()DOC");
 static const auto doc_d_22 = fun_22.doc(R"DOC()DOC");
+static const auto doc_d_23 = fun_23.doc(R"DOC()DOC");
 static const auto doc_d_24 = fun_24.doc(R"DOC()DOC");
 static const auto doc_d_25 = fun_25.doc(R"DOC()DOC");
 static const auto doc_d_26 = fun_26.doc(R"DOC()DOC");
 static const auto doc_d_27 = fun_27.doc(R"DOC()DOC");
 static const auto doc_d_28 = fun_28.doc(R"DOC()DOC");
+static const auto doc_d_29 = fun_29.doc(R"DOC()DOC");
 static const auto doc_d_30 = fun_30.doc(R"DOC()DOC");
 
 // ----- Method table ----
@@ -244,6 +269,8 @@ PyMethodDef c2py::tp_methods<coqui_py::Mf>[] = {
      doc_d_21.c_str()},
     {"qpts_ibz", (PyCFunction)c2py::pyfkw<fun_22>, METH_VARARGS | METH_KEYWORDS,
      doc_d_22.c_str()},
+    {"augment_basis", (PyCFunction)c2py::pyfkw<fun_23>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_23.c_str()},
     {"eph_projector_overlaps", (PyCFunction)c2py::pyfkw<fun_24>,
      METH_VARARGS | METH_KEYWORDS, doc_d_24.c_str()},
     {"eph_vertex_local", (PyCFunction)c2py::pyfkw<fun_25>,
@@ -256,6 +283,8 @@ PyMethodDef c2py::tp_methods<coqui_py::Mf>[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_28.c_str()},
     {"compute_bare_eph_vertex", (PyCFunction)c2py::pyfkw<fun_30>,
      METH_VARARGS | METH_KEYWORDS, doc_d_30.c_str()},
+    {"augment_basis_deltapsi", (PyCFunction)c2py::pyfkw<fun_29>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_29.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
