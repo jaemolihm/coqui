@@ -2014,8 +2014,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.start("ALLOC");
   // Tkug for ipts in a block, distributed over u (in shared memory)
   Timer.start("A_shmwin");
+  // fully written by the fill_Tkug_u gemm (all ik, all nI_per_node rows, all g
+  // columns collectively) before the FFT scatter reads it -> skip zero-init
   math::shm::shared_array<nda::array_view<ComplexType,3>> sTkug_u(*mpi,
-      {kp_order.size(),nI_per_node,dPsia.global_shape()[4]});
+      {kp_order.size(),nI_per_node,dPsia.global_shape()[4]}, false);
   Timer.stop("A_shmwin");
   auto sTkug_u_loc = sTkug_u.local();
 
@@ -2077,12 +2079,16 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
 
   // for FFT g<->r, allocate later
   Timer.start("A_shmwin");
+  // These three work buffers are fully written before first read each block:
+  // Tkur via the per-block T2d()=0 + copy_select; TRur via the beta=0 kR gemm
+  // (or direct copy at nkpts==1); ZRur via the conj-copy loop (Xb branch) or
+  // aliases TRur otherwise -> skip zero-init.
   math::shm::shared_array<nda::array_view<ComplexType,1>> sTkur_1d(*mpi,
-      {std::max(nkloc,nqpts_ibz)*nI_per_node*rho_g.nnr()});
+      {std::max(nkloc,nqpts_ibz)*nI_per_node*rho_g.nnr()}, false);
   math::shm::shared_array<nda::array_view<ComplexType,1>> sTRur_1d(*mpi,
-      {nkpts*nI_per_node*rho_g.nnr()});
+      {nkpts*nI_per_node*rho_g.nnr()}, false);
   math::shm::shared_array<nda::array_view<ComplexType,1>> sZRur_1d(*mpi,
-      { ((Xb!=nullptr)?nkpts*nI_per_node*rho_g.nnr():1) });
+      { ((Xb!=nullptr)?nkpts*nI_per_node*rho_g.nnr():1) }, false);
   Timer.stop("A_shmwin");
   auto Tkur_1d = sTkur_1d.local();
   auto TRur_1d = sTRur_1d.local();

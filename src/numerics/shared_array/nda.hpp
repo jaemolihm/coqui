@@ -63,37 +63,37 @@ namespace math {
         or Array_view_t::layout_t::is_stride_order_C(), "Ordering mismatch.");
     public:
       shared_array(mpi3::shared_communicator* node_comm,
-                   std::array<long, rank> shape) :
+                   std::array<long, rank> shape, bool zero_init = true) :
           _node_comm(node_comm),
           _size(std::accumulate(shape.cbegin(), shape.cend(), (mpi3::size_t)1, std::multiplies<>{})),
           _shape(shape),
           _win(std::make_unique<mpi3::shared_window<value_type>>(*node_comm, (node_comm->root()) ? _size : 0))
       {
-        check_and_init();
+        check_and_init(zero_init);
       }
 
       shared_array(mpi3::communicator *gcomm,
                    mpi3::communicator *internode_comm,
                    mpi3::shared_communicator *node_comm,
-                   std::array<long, rank> shape):
+                   std::array<long, rank> shape, bool zero_init = true):
           _gcomm(gcomm), _internode_comm(internode_comm), _node_comm(node_comm),
           _size(std::accumulate(shape.cbegin(), shape.cend(), (mpi3::size_t)1, std::multiplies<>{})),
           _shape(shape),
           _win(std::make_unique<mpi3::shared_window<value_type>>(*node_comm, (node_comm->root()) ? _size : 0))
       {
-        check_and_init();
+        check_and_init(zero_init);
       }
- 
+
       shared_array(utils::mpi_context_t<mpi3::communicator,mpi3::shared_communicator> &ctxt,
-                   std::array<long, rank> shape):
-          _gcomm(std::addressof(ctxt.comm)), 
-          _internode_comm(std::addressof(ctxt.internode_comm)), 
+                   std::array<long, rank> shape, bool zero_init = true):
+          _gcomm(std::addressof(ctxt.comm)),
+          _internode_comm(std::addressof(ctxt.internode_comm)),
           _node_comm(std::addressof(ctxt.node_comm)),
           _size(std::accumulate(shape.cbegin(), shape.cend(), (mpi3::size_t)1, std::multiplies<>{})),
           _shape(shape),
           _win(std::make_unique<mpi3::shared_window<value_type>>(*_node_comm, (_node_comm->root()) ? _size : 0))
-      { 
-        check_and_init();
+      {
+        check_and_init(zero_init);
       }
 
       shared_array(const shared_array &other) :
@@ -129,14 +129,15 @@ namespace math {
 
       ~shared_array() = default; 
 
-      void check_and_init() {
+      void check_and_init(bool zero_init = true) {
         utils::check(_win->base(0) != nullptr, "shm::shared_array: win.base(0) == nullptr");
         utils::check(_win->size(0) == _size, "shm::shared_array: win.size(0) has incorrect dimension");
         if (_node_comm->size() > 1) {
           utils::check(_win->size(1) == 0, "shm::shared_array: win.size(!=0) has incorrect dimension");
         }
-        // initialize array to 0.0
-        set_zero();
+        // initialize array to 0.0, unless the caller opts out (buffer fully written before read)
+        if (zero_init)
+          set_zero();
       }
 
       void set_zero() {
