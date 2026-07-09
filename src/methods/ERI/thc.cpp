@@ -134,7 +134,7 @@ thc::thc(mf::MF *mf_,
                  "IntPts","IntVecs","VCoul","LSSolve","ip_SERIAL","SERIAL","TUR","ZUR","EXTRA",
                  "GEMM", "shmX",
                  // leaf sub-clocks inside the ZUR loop of get_ZquG_Cquv_fft_shared_memory
-                 "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack",
+                 "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack","ZUR_copy",
                  // leaf sub-clocks splitting the ALLOC total
                  "A_outzero","A_redist","A_darray","A_shmwin"} )
     Timer.add(v);
@@ -492,6 +492,7 @@ void thc::print_timers()
   app_log(2,"        -> R->q gemm:      {}",Timer.elapsed("ZUR_RQ"));
   app_log(2,"        -> C(q,u,v) gather:{}",Timer.elapsed("ZUR_Cquv"));
   app_log(2,"        -> r->G pack:      {}",Timer.elapsed("ZUR_pack"));
+  app_log(2,"        -> fft copy-back:  {}",Timer.elapsed("ZUR_copy"));
   app_log(2,"      - extra:             {}",Timer.elapsed("EXTRA"));
   app_log(2,"      - ls solve:          {}",Timer.elapsed("LSSolve"));
   app_log(2,"    coulomb matrix:        {}",Timer.elapsed("VCoul"));

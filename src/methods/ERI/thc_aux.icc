@@ -2190,7 +2190,9 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
           // G -> r
           F.backward(T4d_in,T4d_out);
           Timer.stop("FFT");
+          Timer.start("ZUR_copy");
           T4d_in() = T4d_out();
+          Timer.stop("ZUR_copy");
 
           // add missing exp(ikr) phase
           {
@@ -2293,10 +2295,12 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
           // G -> r
           F.backward(T4d_in,T4d_out);
           Timer.stop("FFT");
+          Timer.start("ZUR_copy");
           T4d_in() = T4d_out();
+          Timer.stop("ZUR_copy");
 
           // add missing exp(ikr) phase
-          { 
+          {
             // T(k,u,r) *= phase(k,r)
             for( auto [i,kI] : itertools::enumerate(kI_rng) ) {
               long ik = kI/nI;
