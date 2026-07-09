@@ -136,7 +136,7 @@ thc::thc(mf::MF *mf_,
                  // leaf sub-clocks inside the ZUR loop of get_ZquG_Cquv_fft_shared_memory
                  "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack",
                  // leaf sub-clocks splitting the ALLOC total
-                 "A_outzero","A_bufzero","A_redist"} )
+                 "A_outzero","A_redist","A_darray","A_shmwin"} )
     Timer.add(v);
 }
 
@@ -468,8 +468,9 @@ void thc::print_timers()
   app_log(2,"    IO (orbs):             {}",Timer.elapsed("IO_ORBS"));
   app_log(2,"    allocations:           {}",Timer.elapsed("ALLOC"));
   app_log(2,"      - out-array zero:    {}",Timer.elapsed("A_outzero"));
-  app_log(2,"      - work-buf zero:     {}",Timer.elapsed("A_bufzero"));
   app_log(2,"      - redistribute:      {}",Timer.elapsed("A_redist"));
+  app_log(2,"      - darray alloc:      {}",Timer.elapsed("A_darray"));
+  app_log(2,"      - shm windows:       {}",Timer.elapsed("A_shmwin"));
   app_log(2,"    communications:        {}",Timer.elapsed("COMM")+Timer.elapsed("ip_COMM"));
   app_log(2,"    fft:                   {}",Timer.elapsed("FFT"));
   app_log(2,"      - fft (planning):    {}",Timer.elapsed("FFTPLAN"));

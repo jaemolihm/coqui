@@ -1828,12 +1828,14 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
     auto [n0,n1] = itertools::chunk_range(0,nIpts,nnodes,node_id);
     std::tie(nI0_core,nI1_core) = itertools::chunk_range(n0,n1,mpi->node_comm.size(),mpi->node_comm.rank());
   } 
+  Timer.start("A_darray");
   memory::darray_t<local_3Array_t,mpi3::communicator> Z_qug(std::addressof(mpi->comm), {1,ntasks,1},
-                {nqpts_ibz,nIpts,rho_g.size()},{nqpts_ibz,nI1_core-nI0_core,rho_g.size()},       
+                {nqpts_ibz,nIpts,rho_g.size()},{nqpts_ibz,nI1_core-nI0_core,rho_g.size()},
                 {0,nI0_core,0},{1,1,1});
   memory::darray_t<local_3Array_t,mpi3::communicator> C_quv(std::addressof(mpi->comm), {1,ntasks,1},
-                {nqpts_ibz,nIpts,nIpts},{nqpts_ibz,nI1_core-nI0_core,nIpts},       
+                {nqpts_ibz,nIpts,nIpts},{nqpts_ibz,nI1_core-nI0_core,nIpts},
                 {0,nI0_core,0},{1,1,1});
+  Timer.stop("A_darray");
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
   Timer.start("A_outzero");
@@ -1852,14 +1854,16 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   }
 
   // k<->R and R<->k transformations
+  Timer.start("A_shmwin");
   math::shm::shared_array<nda::array_view<ComplexType,2>> sf_RQ(*mpi,{nqpts_ibz,nkpts});
   math::shm::shared_array<nda::array_view<ComplexType,2>> sf_kR(*mpi,{nkpts,nkpts-nkpts_trev_pairs});
-  // exp(iqr), exp(ikr) phase factor 
+  // exp(iqr), exp(ikr) phase factor
   math::shm::shared_array<nda::array_view<ComplexType,2>> sf_phase_q(*mpi,{nqpts_ibz,rho_g.nnr()});
   math::shm::shared_array<nda::array_view<ComplexType,2>> sf_phase_k(*mpi,{nkpts-nkpts_trev_pairs,rho_g.nnr()});
 
   // symmetry rotations of the 'w' grid. Used to obtain orbitals at k outside IBZ
   math::shm::shared_array<nda::array_view<long,2>> swfc_to_rho_sym(*mpi,{nsym-1,wfc_grid->size()});
+  Timer.stop("A_shmwin");
   Timer.stop("ALLOC");
 
   Timer.start("DistOrbs");
@@ -2009,11 +2013,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
 
   Timer.start("ALLOC");
   // Tkug for ipts in a block, distributed over u (in shared memory)
+  Timer.start("A_shmwin");
   math::shm::shared_array<nda::array_view<ComplexType,3>> sTkug_u(*mpi,
       {kp_order.size(),nI_per_node,dPsia.global_shape()[4]});
-  Timer.start("A_bufzero");
-  sTkug_u.set_zero();
-  Timer.stop("A_bufzero");
+  Timer.stop("A_shmwin");
   auto sTkug_u_loc = sTkug_u.local();
 
   // Bounded, node-shared g-block replica of Psi. Replicating the full-g Psi on
@@ -2025,8 +2028,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   long nb_max = std::max(a_range.size(), b_range.size());
   long psi_per_gcol = std::max(1l, long(nspins*nkpts_ibz*nb_max*npol));
   long gblk = std::min(ngw, std::max(1l, (long(kp_order.size())*nI_per_node*ngw)/psi_per_gcol));
+  Timer.start("A_shmwin");
   math::shm::shared_array<nda::array_view<ComplexType,5>> sPsi_blk(*mpi,
       {nspins,nkpts_ibz,nb_max,npol,gblk});
+  Timer.stop("A_shmwin");
   app_log(2," - Psi g-block: {} of {} ({} block(s))",gblk,ngw,(ngw+gblk-1)/gblk);
 
   // Build this node's u-segment of Tkug directly, one g-block at a time:
@@ -2071,17 +2076,14 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   };
 
   // for FFT g<->r, allocate later
+  Timer.start("A_shmwin");
   math::shm::shared_array<nda::array_view<ComplexType,1>> sTkur_1d(*mpi,
       {std::max(nkloc,nqpts_ibz)*nI_per_node*rho_g.nnr()});
   math::shm::shared_array<nda::array_view<ComplexType,1>> sTRur_1d(*mpi,
       {nkpts*nI_per_node*rho_g.nnr()});
   math::shm::shared_array<nda::array_view<ComplexType,1>> sZRur_1d(*mpi,
       { ((Xb!=nullptr)?nkpts*nI_per_node*rho_g.nnr():1) });
-  Timer.start("A_bufzero");
-  sTkur_1d.set_zero();
-  sTRur_1d.set_zero();
-  sZRur_1d.set_zero();
-  Timer.stop("A_bufzero");
+  Timer.stop("A_shmwin");
   auto Tkur_1d = sTkur_1d.local();
   auto TRur_1d = sTRur_1d.local();
   auto ZRur_1d = sZRur_1d.local();
@@ -2141,6 +2143,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                            TRur_1d.data() + kI0*rho_g.nnr());
 
       Timer.start("FFTPLAN");
+      // NOTE: keep this plan out-of-place (with the T4d_in()=T4d_out() copy-back
+      // below): an in-place plan produces wrong results downstream and a slower FFT.
       math::nda::fft<true> F(T4d_in,T4d_out,
                              math::fft::FFT_MEASURE|math::fft::FFT_DESTROY_INPUT);
       Timer.stop("FFTPLAN");
@@ -2181,7 +2185,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
           F.backward(T4d_in,T4d_out);
           Timer.stop("FFT");
           T4d_in() = T4d_out();
- 
+
           // add missing exp(ikr) phase
           {
             // T(k,u,r) *= phase(k,r)
