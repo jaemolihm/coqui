@@ -43,6 +43,7 @@
 #include "numerics/iter_scf/diis/qp_com_diis_residual.h"
 
 #include "numerics/iter_scf/diis/diis_alg.hpp"
+#include "numerics/iter_scf/diis/spmd_fock_sigma_diis.hpp"
 #include "numerics/iter_scf/damp/damp_t.hpp"
 
 // TODO clean up duplicate codes between Heff and FockSigma extrapolation
@@ -330,6 +331,11 @@ namespace iter_scf {
     // DIIS subspace storage: "disk" (HDF5-backed VSpace) or "memory" (in-memory;
     // faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
     std::string storage = "disk";
+    // A12: SPMD element-sliced in-memory engine for the Dyson (FockSigma) DIIS.
+    // Driven directly by diis_impl (scf_common.cpp) when storage == "memory"
+    // and the in-memory G/S/H0 are available; the members above and the serial
+    // stack below are untouched by it (disk keeps the exact root-only path).
+    spmd_fs_diis spmd;
     
   private:
     VSpace<FockSigma> x_vsp;                 // vector space of Fock-self-energy vectors

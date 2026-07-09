@@ -75,6 +75,23 @@ namespace iter_scf::diis_timers {
   // diis_t::get_mu checkpoint read
   inline utils::Watch get_mu      {"diis_get_mu"};
 
+  // A12 SPMD (element-sliced) FockSigma DIIS sub-timers. Per-rank; the global
+  // root's values are the ones printed. Rough mapping to the serial path:
+  // hist_store ~ fs_copies + vsp_add + inject, B_dots ~ vsp_overlap,
+  // lincomb ~ vsp_lincomb, damp_mix ~ damp_mix, damp_stage ~ damp_read,
+  // conv ~ solve_convscan, writeback ~ solve_copyback.
+  inline utils::Watch spmd_total      {"spmd_total"};
+  inline utils::Watch spmd_hist_store {"spmd_hist_store_slices"};
+  inline utils::Watch spmd_B_dots     {"spmd_B_row_dots"};
+  inline utils::Watch spmd_B_comm     {"spmd_B_row_comm"};
+  inline utils::Watch spmd_coefs      {"spmd_coefs_solve"};
+  inline utils::Watch spmd_lincomb    {"spmd_lincomb"};
+  inline utils::Watch spmd_conv       {"spmd_conv_maxdiff"};
+  inline utils::Watch spmd_writeback  {"spmd_writeback_slices"};
+  inline utils::Watch spmd_damp_mix   {"spmd_damp_mix"};
+  inline utils::Watch spmd_damp_stage {"spmd_damp_stage_slice"};
+  inline utils::Watch spmd_prev_store {"spmd_prev_state_store"};
+
   inline void log() {
     auto row = [](utils::Watch& w) {
       app_log(2, "  {:<28}: {:12.4f} s   (calls {})", w.name, w.elapsed(), w.number_of_calls());
@@ -107,6 +124,17 @@ namespace iter_scf::diis_timers {
     row(damp_read);
     row(damp_mix);
     row(get_mu);
+    row(spmd_total);
+    row(spmd_hist_store);
+    row(spmd_B_dots);
+    row(spmd_B_comm);
+    row(spmd_coefs);
+    row(spmd_lincomb);
+    row(spmd_conv);
+    row(spmd_writeback);
+    row(spmd_damp_mix);
+    row(spmd_damp_stage);
+    row(spmd_prev_store);
     app_log(2, "");
   }
 

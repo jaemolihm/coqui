@@ -28,6 +28,7 @@
 #include "nda/linalg/dot.hpp"
 #include <nda/linalg/eigenelements.hpp>
 #include "diis_residual.h"
+#include "diis_coefs.hpp"
 
 
 namespace iter_scf {
@@ -378,44 +379,9 @@ private:
 
 
     void compute_coefs_c1() {
-
-//#pragma float_control(precise, on) // Need accurate extrapolation coeffs
-        auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
-
-        nda::array<double, 1> bb(B.shape()[1]); 
-        bb() = 1.0;
-
-        auto [eig, evecs] = nda::linalg::eigenelements(B);
-        auto evecs_tr = nda::make_regular(nda::transpose(evecs));
-
-        nda::matrix<double> Binv(B.shape()[0], B.shape()[1]); // Inverse or pseudoinverse
-        nda::matrix<double> eig_inv(B.shape()[0], B.shape()[1]);
-        nda::matrix<double> I(B.shape()[0], B.shape()[1]);
-        Binv() = 0;
-        eig_inv() = 0;
-
-        double eig_max = nda::max_element(eig);
-        double eig_min = nda::min_element(eig);
-        double cond = eig_max / eig_min;
-
-        const double eig_thresh = 1E-12;
-
-        app_log(2, diis_str + "Condition number of B: {}", cond);
-
-        for (auto i : nda::range(0, eig.size())) { 
-            if(eig(i)*cond > eig_thresh) {
-                eig_inv(i,i) = 1.0/(eig(i)); 
-            }
-        }
-
-        nda::blas::gemm(evecs, eig_inv, I);
-        nda::blas::gemm(I, evecs_tr, Binv);
-
-        nda::array<double, 1> x(B.shape()[1]); 
-        nda::blas::gemv(1.0, Binv, bb, 0.0, x);
-        
-        std::complex<double> sum = std::accumulate(x.begin(), x.end(), 0.0);
-        m_C = make_regular(nda::real(x / sum));
+        // The eigendecomposition/pseudoinverse solve is shared with the SPMD
+        // in-memory DIIS path (diis_coefs.hpp) so it exists in one place only.
+        m_C = compute_diis_coefs_c1(m_B);
      }
 
 
