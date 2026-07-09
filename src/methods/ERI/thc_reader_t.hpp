@@ -886,6 +886,10 @@ namespace methods {
     int nbnd_aux() const { return 0; }
     std::string& set_X_type() { return _X_type; }
     const std::string thc_X_type() const { return _X_type; }
+    // True when the Coulomb matrix _dZ is held in memory (incore), so a redistribute
+    // in dZ() reuses resident data rather than re-reading from disk. Lets callers decide
+    // whether caching a redistributed copy is worthwhile (it is only for incore).
+    bool dZ_incore() const { return _storage == eri_storage_e::incore; }
     std::string filename() const { return _eri_file; }
     //mpi3::communicator* comm() const { return std::addressof(_mpi->comm); }
     auto& MF() const { return _MF; }

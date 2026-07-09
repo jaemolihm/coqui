@@ -347,8 +347,11 @@ template<typename dyson_type, typename X_t, typename Xt_t>
 void update_G(dyson_type &dyson, const mf::MF &mf, const imag_axes_ft::IAFT &FT, X_t & Dm, Xt_t &G,
               const X_t & F, const Xt_t &Sigma, double &mu, bool const_mu) {
   app_log(2, "* Solving Green's function:");
-  if(!const_mu)
+  if(!const_mu) {
+    dyson.Timer().start("UPDATE_MU");
     mu = update_mu(mu, dyson, mf, FT, F, Sigma);
+    dyson.Timer().stop("UPDATE_MU");
+  }
   dyson.solve_dyson(Dm, G, F, Sigma, mu);
 }
 
@@ -359,7 +362,9 @@ double update_mu_bisection(double old_mu, dyson_type& dyson, const mf::MF &mf,
   double nel_target = mf.nelec();
   double delta = 0.2;
   nda::array<ComplexType, 4> FpSigma_spectra(FT.nw_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd());
+  dyson.Timer().start("EIGENSPECTRA");
   dyson.compute_eigenspectra(F, Sigma, FpSigma_spectra);
+  dyson.Timer().stop("EIGENSPECTRA");
   auto eval_f = [&](double mu) {
     return compute_Nelec(mu, FpSigma_spectra, mf, FT) - nel_target;
   };
@@ -384,7 +389,9 @@ double update_mu_midpoint(double old_mu, dyson_type& dyson, const mf::MF &mf,
 
   nda::array<ComplexType, 4> FpSigma_spectra(
       FT.nw_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd());
+  dyson.Timer().start("EIGENSPECTRA");
   dyson.compute_eigenspectra(F, Sigma, FpSigma_spectra);
+  dyson.Timer().stop("EIGENSPECTRA");
 
   auto eval_f = [&](double mu) {
     return compute_Nelec(mu, FpSigma_spectra, mf, FT) - nel_target;

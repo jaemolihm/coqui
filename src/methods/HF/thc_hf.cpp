@@ -60,7 +60,7 @@ namespace methods {
 
       for( auto& v: {"TOTAL", "ALLOC",
                      "PRIM_TO_AUX", "AUX_TO_PRIM",
-                     "COULOMB", "EXCHANGE"} ) {
+                     "COULOMB", "EXCHANGE", "READ_Z", "U_FT", "SYNC"} ) {
         _Timer.add(v);
       }
 

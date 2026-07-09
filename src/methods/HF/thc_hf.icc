@@ -62,12 +62,30 @@ namespace methods {
       _Timer.stop("ALLOC");
 
       // MAM: for coulomb only, we should just read q=0 only, should add routine to reader
-      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+      // The bare Coulomb dZ({1,np_P,np_Q}) is iteration-invariant; cache the redistributed
+      // copy (incore only) so subsequent Fock builds skip the MPI redistribute. See hf_t.h.
+      _Timer.start("READ_Z");
+      std::array<long,3> dZ_pgrid = {1, np_P, np_Q};
+      const void* dZ_src = static_cast<const void*>(std::addressof(thc));
+      bool dZ_cacheable = false;
+      if constexpr (requires { thc.dZ_incore(); }) dZ_cacheable = thc.dZ_incore();
+      bool dZ_hit = dZ_cacheable and _dZ_cache.has_value()
+                    and _dZ_cache_src == dZ_src and _dZ_cache_pgrid == dZ_pgrid
+                    and _dZ_cache_nq == MF->nqpts_ibz() and _dZ_cache_np == NP;
+      dCoulomb_t dU_qPQ = dZ_hit ? *_dZ_cache : thc.dZ(dZ_pgrid);
+      if (dZ_cacheable and not dZ_hit) {
+        _dZ_cache = dU_qPQ;
+        _dZ_cache_src = dZ_src;
+        _dZ_cache_pgrid = dZ_pgrid;
+        _dZ_cache_nq = MF->nqpts_ibz();
+        _dZ_cache_np = NP;
+      }
       auto dU_qPQ_loc = dU_qPQ.local();
 
       // keep a copy of U(q=0)
       nda::array<ComplexType,2> Uq0_PQ(NP_loc,NQ_loc);
       Uq0_PQ() = dU_qPQ_loc(0,nda::ellipsis{});
+      _Timer.stop("READ_Z");
 
       // accumulate diagonal indices of Dm for the Hartree term
       nda::array<ComplexType, 1> Dm_QQ(NP, ComplexType(0.0));
@@ -141,6 +159,7 @@ namespace methods {
     
         utils::check(compute_exchange, "Oh oh.");
         // FT U(q) to the real space U(R)
+        _Timer.start("U_FT");
         if (nkpts != 1) {
           // U^q -> U^R
           buffer.resize(shape_t<2>{nkpts, NP_loc*NQ_loc});
@@ -150,6 +169,7 @@ namespace methods {
           math::detail::gemm_guarded(f_Rk, U_2D, buffer);
           U_2D = buffer;
         }
+        _Timer.stop("U_FT");
 
         // aux_to_primary needs to be called for each {ip,iq} block.
         // You can still use the fact that off diagonal blocks are hermitian with respect
@@ -303,7 +323,9 @@ namespace methods {
       _Timer.start("EXCHANGE");
       if (compute_exchange) HF_K_correction(sF_skij, Dm_skij, S_skij, MF->madelung());
       _Timer.stop("EXCHANGE");
+      _Timer.start("SYNC");
       mpi->comm.barrier();
+      _Timer.stop("SYNC");
     }
 
     // MAM: This is only correct with orthonormal basis sets. Missing factors of the 
@@ -534,7 +556,9 @@ namespace methods {
       _Timer.start("EXCHANGE");
       if (compute_exchange) HF_K_correction(sF_skij, Dm_skij, S_skij, MF->madelung());
       _Timer.stop("EXCHANGE");
+      _Timer.start("SYNC");
       mpi->comm.barrier();
+      _Timer.stop("SYNC");
     }
   } // solvers
 } // methods

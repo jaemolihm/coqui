@@ -48,8 +48,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
                "SCF loop: mpi context of mb_state and mb_eri should be the same!");
   utils::check(&FT == mb_state.ft,
                "SCF loop: imag_axes_ft of mb_state and scf_loop should be the same!");
-  for( auto& v: {"SCF_TOTAL", "STATE_ALLOC", "INIT_FOCK", "DYSON", "MBPT_SOLVERS",
-                 "ITERATIVE", "ENERGY", "WRITE"} ) {
+  for( auto& v: {"SCF_TOTAL", "STATE_ALLOC", "INIT_FOCK", "DYSON", "DYSON_HERMITIZE",
+                 "MBPT_SOLVERS", "ITERATIVE", "ENERGY", "WRITE"} ) {
     Timer.add(v);
   }
   // http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20dyson-scf
@@ -198,11 +198,13 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     Timer.start("DYSON");
     // whether to update mu depends on const_mu
     update_G(dyson, *mf, FT, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, const_mu);
+    Timer.start("DYSON_HERMITIZE");
     if (mpi->node_comm.root()) {
       hermitize_in_tau(sDm_skij.local(), "density matrix");
       hermitize_in_tau(sG_tskij.local(), "Green's function");
     }
     mpi->comm.barrier();
+    Timer.stop("DYSON_HERMITIZE");
     Timer.stop("DYSON");
 
 
@@ -252,6 +254,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   app_log(2, "    State alloc:          {0:.3f} sec", Timer.elapsed("STATE_ALLOC"));
   app_log(2, "    Initial Fock:         {0:.3f} sec", Timer.elapsed("INIT_FOCK"));
   app_log(2, "    Dyson:                {0:.3f} sec", Timer.elapsed("DYSON"));
+  app_log(2, "      - hermitize Dm/G:   {0:.3f} sec", Timer.elapsed("DYSON_HERMITIZE"));
   app_log(2, "    MBPT solvers:         {0:.3f} sec", Timer.elapsed("MBPT_SOLVERS"));
   app_log(2, "    Iterative alg:        {0:.3f} sec", Timer.elapsed("ITERATIVE"));
   app_log(2, "    Energy eval:          {0:.3f} sec", Timer.elapsed("ENERGY"));

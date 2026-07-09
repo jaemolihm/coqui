@@ -79,7 +79,8 @@ public:
       hermitize_in_tau(_sS_skij.local());
     }
 
-    for( auto& v: {"DYSON", "SIGMA_TAU_TO_W", "DYSON_LOOP", "REDISTRIBUTE", "DYSON_GATHER"} ) {
+    for( auto& v: {"DYSON", "SIGMA_TAU_TO_W", "DYSON_LOOP", "REDISTRIBUTE", "DYSON_GATHER",
+                   "UPDATE_MU", "EIGENSPECTRA", "DM_TAU_TO_BETA"} ) {
       _Timer.add(v);
     }
     _context->comm.barrier();
@@ -102,7 +103,8 @@ public:
     chkpt::read_ovlp(_context->node_comm, H0_S_chkpt, _sS_skij);
     _context->comm.barrier();
 
-    for( auto& v: {"DYSON", "SIGMA_TAU_TO_W", "DYSON_LOOP", "REDISTRIBUTE", "DYSON_GATHER"} ) {
+    for( auto& v: {"DYSON", "SIGMA_TAU_TO_W", "DYSON_LOOP", "REDISTRIBUTE", "DYSON_GATHER",
+                   "UPDATE_MU", "EIGENSPECTRA", "DM_TAU_TO_BETA"} ) {
       _Timer.add(v);
     }
     _context->comm.barrier();
@@ -133,11 +135,14 @@ public:
   inline void print_timers() {
     app_log(2, "\n  DYSON timers");
     app_log(2, "  ------------");
+    app_log(2, "    Update mu:                      {0:.3f} sec", _Timer.elapsed("UPDATE_MU"));
+    app_log(2, "      - Eigenspectra:               {0:.3f} sec", _Timer.elapsed("EIGENSPECTRA"));
     app_log(2, "    Dyson eqn:                      {0:.3f} sec", _Timer.elapsed("DYSON"));
     app_log(2, "      - Sigma(t)->Sigma(w):         {0:.3f} sec", _Timer.elapsed("SIGMA_TAU_TO_W"));
     app_log(2, "      - Dyson loop:                 {0:.3f} sec", _Timer.elapsed("DYSON_LOOP"));
     app_log(2, "      - Redistribute                {0:.3f} sec", _Timer.elapsed("REDISTRIBUTE"));
-    app_log(2, "      - Gather:                     {0:.3f} sec\n", _Timer.elapsed("DYSON_GATHER"));
+    app_log(2, "      - Gather:                     {0:.3f} sec", _Timer.elapsed("DYSON_GATHER"));
+    app_log(2, "    Dm tau->beta:                   {0:.3f} sec\n", _Timer.elapsed("DM_TAU_TO_BETA"));
   }
 
 private:

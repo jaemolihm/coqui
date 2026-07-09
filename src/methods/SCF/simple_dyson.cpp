@@ -160,12 +160,14 @@ namespace {
   void simple_dyson::solve_dyson(Dm_t &_sDm_skij, G_t &_G_shm, const F_t &_sF_skij,
                                  const Sigma_t &_Sigma_shm, double mu) {
     solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu);
+    _Timer.start("DM_TAU_TO_BETA");
     if (_context->node_comm.root()) {
       auto Dm = _sDm_skij.local();
       _FT->tau_to_beta(_G_shm.local(), Dm);
       Dm *= -1;
     }
     _context->comm.barrier();
+    _Timer.stop("DM_TAU_TO_BETA");
   }
 
 
