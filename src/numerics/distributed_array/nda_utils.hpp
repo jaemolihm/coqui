@@ -732,27 +732,29 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
   long mpi_size = comm->size();
 
   auto Aloc = A.local();
-  auto Bloc = B.local(); 
-
-  if( b == get_value_t<Arr2_t>(0) ) {
-    if(Bloc.size()>0) ::nda::tensor::set(get_value_t<Arr2_t>(0), Bloc);
-  } else if(b != get_value_t<Arr2_t>(1)) {
-    if(Bloc.size()>0) ::nda::tensor::scale(b, Bloc);
-  } 
+  auto Bloc = B.local();
 
   // nothing else to do
   if( a == get_value_t<Arr1_t>(0) ) return;
 
   // serial case...
   if(mpi_size==1) {
+    // add-into semantics below need B pre-scaled by b (b==0 -> zero first)
+    if( b == get_value_t<Arr2_t>(0) ) {
+      if(Bloc.size()>0) ::nda::tensor::set(get_value_t<Arr2_t>(0), Bloc);
+    } else if(b != get_value_t<Arr2_t>(1)) {
+      if(Bloc.size()>0) ::nda::tensor::scale(b, Bloc);
+    }
     if constexpr( ::nda::mem::have_device_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
       ::nda::tensor::add(a, Aloc, b_one, Bloc);
-    } else {  
+    } else {
       static_assert( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t>, "oh oh." );
       Bloc += a * Aloc;
     }
     return;
   }
+  // parallel path: no pre-zero needed - the sz_buf_B == Bloc.size() full-coverage
+  // assertion below guarantees the unpack loop overwrites every element of Bloc.
 
   ::nda::array<long,3> blocks{mpi_size,4,rank};
   ::nda::array<long,2> local_blocks{4,rank};
@@ -885,7 +887,6 @@ void redistribute_in_place(Arr1_t& A, std::array<long,get_rank<Arr1_t>> grid,
 {
   using local_Array_t = typename std::decay_t<Arr1_t>::Array_t::regular_type;
   auto B{make_distributed_array<local_Array_t>(*(A.communicator()),grid,A.global_shape(),bz)};
-  B.local() = get_value_t<Arr1_t>{0};
   redistribute(A,B,a,get_value_t<Arr1_t>{0});
   A = std::move(B);
 }
