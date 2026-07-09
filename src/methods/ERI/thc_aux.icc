@@ -1807,7 +1807,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
             nkpts * (nqpts_ibz + nkpts-nkpts_trev_pairs)          +  // RQ,kR 
             rho_g.nnr() * (nqpts_ibz + nkpts-nkpts_trev_pairs)    +  // phase_q,phase_r,rots
             /*  working space in shared memory, 1 ipt per node */
-            4.0*(nkpts-nkpts_trev_pairs)*wfc_grid->size()  +  // Tkug_G, Tkug_u
+            4.0*(nkpts-nkpts_trev_pairs)*wfc_grid->size()  +  // sTkug_u + sPsi_blk (~2x each, conservative)
             (2.0*nkpts-nkpts_trev_pairs)*rho_g.nnr()          // Tkur_a, TRur_a
           ) * sizeof(ComplexType) / (1024.0 * 1024.0 * 1024.0); 
     app_log(1, " - Estimated minimum memory requirement for this step, \n     per (current type of) node: {} GB ", mem);
@@ -1838,10 +1838,11 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.stop("A_darray");
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
-  // No upfront zero of Z_qug/C_quv: every local (iq,iu) row is written exactly
-  // once with full-row coverage by the scl=0 copy_select in steps 4d/4f below
-  // (iq spans all nqpts_ibz each block; the iu_for_sXb round-robin assigns each
-  // local ipt exactly once), so the overwrite replaces the pre-zero.
+  // No upfront zero of Z_qug/C_quv: every local (iq,iu) row is written with
+  // full-row coverage once per spin/pol channel by the copy_select in steps
+  // 4d/4f (iq spans all nqpts_ibz each block; the iu_for_sXb round-robin
+  // assigns each local ipt exactly once). The first channel overwrites (scl=0),
+  // later channels accumulate — see scl_isp in the isp loop.
 
   // figure out the number of Ipts in this node and the maximum over all nodes
   int tot_nI_in_node = 0, max_nI_in_node=0; 
@@ -2029,6 +2030,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   long ngw = dPsia.global_shape()[4];
   long nb_max = std::max(a_range.size(), b_range.size());
   long psi_per_gcol = std::max(1l, long(nspins*nkpts_ibz*nb_max*npol));
+  // NOTE: if gblk clamps to 1 (psi_per_gcol > sTkug_u size), the replica is one
+  // full Psi g-column and can exceed the one-sTkug_u bound.
   long gblk = std::min(ngw, std::max(1l, (long(kp_order.size())*nI_per_node*ngw)/psi_per_gcol));
   Timer.start("A_shmwin");
   math::shm::shared_array<nda::array_view<ComplexType,5>> sPsi_blk(*mpi,
@@ -2120,13 +2123,16 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.stop("EXTRA");
 
   // calculate T(u,r) for all kpoints and orbital ranges 
-  for( auto isp : nda::range(nspins*npol) ) 
+  for( auto isp : nda::range(nspins*npol) )
   {
     long ispin = isp/npol;
     long ipol  = isp%npol;
+    // Z_qug/C_quv accumulate the sum over spin/pol channels: the first channel
+    // overwrites (scl=0, initializing the un-zeroed arrays), later ones add.
+    auto scl_isp = ComplexType(isp==0 ? 0.0 : 1.0);
 
     Timer.start("ZUR");
-    for( auto ib : nda::range(nblk) ) { 
+    for( auto ib : nda::range(nblk) ) {
 
       // Ipts in this iteration
       int b0 = ib*nI_per_node;
@@ -2366,9 +2372,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
-              // scl=0: each local (iq,iu) row is written exactly once (see ALLOC note)
               nda::copy_select(false,IPts,ComplexType(1.0),T3d(iq,i,all),
-                               ComplexType(0.0),C_quv.local()(iq,iu-u0,all));
+                               scl_isp,C_quv.local()(iq,iu-u0,all));
           }
         }
       }
@@ -2420,9 +2425,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
-              // scl=0: each local (iq,iu) row is written exactly once (see ALLOC note)
               nda::copy_select(false,rho_g.gv_to_fft(),ComplexType(1.0),Z3D(iq,i,all),
-                   ComplexType(0.0),Z_qug.local()(iq,iu-u0,all));
+                   scl_isp,Z_qug.local()(iq,iu-u0,all));
           }
         }
         Timer.stop("ZUR_pack");
