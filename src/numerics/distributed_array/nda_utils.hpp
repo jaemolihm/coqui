@@ -842,10 +842,16 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
 
   // copy inversections of A with all ranges into a buffer
   size_t count_sz_check = 0;
-  for( auto p : itertools::range(mpi_size) ) { 
+  for( auto p : itertools::range(mpi_size) ) {
     if(ovlps_from_A[p]) {
-      auto A_ = make_regular(detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]));
-      std::copy_n(A_.data(),A_.size(),buffer_A.data()+A_disp[p]);
+      auto A_ = detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]);
+      if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
+        // pack strided sub-block directly into the contiguous send buffer
+        ::nda::array_view<value_t,rank>(A_.shape(), buffer_A.data()+A_disp[p]) = A_;
+      } else {
+        auto A_reg = make_regular(A_);
+        std::copy_n(A_reg.data(),A_reg.size(),buffer_A.data()+A_disp[p]);
+      }
       count_sz_check += A_.size();
     }
   }
@@ -855,11 +861,22 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
                        buffer_B.data(), B_counts.data(), B_disp.data());
 
 
-  for( auto p : itertools::range(mpi_size) ) { 
+  for( auto p : itertools::range(mpi_size) ) {
     if(ovlps_from_B[p]) {
-      auto B_ = make_regular(detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]));
-      std::copy_n(buffer_B.data()+B_disp[p],B_.size(),B_.data());
-      detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]) = B_;
+      auto B_ = detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]);
+      if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
+        // Direct overwrite of the strided sub-block from the contiguous recv
+        // buffer. This relies on the a==1 && b==0 assertion at the top of the
+        // function. If that restriction is ever lifted, this must become
+        //   B_ += a * (buffer view)
+        // and the b-scaling prologue (currently only in the serial branch) must
+        // return to the parallel path.
+        B_ = ::nda::array_view<const value_t,rank>(B_.shape(), buffer_B.data()+B_disp[p]);
+      } else {
+        auto B_reg = make_regular(B_);
+        std::copy_n(buffer_B.data()+B_disp[p],B_reg.size(),B_reg.data());
+        B_ = B_reg;
+      }
     }
   }
 }
