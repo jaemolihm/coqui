@@ -267,14 +267,18 @@ private:
                 Bnew(i,j) = m_B(i,j);
         }
 
-        // Evaluate new overlaps and add them to B:
-        // Can ship this piece as a function with the vector space 
-        // for good parallelization
-        for(size_t i = 0; i < m_B.shape()[1]; i++) {
-            Bnew(i, m_B.shape()[1]) = res_vsp->overlap(i, u);
-            Bnew(m_B.shape()[1], i) = std::conj(Bnew(i, m_B.shape()[1]));
+        // Evaluate new overlaps and add them to B. The whole row/col plus the
+        // diagonal <u|u> is built in one batched pass (H7): for FockSigma this
+        // reuses a single cached conj(u) across all x_i, replacing the n+1 per-pair
+        // 1.8 GB conjugate materializations; bit-identical to the per-pair path.
+        size_t m = m_B.shape()[1];
+        auto ov = res_vsp->overlaps_new_row(u);
+        utils::check(ov.size() == m + 1, "diis_alg::update_overlaps: overlap row size mismatch");
+        for(size_t i = 0; i < m; i++) {
+            Bnew(i, m) = ov[i];
+            Bnew(m, i) = std::conj(ov[i]);
         }
-       Bnew(m_B.shape()[1],m_B.shape()[1]) = res_vsp->overlap(u, u);
+       Bnew(m, m) = ov[m];
        m_B = Bnew;
 #if DIIS_DEBUG
        std::cout << "After the update" << std::endl;

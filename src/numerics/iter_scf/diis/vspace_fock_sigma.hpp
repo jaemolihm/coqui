@@ -111,6 +111,48 @@ public:
       return res1(0,0) + res2(0,0);
     }
 
+    // H7: a materialized conjugate "handle" for this vector — the (1,N) conjugated
+    // rows of the flattened Fock and Sigma, i.e. exactly the LHS buffers dot_prod
+    // builds internally. Caching it lets update_overlaps compute an entire B-row
+    // (<x_i|u> for all subspace vectors x_i) with one conj(u) materialization reused
+    // across every i, instead of one 1.8 GB conj copy per pair.
+    struct ConjFlat {
+        nda::array<ComplexType, 2> Frow; // (1, Fdim) = conj(flatten(Fock))^T
+        nda::array<ComplexType, 2> Srow; // (1, Sdim) = conj(flatten(Sigma))^T
+    };
+
+    ConjFlat make_conj_flat() const {
+      utils::check(inited_F, "FockSigma: Fock matrix is not initialized");
+      utils::check(inited_S, "FockSigma: Sigma is not initialized");
+      size_t Fdim = std::reduce(_Fock.shape().begin(), _Fock.shape().end(), 1, std::multiplies<size_t>());
+      size_t Sdim = std::reduce(_Sigma.shape().begin(), _Sigma.shape().end(), 1, std::multiplies<size_t>());
+      auto matvec_F = nda::reshape(_Fock, std::array<long, 2>{Fdim, 1});
+      auto matvec_S = nda::reshape(_Sigma, std::array<long, 2>{Sdim, 1});
+      ConjFlat h;
+      h.Frow = nda::make_regular(nda::conj(nda::transpose(matvec_F)));
+      h.Srow = nda::make_regular(nda::conj(nda::transpose(matvec_S)));
+      return h;
+    }
+
+    // H7: computes <u|x> where *this == x and u_conj == u.make_conj_flat().
+    // The gemm signature/shapes/kernel are IDENTICAL to dot_prod's (plain zgemm,
+    // no 'C'/'T' op) — only the pre-materialized conjugation moves from the LHS
+    // buffer to the operand carried by u_conj — so <u|x> is bitwise conj(<x|u>),
+    // and conj(<u|x_i>) reproduces the per-pair overlap <x_i|u> to the last digit.
+    ComplexType dot_prod_conj_lhs(const ConjFlat& u_conj) const {
+      utils::check(inited_F, "FockSigma: Fock matrix is not initialized");
+      utils::check(inited_S, "FockSigma: Sigma is not initialized");
+      size_t Fdim = std::reduce(_Fock.shape().begin(), _Fock.shape().end(), 1, std::multiplies<size_t>());
+      size_t Sdim = std::reduce(_Sigma.shape().begin(), _Sigma.shape().end(), 1, std::multiplies<size_t>());
+      auto matvec_F = nda::reshape(_Fock, std::array<long, 2>{Fdim, 1});
+      auto matvec_S = nda::reshape(_Sigma, std::array<long, 2>{Sdim, 1});
+      nda::array<ComplexType, 2> res1(1,1);
+      nda::array<ComplexType, 2> res2(1,1);
+      nda::blas::gemm(u_conj.Frow, matvec_F, res1);
+      nda::blas::gemm(u_conj.Srow, matvec_S, res2);
+      return res1(0,0) + res2(0,0);
+    }
+
     const Array_4D& get_fock() const {
         utils::check(inited_F, "FockSigma: Fock matrix is not initialized");
         return _Fock;

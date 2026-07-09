@@ -23,6 +23,8 @@
 #define COQUI_VECTOR_SPACE_H
 
 #include <vector>
+#include <complex>
+#include <type_traits>
 
 #include "numerics/iter_scf/diis/diis_timers.hpp"
 
@@ -43,6 +45,16 @@ private:
     bool _in_memory = false;
     std::vector<Vector> _vecs; // vector storage when in-memory
     bool inited = false;
+
+    // Detect whether Vector exposes the H7 conjugate-handle interface
+    // (make_conj_flat + dot_prod_conj_lhs). FockSigma does; Heff does not.
+    template<typename V>
+    static auto detect_conj_handle(int)
+        -> decltype(std::declval<const V&>().make_conj_flat(), std::true_type{});
+    template<typename V>
+    static std::false_type detect_conj_handle(...);
+    static constexpr bool has_conj_handle =
+        decltype(detect_conj_handle<Vector>(0))::value;
 
 public:
 
@@ -132,6 +144,47 @@ public:
         auto res = a.dot_prod(b);
         diis_timers::vsp_overlap.stop();
         return res;
+    }
+
+    // H7: build the new DIIS B-matrix row/column against the incoming residual u.
+    // Returns { <x_0|u>, ..., <x_{n-1}|u>, <u|u> } with n = current subspace size.
+    // For a Vector exposing a conjugate handle (FockSigma) this materializes conj(u)
+    // once and reuses it across every x_i (and u), computing <x_i|u> as
+    // conj(<u|x_i>) — bit-identical to overlap(i,u)/overlap(u,u) because the gemm
+    // kernel/shapes are unchanged and only the conjugated operand is swapped. Vector
+    // types without the handle (Heff) fall back to the unchanged per-pair path.
+    std::vector<std::complex<double>> overlaps_new_row(const Vector& u) {
+        utils::check(inited, "VSpace is not initialized");
+        std::vector<std::complex<double>> out(_size + 1);
+        // COQUI_DEBUG_PAIR_OVERLAP=1 forces the pre-H7 per-pair path (same binary
+        // A/B for the digit-identity gate).
+        static const bool force_pair = []() {
+            const char* e = std::getenv("COQUI_DEBUG_PAIR_OVERLAP");
+            return e && e[0] == '1';
+        }();
+        if constexpr (has_conj_handle) {
+          if (!force_pair) {
+            diis_timers::vsp_overlap.start();
+            auto u_conj = u.make_conj_flat();
+            diis_timers::vsp_overlap.stop();
+            Vector scratch; // disk-mode read target (untimed, as in overlap(i,u))
+            for (size_t i = 0; i < _size; i++) {
+                const Vector* xi;
+                if (_in_memory) { xi = &_vecs[i]; }
+                else { scratch.read_from_file(_filename, i); xi = &scratch; }
+                diis_timers::vsp_overlap.start();
+                out[i] = std::conj(xi->dot_prod_conj_lhs(u_conj)); // <x_i|u>
+                diis_timers::vsp_overlap.stop();
+            }
+            diis_timers::vsp_overlap.start();
+            out[_size] = u.dot_prod_conj_lhs(u_conj); // <u|u> (matches overlap(u,u))
+            diis_timers::vsp_overlap.stop();
+            return out;
+          }
+        }
+        for (size_t i = 0; i < _size; i++) out[i] = overlap(i, u);
+        out[_size] = overlap(u, u);
+        return out;
     }
 
     size_t size() {
