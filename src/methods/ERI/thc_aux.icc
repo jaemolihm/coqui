@@ -1204,8 +1204,10 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
                 {nqpts_ibz,nIpts,nIpts},{1,1,1});
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
+  Timer.start("A_outzero");
   Z_qug.local() = ComplexType(0.0);
   C_quv.local() = ComplexType(0.0);
+  Timer.stop("A_outzero");
   long nI_loc = Z_qug.local_shape()[1];
 
   // temporarily calculating in host and moving to dev
@@ -1710,8 +1712,10 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   buffer2.resize(1);
   ZRur_1d.resize(1);
   Timer.start("ALLOC");
+  Timer.start("A_redist");
   math::nda::redistribute_in_place(C_quv,pgrid,{block_size[0],block_size[1],block_size[1]});
   math::nda::redistribute_in_place(Z_qug,pgrid,block_size);
+  Timer.stop("A_redist");
   Timer.stop("ALLOC");
 
   return std::make_tuple(std::move(Z_qug),std::move(C_quv));;
@@ -1832,8 +1836,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                 {0,nI0_core,0},{1,1,1});
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
+  Timer.start("A_outzero");
   Z_qug.local() = ComplexType(0.0);
   C_quv.local() = ComplexType(0.0);
+  Timer.stop("A_outzero");
 
   // figure out the number of Ipts in this node and the maximum over all nodes 
   int tot_nI_in_node = 0, max_nI_in_node=0; 
@@ -1884,9 +1890,9 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
    *   sXkau:   {nkpts-nkpts_trev, nbnd, nI_per_blk}           
    *   Tkur:   {nkpts-nkpts_trev, nI_per_node, rho_g.nnr()}    
    *   TRur:   {nkpts, nI_per_node, rho_g.nnr()}                
-   *   if (Xb) ZRur:   {nkpts, nI_per_node, rho_g.nnr()}  
-   *   dTkug_g:  {nkpts-ntrev, nI_per_node, wfc_g->size()}     (storage per node)
-   *   dTkug_u:  {nkpts-ntrev, nI_per_node, wfc_g->size()}     (storage per node)     
+   *   if (Xb) ZRur:   {nkpts, nI_per_node, rho_g.nnr()}
+   *   sTkug_u:  {nkpts-ntrev, nI_per_node, wfc_g->size()}     (storage per node)
+   *   sPsi_blk: {nspin, nkpts_ibz, nbnd, npol, gblk}          (bounded Psi g-block replica per node)
    *
    *   where MEM is the available memory on the node and x is the fraction of memory
    *   assumed usable, e.g. 0.9.
@@ -2002,20 +2008,67 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.stop("EXTRA");
 
   Timer.start("ALLOC");
-  // Tkug for ipts in a block, distributed over g
-  auto dTkug_g{math::nda::make_distributed_array<local_3Array_t>(mpi->comm,{1,1,mpi->comm.size()},
-                {kp_order.size(),nI_per_blk,dPsia.global_shape()[4]},{1,1,1})};
-  // Tkug for ipts in a block, distributed over u (in shared memory) 
+  // Tkug for ipts in a block, distributed over u (in shared memory)
   math::shm::shared_array<nda::array_view<ComplexType,3>> sTkug_u(*mpi,
-      {kp_order.size(),nI_per_node,dPsia.global_shape()[4]}); 
-  sTkug_u.set_zero(); 
+      {kp_order.size(),nI_per_node,dPsia.global_shape()[4]});
+  Timer.start("A_bufzero");
+  sTkug_u.set_zero();
+  Timer.stop("A_bufzero");
   auto sTkug_u_loc = sTkug_u.local();
-   // dummy empty array
-  decltype(sTkug_u_loc) dummy_local(std::array<long,3>{kp_order.size(),0,dPsia.global_shape()[4]},sTkug_u_loc.data());
-  // distributed_array_view, root of node_comm has all the segment of the node 
-  math::nda::distributed_array_view<decltype(sTkug_u_loc),mpi3::communicator> dTkug_u(std::addressof(mpi->comm),
-                {1,mpi->comm.size(),1},dTkug_g.global_shape(),{0,node_id*nI_per_node,0},{1,1,1},
-                (mpi->node_comm.root()?sTkug_u_loc:dummy_local));
+
+  // Bounded, node-shared g-block replica of Psi. Replicating the full-g Psi on
+  // every node would not shrink with node count, so we gather one g-block at a
+  // time, sized so the replica never exceeds one (node-scaling) sTkug_u buffer.
+  // This keeps the g->u transpose of Tkug eliminated while bounding the per-node
+  // Psi replica -> scalable to many nodes.
+  long ngw = dPsia.global_shape()[4];
+  long nb_max = std::max(a_range.size(), b_range.size());
+  long psi_per_gcol = std::max(1l, long(nspins*nkpts_ibz*nb_max*npol));
+  long gblk = std::min(ngw, std::max(1l, (long(kp_order.size())*nI_per_node*ngw)/psi_per_gcol));
+  math::shm::shared_array<nda::array_view<ComplexType,5>> sPsi_blk(*mpi,
+      {nspins,nkpts_ibz,nb_max,npol,gblk});
+  app_log(2," - Psi g-block: {} of {} ({} block(s))",gblk,ngw,(ngw+gblk-1)/gblk);
+
+  // Build this node's u-segment of Tkug directly, one g-block at a time:
+  //   Tkug_u(k,u_loc,g) = sum_a conj(X)(k, off+u_loc, a) * Psi(k,a,g),  off=node_id*nI_per_node.
+  // Per g-block: gather that block of Psi into the node-shared replica (each rank
+  // scatters its source g-overlap, then node roots all-reduce over internode_comm
+  // -> valid multi-node), then GEMM the block with its g columns split over
+  // node_comm. No g->u transpose and no full-g Psi replica. Per output element
+  // this is the same contraction over a as the old gemm-then-redistribute path.
+  auto fill_Tkug_u = [&](auto& dP, auto const& sX_loc, int ispin_, int ipol_) {
+    long off = node_id*nI_per_node;
+    long nb = dP.global_shape()[2];
+    auto dPloc = dP.local();
+    auto g_src = dP.local_range(4);
+    auto sPloc = sPsi_blk.local();
+    for( long gb0=0; gb0<ngw; gb0+=gblk ) {
+      long gb1 = std::min(ngw, gb0+gblk);
+      long bw = gb1-gb0;
+      // gather Psi(:,:,:,:,[gb0,gb1)) into the node-shared replica
+      sPsi_blk.set_zero();
+      mpi->node_comm.barrier();
+      long o0 = std::max(gb0,g_src.first()), o1 = std::min(gb1,g_src.last());
+      if( o1>o0 )
+        sPloc(all,all,nda::range(0,nb),all,nda::range(o0-gb0,o1-gb0)) =
+              dPloc(all,all,all,all,nda::range(o0-g_src.first(),o1-g_src.first()));
+      mpi->comm.barrier();
+      if( mpi->node_comm.root() )
+        mpi->internode_comm.all_reduce_in_place_n(sPloc.data(),sPloc.size(),std::plus<>{});
+      mpi->comm.barrier();
+      // GEMM this block, g columns split over node_comm
+      auto [c0,c1] = itertools::chunk_range(0l, bw, long(mpi->node_comm.size()),
+                                            long(mpi->node_comm.rank()));
+      Timer.start("GEMM");
+      if( c1>c0 )
+        for( auto [ik,k] : itertools::enumerate(kp_order) )
+          nda::blas::gemm(sX_loc(ik,nda::range(off,off+nI_per_node),all),
+                          sPloc(ispin_,kp_to_ibz(k),nda::range(0,nb),ipol_,nda::range(c0,c1)),
+                          sTkug_u_loc(ik,nda::range(0,nI_per_node),nda::range(gb0+c0,gb0+c1)));
+      Timer.stop("GEMM");
+      mpi->node_comm.barrier();
+    }
+  };
 
   // for FFT g<->r, allocate later
   math::shm::shared_array<nda::array_view<ComplexType,1>> sTkur_1d(*mpi,
@@ -2024,9 +2077,11 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
       {nkpts*nI_per_node*rho_g.nnr()});
   math::shm::shared_array<nda::array_view<ComplexType,1>> sZRur_1d(*mpi,
       { ((Xb!=nullptr)?nkpts*nI_per_node*rho_g.nnr():1) });
+  Timer.start("A_bufzero");
   sTkur_1d.set_zero();
   sTRur_1d.set_zero();
   sZRur_1d.set_zero();
+  Timer.stop("A_bufzero");
   auto Tkur_1d = sTkur_1d.local();
   auto TRur_1d = sTRur_1d.local();
   auto ZRur_1d = sZRur_1d.local();
@@ -2099,8 +2154,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         Timer.stop("shmX");
 
         Timer.start("TUR");
-        // Tkug for the current block, distributed only over g
-        get_Tkug<MEM>(ispin,ipol,kp_to_ibz,kp_order,sXaku.local(),dPsia,dTkug_g,dTkug_u);
+        // Tkug for the current block, built directly in the u-distribution
+        fill_Tkug_u(dPsia,sXaku.local(),ispin,ipol);
         Timer.stop("TUR");
       }
 
@@ -2139,6 +2194,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         mpi->node_comm.barrier();
 
         // T(R,u,r) = exp(ikR) T(k,u,r)
+        Timer.start("ZUR_kR");
         if(nkpts>1) {
           auto f_kR = sf_kR.local();
           if(nkpts_trev_pairs>0) {
@@ -2147,7 +2203,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
 
             math::shm::blas::detail::gemm(mpi->node_comm,ComplexType(2.0),f_kR(all,krng1),
                             Tkur(krng1,all),ComplexType(0.0),TRur);
-            auto [n0,n1] = itertools::chunk_range(0,TRur.size(),mpi->node_comm.size(),mpi->node_comm.rank()); 
+            auto [n0,n1] = itertools::chunk_range(0,TRur.size(),mpi->node_comm.size(),mpi->node_comm.rank());
             auto p = TRur_1d.data()+n0;
             for( long n=0; n<(n1-n0); ++n, ++p ) *p = ComplexType(p->real(),0.0);
             mpi->node_comm.barrier();
@@ -2157,25 +2213,28 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
             math::shm::blas::detail::gemm(mpi->node_comm,ComplexType(1.0),f_kR,Tkur,ComplexType(0.0),TRur);
           }
         } else {
-          TRur(0,all) = Tkur(0,all);  
+          TRur(0,all) = Tkur(0,all);
         }
         mpi->node_comm.barrier();
+        Timer.stop("ZUR_kR");
       }
 
-      // 4b. Z(R,u,r) = conj(T(R,u,r)) * T(R,u,r), 
+      // 4b. Z(R,u,r) = conj(T(R,u,r)) * T(R,u,r),
       if(Xb == nullptr) {
 
         // save to return now
         // Exit loop if no more work!
         if(nI==0) continue;
 
+        Timer.start("ZUR_had");
         {
-          auto [n0,n1] = itertools::chunk_range(0,TRur.size(),mpi->node_comm.size(),mpi->node_comm.rank()); 
-          // remember that in this case, we reuse TRur (multiply in place) 
+          auto [n0,n1] = itertools::chunk_range(0,TRur.size(),mpi->node_comm.size(),mpi->node_comm.rank());
+          // remember that in this case, we reuse TRur (multiply in place)
           auto p = TRur_1d.data()+n0;
-          for( long n=0; n<(n1-n0); ++n, ++p ) *p = std::conj(*p)*(*p); 
-        } 
+          for( long n=0; n<(n1-n0); ++n, ++p ) *p = std::conj(*p)*(*p);
+        }
         mpi->node_comm.barrier();
+        Timer.stop("ZUR_had");
 
       } else {
 
@@ -2198,8 +2257,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
           Timer.stop("shmX");
         
           Timer.start("TUR");
-          // Tkug for the current block, distributed only over g
-          get_Tkug<MEM>(ispin,ipol,kp_to_ibz,kp_order,sXbku.local(),*dPsib,dTkug_g,dTkug_u);
+          // Tkug for the current block, built directly in the u-distribution
+          fill_Tkug_u(*dPsib,sXbku.local(),ispin,ipol);
           Timer.stop("TUR");
         }
 
@@ -2269,7 +2328,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         mpi->node_comm.barrier();
       } // (not Xb.has_value())
 
-      // 4c. Z(q,u,r) = exp(iqR) Z(R,u,r) 
+      // 4c. Z(q,u,r) = exp(iqR) Z(R,u,r)
+      Timer.start("ZUR_RQ");
       if(nkpts>1) {
         auto f_RQ = sf_RQ.local();
         math::shm::blas::detail::gemm(mpi->node_comm,ComplexType(1.0),f_RQ,ZRur,ComplexType(0.0),Zqur);
@@ -2277,18 +2337,20 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         Zqur(0,all) = ZRur(0,all);
       }
       mpi->node_comm.barrier();
+      Timer.stop("ZUR_RQ");
 
       // update kI to new range: {0,nqpts_ibz*nI}
       std::tie(kI0,kI1) = itertools::chunk_range(0,nqpts_ibz*nI,mpi->node_comm.size(),mpi->node_comm.rank()); 
       kI_rng = nda::range(kI0,kI1);
 
       // 4d. C(q,u,v) = Z(q,u,rv)
-      { 
+      Timer.start("ZUR_Cquv");
+      {
         auto T3d = nda::reshape(Zqur,std::array<long,3>{nqpts_ibz,nI,rho_g.nnr()});
         long u0 = C_quv.local_range(1).first();
         long u1 = C_quv.local_range(1).last();
-        for( auto iq : nda::range(nqpts_ibz) ) { 
-          for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) { 
+        for( auto iq : nda::range(nqpts_ibz) ) {
+          for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
               nda::copy_select(false,IPts,ComplexType(1.0),T3d(iq,i,all),
                                ComplexType(1.0),C_quv.local()(iq,iu-u0,all));
@@ -2296,19 +2358,22 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         }
       }
       mpi->node_comm.barrier();
+      Timer.stop("ZUR_Cquv");
 
       // 4e. Z(q,u,r) *= exp(-q*r)
       // add exp(i q*r) phase factor
+      Timer.start("ZUR_pack");
       {
         // Z_qux(q,u,x) = Z_qux(q,u,x) * phase(q,x)
         auto Z2D = nda::array_view<ComplexType,2>({kI_rng.size(),rho_g.nnr()},
-                                                   Zqur.data()+kI0*rho_g.nnr()); 
+                                                   Zqur.data()+kI0*rho_g.nnr());
         for( auto [i,kI] : itertools::enumerate(kI_rng) ) {
           long iq = kI/nI;
           Z2D(i,all) *= sf_phase_q.local()(iq,all);
         }
       }
       mpi->node_comm.barrier();
+      Timer.stop("ZUR_pack");
 
       // 4f. Z(q,u,G) = fft(Z(q,u,r)) => mapped to truncated G grid
       // fft r->G
@@ -2330,6 +2395,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         mpi->node_comm.barrier();
 
         // copy from fft mesh to reduced g-grid
+        Timer.start("ZUR_pack");
         //auto Z3D = nda::reshape(Zqur, shape_t<3>{nqpts_ibz,nI,rho_g.nnr()});
         auto Z3D = memory::array_view<MEM,ComplexType,3>({nqpts_ibz,nI,rho_g.nnr()},
                                                          TRur_1d.data());
@@ -2343,10 +2409,11 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                    ComplexType(1.0),Z_qug.local()(iq,iu-u0,all));
           }
         }
+        Timer.stop("ZUR_pack");
       }
       mpi->node_comm.barrier();
-          
-    } // b : loop over nIpts segments 
+
+    } // b : loop over nIpts segments
     Timer.stop("ZUR");
   } // ispin/ipol
   dPsia.reset();
@@ -2355,8 +2422,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   sTkur_1d = math::shm::shared_array<nda::array_view<ComplexType,1>>(*mpi,{1});
   sTRur_1d = math::shm::shared_array<nda::array_view<ComplexType,1>>(*mpi,{1});
   Timer.start("ALLOC");
+  Timer.start("A_redist");
   math::nda::redistribute_in_place(C_quv,pgrid,{block_size[0],block_size[1],block_size[1]});
   math::nda::redistribute_in_place(Z_qug,pgrid,block_size);
+  Timer.stop("A_redist");
   Timer.stop("ALLOC");
 
   return std::make_tuple(std::move(Z_qug),std::move(C_quv));;

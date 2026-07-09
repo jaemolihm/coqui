@@ -132,7 +132,11 @@ thc::thc(mf::MF *mf_,
 
   for( auto& v: {"TOTAL","IO_SAVE","IO_ORBS","ALLOC","ip_COMM","COMM","FFT","FFTPLAN","DistOrbs","IpIter",
                  "IntPts","IntVecs","VCoul","LSSolve","ip_SERIAL","SERIAL","TUR","ZUR","EXTRA",
-                 "GEMM", "shmX"} )
+                 "GEMM", "shmX",
+                 // leaf sub-clocks inside the ZUR loop of get_ZquG_Cquv_fft_shared_memory
+                 "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack",
+                 // leaf sub-clocks splitting the ALLOC total
+                 "A_outzero","A_bufzero","A_redist"} )
     Timer.add(v);
 }
 
@@ -463,6 +467,9 @@ void thc::print_timers()
   app_log(2,"    IO (save):             {}",Timer.elapsed("IO_SAVE"));
   app_log(2,"    IO (orbs):             {}",Timer.elapsed("IO_ORBS"));
   app_log(2,"    allocations:           {}",Timer.elapsed("ALLOC"));
+  app_log(2,"      - out-array zero:    {}",Timer.elapsed("A_outzero"));
+  app_log(2,"      - work-buf zero:     {}",Timer.elapsed("A_bufzero"));
+  app_log(2,"      - redistribute:      {}",Timer.elapsed("A_redist"));
   app_log(2,"    communications:        {}",Timer.elapsed("COMM")+Timer.elapsed("ip_COMM"));
   app_log(2,"    fft:                   {}",Timer.elapsed("FFT"));
   app_log(2,"      - fft (planning):    {}",Timer.elapsed("FFTPLAN"));
@@ -479,6 +486,11 @@ void thc::print_timers()
   app_log(2,"      - shmX:              {}",Timer.elapsed("shmX"));
   app_log(2,"      - Tur:               {}",Timer.elapsed("TUR"));
   app_log(2,"      - Zur:               {}",Timer.elapsed("ZUR"));
+  app_log(2,"        -> k->R gemm:      {}",Timer.elapsed("ZUR_kR"));
+  app_log(2,"        -> hadamard:       {}",Timer.elapsed("ZUR_had"));
+  app_log(2,"        -> R->q gemm:      {}",Timer.elapsed("ZUR_RQ"));
+  app_log(2,"        -> C(q,u,v) gather:{}",Timer.elapsed("ZUR_Cquv"));
+  app_log(2,"        -> r->G pack:      {}",Timer.elapsed("ZUR_pack"));
   app_log(2,"      - extra:             {}",Timer.elapsed("EXTRA"));
   app_log(2,"      - ls solve:          {}",Timer.elapsed("LSSolve"));
   app_log(2,"    coulomb matrix:        {}",Timer.elapsed("VCoul"));
