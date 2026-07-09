@@ -286,6 +286,15 @@ namespace iter_scf {
       comFS_residual.upload_g_mu(G, mu);
     }
 
+    /**
+     * @brief Inject a pre-computed commutator residual C_t (A10 distributed path)
+     * for the next Dyson-SCF commutator DIIS solve to consume.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_C>
+    void upload_residual(const Array_C& C_t) {
+      comFS_residual.upload_residual(C_t);
+    }
+
     void metadata_log() const {
       app_log(2, "\nIterative algorithm for SCF");
       app_log(2, "-----------------------------");

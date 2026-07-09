@@ -47,7 +47,22 @@ protected:
     std::string mbpt_output;
     bool g_mu_injected = false;
 
+    Array_5D C_t_injected;         // pre-computed commutator (A10 distributed path)
+    bool residual_injected = false;
+
 public:
+
+    /**
+     * Supply a pre-computed commutator residual C_t (A10 k-striped distributed
+     * path). The next get_diis_residual consumes it once instead of running the
+     * serial commutator_t; if not injected, get_diis_residual falls back to the
+     * serial path.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_C>
+    void upload_residual(const Array_C& C_t_) {
+        C_t_injected = C_t_;
+        residual_injected = true;
+    }
 
     // a version with external G
     void upload_g(Array_5D& G_) {
@@ -120,18 +135,26 @@ public:
     // This may not be the most memory-efficient implementation...
     bool get_diis_residual(FockSigma& res) override {
         utils::check(com_initialized, "DIIS commutator residual is not initialized");
-            if (g_mu_injected) g_mu_injected = false; // consume the injected G/mu
-            else upload_g_mu();
             // Warning! Sigma here is in tau!
             const FockSigma& x_last = current_state->get_ref();
 
-            Array_5D C_t;
-            commutator_t(C_t, FT, G_incoming, x_last, mu, _S, _H0);
-
             auto Fz = x_last.get_fock();
             Fz() = 0;
+
+            if (residual_injected) {
+                // A10: consume the pre-computed distributed commutator.
+                residual_injected = false;
+                res.set_fock_sigma(Fz, C_t_injected);
+                return true;
+            }
+
+            if (g_mu_injected) g_mu_injected = false; // consume the injected G/mu
+            else upload_g_mu();
+
+            Array_5D C_t;
+            commutator_t(C_t, FT, G_incoming, x_last, mu, _S, _H0);
             res.set_fock_sigma(Fz, C_t);
-            
+
             return true;
         }
     };

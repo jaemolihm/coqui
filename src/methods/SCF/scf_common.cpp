@@ -20,6 +20,7 @@
 
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 
 #include "scf_common.hpp"
@@ -475,7 +476,8 @@ template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
                const imag_axes_ft::IAFT *FT, std::array<std::string,3> datasets,
-               const Xt_t* sG_tskij, double mu)
+               const Xt_t* sG_tskij, double mu,
+               const X_t* sS_skij, const X_t* sH0_skij)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
@@ -484,6 +486,36 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
   } else {
     iter_solver.metadata_log();
     int internode_proc_holding_extrap = 0;
+
+    // A10: k-striped distributed commutator residual. All ranks participate
+    // (non-root ranks cannot know whether the root-side DIIS call is the grow-only
+    // first iteration, so one evaluation per run is wasted — it is overwritten by
+    // the next iteration's residual before it can be consumed). COQUI_DEBUG_SERIAL_DIIS=1
+    // forces the original serial (root-only) residual path for A/B validation.
+    static const bool serial_diis = (std::getenv("COQUI_DEBUG_SERIAL_DIIS") != nullptr);
+    const bool distributed_residual =
+        (not serial_diis) and sG_tskij and sS_skij and sH0_skij and
+        iter_solver.iter_alg() == iter_scf::DIIS;
+    // The commutator C_t is accumulated into a node-shared window: the (s,k)
+    // partition is disjoint, so each rank writes distinct blocks (no intra-node
+    // reduce) and only the internode sum + a fence are needed to complete it.
+    std::optional<sArray_t<Array_view_5D_t>> sC_t_dist;
+    if (distributed_residual) {
+      auto [nt, ns, nk, nao, nao2] = sSigma_tskij.shape();
+      sC_t_dist.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+          context.comm, context.internode_comm, context.node_comm, {nt, ns, nk, nao, nao2}));
+      sC_t_dist->win().fence();
+      iter_scf::commutator_t_distributed(
+          context.comm, sC_t_dist->local(), FT,
+          sG_tskij->local(), sF_skij.local(), sSigma_tskij.local(), mu,
+          sS_skij->local(), sH0_skij->local());
+      iter_scf::diis_timers::com_dist_reduce.start();
+      sC_t_dist->win().fence();
+      sC_t_dist->all_reduce(); // combine per-node windows across nodes (no-op on 1 node)
+      iter_scf::diis_timers::com_dist_reduce.stop();
+      // C_t is now complete on every rank's node-shared window.
+    }
+
     // DIIS does not support mpi yet
     if (context.comm.root()) { // A global communicator here is needed for DIIS
 
@@ -493,6 +525,9 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       // The in-memory G/mu are byte-identical to the scf/iter{final_iter} checkpoint
       // datasets the commutator residual would otherwise re-read from disk.
       if (sG_tskij) iter_solver.upload_diis_g_mu(sG_tskij->local(), mu);
+      // Inject the distributed commutator so the root-side solve consumes it
+      // instead of recomputing the residual serially.
+      if (distributed_residual) iter_solver.upload_diis_residual(sC_t_dist->local());
 
       std::string filename = h5_prefix + ".mbpt.h5";
       h5::file file(filename, 'r');
@@ -525,7 +560,8 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
                      long iteration, std::string h5_prefix,
                      X_t &sF_skij, Xt_t &sSigma_tskij, const imag_axes_ft::IAFT *FT,
                      std::array<std::string,3> datasets,
-                     const Xt_t* sG_tskij, double mu)
+                     const Xt_t* sG_tskij, double mu,
+                     const X_t* sS_skij, const X_t* sH0_skij)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
@@ -570,7 +606,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     } else if (iter_solver.iter_alg() == iter_scf::DIIS) {
       std::tie(conv_F, conv_Sigma) = diis_impl(context, iter_solver, iteration, h5_prefix,
                                                sF_skij, sSigma_tskij, FT, datasets,
-                                               sG_tskij, mu);
+                                               sG_tskij, mu, sS_skij, sH0_skij);
     } else {
       utils::check(false, "scf_common::solve_iterative: unknown type of iterative algorithm.");
     }
@@ -681,7 +717,8 @@ template double update_mu(double, simple_dyson&, const mf::MF &, const imag_axes
 template auto solve_iterative(utils::mpi_context_t<mpi3::communicator>&, iter_scf::iter_scf_t&, long, std::string,
                               sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>&, const imag_axes_ft::IAFT*,
                               std::array<std::string,3>,
-                              const sArray_t<Array_view_5D_t>*, double)
+                              const sArray_t<Array_view_5D_t>*, double,
+                              const sArray_t<Array_view_4D_t>*, const sArray_t<Array_view_4D_t>*)
          -> std::tuple<double, double>;
 
 template void write_mf_data(mf::MF&, const imag_axes_ft::IAFT&, simple_dyson&,

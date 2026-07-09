@@ -85,6 +85,16 @@ namespace iter_scf {
       }, _alg_var);
     }
 
+    // Inject a pre-computed commutator residual C_t (A10 distributed path) into
+    // the active algorithm (DIIS only; a no-op for algorithms without this hook).
+    template<class Array5D>
+    void upload_diis_residual(const Array5D& C_t) {
+      std::visit( [&](auto&& v) {
+        if constexpr (requires { v.upload_residual(C_t); })
+          v.upload_residual(C_t);
+      }, _alg_var);
+    }
+
     void metadata_log() const {
       std::visit( [&](auto&& v) { v.metadata_log(); }, _alg_var);
     }

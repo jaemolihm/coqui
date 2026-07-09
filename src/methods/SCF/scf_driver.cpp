@@ -188,7 +188,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
                                                      mb_state.coqui_prefix,
                                                      sF_skij, sSigma_tskij, &FT,
                                                      {"scf", "F_skij", "Sigma_tskij"},
-                                                     &sG_tskij, mu);
+                                                     &sG_tskij, mu,
+                                                     &dyson.sS_skij(), &dyson.sH0_skij());
     }
     Timer.stop("ITERATIVE");
 

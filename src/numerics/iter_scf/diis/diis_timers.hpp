@@ -39,6 +39,16 @@ namespace iter_scf::diis_timers {
   inline utils::Watch com_gemm    {"commutator_iwsk_gemm"};
   inline utils::Watch com_wtau    {"commutator_w_to_tau"};
 
+  // A10 k-striped distributed commutator sub-timers (measured on root, which
+  // processes its own (s,k) subset; the D2 split is mirrored per component).
+  inline utils::Watch com_dist_total    {"commutator_dist_total"};
+  inline utils::Watch com_dist_scan     {"commutator_dist_sigma_scan"};
+  inline utils::Watch com_dist_ftG      {"commutator_dist_tau_to_w_G"};
+  inline utils::Watch com_dist_ftSigma  {"commutator_dist_tau_to_w_Sigma"};
+  inline utils::Watch com_dist_gemm     {"commutator_dist_iwsk_gemm"};
+  inline utils::Watch com_dist_wtau     {"commutator_dist_w_to_tau"};
+  inline utils::Watch com_dist_reduce   {"commutator_dist_reduce"};
+
   // FockSigma whole-vector value copies (copy-ctor + value-ctor + copy-assign);
   // covers opt_state put/get and VSpace get_vec copies (aggregate)
   inline utils::Watch fs_copies   {"focksigma_copies"};
@@ -66,6 +76,13 @@ namespace iter_scf::diis_timers {
     row(com_ftSigma);
     row(com_gemm);
     row(com_wtau);
+    row(com_dist_total);
+    row(com_dist_scan);
+    row(com_dist_ftG);
+    row(com_dist_ftSigma);
+    row(com_dist_gemm);
+    row(com_dist_wtau);
+    row(com_dist_reduce);
     row(fs_copies);
     row(vsp_add);
     row(vsp_get);

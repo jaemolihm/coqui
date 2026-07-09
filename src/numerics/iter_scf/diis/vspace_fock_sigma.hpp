@@ -301,5 +301,126 @@ void commutator_t(Array_G& C_t, const imag_axes_ft::IAFT *FT,
 }
 
 
+/**
+ * A10: k-striped SPMD version of commutator_t.
+ *
+ * Every rank reads G, F, Sigma, S, H0 directly from the node-shared arrays
+ * (byte-identical on all ranks) and processes only its own round-robin subset
+ * of the (s,k) index end-to-end: per owned (s,k) it tau_to_w's the G (and, unless
+ * Sigma is exactly zero, the Sigma) slice, runs the (iw) gemm loop, w_to_tau's the
+ * resulting C slice, and writes it into the caller-provided output view C_t_out.
+ *
+ * C_t_out is a node-shared window (pre-zeroed by its shared_array ctor): the (s,k)
+ * partition is disjoint, so every rank writes distinct blocks and no reduce over
+ * the node is needed — the caller only fences the window and (for multi-node) sums
+ * the per-node windows across the internode communicator. Each (t,s,k) block is
+ * produced by exactly one rank, so this reproduces the serial commutator bit-for-bit
+ * provided the per-slice FT gemm shapes match the serial full-array FT to the last
+ * digit (validated by the energy gate).
+ *
+ * @param comm    - [INPUT] communicator the (s,k) work is striped over
+ * @param C_t_out - [OUTPUT] commutator in tau space; this rank fills its owned (s,k)
+ *                  blocks (a node-shared window; the fence/internode sum is the
+ *                  caller's responsibility)
+ * @param FT      - [INPUT] imaginary-axis FT axes
+ * @param G_t     - [INPUT] Green's function in tau space (rank 5)
+ * @param Fock    - [INPUT] Fock matrix (rank 4)
+ * @param Sigma_t - [INPUT] self-energy in tau space (rank 5)
+ * @param mu      - [INPUT] chemical potential
+ * @param S       - [INPUT] overlap matrix (rank 4)
+ * @param H0      - [INPUT] non-interacting Hamiltonian (rank 4)
+ **/
+template<typename comm_t, typename Arr_out, typename Arr_G, typename Arr_F,
+         typename Arr_Sig, typename Arr_S, typename Arr_H0>
+void commutator_t_distributed(comm_t& comm, Arr_out&& C_t_out,
+                              const imag_axes_ft::IAFT *FT,
+                              const Arr_G& G_t, const Arr_F& Fock,
+                              const Arr_Sig& Sigma_t, double mu,
+                              const Arr_S& S, const Arr_H0& H0) {
+    diis_timers::com_dist_total.start();
+    decltype(nda::range::all) all;
+    long nk  = G_t.shape()[2];
+    long nao = G_t.shape()[3];
+    long nt  = G_t.shape()[0];
+    long ns  = G_t.shape()[1];
+    long nw  = FT->nw_f();
+    long nsk = ns * nk;
+    int rank    = comm.rank();
+    int nranks  = comm.size();
+
+    // Global Sigma==0 detection. Each rank scans only its owned slices; the
+    // reduce reproduces the serial whole-array none_of decision (the FT of an
+    // exactly-zero slice is exactly zero, matching the serial skip).
+    diis_timers::com_dist_scan.start();
+    int local_nonzero = 0;
+    for (long sk = rank; sk < nsk; sk += nranks) {
+        long s = sk / nk, k = sk % nk;
+        auto Sig_sk = Sigma_t(all, s, k, all, all);
+        if (std::any_of(Sig_sk.begin(), Sig_sk.end(),
+                        [](ComplexType z) { return z != ComplexType{0}; })) {
+            local_nonzero = 1;
+            break;
+        }
+    }
+    int global_nonzero = local_nonzero;
+    comm.all_reduce_in_place_n(&global_nonzero, 1, std::plus<>{});
+    bool sigma_is_zero = (global_nonzero == 0);
+    diis_timers::com_dist_scan.stop();
+
+    // Per-(s,k) contiguous scratch (the trailing (t/w, i, j) blocks feed the FT).
+    nda::array<ComplexType, 3> G_t_sk(nt, nao, nao);
+    nda::array<ComplexType, 3> G_w_sk(nw, nao, nao);
+    nda::array<ComplexType, 3> Sigma_t_sk(nt, nao, nao);
+    nda::array<ComplexType, 3> Sigma_w_sk(nw, nao, nao);
+    nda::array<ComplexType, 3> C_w_sk(nw, nao, nao);
+    nda::array<ComplexType, 3> C_t_sk(nt, nao, nao);
+    nda::array<ComplexType, 2> I1(nao, nao);
+    nda::array<ComplexType, 2> I2(nao, nao);
+
+    for (long sk = rank; sk < nsk; sk += nranks) {
+        long s = sk / nk, k = sk % nk;
+
+        G_t_sk = G_t(all, s, k, all, all);
+        diis_timers::com_dist_ftG.start();
+        FT->tau_to_w(G_t_sk, G_w_sk, imag_axes_ft::fermion);
+        diis_timers::com_dist_ftG.stop();
+
+        diis_timers::com_dist_ftSigma.start();
+        if (sigma_is_zero) {
+            Sigma_w_sk() = 0;
+        } else {
+            Sigma_t_sk = Sigma_t(all, s, k, all, all);
+            FT->tau_to_w(Sigma_t_sk, Sigma_w_sk, imag_axes_ft::fermion);
+        }
+        diis_timers::com_dist_ftSigma.stop();
+
+        auto S_sk  = S(s, k, all, all);
+        auto F_sk  = Fock(s, k, all, all);
+        auto H0_sk = H0(s, k, all, all);
+
+        diis_timers::com_dist_gemm.start();
+        for (long iw = 0; iw < nw; iw++) {
+            long wn = FT->wn_mesh()(iw);
+            ComplexType omega_mu = FT->omega(wn) + mu;
+            auto G_wsk = G_w_sk(iw, all, all);
+            nda::array<ComplexType, 2> G0inv_Sigma_wsk =
+                nda::make_regular(omega_mu * S_sk - H0_sk - F_sk - Sigma_w_sk(iw, all, all));
+            // gemm uses beta=0, fully overwriting I1/I2.
+            nda::blas::gemm(G_wsk, G0inv_Sigma_wsk, I1);
+            nda::blas::gemm(G0inv_Sigma_wsk, G_wsk, I2);
+            C_w_sk(iw, all, all) = nda::make_regular(I1 - I2);
+        }
+        diis_timers::com_dist_gemm.stop();
+
+        diis_timers::com_dist_wtau.start();
+        FT->w_to_tau(C_w_sk, C_t_sk, imag_axes_ft::fermion);
+        diis_timers::com_dist_wtau.stop();
+
+        C_t_out(all, s, k, all, all) = C_t_sk;
+    }
+    diis_timers::com_dist_total.stop();
 }
-#endif 
+
+
+}
+#endif
