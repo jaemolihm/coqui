@@ -22,6 +22,7 @@
 #include "chkpt_utils.h"
 #include "utilities/check.hpp"
 
+#include <chrono>
 #include <filesystem>
 
 namespace methods {
@@ -86,24 +87,53 @@ void dump_scf(communicator_t &comm, long iter,
               double mu, std::string output,
               std::string input_grp, long input_iter) {
   if (comm.root()) {
+    using clock_t = std::chrono::steady_clock;
+    auto elapsed = [](clock_t::time_point a, clock_t::time_point b) {
+      return std::chrono::duration<double>(b - a).count();
+    };
+    double t_open = 0, t_G = 0, t_Sigma = 0, t_small = 0, t_close = 0;
+    // A missing "Sigma_tskij" dataset means Sigma is exactly zero (e.g. HF). Scan
+    // once on this rank (which holds the full node-shared array) and skip the write
+    // if so; every in-repo reader treats the absence as an exactly-zero Sigma.
+    auto Sigma_loc = Sigma.local();
+    bool sigma_is_zero = std::none_of(Sigma_loc.data(), Sigma_loc.data() + Sigma_loc.size(),
+                                      [](const ComplexType &x) { return x != ComplexType(0); });
+
     std::string filename = output + ".mbpt.h5";
     std::string iter_grp_name = "iter" + std::to_string(iter);
-    h5::file file(filename, 'a');
-    h5::group grp(file);
-    auto scf_grp = (grp.has_subgroup("scf"))? grp.open_group("scf") : grp.create_group("scf");
-    auto iter_grp = (scf_grp.has_subgroup(iter_grp_name) )?
-        scf_grp.open_group(iter_grp_name) : scf_grp.create_group(iter_grp_name);
+    auto t0 = clock_t::now();
+    {
+      h5::file file(filename, 'a');
+      h5::group grp(file);
+      auto scf_grp = (grp.has_subgroup("scf"))? grp.open_group("scf") : grp.create_group("scf");
+      auto iter_grp = (scf_grp.has_subgroup(iter_grp_name) )?
+          scf_grp.open_group(iter_grp_name) : scf_grp.create_group(iter_grp_name);
 
-    if (input_iter==-1) input_iter = iter-1;
+      if (input_iter==-1) input_iter = iter-1;
 
-    h5::h5_write(scf_grp, "final_iter", iter);
-    h5::h5_write(iter_grp, "greens_func_source", input_grp);
-    h5::h5_write(iter_grp, "greens_func_iteration", input_iter);
-    nda::h5_write(iter_grp, "G_tskij", G.local(), false);
-    nda::h5_write(iter_grp, "Sigma_tskij", Sigma.local(), false);
-    nda::h5_write(iter_grp, "F_skij", F.local(), false);
-    nda::h5_write(iter_grp, "Dm_skij", Dm.local(), false);
-    h5::h5_write(iter_grp, "mu", mu);
+      h5::h5_write(scf_grp, "final_iter", iter);
+      h5::h5_write(iter_grp, "greens_func_source", input_grp);
+      h5::h5_write(iter_grp, "greens_func_iteration", input_iter);
+      auto t1 = clock_t::now(); t_open = elapsed(t0, t1);
+
+      nda::h5_write(iter_grp, "G_tskij", G.local(), false);
+      auto t2 = clock_t::now(); t_G = elapsed(t1, t2);
+
+      if (!sigma_is_zero)
+        nda::h5_write(iter_grp, "Sigma_tskij", Sigma_loc, false);
+      auto t3 = clock_t::now(); t_Sigma = elapsed(t2, t3);
+
+      nda::h5_write(iter_grp, "F_skij", F.local(), false);
+      nda::h5_write(iter_grp, "Dm_skij", Dm.local(), false);
+      h5::h5_write(iter_grp, "mu", mu);
+      auto t4 = clock_t::now(); t_small = elapsed(t3, t4);
+    } // file flush + close (the ceph-bound cost happens here)
+    t_close = elapsed(t0, clock_t::now()) - t_open - t_G - t_Sigma - t_small;
+
+    app_log(2, "  dump_scf write breakdown (s): open/meta {:.3f}, G {:.3f}, Sigma {:.3f}{}, "
+               "F+Dm {:.3f}, flush/close {:.3f}, total {:.3f}",
+            t_open, t_G, t_Sigma, sigma_is_zero ? " (skipped, Sigma==0)" : "",
+            t_small, t_close, t_open + t_G + t_Sigma + t_small + t_close);
   }
   comm.barrier();
 }
@@ -149,8 +179,11 @@ long read_scf(mpi3::shared_communicator node_comm,
     if (iter_grp.has_dataset("F_skij")) {
       // checkpoint from a dyson scf
       nda::h5_read(iter_grp, "F_skij", Floc);
+      // A missing Sigma_tskij means Sigma is exactly zero (e.g. HF checkpoint).
       if (iter_grp.has_dataset("Sigma_tskij"))
         nda::h5_read(iter_grp, "Sigma_tskij", Sloc);
+      else
+        Sloc() = 0.0;
     } else if (iter_grp.has_dataset("Heff_skij")) {
       // checkpoint from a qp scf
       auto sys_grp = h5::group(file).open_group("system");

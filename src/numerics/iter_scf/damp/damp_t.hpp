@@ -57,11 +57,16 @@ namespace iter_scf {
       utils::check(grp.has_subgroup("iter" + std::to_string(iter-1)), "damp: h5 group /scf/iter{} does not exist.", iter-1);
       auto iter_grp = grp.open_group("iter" + std::to_string(iter-1));
 
-      // H_previous is fully overwritten by the h5_read below, so it is only
-      // shaped here, not copied from H (complex nda arrays are calloc-backed).
+      // H_previous is fully overwritten by the h5_read below (or left zero when the
+      // dataset is absent), so it is only shaped here, not copied from H (complex nda
+      // arrays are calloc-backed). A missing dataset means the previous-iteration
+      // quantity was exactly zero (e.g. Sigma_tskij on an HF checkpoint).
       std::decay_t<decltype(nda::make_regular(H))> H_previous(H.shape());
       diis_timers::damp_read.start();
-      nda::h5_read(iter_grp, dataset, H_previous);
+      if (iter_grp.has_dataset(dataset))
+        nda::h5_read(iter_grp, dataset, H_previous);
+      else
+        H_previous() = 0.0;
       diis_timers::damp_read.stop();
 
       diis_timers::damp_mix.start();
