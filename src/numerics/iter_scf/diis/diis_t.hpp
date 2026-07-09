@@ -242,10 +242,14 @@ namespace iter_scf {
             if(is_extrapolated != 0) {
                 // Convergence measures max|F-F_extrap| / max|Sigma-Sigma_extrap|
                 // are scanned element-wise off the lazy difference (no temporary).
+                diis_timers::solve_convscan.start();
                 double Fmax = nda::max_element(nda::abs(F - d_alg.get_extrapolated_state_ref().get_fock()));
                 double Smax = nda::max_element(nda::abs(Sigma - d_alg.get_extrapolated_state_ref().get_sigma()));
+                diis_timers::solve_convscan.stop();
+                diis_timers::solve_copyback.start();
                 F     = d_alg.get_extrapolated_state_ref().get_fock();
                 Sigma = d_alg.get_extrapolated_state_ref().get_sigma();
+                diis_timers::solve_copyback.stop();
 
                 return std::array<double, 2>{Fmax, Smax};
 

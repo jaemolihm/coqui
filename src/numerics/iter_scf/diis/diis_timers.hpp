@@ -53,6 +53,15 @@ namespace iter_scf::diis_timers {
   // covers opt_state put/get and VSpace get_vec copies (aggregate)
   inline utils::Watch fs_copies   {"focksigma_copies"};
 
+  // A11: residual-chain whole-vector (nda-array-level) copies that bypass the
+  // FockSigma copy ctor/assign and are therefore NOT in fs_copies.
+  inline utils::Watch res_inject_copy {"residual_inject_copy"};  // upload_residual C_t copy
+  inline utils::Watch gmu_inject_copy {"g_mu_inject_copy"};      // upload_g_mu G copy
+  inline utils::Watch res_set_copy    {"residual_set_into_res"}; // set_fock_sigma into res
+  inline utils::Watch res_fz          {"residual_Fz_zero"};      // Fz alloc + zero
+  inline utils::Watch solve_convscan  {"solve_conv_maxdiff_scan"}; // max|ΔF|,max|ΔΣ|
+  inline utils::Watch solve_copyback  {"solve_extrap_copyback"};   // F=,Sigma= result
+
   // VSpace operations (inclusive: lincomb/get overlap fs_copies etc. nested)
   inline utils::Watch vsp_add     {"vspace_add_to_vspace"};
   inline utils::Watch vsp_get     {"vspace_get_vec"};
@@ -61,6 +70,7 @@ namespace iter_scf::diis_timers {
 
   // damp_t::solve checkpoint read (warmup iterations)
   inline utils::Watch damp_read   {"damp_checkpoint_read"};
+  inline utils::Watch damp_mix    {"damp_mix_arithmetic"};   // A11: warmup mixing passes
 
   // diis_t::get_mu checkpoint read
   inline utils::Watch get_mu      {"diis_get_mu"};
@@ -84,11 +94,18 @@ namespace iter_scf::diis_timers {
     row(com_dist_wtau);
     row(com_dist_reduce);
     row(fs_copies);
+    row(res_inject_copy);
+    row(gmu_inject_copy);
+    row(res_set_copy);
+    row(res_fz);
+    row(solve_convscan);
+    row(solve_copyback);
     row(vsp_add);
     row(vsp_get);
     row(vsp_overlap);
     row(vsp_lincomb);
     row(damp_read);
+    row(damp_mix);
     row(get_mu);
     app_log(2, "");
   }

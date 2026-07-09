@@ -523,8 +523,11 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
         diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
       }
       // The in-memory G/mu are byte-identical to the scf/iter{final_iter} checkpoint
-      // datasets the commutator residual would otherwise re-read from disk.
-      if (sG_tskij) iter_solver.upload_diis_g_mu(sG_tskij->local(), mu);
+      // datasets the commutator residual would otherwise re-read from disk. Skip
+      // this multi-GB G copy when the distributed (injected) residual is active:
+      // that path returns the pre-computed C_t and never consumes G_incoming.
+      if (sG_tskij and not distributed_residual)
+        iter_solver.upload_diis_g_mu(sG_tskij->local(), mu);
       // Inject the distributed commutator so the root-side solve consumes it
       // instead of recomputing the residual serially.
       if (distributed_residual) iter_solver.upload_diis_residual(sC_t_dist->local());

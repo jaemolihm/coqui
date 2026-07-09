@@ -133,9 +133,18 @@ public:
         _Sigma = S_;
         inited_S = true;
     }
+    // Move overload: steals the buffer of a temporary/consumed Sigma (no copy).
+    void set_sigma(Array_5D&& S_) {
+        _Sigma = std::move(S_);
+        inited_S = true;
+    }
     void set_fock_sigma(Array_4D& F_, Array_5D& S_) {
         set_fock(F_);
         set_sigma(S_);
+    }
+    void set_fock_sigma(Array_4D& F_, Array_5D&& S_) {
+        set_fock(F_);
+        set_sigma(std::move(S_));
     }
 
     void set_zero() {
