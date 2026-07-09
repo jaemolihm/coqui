@@ -1838,12 +1838,12 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.stop("A_darray");
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
-  Timer.start("A_outzero");
-  Z_qug.local() = ComplexType(0.0);
-  C_quv.local() = ComplexType(0.0);
-  Timer.stop("A_outzero");
+  // No upfront zero of Z_qug/C_quv: every local (iq,iu) row is written exactly
+  // once with full-row coverage by the scl=0 copy_select in steps 4d/4f below
+  // (iq spans all nqpts_ibz each block; the iu_for_sXb round-robin assigns each
+  // local ipt exactly once), so the overwrite replaces the pre-zero.
 
-  // figure out the number of Ipts in this node and the maximum over all nodes 
+  // figure out the number of Ipts in this node and the maximum over all nodes
   int tot_nI_in_node = 0, max_nI_in_node=0; 
   {
     tot_nI_in_node = Z_qug.local_range(1).size();
@@ -2362,8 +2362,9 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
+              // scl=0: each local (iq,iu) row is written exactly once (see ALLOC note)
               nda::copy_select(false,IPts,ComplexType(1.0),T3d(iq,i,all),
-                               ComplexType(1.0),C_quv.local()(iq,iu-u0,all));
+                               ComplexType(0.0),C_quv.local()(iq,iu-u0,all));
           }
         }
       }
@@ -2415,8 +2416,9 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
+              // scl=0: each local (iq,iu) row is written exactly once (see ALLOC note)
               nda::copy_select(false,rho_g.gv_to_fft(),ComplexType(1.0),Z3D(iq,i,all),
-                   ComplexType(1.0),Z_qug.local()(iq,iu-u0,all));
+                   ComplexType(0.0),Z_qug.local()(iq,iu-u0,all));
           }
         }
         Timer.stop("ZUR_pack");

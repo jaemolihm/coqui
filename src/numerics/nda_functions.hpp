@@ -157,12 +157,22 @@ void copy_select(bool expand, V1 const& m, T alpha, V3 const& A, T scl, V4&& B)
     APP_ABORT("Error: Missing device function copy_select.");
 #endif
   } else {
-    if(expand)  
-      for( auto [i,n] : itertools::enumerate(m) )
-        B(n) = scl*B(n) + alpha*A(i);
-    else
-      for( auto [i,n] : itertools::enumerate(m) )
-        B(i) = scl*B(i) + alpha*A(n);
+    if(scl == T(0)) {
+      // scl==0: overwrite B (0*garbage can be NaN on an uninitialized target)
+      if(expand)
+        for( auto [i,n] : itertools::enumerate(m) )
+          B(n) = alpha*A(i);
+      else
+        for( auto [i,n] : itertools::enumerate(m) )
+          B(i) = alpha*A(n);
+    } else {
+      if(expand)
+        for( auto [i,n] : itertools::enumerate(m) )
+          B(n) = scl*B(n) + alpha*A(i);
+      else
+        for( auto [i,n] : itertools::enumerate(m) )
+          B(i) = scl*B(i) + alpha*A(n);
+    }
   }
 }
 
