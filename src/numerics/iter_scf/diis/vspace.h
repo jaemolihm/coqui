@@ -24,6 +24,8 @@
 
 #include <vector>
 
+#include "numerics/iter_scf/diis/diis_timers.hpp"
+
 namespace iter_scf {
 
 // Abstract vector spaces and operations used in DIIS
@@ -73,8 +75,10 @@ public:
     void get_vec(const size_t i, Vector& vec) {
         utils::check(inited, "VSpace is not initialized");
         utils::check(i < _size, "VSpace::get_vec Vector index of the VSpace container {} is out of bounds", _filename);
+        diis_timers::vsp_get.start();
         if (_in_memory) vec = _vecs[i];
         else vec.read_from_file(_filename, i);
+        diis_timers::vsp_get.stop();
     }
 
     /**
@@ -82,8 +86,21 @@ public:
      */
     void add_to_vspace(const Vector& a) {
         utils::check(inited, "VSpace is not initialized");
+        diis_timers::vsp_add.start();
         if (_in_memory) _vecs.push_back(a);
         else a.write_to_file(_filename, _size);
+        diis_timers::vsp_add.stop();
+        _size++;
+    }
+
+    // Move overload: in-memory storage takes ownership without a copy; the disk
+    // path writes and then drops the vector, exactly as the const& overload.
+    void add_to_vspace(Vector&& a) {
+        utils::check(inited, "VSpace is not initialized");
+        diis_timers::vsp_add.start();
+        if (_in_memory) _vecs.push_back(std::move(a));
+        else a.write_to_file(_filename, _size);
+        diis_timers::vsp_add.stop();
         _size++;
     }
 
@@ -109,7 +126,12 @@ public:
     }
 
     std::complex<double> overlap(const Vector& a, const Vector& b) {
-        return a.dot_prod(b);
+        // Leaf overlap: index-based overlap(i,j)/(i,a) all funnel here, so timing
+        // this alone captures every dot_prod without Watch re-entrancy.
+        diis_timers::vsp_overlap.start();
+        auto res = a.dot_prod(b);
+        diis_timers::vsp_overlap.stop();
+        return res;
     }
 
     size_t size() {
@@ -136,16 +158,21 @@ public:
 
     virtual Vector make_linear_comb(const nda::array<ComplexType, 1>& C) {
         utils::check(inited, "VSpace is not initialized");
+         diis_timers::vsp_lincomb.start();
          Vector r;
          if(_size > 0) {
              get_vec(size()-1, r); // this is needed to initialize r
              r.set_zero();
          }
-         else return r; 
+         else { diis_timers::vsp_lincomb.stop(); return r; }
          for(size_t i = 0; i < _size && i < C.size(); i++) {
              ComplexType coeff = C(C.size()-1-i);
-             r.add(get_vec(size()-1-i), coeff);
+             // In-memory: accumulate directly from the stored vector (no copy).
+             // Disk: read the vector into a temporary and accumulate.
+             if (_in_memory) r.add(_vecs[size()-1-i], coeff);
+             else r.add(get_vec(size()-1-i), coeff);
          }
+         diis_timers::vsp_lincomb.stop();
          return r;
      }
 

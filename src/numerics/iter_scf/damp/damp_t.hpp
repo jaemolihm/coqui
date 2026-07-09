@@ -30,6 +30,7 @@
 #include "nda/h5.hpp"
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
+#include "numerics/iter_scf/diis/diis_timers.hpp"
 
 namespace iter_scf {
   /**
@@ -57,7 +58,9 @@ namespace iter_scf {
       auto iter_grp = grp.open_group("iter" + std::to_string(iter-1));
 
       auto H_previous = nda::make_regular(H);
+      diis_timers::damp_read.start();
       nda::h5_read(iter_grp, dataset, H_previous);
+      diis_timers::damp_read.stop();
 
       H = mixing*H + (1.0-mixing)*H_previous;
 

@@ -123,7 +123,7 @@ public:
             if (g_mu_injected) g_mu_injected = false; // consume the injected G/mu
             else upload_g_mu();
             // Warning! Sigma here is in tau!
-            FockSigma x_last = current_state->get();
+            const FockSigma& x_last = current_state->get_ref();
 
             Array_5D C_t;
             commutator_t(C_t, FT, G_incoming, x_last, mu, _S, _H0);

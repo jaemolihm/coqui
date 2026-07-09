@@ -57,6 +57,12 @@ public:
         return x;
     }
 
+    // Read-only access to the stored vector without a copy.
+    const Vector& get_ref() const {
+        utils::check(inited, "State is not initialized");
+        return x;
+    }
+
     void set(const Vector x_) {x = x_; inited = true;}
     void set(const Vector& x_) {x = x_; inited = true;}
     void set(Vector&& x_) noexcept {x = std::move(x_); inited = true;}

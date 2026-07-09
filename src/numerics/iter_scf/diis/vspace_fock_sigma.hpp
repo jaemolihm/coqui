@@ -22,7 +22,10 @@
 #ifndef COQUI_VSPACE_FOCK_SIGMA_HPP
 #define COQUI_VSPACE_FOCK_SIGMA_HPP
 
+#include <algorithm>
+
 #include "numerics/iter_scf/diis/vspace.h"
+#include "numerics/iter_scf/diis/diis_timers.hpp"
 namespace iter_scf {
 
 // Implementation of vector algebra for Fock matrix and self-energy union
@@ -41,28 +44,44 @@ private:
     bool inited_mu = false;
 public:
     FockSigma() {}
-    FockSigma(const FockSigma & rhs) : _Fock(rhs._Fock), _Sigma(rhs._Sigma), _mu(rhs._mu) {
+    FockSigma(const FockSigma & rhs) {
+        diis_timers::fs_copies.start();
+        _Fock = rhs._Fock;
+        _Sigma = rhs._Sigma;
+        _mu = rhs._mu;
+        diis_timers::fs_copies.stop();
         inited_F = true;
         inited_S = true;
         inited_mu = true;
     }
 
-    FockSigma(const Array_4D& Fock_, const Array_5D& Sigma_, const double mu_) : 
-       _Fock(Fock_), _Sigma(Sigma_), _mu(mu_) {
+    FockSigma(const Array_4D& Fock_, const Array_5D& Sigma_, const double mu_) {
+        diis_timers::fs_copies.start();
+        _Fock = Fock_;
+        _Sigma = Sigma_;
+        _mu = mu_;
+        diis_timers::fs_copies.stop();
         inited_F = true;
         inited_S = true;
         inited_mu = true;
     }
 
     FockSigma& operator =(const FockSigma& rhs) {
+      diis_timers::fs_copies.start();
       _Fock = rhs._Fock;
       _Sigma = rhs._Sigma;
       _mu = rhs._mu;
+      diis_timers::fs_copies.stop();
         inited_F = true;
         inited_S = true;
         inited_mu = true;
       return *this;
     }
+
+    // Move ctor/assign steal the nda buffers (no whole-vector copy), enabling
+    // std::move into VSpace/opt_state on the last use of a temporary.
+    FockSigma(FockSigma&&) = default;
+    FockSigma& operator =(FockSigma&&) = default;
 
     ComplexType dot_prod(const FockSigma& rhs) const {
       utils::check(inited_F, "FockSigma: Fock matrix is not initialized");
@@ -76,17 +95,15 @@ public:
       auto matvec_F= nda::reshape(_Fock, std::array<long, 2>{Fdim, 1});
       auto matvec_S= nda::reshape(_Sigma, std::array<long, 2>{Sdim, 1});
 
-      auto rFock = rhs.get_fock();
-      auto rSigma = rhs.get_sigma();
+      const auto& rFock = rhs.get_fock();
+      const auto& rSigma = rhs.get_sigma();
       size_t rFdim = std::reduce(rFock.shape().begin(), rFock.shape().end(), 1, std::multiplies<size_t>());
       size_t rSdim = std::reduce(rSigma.shape().begin(), rSigma.shape().end(), 1, std::multiplies<size_t>());
-/*
-      auto vec_rF= nda::reshape(rFock, std::array<long, 1>{rFdim});
-      auto vec_rS= nda::reshape(rSigma, std::array<long, 1>{rSdim});
-*/
       auto matvec_rF= nda::reshape(rFock, std::array<long, 2>{rFdim, 1});
       auto matvec_rS= nda::reshape(rSigma, std::array<long, 2>{rSdim, 1});
-      //return nda::blas::dotc(vec_F,vec_rF) + nda::blas::dotc(vec_S,vec_rS);
+      // The conjugated copies are materialized on purpose: routing the conjugation
+      // into the zgemm as the 'C' op selects a different MKL kernel whose rounding
+      // differs, breaking digit-identity of the DIIS extrapolation.
       nda::array<ComplexType, 2> res1(1,1);
       nda::array<ComplexType, 2> res2(1,1);
       nda::blas::gemm(nda::make_regular(nda::conj(nda::transpose(matvec_F))), matvec_rF, res1);
@@ -161,6 +178,13 @@ public:
         _Sigma += c * a.get_sigma();
     }
 
+    void add(const FockSigma& a, ComplexType c) {
+        utils::check(inited_F, "FockSigma: Fock matrix is not initialized");
+        utils::check(inited_S, "FockSigma: Sigma is not initialized");
+        _Fock += c * a.get_fock();
+        _Sigma += c * a.get_sigma();
+    }
+
     void read_from_file(std::string filename, const size_t vec_number) {
         h5::file file(filename, 'r');
         auto vec_grp = h5::group(file).open_group("vec" + std::to_string(vec_number));
@@ -209,33 +233,47 @@ template<typename Array_G, typename Array_ov>
 void commutator_t(Array_G& C_t, const imag_axes_ft::IAFT *FT,
                   const Array_G& G_t, const FockSigma& FS_t, double mu,
                   const Array_ov& S, const Array_ov& H0) {
+    diis_timers::com_total.start();
     decltype(nda::range::all) all;
     size_t nt = G_t.shape()[0];
     size_t ns = G_t.shape()[1];
     size_t nk = G_t.shape()[2];
     size_t nao = G_t.shape()[3];
     size_t nw = FT->nw_f();
+    diis_timers::com_alloc.start();
     nda::array<ComplexType, 5> G_w(nw,ns,nk,nao,nao);
     nda::array<ComplexType, 5> Sigma_w(nw,ns,nk,nao,nao);
+    diis_timers::com_alloc.stop();
     // G_w is filled
+    diis_timers::com_ftG.start();
     FT->tau_to_w(G_t, G_w, imag_axes_ft::fermion);
-    // Sigma_t is filled
-    auto Sigma_t = FS_t.get_sigma();
-    auto Fock = FS_t.get_fock();
-    // Sigma_w is filled
-    FT->tau_to_w(Sigma_t, Sigma_w, imag_axes_ft::fermion);
+    diis_timers::com_ftG.stop();
+    const auto& Sigma_t = FS_t.get_sigma();
+    const auto& Fock = FS_t.get_fock();
+    // HF: Sigma(tau) is exactly zero, so its FT is exactly zero. Detect this and
+    // fill Sigma_w with exact zeros instead of transforming (bit-identical). For
+    // scGW the scan hits a nonzero element and the transform is taken as usual.
+    diis_timers::com_ftSigma.start();
+    bool sigma_is_zero = std::none_of(Sigma_t.data(), Sigma_t.data() + Sigma_t.size(),
+                                      [](ComplexType z) { return z != ComplexType{0}; });
+    if (sigma_is_zero) Sigma_w() = 0;
+    else FT->tau_to_w(Sigma_t, Sigma_w, imag_axes_ft::fermion);
+    diis_timers::com_ftSigma.stop();
 
     nda::array<ComplexType, 4> Dm(ns,nk,nao,nao);
     FT->tau_to_beta(G_t, Dm);
 
+    diis_timers::com_alloc.start();
+    // C_w is fully overwritten in the (iw,s,k) loop below; C_t is fully
+    // overwritten by w_to_tau (a single beta=0 gemm), so neither needs zeroing.
     nda::array<ComplexType, 5> C_w(nw, ns, nk, nao, nao);
-    C_w () = 0;
-    C_t = nda::array<ComplexType, 5>(nt,ns,nk,nao,nao); // To make sure an array of appropriate size is ready
-    C_t () = 0;
+    C_t = nda::array<ComplexType, 5>(nt,ns,nk,nao,nao); // appropriately sized output
+    diis_timers::com_alloc.stop();
 
     nda::array<ComplexType, 2> I1(nao, nao);
     nda::array<ComplexType, 2> I2(nao, nao);
 
+    diis_timers::com_gemm.start();
     for(size_t iw = 0; iw < nw; iw++)
     for(size_t s = 0; s < ns; s++)
     for(size_t k = 0; k < nk; k++) {
@@ -249,14 +287,17 @@ void commutator_t(Array_G& C_t, const imag_axes_ft::IAFT *FT,
 
         nda::array<ComplexType, 2> G0inv_Sigma_wsk = nda::make_regular(omega_mu * S_sk - H0_sk - F_sk - Sigma_wsk);
         nda::array_view<ComplexType, 2> C_wsk = C_w(iw,s,k,all,all);
-        I1() = 0;
-        I2() = 0;
+        // gemm uses beta=0, fully overwriting I1/I2.
         nda::blas::gemm(G_wsk, G0inv_Sigma_wsk, I1);
         nda::blas::gemm(G0inv_Sigma_wsk, G_wsk, I2);
         C_wsk = nda::make_regular(I1 - I2);
     }
+    diis_timers::com_gemm.stop();
 
+    diis_timers::com_wtau.start();
     FT->w_to_tau(C_w, C_t, imag_axes_ft::fermion);
+    diis_timers::com_wtau.stop();
+    diis_timers::com_total.stop();
 }
 
 
