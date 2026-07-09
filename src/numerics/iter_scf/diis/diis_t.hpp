@@ -62,11 +62,12 @@ namespace iter_scf {
   public:
     diis_t() = default;
     diis_t(double mixing_, size_t max_subsp_size_, size_t warmup_iter_,
-         std::string residual_type_ = "commutator"):
+         std::string residual_type_ = "commutator", std::string storage_ = "disk"):
         mixing(mixing_),
         max_subsp_size(max_subsp_size_),
         warmup_iter(warmup_iter_),
-        residual_type(normalize_residual_type(std::move(residual_type_))) {};
+        residual_type(normalize_residual_type(std::move(residual_type_))),
+        storage(normalize_storage(std::move(storage_))) {};
 
     diis_t(const diis_t& other) = default;
     diis_t(diis_t&& other) = default;
@@ -101,9 +102,9 @@ namespace iter_scf {
         // Initialize the extrapolated state using the current Fock and Sigma
         extrapolated_state.initialize(FockSigma(F, Sigma, mu));
         // initialize the vector space used to extrapolation
-        x_vsp.initialize("diis_vectors.h5");
+        x_vsp.initialize("diis_vectors.h5", storage == "memory");
         // initialize the vector space for residuals
-        res_vsp.initialize("diis_residuals.h5");
+        res_vsp.initialize("diis_residuals.h5", storage == "memory");
         comFS_residual.initialize(&extrapolated_state, S, H0, FT, mbpt_output);
         // providing non-owning pointers to DIIS kernel as well as the starting state
         d_alg.init(&extrapolated_state, &comFS_residual, &x_vsp, &res_vsp,
@@ -130,8 +131,8 @@ namespace iter_scf {
       initialized_qp = true;
 
       extrapolated_heff_state.initialize(Heff(H));
-      heff_x_vsp.initialize("diis_heff_vectors.h5");
-      heff_res_vsp.initialize("diis_heff_residuals.h5");
+      heff_x_vsp.initialize("diis_heff_vectors.h5", storage == "memory");
+      heff_res_vsp.initialize("diis_heff_residuals.h5", storage == "memory");
       qp_com_residual.initialize(&extrapolated_heff_state, S, mbpt_output, residual_type);
       h_alg.init(&extrapolated_heff_state, &qp_com_residual, &heff_x_vsp, &heff_res_vsp,
              max_subsp_size, true, Heff(H));
@@ -279,6 +280,15 @@ namespace iter_scf {
                              "this is a compile-time guard and should never be called at runtime.");
     }
 
+    /**
+     * @brief Supply the latest-iteration G and mu from memory for the Dyson-SCF
+     * commutator residual, avoiding the G_tskij re-read from the checkpoint file.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_G>
+    void upload_g_mu(const Array_G& G, double mu) {
+      comFS_residual.upload_g_mu(G, mu);
+    }
+
     void metadata_log() const {
       app_log(2, "\nIterative algorithm for SCF");
       app_log(2, "-----------------------------");
@@ -294,6 +304,7 @@ namespace iter_scf {
       app_log(2, "    max subspace size = {}", max_subsp_size);
       app_log(2, "    warmup iteration  = {}", warmup_iter);
       app_log(2, "    residual type     = {}", residual_type);
+      app_log(2, "    subspace storage  = {}", storage);
       app_log(2, "    checkpoint output = {}\n", mbpt_output);
     }
 
@@ -306,6 +317,9 @@ namespace iter_scf {
     bool initialized_dyson = false;
     bool initialized_qp = false;
     std::string residual_type = "commutator";
+    // DIIS subspace storage: "disk" (HDF5-backed VSpace) or "memory" (in-memory;
+    // faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
+    std::string storage = "disk";
     
   private:
     VSpace<FockSigma> x_vsp;                 // vector space of Fock-self-energy vectors
@@ -330,6 +344,15 @@ namespace iter_scf {
                    "diis_t::normalize_residual_type: unknown residual_type = {}. Valid options are \"commutator\" and \"vector_diff\"",
                    residual_type);
       return residual_type;
+    }
+
+    static std::string normalize_storage(std::string storage) {
+      std::transform(storage.begin(), storage.end(), storage.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      utils::check(storage == "disk" or storage == "memory",
+                   "diis_t::normalize_storage: unknown storage = {}. Valid options are \"disk\" and \"memory\"",
+                   storage);
+      return storage;
     }
 
     /**

@@ -474,7 +474,8 @@ auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-               const imag_axes_ft::IAFT *FT, std::array<std::string,3> datasets)
+               const imag_axes_ft::IAFT *FT, std::array<std::string,3> datasets,
+               const Xt_t* sG_tskij, double mu)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
@@ -489,6 +490,9 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       if (not iter_solver.is_initialized()) {
         diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
       }
+      // The in-memory G/mu are byte-identical to the scf/iter{final_iter} checkpoint
+      // datasets the commutator residual would otherwise re-read from disk.
+      if (sG_tskij) iter_solver.upload_diis_g_mu(sG_tskij->local(), mu);
 
       std::string filename = h5_prefix + ".mbpt.h5";
       h5::file file(filename, 'r');
@@ -520,7 +524,8 @@ template<typename comm_t, typename X_t, typename Xt_t>
 auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
                      long iteration, std::string h5_prefix,
                      X_t &sF_skij, Xt_t &sSigma_tskij, const imag_axes_ft::IAFT *FT,
-                     std::array<std::string,3> datasets)
+                     std::array<std::string,3> datasets,
+                     const Xt_t* sG_tskij, double mu)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
@@ -564,7 +569,8 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
                                                   sF_skij, sSigma_tskij, datasets);
     } else if (iter_solver.iter_alg() == iter_scf::DIIS) {
       std::tie(conv_F, conv_Sigma) = diis_impl(context, iter_solver, iteration, h5_prefix,
-                                               sF_skij, sSigma_tskij, FT, datasets);
+                                               sF_skij, sSigma_tskij, FT, datasets,
+                                               sG_tskij, mu);
     } else {
       utils::check(false, "scf_common::solve_iterative: unknown type of iterative algorithm.");
     }
@@ -674,7 +680,8 @@ template double update_mu(double, simple_dyson&, const mf::MF &, const imag_axes
 
 template auto solve_iterative(utils::mpi_context_t<mpi3::communicator>&, iter_scf::iter_scf_t&, long, std::string,
                               sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>&, const imag_axes_ft::IAFT*,
-                              std::array<std::string,3>)
+                              std::array<std::string,3>,
+                              const sArray_t<Array_view_5D_t>*, double)
          -> std::tuple<double, double>;
 
 template void write_mf_data(mf::MF&, const imag_axes_ft::IAFT&, simple_dyson&,

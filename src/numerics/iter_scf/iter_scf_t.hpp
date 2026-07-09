@@ -75,6 +75,16 @@ namespace iter_scf {
       return std::visit( [&](auto&& v) { return v.initialized; }, _alg_var);
     }
 
+    // Supply the latest-iteration G and mu from memory to the active algorithm
+    // (DIIS commutator residual only; a no-op for algorithms without this hook).
+    template<class Array5D>
+    void upload_diis_g_mu(const Array5D& G, double mu) {
+      std::visit( [&](auto&& v) {
+        if constexpr (requires { v.upload_g_mu(G, mu); })
+          v.upload_g_mu(G, mu);
+      }, _alg_var);
+    }
+
     void metadata_log() const {
       std::visit( [&](auto&& v) { v.metadata_log(); }, _alg_var);
     }

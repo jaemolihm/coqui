@@ -425,13 +425,18 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
  * @param sSigma_tskij - [INPUT] dynamic self-energy at the current iteration
  * @param FT           - [INPUT] Fourier transform driver on imaginary axes
  * @param restart      - [INPUT] whether this is a restart SCF
+ * @param sG_tskij     - [INPUT] latest-iteration Green's function (optional). When given
+ *                       (together with mu), the DIIS commutator residual uses it directly
+ *                       instead of re-reading G_tskij from the checkpoint file.
+ * @param mu           - [INPUT] chemical potential matching sG_tskij
  * @return - maximum norm of the SCF error for F and Sigma
  */
 template<typename comm_t, typename X_t, typename Xt_t>
 auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
                      long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
                      const imag_axes_ft::IAFT *FT,
-                     std::array<std::string,3> dataset={"scf", "F_skij", "Sigma_tskij"})
+                     std::array<std::string,3> dataset={"scf", "F_skij", "Sigma_tskij"},
+                     const Xt_t* sG_tskij = nullptr, double mu = 0.0)
   -> std::tuple<double, double>;
 
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
@@ -444,7 +449,8 @@ template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
                const imag_axes_ft::IAFT *FT,
-               std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"})
+               std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"},
+               const Xt_t* sG_tskij = nullptr, double mu = 0.0)
 -> std::tuple<double, double>;
 
 template<typename comm_t, typename X_t, nda::ArrayOfRank<1> Array1D>

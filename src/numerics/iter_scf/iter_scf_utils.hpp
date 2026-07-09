@@ -37,7 +37,9 @@ namespace iter_scf {
    * DIIS options:
    *  - mixing: "0.7" For initial damping
    *  - max_subsp_size: "5" Maximal dimension of the extrapolation subspace
-   *  - diis_start: "3" When to start applying DIIS extrapolation. 
+   *  - diis_start: "3" When to start applying DIIS extrapolation.
+   *  - storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
+   *    (in-memory; faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM)}
    */
   inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false) {
     for (auto const& it : base_pt) {
@@ -62,6 +64,8 @@ namespace iter_scf {
             auto residual_type = io::get_value_with_default<std::string>(
               pt, "residual_type", is_evscf ? "vector_diff" : "commutator");
             io::tolower(residual_type);
+            auto storage = io::get_value_with_default<std::string>(pt, "storage", "disk");
+            io::tolower(storage);
             auto diis_start = io::get_value_with_default<size_t>(pt,"diis_start",-1);
             if (diis_start != -1) {
               app_log(1, "[WARNING] 'diis_start' is deprecated. Please use 'diis_warmup' instead \n"
@@ -75,7 +79,7 @@ namespace iter_scf {
               warmup_iter = diis_start;
             }
 
-            return iter_scf_t(diis_t(mixing, max_subsp_size, warmup_iter, residual_type));
+            return iter_scf_t(diis_t(mixing, max_subsp_size, warmup_iter, residual_type, storage));
 
           } else {
             utils::check(false, "Unrecognized algorithm type for iterative solver. ");

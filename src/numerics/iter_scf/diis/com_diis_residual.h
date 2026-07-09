@@ -42,15 +42,27 @@ protected:
     Array_4D _H0; // Non-interacting Hamiltonian
     double mu;    // Chemical potential
 
-    Array_5D G_incoming; 
+    Array_5D G_incoming;
     long iter = -1;
-    std::string mbpt_output;                      
+    std::string mbpt_output;
+    bool g_mu_injected = false;
 
 public:
 
     // a version with external G
     void upload_g(Array_5D& G_) {
         G_incoming = G_;
+    }
+    /**
+     * Supply the latest-iteration G and mu from memory (byte-identical to the
+     * scf/iter{final_iter} checkpoint datasets), so the next get_diis_residual
+     * skips the multi-GB re-read of G_tskij from the checkpoint file.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_G>
+    void upload_g_mu(const Array_G& G_, double mu_) {
+        G_incoming = G_;
+        mu = mu_;
+        g_mu_injected = true;
     }
     // a version with external mu
     void update_mu(double mu_) {
@@ -108,7 +120,8 @@ public:
     // This may not be the most memory-efficient implementation...
     bool get_diis_residual(FockSigma& res) override {
         utils::check(com_initialized, "DIIS commutator residual is not initialized");
-            upload_g_mu(); // TODO if it hasn't been supplied externally
+            if (g_mu_injected) g_mu_injected = false; // consume the injected G/mu
+            else upload_g_mu();
             // Warning! Sigma here is in tau!
             FockSigma x_last = current_state->get();
 

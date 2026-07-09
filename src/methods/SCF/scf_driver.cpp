@@ -182,9 +182,13 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
 
     Timer.start("ITERATIVE");
     if (iter_solver != nullptr) {
+      // sG_tskij/mu still hold the previous iteration's Dyson output here
+      // (update_G runs below), matching the latest checkpoint on disk.
       std::tie(F_conv, Sigma_conv) = solve_iterative(*mpi, *iter_solver, output_iter,
                                                      mb_state.coqui_prefix,
-                                                     sF_skij, sSigma_tskij, &FT);
+                                                     sF_skij, sSigma_tskij, &FT,
+                                                     {"scf", "F_skij", "Sigma_tskij"},
+                                                     &sG_tskij, mu);
     }
     Timer.stop("ITERATIVE");
 
