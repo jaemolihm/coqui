@@ -46,13 +46,16 @@ public:
 
   ComplexType dot_prod(const Heff& rhs) const {
     utils::check(inited_H, "Heff: matrix is not initialized");
-    auto rHeff = rhs.get_heff();
+    const auto& rHeff = rhs.get_heff();
 
     size_t hdim = std::reduce(_Heff.shape().begin(), _Heff.shape().end(), 1, std::multiplies<size_t>());
     size_t rhdim = std::reduce(rHeff.shape().begin(), rHeff.shape().end(), 1, std::multiplies<size_t>());
     auto matvec_h = nda::reshape(_Heff, std::array<long, 2>{hdim, 1});
     auto matvec_rh = nda::reshape(rHeff, std::array<long, 2>{rhdim, 1});
 
+    // The conjugated copy is materialized on purpose: routing the conjugation
+    // into the zgemm as the 'C' op selects a different MKL kernel whose rounding
+    // differs, breaking digit-identity of the DIIS extrapolation.
     nda::array<ComplexType, 2> res(1, 1);
     nda::blas::gemm(nda::make_regular(nda::conj(nda::transpose(matvec_h))), matvec_rh, res);
     return res(0, 0);
@@ -92,6 +95,11 @@ public:
   }
 
   void add(Heff&& a, ComplexType c) {
+    utils::check(inited_H, "Heff: matrix is not initialized");
+    _Heff += c * a.get_heff();
+  }
+
+  void add(const Heff& a, ComplexType c) {
     utils::check(inited_H, "Heff: matrix is not initialized");
     _Heff += c * a.get_heff();
   }

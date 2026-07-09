@@ -89,7 +89,7 @@ namespace methods {
                      "EVALUATE_PI_R", "PI_ALLOC_R", "PI_FT_R", "PI_HADPROD_R",
                      "EVALUATE_W",
                      "EVALUATE_SIGMA_K", "SIGMA_ALLOC_K", "SIGMA_HADPROD_K", "SIGMA_MULTIPLY_DMAT_K",
-                     "EVALUATE_SIGMA_R", "SIGMA_ALLOC_R", "SIGMA_FT_R", "SIGMA_HADPROD_R",
+                     "EVALUATE_SIGMA_R", "SIGMA_ALLOC_R", "SIGMA_TRANSPOSE_R", "SIGMA_FT_R", "SIGMA_HADPROD_R",
                      "IMAG_FT_TtoW", "IMAG_FT_WtoT", "FT_REDISTRIBUTE"} ) {
         _Timer.add(v);
       }
@@ -151,7 +151,7 @@ namespace methods {
                      "EVALUATE_PI_R", "PI_ALLOC_R", "PI_FT_R", "PI_HADPROD_R",
                      "EVALUATE_W",
                      "EVALUATE_SIGMA_K", "SIGMA_ALLOC_K", "SIGMA_HADPROD_K", "SIGMA_MULTIPLY_DMAT_K",
-                     "EVALUATE_SIGMA_R", "SIGMA_ALLOC_R", "SIGMA_FT_R", "SIGMA_HADPROD_R",
+                     "EVALUATE_SIGMA_R", "SIGMA_ALLOC_R", "SIGMA_TRANSPOSE_R", "SIGMA_FT_R", "SIGMA_HADPROD_R",
                      "IMAG_FT_TtoW", "IMAG_FT_WtoT", "FT_REDISTRIBUTE"} ) {
         _Timer.add(v);
       }

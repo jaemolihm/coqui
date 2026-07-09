@@ -738,7 +738,11 @@ namespace methods {
       Fhf_loc += H0_skij;
 
       auto Sigma_loc = sSigma_tskij.local();
-      nda::h5_read(iter_grp, "Sigma_tskij", Sigma_loc);
+      // A missing Sigma_tskij means Sigma is exactly zero (e.g. HF checkpoint).
+      if (iter_grp.has_dataset("Sigma_tskij"))
+        nda::h5_read(iter_grp, "Sigma_tskij", Sigma_loc);
+      else
+        Sigma_loc() = 0.0;
     }
     _context.node_comm.broadcast_n(&mu, 1, 0);
 

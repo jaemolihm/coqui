@@ -36,6 +36,7 @@
 #include "mean_field/MF.hpp"
 #include "methods/embedding/projector_boson_t.h"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
+#include "numerics/fft/fft_kR.hpp"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/ERI/detail/concepts.hpp"
@@ -272,8 +273,21 @@ namespace solvers {
     // Distributed bosonic τ↔ω FT engine. The public tau_to_w / w_to_tau
     // delegate to this; it owns the FT timers and the leak-check gate.
     scr_coulomb_fourier_t _scr_fourier;
+
+    // Blocked-FFT engines for the spatial k<->R transform in eval_Pi_rpa_Rspace.
+    // Built lazily; _fft_k transforms the kpts-indexed G, _fft_q the Qpts-indexed Pi.
+    // Used when COQUI_DEBUG_GEMM_FT is unset and the q-mesh is symmetry-unreduced.
+    std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
   public:
     utils::TimerManager& timer() { return _Timer; }
+
+    /**
+     * Print the RPA polarizability (Π) and screened-interaction (W) timers.
+     * These are recorded by eval_Pi_qdep / dyson_W_in_place and the bosonic
+     * FT engine but were previously never surfaced, leaving the dominant scGW
+     * cost invisible. Called at the end of update_w.
+     */
+    void print_timers(int level = 2);
 
   private:
 

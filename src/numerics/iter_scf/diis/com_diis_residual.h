@@ -42,15 +42,46 @@ protected:
     Array_4D _H0; // Non-interacting Hamiltonian
     double mu;    // Chemical potential
 
-    Array_5D G_incoming; 
+    Array_5D G_incoming;
     long iter = -1;
-    std::string mbpt_output;                      
+    std::string mbpt_output;
+    bool g_mu_injected = false;
+
+    Array_5D C_t_injected;         // pre-computed commutator (A10 distributed path)
+    bool residual_injected = false;
 
 public:
+
+    /**
+     * Supply a pre-computed commutator residual C_t (A10 k-striped distributed
+     * path). The next get_diis_residual consumes it once instead of running the
+     * serial commutator_t; if not injected, get_diis_residual falls back to the
+     * serial path.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_C>
+    void upload_residual(const Array_C& C_t_) {
+        diis_timers::res_inject_copy.start();
+        C_t_injected = C_t_;
+        diis_timers::res_inject_copy.stop();
+        residual_injected = true;
+    }
 
     // a version with external G
     void upload_g(Array_5D& G_) {
         G_incoming = G_;
+    }
+    /**
+     * Supply the latest-iteration G and mu from memory (byte-identical to the
+     * scf/iter{final_iter} checkpoint datasets), so the next get_diis_residual
+     * skips the multi-GB re-read of G_tskij from the checkpoint file.
+     */
+    template<nda::MemoryArrayOfRank<5> Array_G>
+    void upload_g_mu(const Array_G& G_, double mu_) {
+        diis_timers::gmu_inject_copy.start();
+        G_incoming = G_;
+        diis_timers::gmu_inject_copy.stop();
+        mu = mu_;
+        g_mu_injected = true;
     }
     // a version with external mu
     void update_mu(double mu_) {
@@ -68,6 +99,10 @@ public:
         if(iter != iter_from_file) {
             auto iter_grp = scf_grp.open_group("iter"+std::to_string(iter_from_file));
             h5::h5_read(iter_grp, "mu", mu);
+            utils::check(iter_grp.has_dataset("G_tskij"),
+                "com_diis_residual: scf/iter{} has no G_tskij (chkpt_slim intermediate "
+                "iteration); this fallback path requires in-memory G injection "
+                "(upload_g_mu(G, mu)) or a full checkpoint.", iter_from_file);
             nda::h5_read(iter_grp, "G_tskij", G_incoming);
             iter = iter_from_file;
         }
@@ -108,17 +143,35 @@ public:
     // This may not be the most memory-efficient implementation...
     bool get_diis_residual(FockSigma& res) override {
         utils::check(com_initialized, "DIIS commutator residual is not initialized");
-            upload_g_mu(); // TODO if it hasn't been supplied externally
             // Warning! Sigma here is in tau!
-            FockSigma x_last = current_state->get();
+            const FockSigma& x_last = current_state->get_ref();
+
+            // The residual Fock block is zero; a fresh complex nda array is
+            // calloc-zeroed (nda::mem::init_dcmplx), so no copy or explicit fill.
+            diis_timers::res_fz.start();
+            Array_4D Fz(x_last.get_fock().shape());
+            diis_timers::res_fz.stop();
+
+            if (residual_injected) {
+                // A10: consume the pre-computed distributed commutator, moving it
+                // into res (the single unavoidable copy already happened in
+                // upload_residual, out of the node-shared window).
+                residual_injected = false;
+                diis_timers::res_set_copy.start();
+                res.set_fock_sigma(Fz, std::move(C_t_injected));
+                diis_timers::res_set_copy.stop();
+                return true;
+            }
+
+            if (g_mu_injected) g_mu_injected = false; // consume the injected G/mu
+            else upload_g_mu();
 
             Array_5D C_t;
             commutator_t(C_t, FT, G_incoming, x_last, mu, _S, _H0);
+            diis_timers::res_set_copy.start();
+            res.set_fock_sigma(Fz, std::move(C_t));
+            diis_timers::res_set_copy.stop();
 
-            auto Fz = x_last.get_fock();
-            Fz() = 0;
-            res.set_fock_sigma(Fz, C_t);
-            
             return true;
         }
     };

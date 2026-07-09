@@ -30,6 +30,7 @@
 #include "nda/h5.hpp"
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
+#include "numerics/iter_scf/diis/diis_timers.hpp"
 
 namespace iter_scf {
   /**
@@ -56,14 +57,25 @@ namespace iter_scf {
       utils::check(grp.has_subgroup("iter" + std::to_string(iter-1)), "damp: h5 group /scf/iter{} does not exist.", iter-1);
       auto iter_grp = grp.open_group("iter" + std::to_string(iter-1));
 
-      auto H_previous = nda::make_regular(H);
-      nda::h5_read(iter_grp, dataset, H_previous);
+      // H_previous is fully overwritten by the h5_read below (or left zero when the
+      // dataset is absent), so it is only shaped here, not copied from H (complex nda
+      // arrays are calloc-backed). A missing dataset means the previous-iteration
+      // quantity was exactly zero (e.g. Sigma_tskij on an HF checkpoint).
+      std::decay_t<decltype(nda::make_regular(H))> H_previous(H.shape());
+      diis_timers::damp_read.start();
+      if (iter_grp.has_dataset(dataset))
+        nda::h5_read(iter_grp, dataset, H_previous);
+      else
+        H_previous() = 0.0;
+      diis_timers::damp_read.stop();
 
+      diis_timers::damp_mix.start();
       H = mixing*H + (1.0-mixing)*H_previous;
 
       H_previous -= H;
       auto max_iter = max_element(H_previous.data(), H_previous.data()+H_previous.size(),
                               [](auto a, auto b) { return std::abs(a) < std::abs(b); });
+      diis_timers::damp_mix.stop();
       return std::abs((*max_iter));
     }
 

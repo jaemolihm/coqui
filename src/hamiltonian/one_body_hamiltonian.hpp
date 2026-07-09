@@ -237,10 +237,16 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
  * One-body Hamiltonian associated with a MF object in a shared memory array
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
  * @param exclude_H0 [INPUT] - exclude kinetic + pseudo/external potential or not
+ * @param sH0_skij   [INPUT, optional] - when exclude_H0 is set, subtract this
+ *        precomputed H0 (global shape (nspin, nkpts_ibz, nbnd, nbnd)) instead of
+ *        recomputing it. Lets callers that already hold H0 (e.g. the dyson solver)
+ *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute.
  * @return - A shared memory array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
-void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sF_skij, bool exclude_H0=false) {
+void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sF_skij,
+              bool exclude_H0=false,
+              const math::shm::shared_array<Array_4D_t> *sH0_skij=nullptr) {
   long np = sF_skij.internode_comm()->size();
   long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
   long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
@@ -255,10 +261,17 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
   if (sF_skij.node_comm()->root()) {
     auto dF  = hamilt::F<HOST_MEMORY>(mf, *sF_skij.internode_comm(), nda::range(mf.nkpts_ibz()),
                                       nda::range(mf.nbnd()), pgrid, bsize);
-    if (exclude_H0) { 
-      auto dH0 = hamilt::H0<HOST_MEMORY>(mf, *sF_skij.internode_comm(), psp, nda::range(mf.nkpts_ibz()),
-                                         nda::range(mf.nbnd()), pgrid, bsize);
-      dF.local() -= dH0.local();
+    if (exclude_H0) {
+      if (sH0_skij != nullptr) {
+        // subtract the caller-provided H0 restricted to dF's local block
+        auto H0_loc = sH0_skij->local();
+        dF.local() -= H0_loc(dF.local_range(0), dF.local_range(1),
+                             dF.local_range(2), dF.local_range(3));
+      } else {
+        auto dH0 = hamilt::H0<HOST_MEMORY>(mf, *sF_skij.internode_comm(), psp, nda::range(mf.nkpts_ibz()),
+                                           nda::range(mf.nbnd()), pgrid, bsize);
+        dF.local() -= dH0.local();
+      }
     }
     auto F_loc = sF_skij.local();
     F_loc(dF.local_range(0), dF.local_range(1), dF.local_range(2), dF.local_range(3)) = dF.local();

@@ -36,7 +36,8 @@ namespace methods {
       auto scf_grp = h5::group(file).open_group("scf");
       h5::h5_read(scf_grp, "final_iter", iter);
       auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
-      if ( iter_grp.has_dataset("Sigma_tskij") and iter_grp.has_dataset("F_skij") )
+      // F_skij marks a dyson scf; Sigma_tskij may be absent (== exactly zero, e.g. HF).
+      if ( iter_grp.has_dataset("F_skij") )
         scf_type = "dyson";
       else if ( iter_grp.has_dataset("E_ska") )
         scf_type = "quasiparticle";
@@ -118,7 +119,11 @@ namespace methods {
       h5::file file(filename, 'r');
       auto grp = h5::group(file);
       auto Sigma_loc = sSigma_tskij.local();
-      nda::h5_read(grp, dataset, Sigma_loc);
+      // A missing dataset means Sigma is exactly zero (e.g. HF checkpoint).
+      if (grp.has_dataset(dataset))
+        nda::h5_read(grp, dataset, Sigma_loc);
+      else
+        Sigma_loc() = 0.0;
     }
     context.node_comm.barrier();
 

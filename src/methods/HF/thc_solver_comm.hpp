@@ -26,6 +26,7 @@
 #include "nda/nda.hpp"
 #include "utilities/proc_grid_partition.hpp"
 #include "numerics/nda_functions.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/shared_array/detail/concepts.hpp"
@@ -438,14 +439,14 @@ namespace methods {
           auto Xsk_Pa_r = thc.X(s, iq, k);
           
           if(kp_trev(k)) {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ikab_4D(i, kp_map(k), all, all)), Ask_Pb);
+            math::detail::gemm_guarded(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ikab_4D(i, kp_map(k), all, all)), Ask_Pb);
           } else {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_ikab_4D(i, kp_map(k), all, all), Ask_Pb);
+            math::detail::gemm_guarded(Xsk_Pa_l(X_P_rng, all), O_ikab_4D(i, kp_map(k), all, all), Ask_Pb);
           }
 
           // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
           //Xsk_bQ_conj = nda::conj(nda::transpose(Xsk_Pa(O_Q_rng, all)));
-          nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
+          math::detail::gemm_guarded(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
         }
       }
 
@@ -508,10 +509,10 @@ namespace methods {
           auto Xsk_Pa_l = thc.X(s, ip, kp_map(k)); 
           auto Xsk_Pa_r = ( ip==iq ? Xsk_Pa_l : thc.X(s, iq, kp_map(k))); 
           //Xsk_Pa_conj = nda::conj(Xsk_Pa(all, a_range));
-          nda::blas::gemm(nda::dagger(Xsk_Pa_l(all, a_range)), O_iPQ_3D(i, all, all), Ask_aQ);
+          math::detail::gemm_guarded(nda::dagger(Xsk_Pa_l(all, a_range)), O_iPQ_3D(i, all, all), Ask_aQ);
 
           // Osk_ab = Ask_aQ * Xsk_Qb
-          nda::blas::gemm(scl, Ask_aQ, Xsk_Pa_r, 
+          math::detail::gemm_guarded(scl, Ask_aQ, Xsk_Pa_r, 
                           ComplexType(1.0), O_iab_3D(i, a_range, all));
         }
       }
@@ -578,10 +579,10 @@ namespace methods {
           auto Xsk_Pa_l = thc.X(s, ip, kp_map(k)); 
           auto Xsk_Pa_r = ( ip==iq ? Xsk_Pa_l : thc.X(s, iq, kp_map(k))); 
           //Xsk_Pa_conj = nda::conj(Xsk_Pa(P_rng, all));
-          nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_aQ);
+          math::detail::gemm_guarded(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_aQ);
 
           // Osk_ab = Ask_aQ * Xsk_Qb
-          nda::blas::gemm(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_buffer);
+          math::detail::gemm_guarded(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_buffer);
           dim0_comm.reduce_in_place_n(Oab_buffer.data(), Oab_buffer.size(), std::plus<>{}, 0);
           if (dim0_comm.root()) {
             O_iab_3D(i, all, all) += scl*Oab_buffer;

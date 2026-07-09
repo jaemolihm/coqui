@@ -1,0 +1,88 @@
+/**
+ * ==========================================================================
+ * CoQuí: Correlated Quantum ínterface
+ *
+ * Copyright (c) 2022-2026 Simons Foundation & The CoQuí developer team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * ==========================================================================
+ */
+
+#ifndef COQUI_DIIS_COEFS_HPP
+#define COQUI_DIIS_COEFS_HPP
+
+#include <numeric>
+
+#include "configuration.hpp"
+#include "nda/nda.hpp"
+#include "nda/blas.hpp"
+#include "nda/linalg/eigenelements.hpp"
+#include "IO/app_loggers.h"
+
+namespace iter_scf {
+
+/**
+ * @brief Solve the DIIS constraint system for the extrapolation coefficients.
+ *
+ * Given the residual-overlap matrix B, return the real coefficient vector
+ * c = B^{-1} 1 / (1^T B^{-1} 1). B is eigendecomposed (real part; the coefs
+ * are constrained real) and inverted via a thresholded pseudoinverse, exactly
+ * as in the original Pokhilko/Yeh/Zgid scheme. Extracted verbatim from
+ * diis_alg::compute_coefs_c1 so the disk (VSpace/diis_alg) and the memory
+ * SPMD (spmd_fock_sigma) paths compute identical coefficients from one source.
+ *
+ * @param m_B  residual-overlap matrix (n x n).
+ * @return     real extrapolation coefficients (length n), summing to 1.
+ */
+inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B) {
+  auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
+
+  nda::array<double, 1> bb(B.shape()[1]);
+  bb() = 1.0;
+
+  auto [eig, evecs] = nda::linalg::eigenelements(B);
+  auto evecs_tr = nda::make_regular(nda::transpose(evecs));
+
+  nda::matrix<double> Binv(B.shape()[0], B.shape()[1]); // Inverse or pseudoinverse
+  nda::matrix<double> eig_inv(B.shape()[0], B.shape()[1]);
+  nda::matrix<double> I(B.shape()[0], B.shape()[1]);
+  Binv() = 0;
+  eig_inv() = 0;
+
+  double eig_max = nda::max_element(eig);
+  double eig_min = nda::min_element(eig);
+  double cond = eig_max / eig_min;
+
+  const double eig_thresh = 1E-12;
+
+  app_log(2, "DIIS: Condition number of B: {}", cond);
+
+  for (auto i : nda::range(0, eig.size())) {
+    if (eig(i) * cond > eig_thresh) {
+      eig_inv(i, i) = 1.0 / (eig(i));
+    }
+  }
+
+  nda::blas::gemm(evecs, eig_inv, I);
+  nda::blas::gemm(I, evecs_tr, Binv);
+
+  nda::array<double, 1> x(B.shape()[1]);
+  nda::blas::gemv(1.0, Binv, bb, 0.0, x);
+
+  std::complex<double> sum = std::accumulate(x.begin(), x.end(), 0.0);
+  return nda::make_regular(nda::real(x / sum));
+}
+
+} // namespace iter_scf
+
+#endif // COQUI_DIIS_COEFS_HPP

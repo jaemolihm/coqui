@@ -23,6 +23,8 @@
 #define UTILITIES_KPOINT_UTILS_HPP
 
 #include <type_traits>
+#include <cstdlib>
+#include <string_view>
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
 #include "utilities/concepts.hpp"
@@ -42,6 +44,17 @@ namespace utils
 /*
  * A collection of useful routines to manipulate kpoint grids
  */
+
+/// Debug switch: force the dense-gemm k<->R path (instead of the blocked FFT)
+/// in the scGW solvers when COQUI_DEBUG_GEMM_FT is set to a non-zero value.
+/// Mirrors utils::lr_debug_gemm_ft() on the LR path.
+inline bool debug_gemm_ft() {
+  static const bool flag = [] {
+    const char* env = std::getenv("COQUI_DEBUG_GEMM_FT");
+    return env != nullptr && std::string_view(env) != "0";
+  }();
+  return flag;
+}
 
 /*
  * Given a regular, "complete" grid of kpts, Qpts  and a set of reciprocal vectors, calculates:

@@ -69,6 +69,7 @@ namespace methods {
       } else if (_Timer.elapsed("EVALUATE_SIGMA_R") > 0.0) {
         app_log(2, "    Evaluate Sigma (R):      {0:.3f} sec", _Timer.elapsed("EVALUATE_SIGMA_R"));
         app_log(2, "      - Alloc:               {0:.3f} sec", _Timer.elapsed("SIGMA_ALLOC_R"));
+        app_log(2, "      - Transpose (copy):    {0:.3f} sec", _Timer.elapsed("SIGMA_TRANSPOSE_R"));
         app_log(2, "      - Gij -> Guv:          {0:.3f} sec", _Timer.elapsed("SIGMA_PRIM_TO_AUX"));
         app_log(2, "      - FT:                  {0:.3f} sec", _Timer.elapsed("SIGMA_FT_R"));
         app_log(2, "      - Hadamard product:    {0:.3f} sec", _Timer.elapsed("SIGMA_HADPROD_R"));

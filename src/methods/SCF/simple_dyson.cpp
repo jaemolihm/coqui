@@ -19,6 +19,7 @@
  */
 
 
+#include <algorithm>
 #include <cmath>
 
 #include "methods/SCF/simple_dyson.h"
@@ -27,6 +28,21 @@
 #include "nda/nda.hpp"
 
 namespace methods {
+
+namespace {
+  // Detect an exactly-zero (static) self-energy, e.g. HF. One scan per node root
+  // (Sigma lives in node-shared memory), early-exiting at the first nonzero element
+  // (dynamic Sigma, e.g. GW); min-reduced so every rank agrees.
+  template<typename Context_t, typename Sigma_view>
+  bool sigma_is_zero(Context_t &context, const Sigma_view &Sigma) {
+    int is_zero = 1;
+    if (context.node_comm.root())
+      is_zero = std::none_of(Sigma.data(), Sigma.data() + Sigma.size(),
+                             [](const ComplexType &x) { return x != ComplexType(0); }) ? 1 : 0;
+    context.comm.all_reduce_in_place_n(&is_zero, 1, mpi3::min<>{});
+    return is_zero == 1;
+  }
+}
 
   template<typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(G_t &_G_shm,
@@ -59,7 +75,12 @@ namespace methods {
     }
 
     _Timer.start("SIGMA_TAU_TO_W");
-    auto dSigma_wskij = distributed_tau_to_w(_context->comm, _Sigma_shm, *_FT, w_pgrid, w_bsize);
+    // Static case (Sigma == 0, e.g. HF): the imag-axis FT of an exactly-zero Sigma is
+    // exactly zero, so a zero-initialized array replaces the tau->w transform.
+    auto dSigma_wskij = sigma_is_zero(*_context, _Sigma_shm.local())
+        ? make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
+                                             {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize)
+        : distributed_tau_to_w(_context->comm, _Sigma_shm, *_FT, w_pgrid, w_bsize);
     _Timer.stop("SIGMA_TAU_TO_W");
     auto dG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
                                                        {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize);
@@ -139,12 +160,14 @@ namespace methods {
   void simple_dyson::solve_dyson(Dm_t &_sDm_skij, G_t &_G_shm, const F_t &_sF_skij,
                                  const Sigma_t &_Sigma_shm, double mu) {
     solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu);
+    _Timer.start("DM_TAU_TO_BETA");
     if (_context->node_comm.root()) {
       auto Dm = _sDm_skij.local();
       _FT->tau_to_beta(_G_shm.local(), Dm);
       Dm *= -1;
     }
     _context->comm.barrier();
+    _Timer.stop("DM_TAU_TO_BETA");
   }
 
 
@@ -182,9 +205,32 @@ namespace methods {
 
     auto nw_half = _nw/2 + _nw%2;
 
-    // Define M(iw) = S^{-1} * [H0 + F + Sigma(iw)], we have M(-iw) = S^{-1} * M(iw)^{\dagger} * S and thus 
-    // eigvals(M(-iw)) = conj(eigvals(M(iw))). Thus we only need to compute eigvals for half of the frequencies. 
-    // This relation holds for general non-orthogonal basis with general oeverlap matrix S. 
+    // Static case (Sigma == 0, e.g. HF): M(iw) below is frequency-independent, so a
+    // single eigensolve per (s,k) yields the spectra at every frequency. The FT of an
+    // exactly-zero Sigma is exactly zero, so this is bit-identical to the general path.
+    if (sigma_is_zero(*_context, Sigma_tskij)) {
+      for (size_t sk = _context->comm.rank(); sk < _ns*_nkpts_ibz; sk += _context->comm.size()) {
+        auto is = sk / _nkpts_ibz;
+        auto ik = sk % _nkpts_ibz;
+
+        FpSigma = H0(is, ik, nda::ellipsis{}) + F(is, ik, nda::ellipsis{});
+        nda::blas::gemm(ComplexType(1.0), S_inv(is, ik, nda::ellipsis{}), FpSigma, ComplexType(0.0), SFS);
+        auto eigvals = nda::linalg::geigenvalues(SFS);
+
+        for (size_t n_neg = 0; n_neg < nw_half; ++n_neg) {
+          auto n_pos = _nw - n_neg - 1;
+          spectra(n_pos, is, ik, nda::range::all) = eigvals;
+          if (n_neg != n_pos)
+            spectra(n_neg, is, ik, nda::range::all) = nda::conj(eigvals);
+        }
+      }
+      _context->comm.all_reduce_in_place_n(spectra.data(), spectra.size(), std::plus<>{});
+      return;
+    }
+
+    // Define M(iw) = S^{-1} * [H0 + F + Sigma(iw)], we have M(-iw) = S^{-1} * M(iw)^{\dagger} * S and thus
+    // eigvals(M(-iw)) = conj(eigvals(M(iw))). Thus we only need to compute eigvals for half of the frequencies.
+    // This relation holds for general non-orthogonal basis with general oeverlap matrix S.
     for (size_t nsk = _context->comm.rank(); nsk < nw_half*_ns*_nkpts_ibz; nsk+=_context->comm.size()) {
 
       // nsk = n_neg*ns*nkpts_ibz + is*nkpts_ibz + k
