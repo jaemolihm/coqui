@@ -618,9 +618,16 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       conv_Sigma = pconv[1];
       context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
       context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
-      // Every node's ranks wrote the full accepted state into their own
-      // node-shared window from identical inputs and coefficients, so no
-      // internode broadcast is needed.
+      // Re-sync the accepted state across nodes from node 0 (whose ranks also
+      // form B, so all consumed state originates there). The coefficients are
+      // provably identical everywhere, but the per-node slice histories are only
+      // identical if the MBPT solvers left F/Sigma bit-identical on every node —
+      // an invariant the serial path never relied on. This broadcast restores
+      // the serial-path guarantee; on a single node it is a no-op.
+      if (context.internode_comm.size() > 1) {
+        sF_skij.broadcast_to_nodes(0);
+        sSigma_tskij.broadcast_to_nodes(0);
+      }
     } else {
     // DIIS does not support mpi yet
     if (context.comm.root()) { // A global communicator here is needed for DIIS
@@ -787,6 +794,13 @@ auto read_greens_function(MPI_Context_t &context, mf::MF *mf,
       nda::h5_read(iter_grp, "G_tskij", Gloc);
     }
     sG_tskij.win().fence();
+  } else if (iter_grp.has_dataset("F_skij")) {
+    // Dyson checkpoint with G omitted: chkpt_slim writes G only on the final
+    // iteration, so a run killed mid-loop leaves intermediate groups G-less.
+    utils::check(false,
+        "read_greens_function: {}/iter{} is a Dyson checkpoint without G_tskij "
+        "(chkpt_slim intermediate iteration). Request the final complete iteration "
+        "or rerun with chkpt_slim disabled.", scf_grp, scf_iter);
   } else {
     // it's a qp type calculation -> construct the Green's function on-the-fly
     auto ft = imag_axes_ft::read_iaft(filename, false);

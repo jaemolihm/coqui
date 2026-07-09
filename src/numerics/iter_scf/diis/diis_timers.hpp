@@ -22,9 +22,10 @@
 #define COQUI_DIIS_TIMERS_HPP
 
 // D2 diagnostic: cumulative timers for the Dyson-DIIS internals.
-// Only the root rank runs this code path, so plain inline (single-definition)
-// Watch objects suffice with no MPI coordination. Instrumentation only:
-// wrapping start/stop pairs, no change to numerics.
+// The serial-path watches run on the root rank only; the spmd_* watches run on
+// every rank but only the root's values are printed, so plain inline
+// (single-definition) Watch objects suffice with no MPI coordination.
+// Instrumentation only: wrapping start/stop pairs, no change to numerics.
 
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"

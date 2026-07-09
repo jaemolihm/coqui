@@ -99,6 +99,10 @@ public:
         if(iter != iter_from_file) {
             auto iter_grp = scf_grp.open_group("iter"+std::to_string(iter_from_file));
             h5::h5_read(iter_grp, "mu", mu);
+            utils::check(iter_grp.has_dataset("G_tskij"),
+                "com_diis_residual: scf/iter{} has no G_tskij (chkpt_slim intermediate "
+                "iteration); this fallback path requires in-memory G injection "
+                "(upload_g_mu(G, mu)) or a full checkpoint.", iter_from_file);
             nda::h5_read(iter_grp, "G_tskij", G_incoming);
             iter = iter_from_file;
         }

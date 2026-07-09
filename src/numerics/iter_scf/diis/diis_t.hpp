@@ -335,6 +335,10 @@ namespace iter_scf {
     // Driven directly by diis_impl (scf_common.cpp) when storage == "memory"
     // and the in-memory G/S/H0 are available; the members above and the serial
     // stack below are untouched by it (disk keeps the exact root-only path).
+    // Slices span node_comm: with one rank per node the "spread the history"
+    // RAM benefit degenerates to full per-rank copies (correct, just not
+    // smaller). Validated at np8 single-node; multi-node state is re-synced
+    // from node 0 after each solve (see diis_impl).
     spmd_fs_diis spmd;
     
   private:
