@@ -39,7 +39,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver,
               int niter, bool restart, double conv_tol, bool const_mu,
               std::string input_grp, int input_iter, bool eval_thermodynamics,
-              bool compute_exchange, bool keep_w)
+              bool compute_exchange, bool keep_w, bool chkpt_slim)
               -> std::tuple<double, double> {
   utils::TimerManager Timer;
   auto mpi = mb_eri.corr_eri->get().mpi();
@@ -107,7 +107,9 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   Timer.start("WRITE");
   if (!restart) { // write metadata and the MF solution
     chkpt::write_metadata(mpi->comm, *mf, FT, dyson.sH0_skij(), dyson.sS_skij(), mb_state.coqui_prefix);
-    chkpt::dump_scf(mpi->comm, 0, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, mb_state.coqui_prefix);
+    // iter-0 baseline: always writes G (write_G=true); slim only gates the Sigma==0 skip here.
+    chkpt::dump_scf(mpi->comm, 0, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, mb_state.coqui_prefix,
+                    "scf", -1, /*write_G=*/true, /*slim=*/chkpt_slim);
   }
   Timer.stop("WRITE");
 
@@ -230,9 +232,15 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
         app_log(1, "abs max diff of self-energy:   {}\n", Sigma_conv);
     }
     Timer.start("WRITE");
+    // In slim mode, skip writing G on non-final iterations: it is rebuilt by the
+    // Dyson solve on restart and every in-run G reader targets the final iteration.
+    // is_last mirrors the loop-exit condition exactly (its converged() inputs are
+    // all set above). In full (default) mode G is written every iteration.
+    bool is_last = (output_iter+1 >= output_iter_init+niter) or converged();
+    bool write_G = chkpt_slim ? is_last : true;
     chkpt::dump_scf(mpi->comm, output_iter, sDm_skij, sG_tskij, sF_skij,
                     sSigma_tskij, mu, mb_state.coqui_prefix,
-                    input_grp, input_iter);
+                    input_grp, input_iter, write_G, /*slim=*/chkpt_slim);
     Timer.stop("WRITE");
     output_iter++;
   } while (output_iter<output_iter_init+niter and not converged());
@@ -482,7 +490,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gw_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GW_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -513,7 +521,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gf2_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GF2_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)

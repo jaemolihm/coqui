@@ -48,7 +48,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver = nullptr,
               int niter = 1, bool restart = false, double conv_tol = 1e-9, bool const_mu = false,
               std::string input_grp = "scf", int input_iter = -1, bool eval_thermodynamics = false,
-              bool compute_exchange = true, bool keep_w = false)
+              bool compute_exchange = true, bool keep_w = false, bool chkpt_slim = false)
               -> std::tuple<double, double>;
 
 /**

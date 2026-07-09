@@ -212,6 +212,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  // Opt-in slim checkpoint: skip Sigma_tskij when Sigma==0 and skip G_tskij on
+  // non-final SCF iterations. Default (false) writes the full old dataset layout.
+  auto chkpt_slim = io::get_value_with_default<bool>(pt,"chkpt_slim",false);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
   io::tolower(h0_source);
   utils::check(h0_source == "compute" || h0_source == "checkpoint",
@@ -271,7 +274,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
              /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-             /*compute_exchange=*/compute_exchange);
+             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
 
   } else if(solver_type == "gw") {
 
@@ -296,7 +299,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration, 
                /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-               /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5);
+               /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
+               /*chkpt_slim=*/chkpt_slim);
 
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
@@ -319,7 +323,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration, 
                /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-               /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5);
+               /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
+               /*chkpt_slim=*/chkpt_slim);
 
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
@@ -366,13 +371,15 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration,
-               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange);
+               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange,
+               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
     } else {
       solvers::scr_coulomb_t scr_eri(&ft, "rpa", div_treatment);
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration,
-               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange);
+               /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange,
+               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
     }
 
   } else if(solver_type == "gw_dca") {
@@ -476,6 +483,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  // Opt-in slim checkpoint: skip Sigma_tskij when Sigma==0 and skip G_tskij on
+  // non-final SCF iterations. Default (false) writes the full old dataset layout.
+  auto chkpt_slim = io::get_value_with_default<bool>(pt,"chkpt_slim",false);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
   io::tolower(h0_source);
   utils::check(h0_source == "compute" || h0_source == "checkpoint",
@@ -538,7 +548,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
              /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-             /*compute_exchange=*/compute_exchange);
+             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);
