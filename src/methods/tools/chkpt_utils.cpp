@@ -86,22 +86,18 @@ void dump_scf(communicator_t &comm, long iter,
               const X_t &F, const Xt_t &Sigma,
               double mu, std::string output,
               std::string input_grp, long input_iter,
-              bool write_G, bool slim) {
+              bool slim) {
   if (comm.root()) {
     using clock_t = std::chrono::steady_clock;
     auto elapsed = [](clock_t::time_point a, clock_t::time_point b) {
       return std::chrono::duration<double>(b - a).count();
     };
     double t_open = 0, t_G = 0, t_Sigma = 0, t_small = 0, t_close = 0;
-    // slim checkpoint (opt-in): a missing "Sigma_tskij" dataset means Sigma is
-    // exactly zero (e.g. HF), and G is only written on the final iteration. Every
-    // in-repo reader treats the absence of Sigma as exactly zero and rebuilds G by
-    // the Dyson solve. The zero-scan runs on this rank (which holds the full
-    // node-shared array), only in slim mode; in full (default) mode Sigma is
-    // always written (old byte-for-byte layout).
+    // In a slim iteration, omit the frequency-dependent G and Sigma datasets.
+    // The explicit metadata flag lets readers distinguish this from old files
+    // where a missing Sigma dataset meant an exactly-zero Sigma (e.g. HF).
     auto Sigma_loc = Sigma.local();
-    bool skip_sigma = slim && std::none_of(Sigma_loc.data(), Sigma_loc.data() + Sigma_loc.size(),
-                                           [](const ComplexType &x) { return x != ComplexType(0); });
+    const char *sigma_note = slim ? " (skipped, slim iter)" : "";
 
     std::string filename = output + ".mbpt.h5";
     std::string iter_grp_name = "iter" + std::to_string(iter);
@@ -120,28 +116,26 @@ void dump_scf(communicator_t &comm, long iter,
       h5::h5_write(iter_grp, "greens_func_iteration", input_iter);
       auto t1 = clock_t::now(); t_open = elapsed(t0, t1);
 
-      // In slim mode G is skipped on non-final iterations (write_G=false): restart
-      // reads only F/Sigma/mu (G is rebuilt by the Dyson solve) and every in-run G
-      // reader targets the final iteration group (which always writes G).
-      if (write_G)
+      if (!slim)
         nda::h5_write(iter_grp, "G_tskij", G.local(), false);
       auto t2 = clock_t::now(); t_G = elapsed(t1, t2);
 
-      if (!skip_sigma)
+      if (!slim)
         nda::h5_write(iter_grp, "Sigma_tskij", Sigma_loc, false);
       auto t3 = clock_t::now(); t_Sigma = elapsed(t2, t3);
 
       nda::h5_write(iter_grp, "F_skij", F.local(), false);
       nda::h5_write(iter_grp, "Dm_skij", Dm.local(), false);
       h5::h5_write(iter_grp, "mu", mu);
+      h5::h5_write(iter_grp, "Sigma_not_stored", slim);
       auto t4 = clock_t::now(); t_small = elapsed(t3, t4);
     } // file flush + close (the ceph-bound cost happens here)
     t_close = elapsed(t0, clock_t::now()) - t_open - t_G - t_Sigma - t_small;
 
     app_log(2, "  dump_scf write breakdown (s): open/meta {:.3f}, G {:.3f}{}, Sigma {:.3f}{}, "
                "F+Dm {:.3f}, flush/close {:.3f}, total {:.3f}",
-            t_open, t_G, write_G ? "" : " (skipped, non-final iter)",
-            t_Sigma, skip_sigma ? " (skipped, Sigma==0)" : "",
+            t_open, t_G, slim ? " (skipped, slim iter)" : "",
+            t_Sigma, sigma_note,
             t_small, t_close, t_open + t_G + t_Sigma + t_small + t_close);
   }
   comm.barrier();
@@ -188,7 +182,15 @@ long read_scf(mpi3::shared_communicator node_comm,
     if (iter_grp.has_dataset("F_skij")) {
       // checkpoint from a dyson scf
       nda::h5_read(iter_grp, "F_skij", Floc);
-      // A missing Sigma_tskij means Sigma is exactly zero (e.g. HF checkpoint).
+      bool sigma_not_stored = false;
+      if (iter_grp.has_dataset("Sigma_not_stored"))
+        h5::h5_read(iter_grp, "Sigma_not_stored", sigma_not_stored);
+      utils::check(!sigma_not_stored,
+                   "read_scf: Sigma_tskij was intentionally omitted from {}/iter{}. "
+                   "This slim intermediate iteration cannot be used for restart.",
+                   h5_grp, iter);
+      // A missing Sigma_tskij without the new flag means Sigma is exactly zero
+      // (e.g. an old HF checkpoint).
       if (iter_grp.has_dataset("Sigma_tskij"))
         nda::h5_read(iter_grp, "Sigma_tskij", Sloc);
       else
@@ -529,7 +531,7 @@ template void dump_scf(
     mpi3::communicator&, long,
     const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t>&,
-    double, std::string, std::string, long, bool, bool);
+    double, std::string, std::string, long, bool);
 
 template void dump_scf(
     mpi3::communicator&, long,

@@ -107,9 +107,9 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   Timer.start("WRITE");
   if (!restart) { // write metadata and the MF solution
     chkpt::write_metadata(mpi->comm, *mf, FT, dyson.sH0_skij(), dyson.sS_skij(), mb_state.coqui_prefix);
-    // iter-0 baseline: always writes G (write_G=true); slim only gates the Sigma==0 skip here.
+    // iter-0 baseline retains the frequency-dependent initial state.
     chkpt::dump_scf(mpi->comm, 0, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, mb_state.coqui_prefix,
-                    "scf", -1, /*write_G=*/true, /*slim=*/chkpt_slim);
+                    "scf", -1, /*slim=*/false);
   }
   Timer.stop("WRITE");
 
@@ -239,10 +239,10 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     // is_last mirrors the loop-exit condition exactly (its converged() inputs are
     // all set above). In full (default) mode G is written every iteration.
     bool is_last = (output_iter+1 >= output_iter_init+niter) or converged();
-    bool write_G = chkpt_slim ? is_last : true;
+    bool write_slim = chkpt_slim && !is_last;
     chkpt::dump_scf(mpi->comm, output_iter, sDm_skij, sG_tskij, sF_skij,
                     sSigma_tskij, mu, mb_state.coqui_prefix,
-                    input_grp, input_iter, write_G, /*slim=*/chkpt_slim);
+                    input_grp, input_iter, write_slim);
     Timer.stop("WRITE");
     output_iter++;
   } while (output_iter<output_iter_init+niter and not converged());

@@ -212,8 +212,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
-  // Opt-in slim checkpoint: skip Sigma_tskij when Sigma==0 and skip G_tskij on
-  // non-final SCF iterations. Default (false) writes the full old dataset layout.
+  // Opt-in slim checkpoint: skip frequency-dependent Sigma_tskij and G_tskij on
+  // non-final SCF iterations (and skip zero Sigma). Default (false) writes the
+  // full old dataset layout.
   auto chkpt_slim = io::get_value_with_default<bool>(pt,"chkpt_slim",false);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
   io::tolower(h0_source);
@@ -483,8 +484,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
-  // Opt-in slim checkpoint: skip Sigma_tskij when Sigma==0 and skip G_tskij on
-  // non-final SCF iterations. Default (false) writes the full old dataset layout.
+  // Opt-in slim checkpoint: skip frequency-dependent Sigma_tskij and G_tskij on
+  // non-final SCF iterations (and skip zero Sigma). Default (false) writes the
+  // full old dataset layout.
   auto chkpt_slim = io::get_value_with_default<bool>(pt,"chkpt_slim",false);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
   io::tolower(h0_source);
