@@ -148,8 +148,9 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   auto Sr_to_r = memory::to_memory_space<MEM>(Sr_to_r_h());
   
 
+  app_log(2, "  - reading & distributing orbitals to FFT grid...");
   Timer.start("DistOrbs");
-  long r0 = std::accumulate(ir_r_set.begin(), ir_r_set.begin()+mpi->comm.rank(), long(0), 
+  long r0 = std::accumulate(ir_r_set.begin(), ir_r_set.begin()+mpi->comm.rank(), long(0),
           [&] (auto const& a, auto const& b) { return a + b.size(); });
   auto distPsia = memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),{1,mpi->comm.size()},
        {nspins*nkpts_ibz*a_range.size(),rho_g.nnr()},{nspins*nkpts_ibz*a_range.size(),ir_rgrid.size()},
@@ -316,6 +317,10 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   nda::array<int,1> piv(block_size+1,0);
   memory::unified_array<ComplexType,2> Abb(block_size,block_size);
 
+  if(nIpts > 0)
+    app_log(2, "  - selecting interpolating points (target nIpts={})", nIpts);
+  else
+    app_log(2, "  - selecting interpolating points (thresh={:.2e})", thresh);
   Timer.start("IpIter");
   // a bit nicer this way...
   auto find_max = [&]() {
@@ -326,8 +331,11 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
 
   long nchol (0);
   auto old_max = find_max();
+  // progress reporting (verbosity >= 2): print every ~10% of the target
+  long prog_step = std::max<long>(1, (nIpts > 0 ? long(nIpts) : rho_g.nnr())/10);
+  long prog_next = prog_step;
   app_log(3," nchol, max |D|: ");
-  while(true) { 
+  while(true) {
 
     utils::check( old_max > 1e-14, " Error in thc::chol_metric_impl_ibz: Reached truncation error of 1e-14 without convergence. This likely means that nIpts is too large. Current number of cholesky vectors = {}. Set nIpts to a value equal or larger than this. ",nchol);
 
@@ -608,6 +616,14 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
           std::string("Error: Cholesky algorithm failed in thc::chol_metric_impl_ibz. \n") +
           std::string("       Found invalid residual:{}"),curr_max);
 
+    if(nchol >= prog_next) {
+      if(nIpts > 0)
+        app_log(2, "    ... {}/{} ({}%), max|D|={:.2e}", nchol, nIpts, (100*nchol)/nIpts, curr_max);
+      else
+        app_log(2, "    ... {} points, max|D|={:.2e} (thresh={:.2e})", nchol, curr_max, thresh);
+      while(prog_next <= nchol) prog_next += prog_step;
+    }
+
     // stopping condition when thresh is set
     if( thresh > 0.0 and thresh > curr_max) {
       if (nIpts > 0 and nchol < nIpts) {
@@ -616,7 +632,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
       break;
     }
     old_max = find_max();
-  }  
+  }
   Timer.stop("IpIter");
 
   if constexpr (Ipts_only) {
@@ -803,8 +819,9 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   if(not single_psi)
     utils::check(nproc_per_pool <= b_range.size(), "Error in chol_metric_impl: Too many processors. Decrease # of processors or increase distr_tol. ");
 
+  app_log(2, "  - reading & distributing orbitals to FFT grid...");
   Timer.start("DistOrbs");
-  // read orbitals in real space and redistribute 
+  // read orbitals in real space and redistribute
   bool custom_grid = (mf->has_wfc_grid() and mf->fft_grid_dim() != rho_g.mesh());
   auto distPsia = mf::read_distributed_orbital_set<local_CArray_t>(*mf,mpi->comm,
                (custom_grid?'w':'r'),
@@ -1067,6 +1084,10 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   nda::array<int,1> piv(block_size+1,0);
   memory::unified_array<ComplexType,2> Abb(block_size,block_size);
 
+  if(nIpts > 0)
+    app_log(2, "  - selecting interpolating points (target nIpts={})", nIpts);
+  else
+    app_log(2, "  - selecting interpolating points (thresh={:.2e})", thresh);
   Timer.start("IpIter");
   // a bit nicer this way...
   auto find_max = [&]() {
@@ -1077,8 +1098,11 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 
   long nchol (0);
   auto old_max = find_max();
+  // progress reporting (verbosity >= 2): print every ~10% of the target
+  long prog_step = std::max<long>(1, (nIpts > 0 ? long(nIpts) : rho_g.nnr())/10);
+  long prog_next = prog_step;
   app_log(3,"nchol, max |D|: ");
-  while(true) { 
+  while(true) {
 
     utils::check( old_max > 1e-14, " Error in thc::chol_metric_impl: Reached truncation error of 1e-14 without convergence. This likely means that nIpts is too large. Current number of cholesky vectors = {}. Set nIpts to a value equal or larger than this. ",nchol);   
 
@@ -1330,6 +1354,14 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     utils::check( std::isfinite(curr_max),
           std::string("Error: Cholesky algorithm failed in thc::chol_metric_impl. \n") +
           std::string("       Found invalid residual:{}"),curr_max);
+
+    if(nchol >= prog_next) {
+      if(nIpts > 0)
+        app_log(2, "    ... {}/{} ({}%), max|D|={:.2e}", nchol, nIpts, (100*nchol)/nIpts, curr_max);
+      else
+        app_log(2, "    ... {} points, max|D|={:.2e} (thresh={:.2e})", nchol, curr_max, thresh);
+      while(prog_next <= nchol) prog_next += prog_step;
+    }
 
     // stopping condition when thresh is set
     if( thresh > 0.0 and thresh > curr_max) break;
