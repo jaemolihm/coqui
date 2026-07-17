@@ -43,6 +43,7 @@ void write_metadata(communicator_t &comm, const mf::MF &mf, const imag_axes_ft::
     h5::h5_write(sys_grp, "number_of_kpoints", mf.nkpts());
     h5::h5_write(sys_grp, "number_of_kpoints_ibz", mf.nkpts_ibz());
     h5::h5_write(sys_grp, "number_of_orbitals", mf.nbnd());
+    h5::h5_write(sys_grp, "number_of_polarizations", mf.npol());
     h5::h5_write(sys_grp, "volume", mf.volume());
     h5::h5_write(sys_grp, "madelung", mf.madelung());
     nda::h5_write(sys_grp, "kp_grid", mf.kp_grid(), false);

@@ -374,7 +374,7 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 template<typename MPI_t>
-void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_output, int scf_iter) {
+void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_output, long scf_iter) {
   long np = mpi.comm.size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
@@ -386,16 +386,11 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
   // logic of iteration
   if (scf_iter == -1) {
     std::string filename = coqui_output + ".mbpt.h5";
-    h5::file file;
-    try {
-      file = h5::file(filename, 'r');
-    } catch(...) {
-      APP_ABORT("Failed to open h5 file: {}, mode:r",filename);
-    }
+    h5::file file(filename, 'r');
     auto scf_grp = h5::group(file).open_group("scf");
     h5::h5_read(scf_grp, "final_iter", scf_iter);
   }
-  int dm_iter = (scf_iter == 0)? scf_iter : scf_iter-1;
+  long dm_iter = (scf_iter == 0)? scf_iter : scf_iter-1;
 
   using larray_view = memory::array_view<HOST_MEMORY,ComplexType,4>;
   using math::shm::make_shared_array;
@@ -418,12 +413,7 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
                                              pgrid, bsize);
     h5::group iter_grp;
     if (active.root()) {
-      h5::file file;
-      try {
-        file = h5::file(filename, 'a');
-      } catch(...) {
-        APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
-      }
+      h5::file file(filename, 'a');
       auto scf_grp = h5::group(file).open_group("scf");
       utils::check(scf_grp.has_subgroup("iter"+std::to_string(scf_iter)),
                    "dump_hartree: \"scf/iter{}\" does not exist!");
@@ -590,17 +580,18 @@ void dump_vxc(MPI_t &mpi, mf::MF &mf, std::string coqui_output) {
                                          pgrid, bsize);
     h5::group sys_grp;
     if (active.root()) {
-      h5::file file;
-      try {
-        file = h5::file(filename, 'a');
-      } catch(...) {
-        APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
-      }
+      h5::file file(filename, 'a');
       h5::group grp(file);
 
       if (grp.has_subgroup("system")) {
         sys_grp = grp.open_group("system");
-        long ns, nkpts, nkpts_ibz, npol, nbnd;
+        // Read into the exact types write_metadata used, so h5 does not warn
+        // about long/int view mismatches.
+        decltype(mf.nspin())     ns;
+        decltype(mf.nkpts())     nkpts;
+        decltype(mf.nkpts_ibz()) nkpts_ibz;
+        decltype(mf.nbnd())      nbnd;
+        decltype(mf.npol())      npol;
         h5::h5_read(sys_grp, "number_of_spins", ns);
         h5::h5_read(sys_grp, "number_of_kpoints", nkpts);
         h5::h5_read(sys_grp, "number_of_kpoints_ibz", nkpts_ibz);

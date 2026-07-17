@@ -67,12 +67,7 @@ void add_vxc(MF_t& mf, nda::range k_range, nda::range b_range,
   } else if(mf.input_file_type() == mf::h5_input_type) {
     utils::check(std::filesystem::exists(mf.filename()), "Error: Missing file: {}",mf.filename());
     auto input_file_name = mf.filename();
-    h5::file file;
-    try {
-      file = h5::file(mf.filename(), 'r');
-    } catch(...) {
-      APP_ABORT("Failed to open h5 file: {}, mode:r",mf.filename());
-    }
+    h5::file file(mf.filename(), 'r');
     h5::group grp(file);
     read_vxc_h5(mf, grp, svxc);
   } else
