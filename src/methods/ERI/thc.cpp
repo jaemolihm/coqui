@@ -20,6 +20,8 @@
 
 
 
+#include <algorithm>
+#include <cmath>
 #include <tuple>
 #include <iomanip>
 
@@ -92,6 +94,8 @@ auto make_wfc_to_rho(utils::mpi_context_t<mpi3::communicator>& mpi,
  *  - ecut: "1.4 * ecutwfc" (falls back to "0.4 * ecutrho" when no wfc grid is available),
  *          Plane wave cutoff used for the evaluation of coulomb matrix elements.
  *  - thresh: "1e-5", Threshold in cholesky decomposition.
+ *  - band_weights: "true". For an augmented mean field, weight the bands by the
+ *          stored augmentation singular values in the pivot search and zeta fit.
  *  Performance related options:
  *  - matrix_block_size: 1024, Block size used in distributed arrays.
  *  - chol_block_size: "8", Block size in cholesky decomposition.
@@ -128,10 +132,28 @@ thc::thc(mf::MF *mf_,
 
   memory_frac = std::min( 0.90, std::max( 0.25, memory_frac ) );
 
+  if( io::get_value_with_default<bool>(pt,"band_weights",true) and mf->is_augmented() ) {
+    band_weight = mf->augmented_band_weights();
+    auto const* w0 = band_weight.data();
+    auto const* w1 = w0 + band_weight.size();
+    has_band_weights = std::any_of(w0, w1, [](double w) { return std::abs(w-1.0) > 1e-14; });
+    if(has_band_weights) {
+      utils::check(mf->npol_in_basis() == 1 and mf->nspin_in_basis() == mf->nspin(),
+                   "thc: band weights require npol==1 and nspin_in_basis==nspin.");
+      double wmin = *std::min_element(w0, w1);
+      utils::check(wmin > 0.0, "thc: non-positive band weight: {}.", wmin);
+      app_log(1,"  Augmented-basis band weights applied to THC pivot search and fit "
+                "(min = {:.3e}). Disable with band_weights = false.", wmin);
+    } else {
+      band_weight = nda::array<double,3>{};
+    }
+  }
+
   if (print_metadata_) print_metadata();
 
   for( auto& v: {"TOTAL","IO_SAVE","IO_ORBS","ALLOC","ip_COMM","COMM","FFT","FFTPLAN","DistOrbs","IpIter",
                  "IntPts","IntVecs","VCoul","LSSolve","ip_SERIAL","SERIAL","TUR","ZUR","EXTRA",
+                 "ip_setup_comm","ip_chol","ip_update_res",
                  "GEMM", "shmX",
                  // leaf sub-clocks inside the ZUR loop of get_ZquG_Cquv_fft_shared_memory
                  "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack","ZUR_copy",
@@ -296,7 +318,10 @@ auto thc::evaluate(memory::array<MEM,long,1> const& ri,
   long nkpts = mf->nkpts();
   long nbnd = mf->nbnd();
   long nchol = Xa.global_shape()[3];
-  utils::check( C_skai.shape() == std::array<long,4>{nspins,nkpts,Xa.global_shape()[2],nbnd}, 
+  utils::check( not has_band_weights,
+                "Error in thc::evaluate: band weights not supported with rotated "
+                "orbitals (C_skai). Set band_weights = false." );
+  utils::check( C_skai.shape() == std::array<long,4>{nspins,nkpts,Xa.global_shape()[2],nbnd},
                 "Error in thc::evaluate: Shape mismatch of C_skai." );
   utils::check( Xa.global_shape() == std::array<long,4>{nspins,nkpts,Xa.global_shape()[2],nchol}, 
                 "Error in thc::evaluate: Shape mismatch of Xb." );

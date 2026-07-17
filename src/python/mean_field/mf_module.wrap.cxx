@@ -131,10 +131,11 @@ static auto const fun_22 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 static auto const fun_23 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self, const std::string &prefix,
        const std::string &outdir, const std::string &type, long nbnd_aug,
-       double epstol) {
-      return self.augment_basis(prefix, outdir, type, nbnd_aug, epstol);
+       double epstol, double dtau_step) {
+      return self.augment_basis(prefix, outdir, type, nbnd_aug, epstol,
+                                dtau_step);
     },
-    "self", "prefix", "outdir", "type", "nbnd_aug", "epstol")};
+    "self", "prefix", "outdir", "type", "nbnd_aug", "epstol", "dtau_step")};
 
 // eph_projector_overlaps
 static auto const fun_24 = c2py::dispatcher_f_kw_t{c2py::cmethod(
@@ -172,14 +173,17 @@ static auto const fun_29 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self, const std::string &prefix,
        const std::string &outdir, const std::string &deltapsi_dir,
        const std::string &elph_dir, const std::vector<long> &iq_list,
-       long nmodes, long nbnd_aug, long nbnd_mf, double smearing_deltapsi,
-       double epstol) {
+       long nmodes, const std::vector<long> &mode_list, long nbnd_aug,
+       long nbnd_mf, double smearing_deltapsi, double epstol,
+       double dtau_step) {
       return self.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
-                                     iq_list, nmodes, nbnd_aug, nbnd_mf,
-                                     smearing_deltapsi, epstol);
+                                     iq_list, nmodes, mode_list, nbnd_aug,
+                                     nbnd_mf, smearing_deltapsi, epstol,
+                                     dtau_step);
     },
     "self", "prefix", "outdir", "deltapsi_dir", "elph_dir", "iq_list", "nmodes",
-    "nbnd_aug", "nbnd_mf", "smearing_deltapsi", "epstol")};
+    "mode_list", "nbnd_aug", "nbnd_mf", "smearing_deltapsi", "epstol",
+    "dtau_step")};
 
 // compute_bare_eph_vertex
 static auto const fun_30 = c2py::dispatcher_f_kw_t{c2py::cmethod(

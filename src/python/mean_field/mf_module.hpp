@@ -119,15 +119,18 @@ namespace coqui_py {
      * @param type       augmentation transform ("momentum")
      * @param nbnd_aug   number of bands to transform (<= nbnd; -1 = all,
      *                   0 = none: original orbitals in augmented bdft format)
-     * @param epstol singular-value cutoff selecting the number kept per k
+     * @param epstol     dimensionless singular-value cutoff (thresholds s, the
+     *                   residual amplitude of the dtau_step-scaled raw state)
+     * @param dtau_step  displacement step (bohr) scaling the raw dψ/dτ states
      */
     Mf augment_basis(const std::string& prefix, const std::string& outdir,
-                     const std::string& type, long nbnd_aug, double epstol) const {
+                     const std::string& type, long nbnd_aug, double epstol,
+                     double dtau_step) const {
       std::string fn = outdir + "/" + prefix + ".h5";
       auto parser = InputParser(std::string("{\"type\": \"") + type + "\"}");
       auto augmenter = orbitals::make_augmenter(*_mf, parser.get_root());
       auto new_mf = orbitals::add_augmentation<HOST_MEMORY>(*_mf, fn, augmenter,
-                                                            nbnd_aug, epstol);
+                                                            nbnd_aug, epstol, dtau_step);
       return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
     }
 
@@ -149,21 +152,26 @@ namespace coqui_py {
      * @param elph_dir          directory holding the elph_bare.iq*.h5 files
      * @param iq_list           phonon q indices to include
      * @param nmodes            modes per q (<=0 → 3*natom)
+     * @param mode_list         1-based mode indices contributing raw states
+     *                          (empty → all modes 1..nmodes)
      * @param nbnd_aug          δψ bands used per mode (R; -1 → all in file)
      * @param nbnd_mf           original bands kept M (<=0 or >nbnd → keep all
      *                          nbnd; buffer fills [M, nbnd))
      * @param smearing_deltapsi buffer denominator smearing σ (Ha)
-     * @param epstol        singular-value cutoff selecting states kept per k
+     * @param epstol        dimensionless singular-value cutoff (thresholds s,
+     *                      the residual amplitude of the dtau_step-scaled state)
+     * @param dtau_step     displacement step (bohr) scaling the raw δψ states
      */
     Mf augment_basis_deltapsi(const std::string& prefix, const std::string& outdir,
                           const std::string& deltapsi_dir, const std::string& elph_dir,
                           const std::vector<long>& iq_list, long nmodes,
+                          const std::vector<long>& mode_list,
                           long nbnd_aug, long nbnd_mf, double smearing_deltapsi,
-                          double epstol) const {
+                          double epstol, double dtau_step) const {
       std::string fn = outdir + "/" + prefix + ".h5";
       auto new_mf = orbitals::add_augmentation_dpsi<HOST_MEMORY>(
-          *_mf, fn, deltapsi_dir, elph_dir, iq_list, nmodes, nbnd_aug, nbnd_mf,
-          smearing_deltapsi, epstol);
+          *_mf, fn, deltapsi_dir, elph_dir, iq_list, nmodes, mode_list,
+          nbnd_aug, nbnd_mf, smearing_deltapsi, epstol, dtau_step);
       return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
     }
 

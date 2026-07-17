@@ -169,6 +169,11 @@ namespace mf {
       bool augmented = false;
       // provenance tag for the augmentation ("momentum", "dpsi", ...)
       std::string augment_type = "";
+      // per-band THC fit weights of the augmented basis over the full BZ,
+      // (nspin, nkpts, nbnd): min(s,1) for augmentation states (s = residual
+      // singular value of the dtau_step-scaled raw state), 1 for the original
+      // bands. Sized only when augmented; empty otherwise.
+      nda::array<double, 3> aug_band_weight;
 
       public:
       // dummy members, just to be consistent with qe_readonly class...
@@ -227,6 +232,15 @@ namespace mf {
         if(nbnd_aux>0) nda::h5_write(ogrp, "eigval_aux", eigval_aux, false);
         if(nbnd_aux>0) nda::h5_write(ogrp, "aux_weight", aux_weight, false);
         nda::h5_write(ogrp, "occ", occ, false);
+        if(augmented) {
+          if(aug_band_weight.size() > 0) {
+            nda::h5_write(ogrp, "augmented_band_weights", aug_band_weight, false);
+          } else {
+            nda::array<double,3> w(nspin, nkpts, nbnd);
+            w() = 1.0;
+            nda::h5_write(ogrp, "augmented_band_weights", w, false);
+          }
+        }
       }
 
       private:
@@ -360,6 +374,22 @@ namespace mf {
         if(nbnd_aux>0) {
           nda::h5_read(grp, "Orbitals/eigval_aux",eigval_aux);
           nda::h5_read(grp, "Orbitals/aux_weight", aux_weight);
+        }
+
+        if(augmented) {
+          // per-band THC fit weights; all ones for files predating them
+          aug_band_weight = nda::array<double, 3>(nspin, nkpts, nbnd);
+          aug_band_weight() = 1.0;
+          if(ogrp.has_dataset("augmented_band_weights")) {
+            nda::array<double, 3> w_;
+            nda::h5_read(grp, "Orbitals/augmented_band_weights", w_);
+            utils::check( w_.extent(0) == nspin and
+                          w_.extent(1) >= nkpts_ibz and w_.extent(2) >= nbnd,
+                          "Error with augmented_band_weights: Incorrect dimensions in h5.");
+            aug_band_weight(all,range(nkpts_ibz),all) = w_(range(nspin),range(nkpts_ibz),range(nbnd));
+            for(int ik=nkpts_ibz; ik<nkpts; ik++)
+              aug_band_weight(all,ik,all) = aug_band_weight(all,_symm.kp_to_ibz(ik),all);
+          }
         }
 
       }

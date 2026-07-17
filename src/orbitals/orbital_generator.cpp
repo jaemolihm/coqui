@@ -293,8 +293,9 @@ void orbital_factory(mf::MF &base_mf, ptree const& pt)
   } else if(auto node_a = pt.get_child_optional("augment")) {
     auto nbnd_aug = io::get_value_with_default<long>(*node_a,"nbnd_aug",base_mf.nbnd());
     auto epstol = io::get_value_with_default<double>(*node_a,"epstol",1e-4);
+    auto dtau_step = io::get_value_with_default<double>(*node_a,"dtau_step",0.1);
     auto augmenter = make_augmenter(base_mf,*node_a);
-    auto mf = add_augmentation<MEM>(base_mf,outdir+"/"+prefix+".h5",augmenter,nbnd_aug,epstol);
+    auto mf = add_augmentation<MEM>(base_mf,outdir+"/"+prefix+".h5",augmenter,nbnd_aug,epstol,dtau_step);
   } else {
     APP_ABORT("orbital_factory: No orbital modifier found.");
   }

@@ -23,6 +23,7 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "configuration.hpp"
@@ -64,9 +65,11 @@ struct orbital_augmenter_t
 /**
  * Momentum augmentation: raw states are p̂_α ψ_b = (k+G)_α ψ_b(G) for the three
  * Cartesian directions α, evaluated on the wavefunction G-grid (same support as
- * ψ_b, so no regridding). The overall (k+G) scale is irrelevant — the states
- * are orthonormalized afterwards — but k and G must share the Cartesian
- * convention taken from the mean-field object.
+ * ψ_b, so no regridding). k and G must share the Cartesian convention taken
+ * from the mean-field object. The raw states carry units of 1/bohr and are
+ * scaled by dtau_step (bohr) in add_augmentation, so their overall scale
+ * matters: it sets the singular values used for truncation and the THC fit
+ * weights.
  */
 struct momentum_augmenter : orbital_augmenter_t
 {
@@ -91,13 +94,17 @@ std::shared_ptr<orbital_augmenter_t> make_augmenter(mf::MF& mf, ptree const& pt)
 // Augment the mean-field basis: keep the original nbnd bands and append the
 // orthonormalized augmentation states produced by `augmenter` from the first
 // nbnd_aug bands, truncated with singular-value cutoff epstol (uniform band
-// count across k). Returns a new bdft mean-field flagged as augmented.
+// count across k). The raw states are derivatives dψ/dτ with respect to an
+// atomic displacement (units 1/bohr) and are scaled by dtau_step (bohr) before
+// truncation, so epstol thresholds the dimensionless residual amplitude
+// s = ||dtau_step·(dψ)⊥||. Returns a new bdft mean-field flagged as augmented,
+// carrying per-band THC fit weights min(s,1) (1 for the originals).
 // nbnd_aug = -1 transforms all bands; nbnd_aug = 0 adds no states and returns
 // the original orbitals in the augmented bdft format (baseline).
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 mf::MF add_augmentation(mf::MF& mf, std::string fn,
                         std::shared_ptr<orbital_augmenter_t> augmenter,
-                        long nbnd_aug, double epstol);
+                        long nbnd_aug, double epstol, double dtau_step = 0.1);
 
 // Augment the mean-field basis with DFPT response wavefunctions (δψ) read from
 // per-(iq,mode,ik) HDF5 files. The base mf carries N = mf.nbnd() h5/nscf bands;
@@ -113,36 +120,48 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 // sharp, continuous 1/x cutoff (1/x for |x|>smearing, x/smearing² otherwise);
 // with it the augmentation is independent of N (any base dataset with enough
 // bands gives the same result). All energies/vertices are converted Ry→Ha at
-// read. The R·nmodes·nq raw states per k are orthonormalized against the M
-// originals, SVD-truncated at epstol, and uniformized (shared tail with
-// add_augmentation). Requires npol==1 and a full-BZ k-grid (nkpts==nkpts_ibz).
+// read. mode_list selects which modes contribute (1-based indices into the
+// nmodes modes of each iq; empty = all modes 1..nmodes). The
+// R·|mode_list|·nq raw states per k are scaled by dtau_step (bohr, they
+// are δψ/δτ responses with units 1/bohr), orthonormalized against the M
+// originals, SVD-truncated at the dimensionless singular-value cutoff epstol,
+// and uniformized (shared tail with add_augmentation). Requires npol==1 and a
+// full-BZ k-grid (nkpts==nkpts_ibz).
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                              std::string deltapsi_dir, std::string elph_dir,
                              std::vector<long> const& iq_list, long nmodes_in,
+                             std::vector<long> const& mode_list,
                              long nbnd_aug, long nbnd_mf,
-                             double smearing, double epstol);
+                             double smearing, double epstol,
+                             double dtau_step = 0.1);
 
 /**
  * Orthonormalize an augmentation block against a fixed set of originals.
  * `psi_orig` (nspin, nkpts_ibz, nbnd, ngm) are the originals, assumed already
  * orthonormal and kept unchanged. `raw_aug` (nspin, nkpts_ibz, n_raw, ngm) are
- * the raw (non-orthonormal) augmentation states. For every k independently we
+ * the raw (non-orthonormal) augmentation states, already scaled by dtau_step.
+ * For every k independently we
  *   1. project raw_aug onto the orthogonal complement of psi_orig,
- *   2. diagonalize the residual overlap and keep the vectors whose eigenvalue
- *      exceeds `epstol`.
+ *   2. diagonalize the residual overlap (eigenvalues λ = s², with s the
+ *      singular value of the residual block) and keep the vectors with
+ *      s = √λ >= `epstol`.
  * To keep a uniform band count, n_aug_max = max_k (#kept) is computed and the
- * top n_aug_max vectors are retained at every k. The returned distributed array
- * (nspin, nkpts_ibz, nbnd + n_aug_max, ngm) is the assembled orthonormal basis
- * [originals | augmentation]. `raw_aug` is overwritten (holds the projected
- * residual on return).
+ * top n_aug_max vectors are retained at every k. Singular values are logged at
+ * verbosity >= 2 (k=0) and >= 3 (all k). Returns
+ *   - the assembled orthonormal basis [originals | augmentation],
+ *     (nspin, nkpts_ibz, nbnd + n_aug_max, ngm), distributed as psi_orig;
+ *   - per-band THC fit weights (nspin, nkpts_ibz, nbnd + n_aug_max), replicated
+ *     on every rank: 1 for the originals, min(s, 1) for the augmentation states.
+ * `raw_aug` is overwritten (holds the projected residual on return).
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY, utils::Communicator comm_t>
 auto orthonormalize_augmentation(
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
                     double epstol)
-  -> memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>;
+  -> std::tuple<memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
+                nda::array<double, 3>>;
 
 /**
  * Kinetic-energy diagonal ⟨φ_i|T|φ_i⟩ = Σ_G ½|k+G|²|φ_i(G)|² on the 'w' grid,

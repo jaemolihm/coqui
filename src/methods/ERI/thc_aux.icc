@@ -608,15 +608,46 @@ void thc::get_Tuv_fft_grid(bool add_phase, int ispin, int k, nda::range orb_rang
 }
 
 /*
- * This routine does 4 things:
+ * Scale the bands of a freshly-read (ns, nkpts_ibz, nb, npol, g) orbital set by
+ * the per-band fit weights, weighting the full-grid leg of the zeta-fit normal
+ * equations. orb_range maps the band axis to absolute band indices. The IBZ
+ * k-points are the first nkpts_ibz entries of the full-BZ list, so the k axis
+ * indexes band_weight directly. No-op when has_band_weights is false.
+ */
+template<MEMORY_SPACE MEM>
+void thc::apply_band_weights_psi(memory::darray_t<memory::array<MEM,ComplexType,5>,mpi3::communicator>& dPsi,
+                                 nda::range orb_range)
+{
+  if(not has_band_weights) return;
+  utils::check(orb_range.first() >= 0 and orb_range.last() <= band_weight.extent(2),
+               "apply_band_weights_psi: orbital range [{},{}) exceeds the band-weight table ({} bands).",
+               orb_range.first(), orb_range.last(), band_weight.extent(2));
+  auto Ploc = dPsi.local();
+  auto s_rng = dPsi.local_range(0);
+  auto k_rng = dPsi.local_range(1);
+  auto a_rng = dPsi.local_range(2);
+  for( auto [is,s] : itertools::enumerate(s_rng) )
+    for( auto [ik,k] : itertools::enumerate(k_rng) )
+      for( auto [ia,a] : itertools::enumerate(a_rng) ) {
+        double w = band_weight(s,k,orb_range.first()+a);
+        if(w != 1.0)
+          nda::tensor::scale(ComplexType(w), Ploc(is,ik,ia,nda::ellipsis{}));
+      }
+}
+
+/*
+ * This routine does 5 things:
  * 1. copies Xskau from distributed memory to shared memory on all nodes
- * 2. changes the structure of ipts from original order to the block consistent order given by iu_for_sXb 
+ * 2. changes the structure of ipts from original order to the block consistent order given by iu_for_sXb
  * 3. chooses kpts from kp_order
  * 4. conjugates X
+ * 5. if wska != nullptr, multiplies band a at (ispin,k) by wska(ispin,k,a),
+ *    weighting the pivot leg of the zeta-fit normal equations
  */
 template<MEMORY_SPACE MEM, typename Tensor_t>
 auto thc::Xskau_to_sXbkua(int ispin, nda::ArrayOfRank<1> auto const& iu_for_sXb,
-                     Tensor_t const& Xa, nda::array<int,1>& kp_order)
+                     Tensor_t const& Xa, nda::array<int,1>& kp_order,
+                     nda::array<double,3> const* wska)
 {
   decltype(nda::range::all) all;
   long nIpts_per_blk = iu_for_sXb.extent(0);
@@ -641,8 +672,15 @@ auto thc::Xskau_to_sXbkua(int ispin, nda::ArrayOfRank<1> auto const& iu_for_sXb,
 
         if( iu_for_sXb(iub) < 0 ) continue;
         long n = iu_for_sXb(iub) - u_range.first();
-        if( n >= 0 and n < u_range.size() )
-          sXloc(ik,iub,a_range_loc) = nda::conj(dXloc(ispin,k-kp_range.first(),all,n));
+        if( n >= 0 and n < u_range.size() ) {
+          if( wska == nullptr ) {
+            sXloc(ik,iub,a_range_loc) = nda::conj(dXloc(ispin,k-kp_range.first(),all,n));
+          } else {
+            for( auto [ia,a] : itertools::enumerate(a_range_loc) )
+              sXloc(ik,iub,a) = (*wska)(ispin,k,a)
+                              * std::conj(dXloc(ispin,k-kp_range.first(),ia,n));
+          }
+        }
 
       }
 
@@ -658,6 +696,8 @@ auto thc::Xskau_to_sXbkua(int ispin, nda::ArrayOfRank<1> auto const& iu_for_sXb,
 
   } else {
 
+    utils::check(wska == nullptr,
+                 "Xskau_to_sXbkua: band weights not implemented on device memory.");
     memory::array<MEM,ComplexType,3> Xkua(kp_order.size(),nIpts_per_blk,Xa.global_shape()[2]);
     Xkua() = ComplexType(0.0);
     auto dXloc = Xa.local();
@@ -781,10 +821,13 @@ auto thc::get_ZquG_Cquv(nda::MemoryArrayOfRank<1> auto const& IPts,
     } else {
       return get_ZquG_Cquv_fft<MEM>(IPts,Xa,Xb,a_range,b_range,pgrid,block_size);
     }
-  } else { 
+  } else {
     utils::check(mf->npol()==1, "Non-collinear not yet implemented");
-    std::array<long, 3> block_size = { 
-      1,  // keep at one to minimize load imbalance 
+    utils::check(not has_band_weights,
+                 "Error in get_ZquG_Cquv: band weights not implemented for the r-space "
+                 "algorithm (non-FFT orbital grids). Set band_weights = false.");
+    std::array<long, 3> block_size = {
+      1,  // keep at one to minimize load imbalance
       std::min(long(default_block_size), std::min(nIpts/pgrid[1], nIpts/pgrid[2]) ),
       std::min(long(default_block_size), rho_g.nnr()/pgrid[2] )
     };
@@ -1226,6 +1269,8 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   // Psi(kIBZ,a,g) distributed over g
   auto dPsia = mf::read_distributed_orbital_set<local_5Array_t>(*mf,mpi->comm,'w',
               {1,1,1,1,mpi->comm.size()},nda::range(0,nspins),nda::range(0,nkpts_ibz),a_range,{1,1,1,1,1});
+  // per-band fit weights: full-grid leg here, pivot (X) leg in Xskau_to_sXbkua
+  apply_band_weights_psi<MEM>(dPsia, a_range);
 
   decltype(dPsia)* dPsib;
   if(not same_orb_range) {
@@ -1235,14 +1280,22 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
                         Psib.grid(),Psib.global_shape(),Psib.local_shape(),
                         Psib.origin(),Psib.block_size());
     *dPsib = std::move(Psib);
+    apply_band_weights_psi<MEM>(*dPsib, b_range);
   } else {
     dPsib = std::addressof(dPsia);
   }
   Timer.stop("DistOrbs");
 
+  // per-band fit weight tables for the X (pivot) leg
+  nda::array<double,3> wska_a, wska_b;
+  if(has_band_weights) {
+    wska_a = make_band_weight_table(a_range);
+    if(Xb != nullptr) wska_b = make_band_weight_table(b_range);
+  }
+
   /*
    * (Significant) Memory usage in the remaining of this routine:
-   *  *** Notice that distributed arrays are already allocated, 
+   *  *** Notice that distributed arrays are already allocated,
    *      so they don't need to be counted.
    *
    *   nI_per_blk = # of Ipts processed per device per iteration, as allowed by memory  
@@ -1466,7 +1519,8 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
 
       {
         Timer.start("shmX");
-        auto Xaku = Xskau_to_sXbkua<MEM>(isp,iu_for_Xb,Xa,kp_order);
+        auto Xaku = Xskau_to_sXbkua<MEM>(isp,iu_for_Xb,Xa,kp_order,
+                                         has_band_weights ? std::addressof(wska_a) : nullptr);
         Timer.stop("shmX");
 
         Timer.start("TUR");
@@ -1562,7 +1616,8 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
         // Repeat calculation for Xb/dPsib, multiply into ZRur
         { 
           Timer.start("shmX");
-          auto Xbku = Xskau_to_sXbkua<MEM>(isp,iu_for_Xb,*Xb,kp_order);
+          auto Xbku = Xskau_to_sXbkua<MEM>(isp,iu_for_Xb,*Xb,kp_order,
+                                           has_band_weights ? std::addressof(wska_b) : nullptr);
           Timer.stop("shmX");
         
           Timer.start("TUR");
@@ -1871,6 +1926,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   // Psi(kIBZ,a,g) distributed over g
   auto dPsia = mf::read_distributed_orbital_set<local_5Array_t>(*mf,mpi->comm,'w',
               {1,1,1,1,mpi->comm.size()},nda::range(0,nspins),nda::range(0,nkpts_ibz),a_range,{1,1,1,1,1});
+  // per-band fit weights: full-grid leg here, pivot (X) leg in Xskau_to_sXbkua
+  apply_band_weights_psi<HOST_MEMORY>(dPsia, a_range);
 
   decltype(dPsia)* dPsib;
   if(not same_orb_range) {
@@ -1880,10 +1937,18 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                         Psib.grid(),Psib.global_shape(),Psib.local_shape(),
                         Psib.origin(),Psib.block_size());
     *dPsib = std::move(Psib);
+    apply_band_weights_psi<HOST_MEMORY>(*dPsib, b_range);
   } else {
     dPsib = std::addressof(dPsia);
   }
   Timer.stop("DistOrbs");
+
+  // per-band fit weight tables for the X (pivot) leg
+  nda::array<double,3> wska_a, wska_b;
+  if(has_band_weights) {
+    wska_a = make_band_weight_table(a_range);
+    if(Xb != nullptr) wska_b = make_band_weight_table(b_range);
+  }
 
   /*
    * (Significant) Memory usage in the remaining of this routine:
@@ -2166,7 +2231,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         // Xaku for ipts in block, in shared memory, with kpts ordered by kp_to_ibz
         auto iu_for_sXb_1d = nda::reshape(iu_for_sXb(ib,nda::ellipsis{}),
                                                 std::array<long,1>{nI_per_blk});
-        auto sXaku = Xskau_to_sXbkua(isp,iu_for_sXb_1d,Xa,kp_order);
+        auto sXaku = Xskau_to_sXbkua(isp,iu_for_sXb_1d,Xa,kp_order,
+                                     has_band_weights ? std::addressof(wska_a) : nullptr);
         Timer.stop("shmX");
 
         Timer.start("TUR");
@@ -2271,7 +2337,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
           // Xbku for ipts in block, in shared memory, with kpts ordered by kp_to_ibz
           auto iu_for_sXb_1d = nda::reshape(iu_for_sXb(ib,nda::ellipsis{}),
                                                   std::array<long,1>{nI_per_blk});
-          auto sXbku = Xskau_to_sXbkua(isp,iu_for_sXb_1d,*Xb,kp_order);
+          auto sXbku = Xskau_to_sXbkua(isp,iu_for_sXb_1d,*Xb,kp_order,
+                                       has_band_weights ? std::addressof(wska_b) : nullptr);
           Timer.stop("shmX");
         
           Timer.start("TUR");

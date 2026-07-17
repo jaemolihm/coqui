@@ -107,15 +107,20 @@ def make_mf(mpi, params, mf_type):
 
 
 def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
-               nbnd_aug=-1, epstol=1e-4):
+               nbnd_aug=-1, epstol=1e-4, dtau_step=0.1):
     """Create an augmented mean-field system from an existing one.
 
     Keeps the original ``nbnd`` bands and appends orthonormalized augmentation
     states generated from the first ``nbnd_aug`` bands. For ``augment_type =
     "momentum"`` the raw states are the momentum-operator images p_alpha psi_b
-    (alpha = x, y, z); they are orthogonalized against the originals and among
-    themselves, then truncated with singular-value cutoff ``epstol`` and
-    padded to a uniform band count across k-points.
+    (alpha = x, y, z; units 1/bohr). The raw states are scaled by ``dtau_step``
+    (bohr) — making them dimensionless displacement responses — then
+    orthogonalized against the originals and among themselves, truncated with
+    the dimensionless singular-value cutoff ``epstol``, and padded to a uniform
+    band count across k-points. The singular values s (capped at 1) are stored
+    as per-band weights and applied to the THC pivot search and interpolating
+    vector fit; the SCF basis and THC collocation matrices stay orthonormal
+    and unweighted.
 
     The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
     returned as a new :class:`Mf`. Because the augmented basis is not an
@@ -136,15 +141,21 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
         adds no states: the original orbitals are rewritten in the augmented
         bdft format, giving a no-augmentation baseline for the same pipeline.
     epstol : float
-        Singular-value cutoff selecting the number of states kept per k-point.
+        Dimensionless singular-value cutoff: a state is kept when the residual
+        amplitude s of its ``dtau_step``-scaled raw state satisfies
+        ``s >= epstol``.
+    dtau_step : float
+        Displacement step in bohr multiplying the raw dpsi/dtau states
+        (default 0.1).
     """
     return mf.augment_basis(prefix, outdir, augment_type, int(nbnd_aug),
-                            float(epstol))
+                            float(epstol), float(dtau_step))
 
 
 def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
-                    iq_list=(1,), nmodes=None, nbnd_aug=-1, nbnd_mf=None,
-                    smearing_deltapsi=0.02, epstol=1e-4):
+                    iq_list=(1,), nmodes=None, modes=None, nbnd_aug=-1,
+                    nbnd_mf=None, smearing_deltapsi=0.02, epstol=1e-4,
+                    dtau_step=0.1):
     """Create a δψ-augmented mean-field system from an existing one.
 
     The base ``mf`` carries ``N = mf.nbnd()`` nscf/h5 bands; ``nbnd_mf`` (=M)
@@ -168,9 +179,13 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
     with σ = ``smearing_deltapsi``); with it the augmentation is **independent of
     N** — a single large dataset
     (big nbnd, nbnd_dpsi) reproduces any smaller (M, R) calculation. The
-    R·nmodes·len(iq_list) raw states per k are then orthogonalized against the M
-    originals (although they should already be orthogonal), truncated with
-    singular-value cutoff ``epstol``, and padded to a uniform band count.
+    R·nmodes·len(iq_list) raw states per k (units 1/bohr) are scaled by
+    ``dtau_step`` (bohr), orthogonalized against the M originals (although they
+    should already be orthogonal), truncated with the dimensionless
+    singular-value cutoff ``epstol``, and padded to a uniform band count. The
+    singular values s (capped at 1) are stored as per-band weights and applied
+    to the THC pivot search and interpolating vector fit; the SCF basis and THC
+    collocation matrices stay orthonormal and unweighted.
 
     The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
     returned as a new :class:`Mf`. Because the augmented basis is not an
@@ -194,6 +209,9 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
         Phonon q indices to include (default ``(1,)``).
     nmodes : int or None
         Number of modes per q. ``None`` uses 3*natom.
+    modes : sequence of int or None
+        1-based mode indices contributing δψ raw states (subset of
+        ``1..nmodes``). ``None`` uses all modes.
     nbnd_aug : int
         Number of δψ bands used per mode (R; ``-1`` = all bands in the file).
     nbnd_mf : int or None
@@ -204,11 +222,17 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
     smearing_deltapsi : float
         Buffer denominator smearing σ in Hartree (default 0.02).
     epstol : float
-        Singular-value cutoff selecting the number of states kept per k-point.
+        Dimensionless singular-value cutoff: a state is kept when the residual
+        amplitude s of its ``dtau_step``-scaled raw state satisfies
+        ``s >= epstol``.
+    dtau_step : float
+        Displacement step in bohr multiplying the raw δψ states (default 0.1).
     """
     return mf.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
                                  [int(i) for i in iq_list],
                                  -1 if nmodes is None else int(nmodes),
+                                 [] if modes is None else [int(m) for m in modes],
                                  int(nbnd_aug),
                                  -1 if nbnd_mf is None else int(nbnd_mf),
-                                 float(smearing_deltapsi), float(epstol))
+                                 float(smearing_deltapsi), float(epstol),
+                                 float(dtau_step))

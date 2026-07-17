@@ -340,6 +340,15 @@ class thc
   double memory_frac = 0.75;
   bool use_least_squares = false;
 
+  // Per-band fit weights of an augmented mean field, (nspin_in_basis, nkpts,
+  // nbnd), all > 0. Each orbital leg of the pivot-search metric and of the
+  // zeta-fit normal equations is scaled by its band weight (so each Gram
+  // factor carries w^2 per band); the returned collocation matrices and all
+  // downstream ERIs stay unweighted. Empty (has_band_weights = false) for
+  // non-augmented systems, trivial weights, or band_weights = false input.
+  nda::array<double,3> band_weight;
+  bool has_band_weights = false;
+
   //fft plans
   int howmany_fft = -1;
 
@@ -488,13 +497,37 @@ class thc
                 nda::ArrayOfRank<3> auto const& Xa, _darray_t_<MEM,5> const& psi,
                 dArray_t& dT_u);
 
+  // wska (optional): per-band fit weights (spin, full-BZ k, band on Xa's band
+  // axis) multiplied into the copied X (weighting one leg of the fit).
   template<MEMORY_SPACE MEM = HOST_MEMORY, typename Tensor_t>
   auto Xskau_to_sXbkua(int ispin, nda::ArrayOfRank<1> auto const& iu_for_sXb,
-                       Tensor_t const& Xa, nda::array<int,1>& kp_order);
+                       Tensor_t const& Xa, nda::array<int,1>& kp_order,
+                       nda::array<double,3> const* wska = nullptr);
 
   //template<MEMORY_SPACE MEM = HOST_MEMORY, typename Tensor_t>
   //auto Xskau_to_sXbkua(int ispin, nda::ArrayOfRank<2> auto const& iu_for_sXb,
   //                     Tensor_t const& Xa, nda::array<int,1>& kp_order);
+
+  // Scale the bands of a freshly-read (ns, nkpts_ibz, nb, npol, g) orbital set
+  // by the per-band fit weights; orb_range maps the band axis to absolute band
+  // indices. No-op when has_band_weights is false.
+  template<MEMORY_SPACE MEM>
+  void apply_band_weights_psi(memory::darray_t<memory::array<MEM,ComplexType,5>,mpi3::communicator>& dPsi,
+                              nda::range orb_range);
+
+  // Weight table for the X (pivot) leg: (nspin, full-BZ k, band-in-orb_range).
+  auto make_band_weight_table(nda::range orb_range) const
+  {
+    utils::check(orb_range.first() >= 0 and orb_range.last() <= band_weight.extent(2),
+                 "make_band_weight_table: orbital range [{},{}) exceeds the band-weight table ({} bands).",
+                 orb_range.first(), orb_range.last(), band_weight.extent(2));
+    nda::array<double,3> w(band_weight.extent(0), band_weight.extent(1), orb_range.size());
+    for( long is=0; is<w.extent(0); ++is )
+      for( long k=0; k<w.extent(1); ++k )
+        for( long ia=0; ia<w.extent(2); ++ia )
+          w(is,k,ia) = band_weight(is,k,orb_range.first()+ia);
+    return w;
+  }
 
   /**
    * Compute

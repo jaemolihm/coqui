@@ -341,13 +341,16 @@ public:
   // Writer for an augmented (non-eigenstate) orbital basis. `psi` is the full
   // basis (all bands, b0=0 semantics) already assembled by the caller;
   // `eigval_ibz` holds the kinetic-energy seed energies over the IBZ,
-  // (nspin, nkpts_ibz, nbnd). Marks the system augmented and writes the
+  // (nspin, nkpts_ibz, nbnd). `band_weights_ibz` holds the per-band THC fit
+  // weights over the IBZ, same shape (empty -> all ones, e.g. for the
+  // no-augmentation baseline). Marks the system augmented and writes the
   // pseudopotential so downstream can recompute H0 (h0_source="compute").
   template<class MF>
   bdft_readonly(MF& mf, std::string fn,
                 math::nda::DistributedArray auto const& psi,
                 nda::array<double,3> const& eigval_ibz,
-                std::string augment_type_in) :
+                std::string augment_type_in,
+                nda::array<double,3> const& band_weights_ibz = {}) :
     sys(mf,fn,false),
     h5file(std::nullopt),
     ecut(sys.ecutrho), fft_mesh(sys.fft_mesh),
@@ -388,6 +391,20 @@ public:
         int iks = sys.bz().kp_to_ibz(ik);
         sys.eigval(is,ik,all) = eigval_ibz(is,iks,all);
       }
+    // per-band THC fit weights over the full BZ (from IBZ, like eigval)
+    sys.aug_band_weight = nda::array<double,3>(sys.nspin,nkpts,norb);
+    sys.aug_band_weight() = 1.0;
+    if(band_weights_ibz.size() > 0) {
+      utils::check( band_weights_ibz.extent(0)==sys.nspin and
+                    band_weights_ibz.extent(1)==nkpts_ibz and
+                    band_weights_ibz.extent(2)==norb,
+                    "bdft_readonly(augment): band_weights_ibz shape mismatch: ({},{},{}) vs ({},{},{}).",
+                    band_weights_ibz.extent(0),band_weights_ibz.extent(1),band_weights_ibz.extent(2),
+                    sys.nspin,nkpts_ibz,norb);
+      for(int is=0; is<sys.nspin; ++is)
+        for(int ik=0; ik<nkpts; ++ik)
+          sys.aug_band_weight(is,ik,all) = band_weights_ibz(is,sys.bz().kp_to_ibz(ik),all);
+    }
 
     sys.mpi->comm.barrier();
     nda::range s_range(sys.nspin);

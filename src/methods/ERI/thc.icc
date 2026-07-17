@@ -54,6 +54,9 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   utils::check(thresh == 0.0 or thresh > 1e-14,
                "Error in thc::chol_metric_impl_ibz: Invalid threshold:{}. Must be either 0.0 or larger than 1e-14.", thresh);
   utils::check(mf->npol_in_basis() == 1, "Error in chol_metric_impl_ibz: npol>1 not yet implemented.");
+  utils::check(not has_band_weights,
+               "Error in chol_metric_impl_ibz: band weights not implemented with k-point "
+               "symmetries. Use a full-BZ k-grid or set band_weights = false.");
 
   // storage space, to be adjusted synamically later on
   int nmax = (nIpts > 0 ? nIpts : 6*int(sqrt(a_range.size()*b_range.size()))); 
@@ -797,8 +800,14 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
                                    C_skai->extent(1) == mf->nkpts() and
                                    C_skai->extent(2) == a_range.size() and
                                    C_skai->extent(3) == mf->nbnd() and
-                                   b_range.size() == mf->nbnd()), 
+                                   b_range.size() == mf->nbnd()),
                "Error in chol_metric_impl: Rotation and range simultaneously used. ");
+  utils::check(not (has_band_weights and C_skai!=nullptr),
+               "Error in chol_metric_impl: band weights not supported with rotated "
+               "orbitals (C_skai). Set band_weights = false.");
+  utils::check(not has_band_weights or
+               (a_range.last() <= band_weight.extent(2) and b_range.last() <= band_weight.extent(2)),
+               "Error in chol_metric_impl: orbital range exceeds the band-weight table.");
 
   // storage space, to be adjusted synamically later on
   int nmax = (nIpts > 0 ? nIpts : 6*int(sqrt(a_range.size()*b_range.size()))); 
@@ -808,8 +817,36 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   auto Q  = mf->Qpts()(iq,all);
   auto kpts = mf->kpts();
   bool gamma = (Q(0)*Q(0)+Q(1)*Q(1)+Q(2)*Q(2) < 1e-8);
-  bool single_psi = gamma and (a_range==b_range) and (C_skai==nullptr); 
-  ComplexType Znorm = ComplexType(1.0)/std::sqrt(std::sqrt(RealType(a_range.size()*b_range.size()*nspins*nkpts*npol)));
+  bool single_psi = gamma and (a_range==b_range) and (C_skai==nullptr);
+  // Effective (weight-squared) band counts for the metric normalization: with
+  // band weights, near-null augmentation states contribute ~nothing to the
+  // weighted metric but would still inflate the plain 1/(na*nb) factor, so the
+  // same absolute `thresh` would terminate the pivoted Cholesky earlier as more
+  // of them are kept. Normalizing by sum_a w^2 (averaged over spin/k) keeps the
+  // metric - and hence nIpts at fixed thresh - independent of how many
+  // near-null states are retained. Reduces to na (nb) for unit weights.
+  RealType na_eff = RealType(a_range.size());
+  RealType nb_eff = RealType(b_range.size());
+  if(has_band_weights) {
+    RealType wa = 0.0, wb = 0.0;
+    for( auto is : itertools::range(nspins) )
+      for( auto k : itertools::range(nkpts) ) {
+        for( auto a : itertools::range(a_range.size()) ) {
+          double w = band_weight(is,k,a_range.first()+a);
+          wa += w*w;
+        }
+        for( auto b : itertools::range(b_range.size()) ) {
+          double w = band_weight(is,k,b_range.first()+b);
+          wb += w*w;
+        }
+      }
+    na_eff = wa / RealType(nspins*nkpts);
+    nb_eff = wb / RealType(nspins*nkpts);
+    app_log(2,"  chol_metric_impl: effective weighted band counts for metric "
+              "normalization: na_eff = {:.3f} (na = {}), nb_eff = {:.3f} (nb = {})",
+            na_eff, a_range.size(), nb_eff, b_range.size());
+  }
+  ComplexType Znorm = ComplexType(1.0)/std::sqrt(std::sqrt(RealType(na_eff*nb_eff*nspins*nkpts*npol)));
 
   // processor grid for accumulating collation matrix. Redistribution to requested grid at the end
   long nkpool = utils::find_proc_grid_max_npools(mpi->comm.size(),nkpts,distr_tol);
@@ -874,7 +911,21 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     distPsia = std::move(dPsir);
   }
   nda::tensor::scale(Znorm, distPsia.local());
-  utils::check(distPsia.local_shape()[0] == nspins*nkpts*a_range.size()*npol, "Shape mismatch"); 
+  utils::check(distPsia.local_shape()[0] == nspins*nkpts*a_range.size()*npol, "Shape mismatch");
+  if(has_band_weights) {
+    // fold the per-band fit weights into the orbitals: the pivoted Cholesky
+    // then acts on the weighted pair-density metric. The weights are divided
+    // back out of the returned collocation matrices below.
+    auto P = nda::reshape(distPsia.local(),
+                shape_t<5>{nspins,nkpts,a_range.size(),npol,distPsia.local_shape()[1]});
+    for( auto is : itertools::range(nspins) )
+      for( auto k : itertools::range(nkpts) )
+        for( auto a : itertools::range(a_range.size()) ) {
+          double w = band_weight(is,k,a_range.first()+a);
+          if(w != 1.0)
+            nda::tensor::scale(ComplexType(w), P(is,k,a,nda::ellipsis{}));
+        }
+  }
   
   // Similar to distPsia
   decltype(distPsia)* distPsib;
@@ -911,6 +962,17 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     }
     utils::check(distPsia.local_range(1) == distPsib->local_range(1), "Error in chol_metric_impl: Range mismatch.");
     nda::tensor::scale(Znorm, distPsib->local());
+    if(has_band_weights) {
+      auto P = nda::reshape(distPsib->local(),
+                  shape_t<5>{nspins,nkpts,b_range.size(),npol,distPsib->local_shape()[1]});
+      for( auto is : itertools::range(nspins) )
+        for( auto k : itertools::range(nkpts) )
+          for( auto b : itertools::range(b_range.size()) ) {
+            double w = band_weight(is,k,b_range.first()+b);
+            if(w != 1.0)
+              nda::tensor::scale(ComplexType(w), P(is,k,b,nda::ellipsis{}));
+          }
+    }
   }
   utils::check(distPsia.local_range(1) == distPsib->local_range(1), "Error: Distribution error.");
   if(b_range.size() > 0)
@@ -1415,6 +1477,17 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       Xloc(all,all,all,i) = Pskau[i];
     // remove normalization
     nda::tensor::scale(ComplexType(1.0)/Znorm, Xloc);
+    if(has_band_weights) {
+      // divide the per-band fit weights back out: the returned collocation
+      // matrices are the unweighted orbitals at the pivot points
+      for( auto is : itertools::range(nspins) )
+        for( auto [ik,k] : itertools::enumerate(k_subrange) )
+          for( auto [ia,a] : itertools::enumerate(a_subrange) ) {
+            double w = band_weight(is,k,a_range.first()+a);
+            if(w != 1.0)
+              nda::tensor::scale(ComplexType(1.0/w), Xloc(is,ik,ia,all));
+          }
+    }
     for( int is=0; is<nspins*npol; ++is ) {
       for( auto [ik,k] : itertools::enumerate(k_subrange) ) {
         utils::rspace_phase_factor(kpts_c(k,all),rho_g.mesh(),ipts,phase);
@@ -1454,6 +1527,15 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       Xloc(all,all,all,i) = Pskbu[i];
     // remove normalization
     nda::tensor::scale(ComplexType(1.0)/Znorm, Xloc);
+    if(has_band_weights) {
+      for( auto is : itertools::range(nspins) )
+        for( auto [ik,k] : itertools::enumerate(k_subrange) )
+          for( auto [ib,b] : itertools::enumerate(b_subrange) ) {
+            double w = band_weight(is,k,b_range.first()+b);
+            if(w != 1.0)
+              nda::tensor::scale(ComplexType(1.0/w), Xloc(is,ik,ib,all));
+          }
+    }
     for( int is=0; is<nspins*npol; ++is ) {
       for( auto [ik,k] : itertools::enumerate(k_subrange) ) {
         utils::rspace_phase_factor(kpts_c(k,all),rho_g.mesh(),ipts,phase);
@@ -1822,6 +1904,9 @@ auto thc::intvec_impl(int iq, nda::MemoryArrayOfRank<1> auto const& IPts,
   // temporary limitations
   utils::check(nspins==1 and npol==1, "Finish implementation for spin polarized/noncollinear in the basis.");
   utils::check(n_rg.size() == B.global_shape()[0], "Finish implementation of distributed chol");
+  utils::check(not has_band_weights,
+               "Error in thc::intvec_impl (LS-THC): band weights not implemented in the "
+               "Cholesky-fit path. Set band_weights = false.");
 
   // temporary, optimize later!
   std::array<long, 2> pgrid2D = {mpi->comm.size(), 1};

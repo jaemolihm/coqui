@@ -65,6 +65,12 @@ def make_thc_coulomb(mf, params):
           least-squares THC fit is performed instead of ISDF.
         - ``chol_block_size`` *(int, optional, default ``8``)* — block size for
           the internal Cholesky step.
+        - ``band_weights`` *(bool, optional, default ``True``)* — for an
+          augmented mean field (``augment_mf`` / ``augment_mf_dpsi``), weight
+          each band by its stored augmentation singular value (1 for the
+          original bands) in the pivot search and the interpolating-vector
+          fit. The collocation matrices and the resulting ERIs remain
+          unweighted. Set to ``False`` to treat all bands equally.
         - ``init`` *(bool, optional, default ``True``)* — if ``True``, runs the
           full THC computation immediately at construction. Set to ``False`` to
           defer until ``.init()`` is called explicitly.

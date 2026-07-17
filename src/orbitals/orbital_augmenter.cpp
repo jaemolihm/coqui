@@ -119,7 +119,8 @@ auto orthonormalize_augmentation(
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
                     double epstol)
-  -> darray_t<memory::array<MEM, ComplexType, 4>, comm_t>
+  -> std::tuple<darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
+                nda::array<double, 3>>
 {
   using larray = memory::array<MEM, ComplexType, 4>;
   decltype(nda::range::all) all;
@@ -186,8 +187,10 @@ auto orthonormalize_augmentation(
       k_comm.broadcast_n(S1.data(), S1.size(), 0);
       k_comm.broadcast_n(v.data(), v.size(), 0);
 
+      // s = sqrt(lambda) is the singular value of the residual block; epstol
+      // thresholds s (dimensionless once raw states are dtau_step-scaled)
       long cnt = 0;
-      for(long i=0;i<n_raw;++i) if(v(i) >= epstol) ++cnt;
+      for(long i=0;i<n_raw;++i) if(v(i) >= epstol*epstol) ++cnt;
       n_aug_max = std::max(n_aug_max, cnt);
       counts.push_back(cnt);
       Vs.push_back(S1);
@@ -204,8 +207,51 @@ auto orthonormalize_augmentation(
     long cmin = counts.empty()? n_aug_max : *std::min_element(counts.begin(),counts.end());
     cmin = comm->all_reduce_value(cmin, boost::mpi3::min<>{});
     app_log(2, "  Basis augmentation: raw states/k = {}, kept per k (n_aug_max) = {}, "
-               "min above epstol = {}, epstol = {:.3e}", n_raw, n_aug_max, cmin, epstol);
+               "min above epstol = {}, epstol (singular value) = {:.3e}", n_raw, n_aug_max, cmin, epstol);
   }
+
+  // full singular-value spectrum, replicated on every rank: each (s,k) block is
+  // filled by the root of its k-pool and summed. Es holds eigenvalues lambda in
+  // ascending order; store s = sqrt(lambda) in descending order.
+  auto sv_all = nda::array<double,3>::zeros({nspin_tot, nkpts_tot, n_raw});
+  {
+    long isk = 0;
+    for(long is=0; is<ns; ++is) {
+      for(long ik=0; ik<nk; ++ik, ++isk) {
+        if(k_comm.rank() != 0) continue;
+        auto const& v = Es[isk];
+        for(long i=0; i<n_raw; ++i)
+          sv_all(s_range.first()+is, k_range.first()+ik, i) = std::sqrt(std::max(v(n_raw-1-i), 0.0));
+      }
+    }
+    comm->all_reduce_in_place_n(sv_all.data(), sv_all.size(), std::plus<>{});
+  }
+  {
+    auto sv_line = [&](long is, long ik) {
+      std::string line;
+      for(long i=0; i<n_raw; ++i) {
+        if(i == n_aug_max) line += " |";
+        line += fmt::format(" {:.3e}", sv_all(is,ik,i));
+      }
+      return line;
+    };
+    app_log(2, "  Singular values (descending, '|' marks the kept/discarded cut):");
+    app_log(2, "    is=0 ik=0:{}", sv_line(0,0));
+    for(long is=0; is<nspin_tot; ++is)
+      for(long ik=0; ik<nkpts_tot; ++ik) {
+        if(is==0 and ik==0) continue;
+        app_log(3, "    is={} ik={}:{}", is, ik, sv_line(is,ik));
+      }
+  }
+
+  // per-band THC fit weights: 1 for the originals, min(s,1) for the kept
+  // augmentation states (band nbnd+r pairs with the r-th largest s at each k)
+  auto weights = nda::array<double,3>::zeros({nspin_tot, nkpts_tot, nbnd + n_aug_max});
+  weights(nda::range::all, nda::range::all, nda::range(0,nbnd)) = 1.0;
+  for(long is=0; is<nspin_tot; ++is)
+    for(long ik=0; ik<nkpts_tot; ++ik)
+      for(long r=0; r<n_aug_max; ++r)
+        weights(is, ik, nbnd + r) = std::min(sv_all(is, ik, n_aug_max-1-r), 1.0);
 
   // pass 2: assemble [originals | augmentation]
   long nbnd_tot = nbnd + n_aug_max;
@@ -238,7 +284,7 @@ auto orthonormalize_augmentation(
     }
   }
   comm->barrier();
-  return psi_out;
+  return std::make_tuple(std::move(psi_out), std::move(weights));
 }
 
 template<MEMORY_SPACE MEM, utils::Communicator comm_t>
@@ -296,7 +342,7 @@ auto rayleigh_eigvals(mf::MF& mf,
 template<MEMORY_SPACE MEM>
 mf::MF add_augmentation(mf::MF& mf, std::string fn,
                         std::shared_ptr<orbital_augmenter_t> augmenter,
-                        long nbnd_aug, double epstol)
+                        long nbnd_aug, double epstol, double dtau_step)
 {
   using larray = typename memory::array<MEM,ComplexType,4>;
   decltype(nda::range::all) all;
@@ -310,6 +356,7 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   utils::check(nspin == nspin_in_basis,
                "add_augmentation: nspin_in_basis != nspin not supported yet.");
+  utils::check(dtau_step > 0.0, "add_augmentation: dtau_step must be > 0, got {}.", dtau_step);
   if(nbnd_aug < 0 or nbnd_aug > nbnd) nbnd_aug = nbnd;
   int n_raw_per = augmenter->n_raw_per_band();
   long n_raw = n_raw_per * nbnd_aug;
@@ -322,7 +369,8 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
   app_log(2,"  - original bands (kept)       : {}", nbnd);
   app_log(2,"  - bands transformed (nbnd_aug): {}", nbnd_aug);
   app_log(2,"  - raw states per k            : {} ({} channels x {})", n_raw, n_raw_per, nbnd_aug);
-  app_log(2,"  - singular-value cutoff       : {:.3e}", epstol);
+  app_log(2,"  - dtau_step (bohr)            : {:.4e}", dtau_step);
+  app_log(2,"  - singular-value cutoff       : {:.3e} (dimensionless, thresholds s)", epstol);
 
   /* 4d processor grid: {s, k, bnd, g}. Bands are not distributed. */
   std::array<long,4> pgrid;
@@ -366,15 +414,20 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
       for(long ik=0; ik<k_range.size(); ++ik)
         augmenter->generate_raw(int(s_range.first()+is), int(k_range.first()+ik), g0,
                                 base_loc(is,ik,all,all), raw_loc(is,ik,all,all));
+    // raw states are dpsi/dtau (1/bohr); dtau_step (bohr) makes them
+    // dimensionless displacement responses, setting the scale of the
+    // singular values used for truncation and THC fit weights
+    raw_aug.local() *= ComplexType(dtau_step);
   }
 
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
-  auto psi_full = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
+  auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
 
   // kinetic-energy eigenvalue seed for the (non-eigen) basis
   auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_full);
 
-  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type()));
+  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type(),
+                                        band_weights));
 }
 
 namespace {
@@ -468,8 +521,9 @@ template<MEMORY_SPACE MEM>
 mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                              std::string deltapsi_dir, std::string elph_dir,
                              std::vector<long> const& iq_list, long nmodes_in,
+                             std::vector<long> const& mode_list,
                              long nbnd_aug, long nbnd_mf,
-                             double smearing, double epstol)
+                             double smearing, double epstol, double dtau_step)
 {
   using larray = typename memory::array<MEM,ComplexType,4>;
   decltype(nda::range::all) all;
@@ -488,6 +542,17 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   long nmodes = (nmodes_in <= 0) ? 3*natom : nmodes_in;
   long nq = long(iq_list.size());
 
+  // modes contributing raw states (1-based); empty selection = all nmodes
+  std::vector<long> modes(mode_list);
+  if(modes.empty()) {
+    modes.resize(size_t(nmodes));
+    for(long m=0; m<nmodes; ++m) modes[size_t(m)] = m+1;
+  }
+  for(auto m : modes)
+    utils::check(m >= 1 and m <= nmodes,
+                 "add_augmentation_dpsi: mode index {} outside [1, {}].", m, nmodes);
+  long nmodes_sel = long(modes.size());
+
   utils::check(nspin == nspin_in_basis,
                "add_augmentation_dpsi: nspin_in_basis != nspin not supported yet.");
   // The elph eigenvalues/vertex read from elph_bare.iq*.h5 have no spin axis, so
@@ -501,6 +566,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                "add_augmentation_dpsi: requires a full-BZ k-grid "
                "(nkpts == nkpts_ibz); disable k-point symmetry.");
   utils::check(nq > 0, "add_augmentation_dpsi: empty iq_list.");
+  utils::check(dtau_step > 0.0, "add_augmentation_dpsi: dtau_step must be > 0, got {}.", dtau_step);
 
   // R = number of δψ bands used. -1 → all bands present in the first file;
   // 0 → no δψ states (baseline: originals in augmented bdft format, no file read).
@@ -513,7 +579,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                  "add_augmentation_dpsi: nbnd_aug (R={}) exceeds bands in δψ file ({}).",
                  R, dk0.nbnd);
   }
-  long n_raw_per = nmodes * nq;
+  long n_raw_per = nmodes_sel * nq;
   long n_raw = R * n_raw_per;
 
   app_log(2,"*****************************************************");
@@ -527,11 +593,13 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   app_log(2,"  - h5/nscf bands (N)           : {}", N);
   app_log(2,"  - original bands kept (M)     : {}", M);
   app_log(2,"  - δψ bands used (R)           : {}", R);
-  app_log(2,"  - modes per q                 : {}", nmodes);
+  app_log(2,"  - modes per q                 : {} of {} ({})", nmodes_sel, nmodes, [&]{
+            std::string s; for(auto m : modes) s += std::to_string(m)+" "; return s; }());
   app_log(2,"  - buffer bands m ∈ [{}, {})   : {} band(s)", M, N, std::max(0L, N-M));
   app_log(2,"  - buffer smearing (Ha)        : {:.4e}", smearing);
   app_log(2,"  - raw states per k            : {} ({} q·modes x {})", n_raw, n_raw_per, R);
-  app_log(2,"  - singular-value cutoff       : {:.3e}", epstol);
+  app_log(2,"  - dtau_step (bohr)            : {:.4e}", dtau_step);
+  app_log(2,"  - singular-value cutoff       : {:.3e} (dimensionless, thresholds s)", epstol);
 
   /* 4d processor grid: {s, k, bnd, g}. Bands are not distributed. */
   std::array<long,4> pgrid;
@@ -617,7 +685,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
       for(int d=0; d<3; ++d)
         G0[d] = std::lround(kpts_cr(ik,d)+qv(d)-kpts_cr(j,d));
 
-      for(long mode=0; mode<nmodes; ++mode) {
+      for(long im=0; im<nmodes_sel; ++im) {
+        long mode = modes[size_t(im)] - 1;           // 0-based mode index
         std::string dprefix = deltapsi_dir + "/deltapsi_iq" + std::to_string(iq)
                             + "_mode" + std::to_string(mode+1);
         auto dk = methods::detail::read_Deltapsi_k(dprefix, ik, mesh);
@@ -645,7 +714,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
           long is = s_range.first()+is_l;
           (void) is;
           for(long n=0; n<R; ++n) {
-            long row = (iq_idx*nmodes + mode)*R + n;   // band index in raw_aug
+            long row = (iq_idx*nmodes_sel + im)*R + n; // band index in raw_aug
             auto out = raw_loc(is_l, jl, row, all);    // (ng_loc)
             // (1) scatter δψ(n,k) coefficients onto the local 'w' grid slice
             for(long ig=0; ig<npw; ++ig) {
@@ -670,18 +739,24 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     }
   }
 
+  // raw states are deltapsi/dtau (1/bohr); dtau_step (bohr) makes them
+  // dimensionless displacement responses, setting the scale of the singular
+  // values used for truncation and THC fit weights
+  raw_aug.local() *= ComplexType(dtau_step);
+
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
-  auto psi_full = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
+  auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
   auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
 
-  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi")));
+  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi"),
+                                        band_weights));
 }
 
 // explicit template instantiations
-template mf::MF add_augmentation<HOST_MEMORY>(mf::MF&,std::string,std::shared_ptr<orbital_augmenter_t>,long,double);
-template mf::MF add_augmentation_dpsi<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,std::vector<long> const&,long,long,long,double,double);
+template mf::MF add_augmentation<HOST_MEMORY>(mf::MF&,std::string,std::shared_ptr<orbital_augmenter_t>,long,double,double);
+template mf::MF add_augmentation_dpsi<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,std::vector<long> const&,long,std::vector<long> const&,long,long,double,double,double);
 template nda::array<double, 3> rayleigh_eigvals<HOST_MEMORY,communicator>(mf::MF&, darray_t<host_array<ComplexType, 4>, communicator>&);
-template darray_t<host_array<ComplexType, 4>, communicator>
+template std::tuple<darray_t<host_array<ComplexType, 4>, communicator>, nda::array<double, 3>>
 orthonormalize_augmentation(darray_t<host_array<ComplexType, 4>, communicator>&,
                             darray_t<host_array<ComplexType, 4>, communicator>&, double);
 

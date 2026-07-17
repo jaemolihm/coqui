@@ -333,6 +333,23 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
+    // Per-band THC fit weights over the full BZ, (nspin, nkpts, nbnd): for an
+    // augmented basis, min(s,1) for the augmentation states (s = residual
+    // singular value of the dtau_step-scaled raw state) and 1 for the original
+    // bands. All ones for non-augmented systems (and augmented files that
+    // predate the weights).
+    nda::array<double,3> augmented_band_weights() const
+    {
+      if(is_augmented()) {
+        auto const& w = std::get<bdft::bdft_readonly>(var).get_sys().aug_band_weight;
+        if(w.size() > 0)
+          return w(nda::range::all,nda::range::all,nda::range(nbnd()));
+      }
+      nda::array<double,3> w(nspin(), nkpts(), nbnd());
+      w() = 1.0;
+      return w;
+    }
+
     decltype(auto) symmetry_rotation(long s, long k) const
     {
       auto ns = qsymms().extent(0);
