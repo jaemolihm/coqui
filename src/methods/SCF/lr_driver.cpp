@@ -169,6 +169,31 @@ std::tuple<int, double> lr_driver::run_lr(
   print_memory_estimate(thc.Np(), include_gw_sigma, gw_full);
   print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
 
+  // Force dW_qtPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
+  // pairs the P/Q tile of W_c (from dW_qtPQ → dW_tRPQ) with that of ΔW and the
+  // G^R cache, both built via lr_W_q_local_dist. When dW_qtPQ arrives on a
+  // different tiling — e.g. mb_state.dW_qtPQ from full-scGW inherits the scGW
+  // polarizability's block_size={1,1,1,1} — the contiguous PQ split disagrees
+  // whenever Np % np_P != 0 (bsize=1 vs bsize=Np/np_P round differently), and
+  // the fused pairing aborts. Redistributing here makes all operands share one
+  // tiling by construction. (The from-file G0W0 path already builds dW_qtPQ on
+  // this distribution, so the redistribute is a no-op there.)
+  if (include_gw_sigma) {
+    long nt_f = sG_tskij.shape()[0];
+    long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
+    auto [tq_pgrid, tq_bsize] =
+        utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
+    std::array<long, 4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
+    std::array<long, 4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+    if (dW_qtPQ->grid() != qt_pgrid || dW_qtPQ->block_size() != qt_bsize) {
+      app_log(2, "lr_driver::run_lr: redistributing dW_qtPQ onto canonical "
+                 "LR q-local tiling (pgrid ({},{},{},{}), bsize ({},{},{},{}))",
+              qt_pgrid[0], qt_pgrid[1], qt_pgrid[2], qt_pgrid[3],
+              qt_bsize[0], qt_bsize[1], qt_bsize[2], qt_bsize[3]);
+      math::nda::redistribute_in_place(*dW_qtPQ, qt_pgrid, qt_bsize);
+    }
+  }
+
   // Initialize lr_hf solver if needed
   if (need_hf && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
