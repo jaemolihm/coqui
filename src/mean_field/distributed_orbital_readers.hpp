@@ -92,21 +92,25 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
     if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
       pgrid = {comm.size(),1};
     } 
-  } else if constexpr (rank==4){ 
+  } else if constexpr (rank==4){
     if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
-      long sz = comm.size();
-      long ps = (sz%nspin==0?nspin:1);
-      long n_ = sz/ps;
-      long pk = utils::find_proc_grid_max_rows(n_,nkpts);
-      pgrid = {ps,pk,n_/pk,1};
+      // cap spin/k/band at their extents (the trailing PW axis is never split);
+      // spilling stays on the band axis. See utils::find_proc_grid_capped.
+      auto [g, n_active] = utils::find_proc_grid_capped<4>(comm.size(), {nspin, nkpts, nbnd, 1l});
+      utils::check(n_active == comm.size(),
+        "read_distributed_orbital_set: cannot tile {} ranks onto (nspin={}, nkpts={}, "
+        "nbnd={}); pass an explicit processor grid or use fewer ranks.",
+        comm.size(), nspin, nkpts, nbnd);
+      pgrid = g;
     }
-  } else if constexpr (rank==5){ 
+  } else if constexpr (rank==5){
     if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
-      long sz = comm.size();
-      long ps = (sz%nspin==0?nspin:1); 
-      long n_ = sz/ps;
-      long pk = utils::find_proc_grid_max_rows(n_,nkpts);
-      pgrid = {ps,pk,n_/pk,1,1};
+      auto [g, n_active] = utils::find_proc_grid_capped<5>(comm.size(), {nspin, nkpts, nbnd, 1l, 1l});
+      utils::check(n_active == comm.size(),
+        "read_distributed_orbital_set: cannot tile {} ranks onto (nspin={}, nkpts={}, "
+        "nbnd={}); pass an explicit processor grid or use fewer ranks.",
+        comm.size(), nspin, nkpts, nbnd);
+      pgrid = g;
     }
   }
   if(np0 == 0) pgrid_out = pgrid;

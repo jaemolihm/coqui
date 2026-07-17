@@ -22,10 +22,70 @@
 #ifndef UTILITIES_PROC_GRID_PARTITION_HPP
 #define UTILITIES_PROC_GRID_PARTITION_HPP
 
+#include <array>
+#include <algorithm>
+
 #include "utilities/check.hpp"
 
 namespace utils
 {
+
+/**
+ * Robust processor grid for a distributed array of the given global `shape` over
+ * `np` ranks. The returned grid never over-subscribes: g[i] <= shape[i] for
+ * every axis, so it cannot trigger the "Too many processors" abort in
+ * make_distributed_array. Axes are filled in index order (axis 0 first), so the
+ * caller should order `shape` by parallelization priority (e.g. {nspin, nkpts,
+ * nbnd, nbnd}).
+ *
+ * Two passes: the first assigns balanced divisor-clean pools per axis; the
+ * second packs any ranks stranded by clean division onto axes that still have
+ * spare extent (possibly uneven, handled by chunk_range). When `np` cannot be
+ * tiled onto `shape` at all (e.g. a prime factor exceeds every extent), the
+ * product of the returned grid, `n_active`, is strictly less than `np`: the
+ * surplus ranks must stay idle and the array must be built on a sub-communicator
+ * of size `n_active`. This keeps few-band/many-core runs alive (at reduced
+ * efficiency) instead of aborting.
+ *
+ * @return {grid, n_active} with prod(grid) == n_active <= np.
+ */
+template<size_t R>
+inline std::pair<std::array<long,R>, long>
+find_proc_grid_capped(long np, std::array<long,R> shape)
+{
+  std::array<long,R> g;
+  g.fill(1);
+  utils::check(np >= 1, "find_proc_grid_capped: np must be >= 1.");
+  for (auto e : shape) utils::check(e >= 1, "find_proc_grid_capped: shape extents must be >= 1.");
+
+  // Pass 1: balanced pools -- largest divisor of the remaining budget that fits.
+  long budget = np;
+  for (size_t ax = 0; ax < R; ++ax) {
+    long d = 1;
+    for (long i = std::min(budget, shape[ax]); i >= 1; --i)
+      if (budget % i == 0) { d = i; break; }
+    g[ax] = d;
+    budget /= d;
+  }
+
+  // Pass 2: raise each axis toward its extent (favoring earlier / higher-priority
+  // axes) to pack ranks stranded by clean division, keeping the product <= np.
+  // May pick a non-divisor value; make_distributed_array splits it unevenly via
+  // chunk_range. E.g. np=96, shape={1,8,10,1}: pass 1 gives {1,8,6,1}=48, pass 2
+  // raises the band axis to {1,8,10,1}=80 (16 idle) instead of leaving 48 idle.
+  long prod = 1;
+  for (auto v : g) prod *= v;
+  for (size_t ax = 0; ax < R; ++ax) {
+    long base = prod / g[ax];             // product of the other axes
+    long best = g[ax];
+    for (long v = shape[ax]; v > best; --v)
+      if (base * v <= np) { best = v; break; }
+    prod = base * best;
+    g[ax] = best;
+  }
+
+  return {g, prod};
+}
 
 /**
  * Find a processor grid {n x m} where max(nkpts, gcomm.size()) = n*m and n is maximized

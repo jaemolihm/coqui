@@ -45,6 +45,39 @@
 namespace hamilt
 {
 
+namespace detail
+{
+/**
+ * Build a distributed one-body (rank-4) quantity and scatter it into the shared
+ * array `sX`. The distributed array is built over the first `n_active` ranks of
+ * sX's internode communicator; any surplus ranks (when the processor grid cannot
+ * tile all ranks, see utils::find_proc_grid_capped) stay idle. Correctness relies on the
+ * active grid blocks covering the full global shape while every other element of
+ * each node's window is zero, so the internode all_reduce assembles the complete
+ * array -- hence sX is zeroed first.
+ *
+ * @param build - callable invoked only on active ranks with their sub-communicator;
+ *                must return the distributed array (global shape == sX.shape()).
+ */
+template<class Array_4D_t, class Builder>
+void assemble_one_body(math::shm::shared_array<Array_4D_t>& sX, long n_active, Builder&& build)
+{
+  sX.set_zero();
+  if (sX.node_comm()->root()) {
+    auto& internode = *sX.internode_comm();
+    int color = (long(internode.rank()) < n_active) ? 0 : 1;
+    auto active = internode.split(color, internode.rank());
+    if (color == 0) {
+      auto dX = build(active);
+      auto Xl = sX.local();
+      Xl(dX.local_range(0), dX.local_range(1), dX.local_range(2), dX.local_range(3)) = dX.local();
+    }
+  }
+  sX.communicator()->barrier();
+  sX.all_reduce();
+}
+} // namespace detail
+
 
 /**
  * Non-interacting one-body hamiltonian associated with MF object in a distributed array
@@ -89,25 +122,19 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_H0(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sH0_skij) {
   long np = sH0_skij.internode_comm()->size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 2048);
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})\n", bsize[0], bsize[1], bsize[2], bsize[3]);
 
-  if (sH0_skij.node_comm()->root()) {
-    auto dH0  = hamilt::H0<HOST_MEMORY>(mf, *sH0_skij.internode_comm(), psp, 
-                                        nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                        pgrid, bsize);
-    auto H0_loc = sH0_skij.local();
-    H0_loc(dH0.local_range(0), dH0.local_range(1), dH0.local_range(2), dH0.local_range(3)) = dH0.local();
-  }
-  sH0_skij.communicator()->barrier();
-  sH0_skij.all_reduce();
+  detail::assemble_one_body(sH0_skij, n_active, [&](boost::mpi3::communicator& c) {
+    return hamilt::H0<HOST_MEMORY>(mf, c, psp,
+                                   nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
+                                   pgrid, bsize);
+  });
 }
 
 /**
@@ -206,12 +233,14 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
       utils::check(k_range.first() >= 0 and k_range.last() <= mf.nkpts(), "K-point range out of bounds.");
       long np0 = std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{});
       if( np0 == 0 ) {
-        long sz = comm.size();
-        long ps = (sz%nspin==0?nspin:1);
-        long n_ = sz/ps;
-        long pk = utils::find_proc_grid_max_rows(n_,nkpts);
-        pgrid = {ps,pk,n_/pk,1};
-      } 
+        // cap every axis at its extent and spill leftover ranks across both band
+        // axes so no dimension is over-subscribed (see utils::find_proc_grid_capped).
+        auto [g, n_active] = utils::find_proc_grid_capped<4>(comm.size(), {nspin, nkpts, M, M});
+        utils::check(n_active == comm.size(),
+          "hamilt::F: cannot tile {} ranks onto (nspin={}, nkpts={}, nbnd={}); pass an "
+          "explicit processor grid or use fewer ranks.", comm.size(), nspin, nkpts, M);
+        pgrid = g;
+      }
       using larray = memory::array<MEM,ComplexType,4>;
       auto Fij = math::nda::make_distributed_array<larray>(comm,pgrid,{nspin,nkpts,M,M},
                   {bz[0],bz[1],bz[2],bz[2]});
@@ -248,19 +277,17 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
               bool exclude_H0=false,
               const math::shm::shared_array<Array_4D_t> *sH0_skij=nullptr) {
   long np = sF_skij.internode_comm()->size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 2048);
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})\n", bsize[0], bsize[1], bsize[2], bsize[3]);
 
-  if (sF_skij.node_comm()->root()) {
-    auto dF  = hamilt::F<HOST_MEMORY>(mf, *sF_skij.internode_comm(), nda::range(mf.nkpts_ibz()),
-                                      nda::range(mf.nbnd()), pgrid, bsize);
+  detail::assemble_one_body(sF_skij, n_active, [&](boost::mpi3::communicator& c) {
+    auto dF = hamilt::F<HOST_MEMORY>(mf, c, nda::range(mf.nkpts_ibz()),
+                                     nda::range(mf.nbnd()), pgrid, bsize);
     if (exclude_H0) {
       if (sH0_skij != nullptr) {
         // subtract the caller-provided H0 restricted to dF's local block
@@ -268,16 +295,13 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
         dF.local() -= H0_loc(dF.local_range(0), dF.local_range(1),
                              dF.local_range(2), dF.local_range(3));
       } else {
-        auto dH0 = hamilt::H0<HOST_MEMORY>(mf, *sF_skij.internode_comm(), psp, nda::range(mf.nkpts_ibz()),
+        auto dH0 = hamilt::H0<HOST_MEMORY>(mf, c, psp, nda::range(mf.nkpts_ibz()),
                                            nda::range(mf.nbnd()), pgrid, bsize);
         dF.local() -= dH0.local();
       }
     }
-    auto F_loc = sF_skij.local();
-    F_loc(dF.local_range(0), dF.local_range(1), dF.local_range(2), dF.local_range(3)) = dF.local();
-  }
-  sF_skij.communicator()->barrier();
-  sF_skij.all_reduce();
+    return dF;
+  });
 }
 
 /**
@@ -352,14 +376,12 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 template<typename MPI_t>
 void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_output, int scf_iter) {
   long np = mpi.comm.size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 2048);
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})\n", bsize[0], bsize[1], bsize[2], bsize[3]);
 
   // logic of iteration
   if (scf_iter == -1) {
@@ -380,33 +402,38 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
   auto sDm_skij = make_shared_array<larray_view>(mpi, {mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
   methods::chkpt::read_dm(mpi.node_comm, coqui_output, dm_iter, sDm_skij);
 
-  auto dVH = hamilt::Vhartree<HOST_MEMORY>(mf, mpi.comm, psp,
-                                           sDm_skij.local(), nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                           pgrid, bsize);
-  mpi.comm.barrier();
-
   std::string filename = coqui_output + ".mbpt.h5";
   app_log(2, "Dump the matrix elements of the Hartree potential: ");
   app_log(2, "  - h5 file: {}", filename);
   app_log(2, "  - h5 dataset = scf/iter{}/VH_skij\n", scf_iter);
 
-  h5::group iter_grp;
-  if (mpi.comm.root()) {
-    h5::file file;
-    try {
-      file = h5::file(filename, 'a');
-    } catch(...) {
-      APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
+  // Build + write the distributed potential on the active sub-communicator; when
+  // the grid cannot tile all ranks (see utils::find_proc_grid_capped) the surplus stay
+  // idle. Rank 0 is always active, so it owns the h5 file handle.
+  int color = (long(mpi.comm.rank()) < n_active) ? 0 : 1;
+  auto active = mpi.comm.split(color, mpi.comm.rank());
+  if (color == 0) {
+    auto dVH = hamilt::Vhartree<HOST_MEMORY>(mf, active, psp,
+                                             sDm_skij.local(), nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
+                                             pgrid, bsize);
+    h5::group iter_grp;
+    if (active.root()) {
+      h5::file file;
+      try {
+        file = h5::file(filename, 'a');
+      } catch(...) {
+        APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
+      }
+      auto scf_grp = h5::group(file).open_group("scf");
+      utils::check(scf_grp.has_subgroup("iter"+std::to_string(scf_iter)),
+                   "dump_hartree: \"scf/iter{}\" does not exist!");
+      iter_grp = scf_grp.open_group("iter"+std::to_string(scf_iter));
+      math::nda::h5_write(iter_grp, "VH_skij", dVH);
+    } else {
+      math::nda::h5_write(iter_grp, "VH_skij", dVH);
     }
-    auto scf_grp = h5::group(file).open_group("scf");
-    utils::check(scf_grp.has_subgroup("iter"+std::to_string(scf_iter)),
-                 "dump_hartree: \"scf/iter{}\" does not exist!");
-
-    iter_grp = scf_grp.open_group("iter"+std::to_string(scf_iter));
-    math::nda::h5_write(iter_grp, "VH_skij", dVH);
-  } else {
-    math::nda::h5_write(iter_grp, "VH_skij", dVH);
   }
+  mpi.comm.barrier();
 }
 
 /**
@@ -466,24 +493,18 @@ auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm,
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_ovlp(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sS_skij) {
   long np = sS_skij.internode_comm()->size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 2048);
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})\n", bsize[0], bsize[1], bsize[2], bsize[3]);
 
-  if (sS_skij.node_comm()->root()) {
-    auto dS  = ovlp<HOST_MEMORY>(mf, *sS_skij.internode_comm(), nda::range(mf.nkpts_ibz()),
-                                 nda::range(mf.nbnd()), pgrid, bsize);
-    auto S_loc = sS_skij.local();
-    S_loc(dS.local_range(0), dS.local_range(1), dS.local_range(2), dS.local_range(3)) = dS.local();
-  }
-  sS_skij.communicator()->barrier();
-  sS_skij.all_reduce();
+  detail::assemble_one_body(sS_skij, n_active, [&](boost::mpi3::communicator& c) {
+    return ovlp<HOST_MEMORY>(mf, c, nda::range(mf.nkpts_ibz()),
+                             nda::range(mf.nbnd()), pgrid, bsize);
+  });
 }
 
 /**
@@ -525,83 +546,82 @@ auto Vxc(mf::MF &mf, boost::mpi3::communicator &comm,
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_Vxc(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sVxc_skij) {
   long np = sVxc_skij.internode_comm()->size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 2048);
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})\n", bsize[0], bsize[1], bsize[2], bsize[3]);
 
-  if (sVxc_skij.node_comm()->root()) {
-    auto dVxc = hamilt::Vxc<HOST_MEMORY>(mf, *sVxc_skij.internode_comm(),
-                                         nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                         pgrid, bsize);
-    auto Vxc_loc = sVxc_skij.local();
-    Vxc_loc(dVxc.local_range(0), dVxc.local_range(1), dVxc.local_range(2), dVxc.local_range(3)) = dVxc.local();
-  }
-  sVxc_skij.communicator()->barrier();
-  sVxc_skij.all_reduce();
+  detail::assemble_one_body(sVxc_skij, n_active, [&](boost::mpi3::communicator& c) {
+    return hamilt::Vxc<HOST_MEMORY>(mf, c,
+                                    nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
+                                    pgrid, bsize);
+  });
 }
 
 template<typename MPI_t>
 void dump_vxc(MPI_t &mpi, mf::MF &mf, std::string coqui_output) {
   long np = mpi.comm.size();
-  long np_s = (np % mf.nspin()== 0)? mf.nspin() : 1;
-  long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf.nkpts_ibz(), 1.0);
-  long np_i = np / (np_s*np_k);
-  std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, (mf.nbnd())/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 2048};
+  auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
+      np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
+  std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+                                     2048l};
   app_log(2, "Evaluate the matrix elements of the exchange-correlation potential: ");
   app_log(2, "  - mean-field backend = {}", mf::mf_source_enum_to_string(mf.mf_type()));
-  app_log(4, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(4, "  - bsize = ({}, {}, {}, {})", 1, 1, blk_i, 2048);
+  app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
+  app_log(4, "  - bsize = ({}, {}, {}, {})", bsize[0], bsize[1], bsize[2], bsize[3]);
   app_log(2, "");
-  auto dVxc = hamilt::Vxc<HOST_MEMORY>(mf, mpi.comm,
-                                       nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                       pgrid, bsize);
-  mpi.comm.barrier();
 
   std::string filename = coqui_output + ".mbpt.h5";
   app_log(2, "Dump the matrix elements of the exchange-correlation potential: ");
   app_log(2, "  - h5 file: {}", filename);
   app_log(2, "  - h5 dataset = system/Vxc_skij\n");
 
-  h5::group sys_grp;
-  if (mpi.comm.root()) {
-    h5::file file;
-    try {
-      file = h5::file(filename, 'a');
-    } catch(...) {
-      APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
-    }
-    h5::group grp(file);
+  // Build + write on the active sub-communicator; surplus ranks stay idle when
+  // the grid cannot tile all ranks (see utils::find_proc_grid_capped). Rank 0 is always
+  // active, so it owns the h5 file handle.
+  int color = (long(mpi.comm.rank()) < n_active) ? 0 : 1;
+  auto active = mpi.comm.split(color, mpi.comm.rank());
+  if (color == 0) {
+    auto dVxc = hamilt::Vxc<HOST_MEMORY>(mf, active,
+                                         nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
+                                         pgrid, bsize);
+    h5::group sys_grp;
+    if (active.root()) {
+      h5::file file;
+      try {
+        file = h5::file(filename, 'a');
+      } catch(...) {
+        APP_ABORT("Failed to open h5 file: {}, mode:a",filename);
+      }
+      h5::group grp(file);
 
-    if (grp.has_subgroup("system")) {
-      sys_grp = grp.open_group("system");
-      long ns, nkpts, nkpts_ibz, npol, nbnd;
-      h5::h5_read(sys_grp, "number_of_spins", ns);
-      h5::h5_read(sys_grp, "number_of_kpoints", nkpts);
-      h5::h5_read(sys_grp, "number_of_kpoints_ibz", nkpts_ibz);
-      h5::h5_read(sys_grp, "number_of_orbitals", nbnd);
-      h5::h5_read(sys_grp, "number_of_polarizations", npol);
-      utils::check(ns == mf.nspin(), "dump_vxc: inconsistent \"nspin\" in coqui mean-field and {}", filename);
-      utils::check(nkpts == mf.nkpts(), "dump_vxc: inconsistent \"nkpts\" in coqui mean-field and {}", filename);
-      utils::check(nkpts_ibz == mf.nkpts_ibz(), "dump_vxc: inconsistent \"nkpts_ibz\" in coqui mean-field and {}",
-                   filename);
-      utils::check(nbnd == mf.nbnd(), "dump_vxc: inconsistent \"nbnd\" in coqui mean-field and {}", filename);
-      utils::check(npol == mf.npol(), "dump_vxc: inconsistent \"npol\" in coqui mean-field and {}", filename);
+      if (grp.has_subgroup("system")) {
+        sys_grp = grp.open_group("system");
+        long ns, nkpts, nkpts_ibz, npol, nbnd;
+        h5::h5_read(sys_grp, "number_of_spins", ns);
+        h5::h5_read(sys_grp, "number_of_kpoints", nkpts);
+        h5::h5_read(sys_grp, "number_of_kpoints_ibz", nkpts_ibz);
+        h5::h5_read(sys_grp, "number_of_orbitals", nbnd);
+        h5::h5_read(sys_grp, "number_of_polarizations", npol);
+        utils::check(ns == mf.nspin(), "dump_vxc: inconsistent \"nspin\" in coqui mean-field and {}", filename);
+        utils::check(nkpts == mf.nkpts(), "dump_vxc: inconsistent \"nkpts\" in coqui mean-field and {}", filename);
+        utils::check(nkpts_ibz == mf.nkpts_ibz(), "dump_vxc: inconsistent \"nkpts_ibz\" in coqui mean-field and {}",
+                     filename);
+        utils::check(nbnd == mf.nbnd(), "dump_vxc: inconsistent \"nbnd\" in coqui mean-field and {}", filename);
+        utils::check(npol == mf.npol(), "dump_vxc: inconsistent \"npol\" in coqui mean-field and {}", filename);
+      } else {
+        sys_grp = grp.create_group("system");
+      }
+
+      math::nda::h5_write(sys_grp, "Vxc_skij", dVxc);
     } else {
-      sys_grp = grp.create_group("system");
+      math::nda::h5_write(sys_grp, "Vxc_skij", dVxc);
     }
-
-    math::nda::h5_write(sys_grp, "Vxc_skij", dVxc);
-  } else {
-    math::nda::h5_write(sys_grp, "Vxc_skij", dVxc);
   }
+  mpi.comm.barrier();
 }
 
 }
