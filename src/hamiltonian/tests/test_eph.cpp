@@ -154,4 +154,91 @@ TEST_CASE("eph_bare_vertex", "[eph]")
   }
 }
 
+/**
+ * Regression test for the bare second-order electron-phonon vertex g2_bare
+ * (q=0), the C++ side of coqui.compute_bare_eph_vertex_d2. There is no external
+ * QE reference for g2, so this compares against a committed gold reference
+ * (g2_bare_ref.h5) frozen from a validated run: it guards against regressions in
+ * the compact atom-diagonal assembly and the k-distributed gather.
+ *
+ * The vertex is assembled exactly as Mf::compute_bare_eph_vertex_d2:
+ *     g2  = pseudopot::eph_vertex_nonlocal_d2(mf)   // (nspin,nat,3,3,nk,nb,nb)
+ *     d2v = pseudopot::build_d2vloc_ion(mf)         // (6*nat, nnr) local d2V at q=0
+ *     gp  = orbitals::eph_vertex_local(mf, d2v, 0)  // local part
+ *     g2(s,ka,i,j) += gp(s,6*ka+p)  (+ transpose for i!=j)   // scatter on root
+ * All three are root-only (full on rank 0, empty elsewhere), so the assembly and
+ * comparison happen on rank 0. If the gold reference is missing it is generated
+ * with nda::h5_write and the test WARNs (rerun to validate) — the same
+ * skip-cleanly convention as the g_bare test above.
+ */
+TEST_CASE("eph_bare_vertex_d2", "[eph]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+
+  std::string source_path = PROJECT_SOURCE_DIR;
+  std::string dir    = source_path + "/tests/unit_test_files/qe/si_eph/";
+  std::string prefix = "Si";
+
+  std::string mf_h5 = dir + prefix + ".coqui.h5";
+  if(not std::filesystem::exists(mf_h5)) {
+    WARN("eph fixture not found (" << mf_h5 << "); skipping eph g2 vertex test.");
+    return;
+  }
+
+  auto mf = mf::make_MF(mpi, mf::qe_source, dir, prefix, mf::h5_input_type);
+  hamilt::pseudopot pp(mf);
+
+  // Assemble g2 = nonlocal + local d2 part, exactly as compute_bare_eph_vertex_d2.
+  auto g2  = pp.eph_vertex_nonlocal_d2(mf);      // (nspin,nat,3,3,nk,nb,nb) root only
+  auto d2v = pp.build_d2vloc_ion(mf);            // (6*nat, nnr) Ha
+  nda::array<double,1> q0(3); q0() = 0.0;
+  auto gp  = orbitals::eph_vertex_local<HOST_MEMORY>(mf, d2v(), q0());
+  static constexpr int pi[6] = {0, 1, 2, 0, 0, 1};
+  static constexpr int pj[6] = {0, 1, 2, 1, 2, 2};
+  if(g2.size() > 0) {   // root only; non-root arrays are empty
+    long nspin = g2.shape(0), nat = g2.shape(1), nk = g2.shape(4), nb = g2.shape(5);
+    for(long s=0; s<nspin; ++s)
+      for(long ka=0; ka<nat; ++ka)
+        for(int p=0; p<6; ++p) {
+          int i = pi[p], j = pj[p];
+          for(long k=0; k<nk; ++k)
+            for(long m=0; m<nb; ++m)
+              for(long n=0; n<nb; ++n) {
+                ComplexType v = gp(s, 6*ka+p, k, m, n);
+                g2(s, ka, i, j, k, m, n) += v;
+                if(i != j) g2(s, ka, j, i, k, m, n) += v;
+              }
+        }
+  }
+
+  if(not mpi->comm.root()) return;
+
+  const double tol = 1e-8;
+  std::string ref = dir + "g2_bare_ref.h5";
+  if(not std::filesystem::exists(ref)) {
+    h5::file fout(ref, 'w');
+    h5::group gout(fout);
+    nda::h5_write(gout, "g2_bare", g2);
+    WARN("generated g2 gold reference " << ref << "; rerun to validate.");
+    return;
+  }
+
+  nda::array<ComplexType,7> g2ref;
+  {
+    h5::file fin(ref, 'r');
+    h5::group gin(fin);
+    nda::h5_read(gin, "g2_bare", g2ref);
+  }
+  REQUIRE(g2.shape() == g2ref.shape());
+
+  double num2 = 0.0, den2 = 0.0;
+  for(long i=0; i<g2.size(); ++i) {
+    num2 += std::norm(g2.data()[i] - g2ref.data()[i]);
+    den2 += std::norm(g2ref.data()[i]);
+  }
+  double rel = (den2 > 0.0) ? std::sqrt(num2 / den2) : std::sqrt(num2);
+  app_log(2, "  eph g2_bare (q=0)  rel err vs gold = {:.3e}", rel);
+  CHECK(rel < tol);
+}
+
 } // namespace bdft_tests

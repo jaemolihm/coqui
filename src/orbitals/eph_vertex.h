@@ -41,10 +41,14 @@ namespace orbitals
  * index = (ix*NY+iy)*NZ+iz). Works for any MF; the augmented orbitals are
  * treated as ordinary bands.
  *
+ * The k-loop is split across ranks and the blocks are gathered to the root, so
+ * g_loc is returned full on the MPI root and empty on every other rank (only the
+ * root consumes it downstream).
+ *
  * @param mf      mean field providing the orbitals
  * @param dV      (nmodes, nnr) cell-periodic perturbation on the FFT grid
  * @param q_cryst (3) phonon wavevector in crystal (fractional) coordinates
- * @return g_loc  (nspin, nmodes, nkpts, nbnd, nbnd)
+ * @return g_loc  (nspin, nmodes, nkpts, nbnd, nbnd) on root; empty elsewhere
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto eph_vertex_local(mf::MF& mf,

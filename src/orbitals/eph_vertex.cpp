@@ -63,17 +63,25 @@ auto eph_vertex_local(mf::MF& mf,
   nda::array<int,1> kpq_map(nk);
   utils::calculate_kpq_map(kpts_crys, q_cryst, kpq_map);
 
-  auto g = nda::array<ComplexType,5>::zeros(
-      std::array<long,5>{nspin, nmodes, nk, nbnd, nbnd});
+  // Memory: the full vertex (nspin,nmodes,nk,nbnd,nbnd) is large. Rather than
+  // building it on every rank (all_reduce) — which replicates it np times and
+  // OOMs at high ranks-per-node — each rank computes only its contiguous k-block
+  // into a small local buffer, then blocks are gathered to the root. The result
+  // is returned full on the root and empty on every other rank (only the root
+  // consumes it downstream).
+  int rank = comm.rank(), np = comm.size();
+  auto [k0, k1] = itertools::chunk_range(0, nk, np, rank);
+  int nk_loc = k1 - k0;
+
+  auto gloc = nda::array<ComplexType,5>::zeros(
+      std::array<long,5>{nspin, nmodes, nk_loc, nbnd, nbnd});
 
   nda::array<ComplexType,2> psik(nbnd,nnr), psikq(nbnd,nnr), psikq_conj(nbnd,nnr), B(nbnd,nnr);
   nda::array<ComplexType,1> phase(nnr);
 
-  int rank = comm.rank(), np = comm.size();
-  long cnt = 0;
   for(int is=0; is<nspin; ++is) {
-    for(int ik=0; ik<nk; ++ik, ++cnt) {
-      if(cnt%np != rank) continue;
+    for(int ik=k0; ik<k1; ++ik) {
+      int ikl = ik - k0;
       int ikpq = kpq_map(ik);
       // umklapp reciprocal-lattice vector: k+q = kpq + G0 (integer crystal coords)
       int G0[3];
@@ -98,11 +106,29 @@ auto eph_vertex_local(mf::MF& mf,
         }
         // g(is,mode,ik,m,n) = (1/nnr) Σ_r conj(u_{m,kpq}(r)) e^{iG0r} dV(r) u_{n,k}(r)
         nda::blas::gemm(ComplexType(1.0/double(nnr)), psikq_conj, nda::transpose(B),
-                        ComplexType(0.0), g(is,mode,ik,all,all));
+                        ComplexType(0.0), gloc(is,mode,ikl,all,all));
       }
     }
   }
-  comm.all_reduce_in_place_n(g.data(), g.size(), std::plus<>{});
+
+  // Gather the per-rank k-blocks onto the root. Returned full on root, empty
+  // elsewhere.
+  nda::array<ComplexType,5> g;
+  if(comm.root()) {
+    g = nda::array<ComplexType,5>::zeros(
+        std::array<long,5>{nspin, nmodes, nk, nbnd, nbnd});
+    if(nk_loc > 0) g(all,all,range(k0,k1),all,all) = gloc;
+    for(int p=1; p<np; ++p) {
+      auto [pk0, pk1] = itertools::chunk_range(0, nk, np, p);
+      int pnk = pk1 - pk0;
+      if(pnk == 0) continue;
+      nda::array<ComplexType,5> tmp(nspin, nmodes, pnk, nbnd, nbnd);
+      comm.receive_n(tmp.data(), tmp.size(), p, 0);
+      g(all,all,range(pk0,pk1),all,all) = tmp;
+    }
+  } else if(nk_loc > 0) {
+    comm.send_n(gloc.data(), gloc.size(), 0, 0);
+  }
   return g;
 }
 

@@ -19,7 +19,7 @@ limitations under the License.
 """
 
 from .mf import make_mf, augment_mf, augment_mf_dpsi
-from .eph import compute_bare_eph_vertex
+from .eph import compute_bare_eph_vertex, compute_bare_eph_vertex_d2
 
 # import PySCF converter module only if PySCF is available
 try:
@@ -29,4 +29,5 @@ except ImportError:
 else:
     from . import pyscf_interface
 
-__all__ = ["make_mf", "augment_mf", "augment_mf_dpsi", "compute_bare_eph_vertex"]
+__all__ = ["make_mf", "augment_mf", "augment_mf_dpsi", "compute_bare_eph_vertex",
+           "compute_bare_eph_vertex_d2"]

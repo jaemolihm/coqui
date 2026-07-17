@@ -187,7 +187,8 @@ namespace coqui_py {
 
     /// Bare nonlocal electron-phonon vertex g_nl(s,mode,k,m,n) =
     /// <phi_{m,k+q}| dV^nl_mode |phi_{n,k}>, factorized from the projector
-    /// overlaps and D-matrix (Hartree, replicated). npol=1, full-BZ k-grid.
+    /// overlaps and D-matrix (Hartree). Returned full on the MPI root and empty
+    /// on every other rank. npol=1, full-BZ k-grid.
     nda::array<ComplexType, 5> eph_vertex_nonlocal(
         nda::array_const_view<double, 1> q_cryst) const {
       hamilt::pseudopot pp(*_mf);
@@ -195,10 +196,11 @@ namespace coqui_py {
     }
 
     /// Full bare electron-phonon vertex g(s,mode,k,m,n) =
-    /// <phi_{m,k+q}| dV_mode |phi_{n,k}> in the band basis (Hartree, replicated):
-    /// local part (ionic dvloc rebuilt from the h5 radial vloc) + nonlocal part
-    /// (projector factorization). mode = 3*kappa + d, nmodes = 3*natom.
-    /// Requires npol=1 and a full-BZ k-grid (nkpts == nkpts_ibz).
+    /// <phi_{m,k+q}| dV_mode |phi_{n,k}> in the band basis (Hartree): local part
+    /// (ionic dvloc rebuilt from the h5 radial vloc) + nonlocal part (projector
+    /// factorization). mode = 3*kappa + d, nmodes = 3*natom. Returned full on the
+    /// MPI root and empty on every other rank (the vertex is large and only the
+    /// root consumes it downstream). Requires npol=1 and a full-BZ k-grid.
     nda::array<ComplexType, 5> compute_bare_eph_vertex(
         nda::array_const_view<double, 1> q_cryst) const {
       hamilt::pseudopot pp(*_mf);
@@ -206,6 +208,60 @@ namespace coqui_py {
       auto g  = orbitals::eph_vertex_local<HOST_MEMORY>(*_mf, dv(), q_cryst);
       g += pp.eph_vertex_nonlocal(*_mf, q_cryst);
       return g;
+    }
+
+    /// Bare nonlocal part of the q=0 second-order electron-phonon vertex, stored
+    /// compactly as (nspin, nat, 3, 3, nk, nb, nb), dims (atom, cart_i, cart_j):
+    ///   g2_nl(s,kappa,i,j,k,m,n) = <phi_{m,k}| d^2 V^nl/dtau_i dtau_j |phi_{n,k}>.
+    /// Factorized from the projector overlaps and D-matrix (Hartree); diagonal in
+    /// atom, so off-atom blocks are not stored. Returned full on the MPI root and
+    /// empty on every other rank. npol=1, full-BZ k-grid. Use together with a local
+    /// part (e.g. eph_vertex_local on a d^2V_loc field at q=0) to assemble g2.
+    nda::array<ComplexType, 7> eph_vertex_nonlocal_d2() const {
+      hamilt::pseudopot pp(*_mf);
+      return pp.eph_vertex_nonlocal_d2(*_mf);
+    }
+
+    /// Full bare second-order electron-phonon vertex at q=0 (Hartree), stored
+    /// compactly as (nspin, nat, 3, 3, nk, nb, nb) with dims (atom, cart_i,
+    /// cart_j):
+    ///   g2(s,kappa,i,j,k,m,n) = <phi_{m,k}| d^2 V_bare/dtau_i dtau_j |phi_{n,k}>,
+    /// i.e. mode1 = 3*kappa+i, mode2 = 3*kappa+j. d^2 V_bare is diagonal in the
+    /// atom index (each ionic term depends on a single atom), so the off-atom
+    /// mode1/mode2 blocks are exactly zero and are not stored. Local part: d^2V_loc
+    /// (build_d2vloc_ion) applied via eph_vertex_local at q=0; nonlocal part:
+    /// projector factorization (eph_vertex_nonlocal_d2). This is the
+    /// "g2_bare"/"d2H0_bare" quantity QE stores at q=Gamma. Returned full on the
+    /// MPI root and empty on every other rank. npol=1, full-BZ k-grid.
+    nda::array<ComplexType, 7> compute_bare_eph_vertex_d2() const {
+      hamilt::pseudopot pp(*_mf);
+      // nonlocal part, compact atom-diagonal (nspin,nat,3,3,nk,nb,nb); root only
+      auto g2 = pp.eph_vertex_nonlocal_d2(*_mf);
+      // local part: 6*nat symmetric-pair d2V fields, evaluated at q=0
+      auto d2v = pp.build_d2vloc_ion(*_mf);                          // (6*nat, nnr) Ha
+      nda::array<double,1> q0(3); q0() = 0.0;                        // q=0
+      auto gp  = orbitals::eph_vertex_local<HOST_MEMORY>(*_mf, d2v(), q0());
+      //                                     gp: (nspin, 6*nat, nk, nb, nb) at q=0
+      // pair p = 0..5 -> (i,j) = (x,x),(y,y),(z,z),(x,y),(x,z),(y,z)
+      static constexpr int pi[6] = {0, 1, 2, 0, 0, 1};
+      static constexpr int pj[6] = {0, 1, 2, 1, 2, 2};
+      if(g2.size() > 0) {   // root only; non-root g2/gp are empty
+        long nspin = g2.shape(0), nat = g2.shape(1), nk = g2.shape(4);
+        long nb = g2.shape(5);
+        for(long s=0; s<nspin; ++s)
+          for(long ka=0; ka<nat; ++ka)
+            for(int p=0; p<6; ++p) {
+              int i = pi[p], j = pj[p];
+              for(long k=0; k<nk; ++k)
+                for(long m=0; m<nb; ++m)
+                  for(long n=0; n<nb; ++n) {
+                    ComplexType v = gp(s, 6*ka+p, k, m, n);
+                    g2(s, ka, i, j, k, m, n) += v;
+                    if(i != j) g2(s, ka, j, i, k, m, n) += v;
+                  }
+            }
+      }
+      return g2;
     }
 
     /// Local (bare) electron-phonon vertex g_loc(s,mode,k,m,n) =

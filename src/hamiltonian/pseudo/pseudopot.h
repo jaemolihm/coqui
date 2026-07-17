@@ -171,9 +171,18 @@ class pseudopot
    * (k+G) is in Cartesian 1/bohr, so P(1..3) are the momentum-operator
    * projector overlaps ⟨β|p̂_d φ⟩. Together with Dion() and the projector→atom
    * maps they factorize the bare nonlocal e-ph vertex. Host only; h5 input for MF.
+   *
+   * When P2 != nullptr, the six independent second-derivative overlaps are also
+   * returned, needed for the nonlocal part of the q=0 second-order vertex:
+   *
+   *   P2(p,s,k,μ,a) = ⟨β_μ,k | (k+G)_i (k+G)_j φ_a,k⟩,
+   *
+   * with pair index p = 0..5 → (i,j) = (x,x),(y,y),(z,z),(x,y),(x,z),(y,z)
+   * (symmetric, Cartesian 1/bohr²).
    */
   template<typename MF_t>
-  void eph_projector_overlaps(MF_t& mf, nda::array<ComplexType,5>& P);
+  void eph_projector_overlaps(MF_t& mf, nda::array<ComplexType,5>& P,
+                              nda::array<ComplexType,5>* P2 = nullptr);
 
   /**
    * Bare nonlocal electron-phonon vertex in the mean-field band basis:
@@ -201,12 +210,35 @@ class pseudopot
    * antisymmetric (bra − ket) derivative combination above. (Momentum convention
    * alphap_QE = i·CoQuí; only diagonal Dion, e.g. ONCV, is supported.)
    *
-   * Spin-independent (replicated over spin). Requires npol=1 and a full-BZ
-   * k-grid (nkpts == nkpts_ibz).
+   * Spin-independent (replicated over spin). The k-loop is split across ranks
+   * and gathered to the root: returned full on the root and empty on every other
+   * rank. Requires npol=1 and a full-BZ k-grid (nkpts == nkpts_ibz).
    */
   template<typename MF_t>
   auto eph_vertex_nonlocal(MF_t& mf, nda::array_const_view<double,1> q_cryst)
     -> nda::array<ComplexType,5>;
+
+  /**
+   * Bare nonlocal part of the q=0 second-order electron-phonon vertex, stored
+   * compactly as (nspin, nat, 3, 3, nk, nb, nb) with dims (atom, cart_i, cart_j):
+   *
+   *   g2_nl(s, κ, α, β, k, m, n) = ⟨φ_{m,k}| ∂²V^nl/∂τ_{κα}∂τ_{κβ} |φ_{n,k}⟩,
+   *   i.e. mode1 = 3·κ+α, mode2 = 3·κ+β. Diagonal in the atom κ, so the off-atom
+   *   mode1/mode2 blocks are exactly zero and are not stored.
+   *
+   * Second derivative of the separable KB potential V^nl = Σ_μ |β_μ⟩ D_μ ⟨β_μ|
+   * w.r.t. two displacements of the same atom. With the projector→(atom,ih) maps
+   * and diagonal D_μ (Dion, ONCV) it factorizes (per projector μ of atom κ) as
+   *   Σ_μ D_μ [ −⟨P2_αβ|_m ⟨P0|_n − ⟨P0|_m ⟨P2_αβ|_n
+   *             + ⟨P1_α|_m ⟨P1_β|_n + ⟨P1_β|_m ⟨P1_α|_n ]
+   * where P0 = ⟨β|φ⟩, P1_d = ⟨β|(k+G)_d φ⟩, P2_ij = ⟨β|(k+G)_i(k+G)_j φ⟩ come from
+   * eph_projector_overlaps. Hartree, replicated over spin. The k-loop is split
+   * across ranks and gathered to the root: returned full on the root and empty on
+   * every other rank. npol=1, full-BZ k-grid.
+   */
+  template<typename MF_t>
+  auto eph_vertex_nonlocal_d2(MF_t& mf)
+    -> nda::array<ComplexType,7>;
 
   /**
    * Ionic local perturbation dV^loc_mode(r) on the dense FFT grid,
@@ -222,6 +254,22 @@ class pseudopot
    */
   template<typename MF_t>
   auto build_dvloc_ion(MF_t& mf, nda::array_const_view<double,1> q_cryst)
+    -> nda::array<ComplexType,2>;
+
+  /**
+   * Local part of the q=0 second-order ionic perturbation on the dense FFT grid,
+   * for the bare second-order electron-phonon vertex:
+   *
+   *   d²V(G) = −G_i · G_j · vloc_sp(|G|) · e^{−iG·τ_κ},
+   *
+   * one field per (atom κ, symmetric Cartesian pair p), packed as
+   * mode = 6·κ + p with p = 0..5 → (i,j) = (x,x),(y,y),(z,z),(x,y),(x,z),(y,z).
+   * Uses the same per-species radial local pseudopotential (h5 "vloc_radial")
+   * and radial FT (vloc_of_g) as build_dvloc_ion. Returns (6·nat, nnr) in
+   * Hartree, C order (ix*NY+iy)*NZ+iz — the layout eph_vertex_local expects.
+   */
+  template<typename MF_t>
+  auto build_d2vloc_ion(MF_t& mf)
     -> nda::array<ComplexType,2>;
 
   // --- accessors for assembling the nonlocal e-ph vertex ---

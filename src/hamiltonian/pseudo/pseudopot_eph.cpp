@@ -53,8 +53,16 @@
 namespace hamilt
 {
 
+// The six symmetric Cartesian pairs for the second-derivative overlaps P2,
+// packed as p = 0..5 -> (i,j) = (x,x),(y,y),(z,z),(x,y),(x,z),(y,z).
+namespace {
+  constexpr int d2_pair_i[6] = {0, 1, 2, 0, 0, 1};
+  constexpr int d2_pair_j[6] = {0, 1, 2, 1, 2, 2};
+}
+
 template<typename MF_t>
-void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P)
+void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P,
+                                       nda::array<ComplexType,5>* P2)
 {
   using nda::range;
   decltype(range::all) all;
@@ -74,6 +82,11 @@ void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P)
   // Output: P(d, s, k, mu*npol, a);  d=0 -> <beta|phi>, d=1..3 -> <beta|(k+G)_{x,y,z} phi>.
   P = nda::array<ComplexType,5>(4, nspin, nk, nkb*npol, nbnd);
   P() = ComplexType(0.0);
+  if( P2 ) {
+    // P2(p, s, k, mu*npol, a) -> <beta|(k+G)_i(k+G)_j phi>, p = 0..5 symmetric pair.
+    *P2 = nda::array<ComplexType,5>(6, nspin, nk, nkb*npol, nbnd);
+    (*P2)() = ComplexType(0.0);
+  }
   if( nkb == 0 ) return;
 
   // 'w' truncated grid + (k+G) factors (Cartesian, 1/bohr)
@@ -114,10 +127,13 @@ void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P)
   nda::array<ComplexType,1> vkb(ngm);
   // (k+G)_d weighted copies of the local orbitals, d = x,y,z
   nda::array<ComplexType,3> psi_w(3, nb_loc, npol*ngm);
+  // (k+G)_i(k+G)_j weighted copies (six symmetric pairs), only if P2 requested
+  nda::array<ComplexType,3> psi_w2;
+  if( P2 ) psi_w2 = nda::array<ComplexType,3>(6, nb_loc, npol*ngm);
 
   for( auto [is,s] : itertools::enumerate(dPsia.local_range(0)) ) {
     for( auto [ik,k] : itertools::enumerate(dPsia.local_range(1)) ) {
-      // build (k+G)_d * psi for this k
+      // build (k+G)_d * psi (and (k+G)_i(k+G)_j * psi if P2) for this k
       for( int ip=0; ip<npol; ++ip )
         for( long g=0; g<ngm; ++g ) {
           double kpg[3];
@@ -129,6 +145,9 @@ void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P)
           for( long ia=0; ia<nb_loc; ++ia ) {
             ComplexType v = psi(is,ik,ia,ip*ngm+g);
             for( int d=0; d<3; ++d ) psi_w(d,ia,ip*ngm+g) = kpg[d]*v;
+            if( P2 )
+              for( int p=0; p<6; ++p )
+                psi_w2(p,ia,ip*ngm+g) = kpg[d2_pair_i[p]]*kpg[d2_pair_j[p]]*v;
           }
         }
       for( int ib=0; ib<nkb; ++ib ) {
@@ -142,11 +161,16 @@ void pseudopot::eph_projector_overlaps(MF_t &mf, nda::array<ComplexType,5>& P)
           for( int d=0; d<3; ++d )
             nda::blas::gemv(ComplexType(1.0), psi_w(d,all,range(ip*ngm,(ip+1)*ngm)), vkb,
                             ComplexType(0.0), P(d+1,s,k,ib*npol+ip,bloc));
+          if( P2 )
+            for( int p=0; p<6; ++p )
+              nda::blas::gemv(ComplexType(1.0), psi_w2(p,all,range(ip*ngm,(ip+1)*ngm)), vkb,
+                              ComplexType(0.0), (*P2)(p,s,k,ib*npol+ip,bloc));
         }
       }
     }
   }
   mpi->comm.all_reduce_in_place_n(P.data(), P.size(), std::plus<>{});
+  if( P2 ) mpi->comm.all_reduce_in_place_n(P2->data(), P2->size(), std::plus<>{});
 }
 
 template<typename MF_t>
@@ -235,20 +259,174 @@ auto pseudopot::eph_vertex_nonlocal(MF_t &mf, nda::array_const_view<double,1> q_
   }
 
   // g(s,mode,k)[m,n] = sum_mu' conj(Bmat(kq,m,mu')) D_thc(mu',mode) Bmat(k,n,mu')
-  nda::array<ComplexType,5> g(nspin, nmodes, nk, nb, nb); g() = ComplexType(0.0);
+  // Memory: the full (nspin,nmodes,nk,nb,nb) vertex is large, so each rank builds
+  // only its contiguous k-block into a small local buffer; the blocks are then
+  // gathered to the root (Bmat, built from the replicated projector overlaps, is
+  // small and kept whole so kq outside the local block is still available).
+  // Returned full on the root and empty on every other rank.
+  int rank = mpi->comm.rank(), np = mpi->comm.size();
+  auto [k0, k1] = itertools::chunk_range(0L, nk, long(np), long(rank));
+  long nk_loc = k1 - k0;
+  nda::array<ComplexType,5> gloc(nspin, nmodes, nk_loc, nb, nb); gloc() = ComplexType(0.0);
   nda::array<ComplexType,2> W(nb, M);
-  for(long k=0; k<nk; ++k) {
+  for(long k=k0; k<k1; ++k) {
+    long kl = k - k0;
     long kq = kpq_map(k);
     for(long imode=0; imode<nmodes; ++imode) {
       for(long m=0; m<nb; ++m)
         for(long mu=0; mu<M; ++mu)
           W(m,mu) = std::conj(Bmat(kq,m,mu)) * Dthc(mu,imode);
       nda::blas::gemm(ComplexType(1.0), W, nda::transpose(Bmat(k,all,all)),
-                      ComplexType(0.0), g(0,imode,k,all,all));
+                      ComplexType(0.0), gloc(0,imode,kl,all,all));
     }
   }
-  for(int is=1; is<nspin; ++is) g(is,all,all,all,all) = g(0,all,all,all,all);
+  for(int is=1; is<nspin; ++is) gloc(is,all,all,all,all) = gloc(0,all,all,all,all);
+
+  nda::array<ComplexType,5> g;
+  if(mpi->comm.root()) {
+    g = nda::array<ComplexType,5>(nspin, nmodes, nk, nb, nb); g() = ComplexType(0.0);
+    if(nk_loc > 0) g(all,all,range(k0,k1),all,all) = gloc;
+    for(int p=1; p<np; ++p) {
+      auto [pk0, pk1] = itertools::chunk_range(0L, nk, long(np), long(p));
+      long pnk = pk1 - pk0;
+      if(pnk == 0) continue;
+      nda::array<ComplexType,5> tmp(nspin, nmodes, pnk, nb, nb);
+      mpi->comm.receive_n(tmp.data(), tmp.size(), p, 0);
+      g(all,all,range(pk0,pk1),all,all) = tmp;
+    }
+  } else if(nk_loc > 0) {
+    mpi->comm.send_n(gloc.data(), gloc.size(), 0, 0);
+  }
   return g;
+}
+
+template<typename MF_t>
+auto pseudopot::eph_vertex_nonlocal_d2(MF_t &mf)
+  -> nda::array<ComplexType,7>
+{
+  using nda::range;
+  decltype(range::all) all;
+
+  utils::check(npol == 1, "pseudopot::eph_vertex_nonlocal_d2: only npol=1 supported.");
+  utils::check(nspin == 1, "pseudopot::eph_vertex_nonlocal_d2: only nspin=1 supported.");
+  utils::check(mf.nkpts() == nkpts_ibz,
+               "eph_vertex_nonlocal_d2: requires a full-BZ k-grid (nkpts == nkpts_ibz).");
+
+  long nk     = nkpts_ibz;
+  long nb     = mf.nbnd();
+  long nproj  = n_proj();
+  long nat    = ityp.size();
+  long nmodes = 3*nat;
+
+  // projector overlaps at q=0: P(0)=<beta|phi>, P(1..3)=<beta|(k+G)_d phi>,
+  // P2(p)=<beta|(k+G)_i(k+G)_j phi> for the 6 symmetric Cartesian pairs.
+  nda::array<ComplexType,5> P, P2;
+  eph_projector_overlaps(mf, P, &P2);
+
+  // per-projector atom index and diagonal KB strength D_mu (Hartree, ONCV)
+  auto D = Dion();   // (nsp, nhm, nhm)
+  {
+    long nsp = D.shape(0), nhm = D.shape(1);
+    double maxdiag = 0.0, maxoff = 0.0;
+    for(long it=0; it<nsp; ++it)
+      for(long i=0; i<nhm; ++i)
+        for(long j=0; j<nhm; ++j) {
+          double a = std::abs(D(it,i,j));
+          if(i==j) maxdiag = std::max(maxdiag, a);
+          else     maxoff  = std::max(maxoff, a);
+        }
+    utils::check(maxoff <= 1e-6*(maxdiag+1e-30),
+                 "pseudopot::eph_vertex_nonlocal_d2: dion has significant off-diagonal "
+                 "terms (max_offdiag={:.3e}, max_diag={:.3e}); only diagonal D "
+                 "(e.g. ONCV) is supported.", maxoff, maxdiag);
+  }
+
+  // maps 3x3 direction pair (i,j) -> symmetric pair index p (inverse of d2_pair_*)
+  auto pair_of = [](int i, int j) {
+    for(int p=0; p<6; ++p)
+      if((d2_pair_i[p]==i && d2_pair_j[p]==j) || (d2_pair_i[p]==j && d2_pair_j[p]==i))
+        return p;
+    return 0;  // unreachable
+  };
+
+  // d^2 V_bare / dtau_kappa dtau_kappa' vanishes for kappa != kappa' (each ionic
+  // term depends on a single atom), so g2 is block-diagonal in the atom index.
+  // Store it compactly as (nspin, nat, 3, 3, nk, nb, nb) — dims (atom, cart_i,
+  // cart_j) — with mode1 = 3*ka+i, mode2 = 3*ka+j, instead of the dense
+  // (nspin, nmodes, nmodes, ...) which is nat times larger and mostly zero.
+  // Memory: each rank builds only its contiguous k-block, gathered to the root;
+  // returned full on the root and empty on every other rank.
+  int rank = mpi->comm.rank(), np = mpi->comm.size();
+  auto [k0, k1] = itertools::chunk_range(0L, nk, long(np), long(rank));
+  long nk_loc = k1 - k0;
+  nda::array<ComplexType,7> g2loc(nspin, nat, 3, 3, nk_loc, nb, nb);
+  g2loc() = ComplexType(0.0);
+
+  // D-scaled ket copies for atom kappa (rows mu in [ofs, ofs+nh)): D_mu * P
+  nda::array<ComplexType,2> DP0, DP1[3], DP2[6];
+  for(int d=0; d<3; ++d) DP1[d] = nda::array<ComplexType,2>();
+  for(int p=0; p<6; ++p) DP2[p] = nda::array<ComplexType,2>();
+
+  for(long k=k0; k<k1; ++k) {
+    long kl = k - k0;
+    for(long ka=0; ka<nat; ++ka) {
+      long off = ofs(ka), nmu = nh(ityp(ka));
+      if(nmu == 0) continue;
+      auto mu_rng = range(off, off+nmu);
+
+      // scale kets by D_mu (row-wise)
+      DP0 = nda::array<ComplexType,2>(nmu, nb);
+      for(int d=0; d<3; ++d) DP1[d] = nda::array<ComplexType,2>(nmu, nb);
+      for(int p=0; p<6; ++p) DP2[p] = nda::array<ComplexType,2>(nmu, nb);
+      for(long j=0; j<nmu; ++j) {
+        ComplexType Dj = D(ityp(ka), j, j);
+        for(long m=0; m<nb; ++m) {
+          DP0(j,m) = Dj * P(0,0,k,off+j,m);
+          for(int d=0; d<3; ++d) DP1[d](j,m) = Dj * P(d+1,0,k,off+j,m);
+          for(int p=0; p<6; ++p) DP2[p](j,m) = Dj * P2(p,0,k,off+j,m);
+        }
+      }
+
+      // bra blocks (unscaled), (nmu, nb) views
+      auto P0b = P(0,0,k,mu_rng,all);
+
+      for(int i=0; i<3; ++i) {
+        for(int j=0; j<3; ++j) {
+          int  pij   = pair_of(i,j);
+          auto gout  = g2loc(0,ka,i,j,kl,all,all);
+          auto P2b   = P2(pij,0,k,mu_rng,all);
+          auto P1i   = P(i+1,0,k,mu_rng,all);
+          auto P1j   = P(j+1,0,k,mu_rng,all);
+          // g2(m,n) = sum_mu D_mu [ -conj(P2_ij)_m P0_n - conj(P0)_m P2_ij_n
+          //                         + conj(P1_i)_m P1_j_n + conj(P1_j)_m P1_i_n ]
+          nda::blas::gemm(ComplexType(-1.0), nda::dagger(P2b), DP0,      ComplexType(0.0), gout);
+          nda::blas::gemm(ComplexType(-1.0), nda::dagger(P0b), DP2[pij], ComplexType(1.0), gout);
+          nda::blas::gemm(ComplexType( 1.0), nda::dagger(P1i), DP1[j],   ComplexType(1.0), gout);
+          nda::blas::gemm(ComplexType( 1.0), nda::dagger(P1j), DP1[i],   ComplexType(1.0), gout);
+        }
+      }
+    }
+  }
+  for(int is=1; is<nspin; ++is)
+    g2loc(is,all,all,all,all,all,all) = g2loc(0,all,all,all,all,all,all);
+
+  nda::array<ComplexType,7> g2;
+  if(mpi->comm.root()) {
+    g2 = nda::array<ComplexType,7>(nspin, nat, 3, 3, nk, nb, nb);
+    g2() = ComplexType(0.0);
+    if(nk_loc > 0) g2(all,all,all,all,range(k0,k1),all,all) = g2loc;
+    for(int p=1; p<np; ++p) {
+      auto [pk0, pk1] = itertools::chunk_range(0L, nk, long(np), long(p));
+      long pnk = pk1 - pk0;
+      if(pnk == 0) continue;
+      nda::array<ComplexType,7> tmp(nspin, nat, 3, 3, pnk, nb, nb);
+      mpi->comm.receive_n(tmp.data(), tmp.size(), p, 0);
+      g2(all,all,all,all,range(pk0,pk1),all,all) = tmp;
+    }
+  } else if(nk_loc > 0) {
+    mpi->comm.send_n(g2loc.data(), g2loc.size(), 0, 0);
+  }
+  return g2;
 }
 
 namespace {
@@ -290,6 +468,68 @@ namespace {
     s -= v.zp*std::exp(-G*G/4.0)/(G*G);
     return (4.0*M_PI/Omega)*s;
   }
+
+  // System geometry + per-species radial local pseudopotential read from the MF
+  // h5, shared by build_dvloc_ion (first derivative) and build_d2vloc_ion
+  // (second derivative) so the radial FT input is single-sourced.
+  struct vloc_geom_t {
+    nda::array<double,2> recvv, tau;  // rows b_i (1/bohr); (nat,3) cart (bohr)
+    nda::array<int,1>    aid;         // species per atom (0-based)
+    double Omega = 0.0;              // cell volume (bohr^3)
+    long   nat = 0, nsp = 0;
+    std::vector<vloc_radial_t> vsp;   // per-species radial FT integrand
+  };
+
+  vloc_geom_t load_vloc_geom(std::string const& input_file_name) {
+    vloc_geom_t G;
+    h5::file file(input_file_name, 'r');
+    h5::group grp0(file);
+    h5::group sys = grp0.open_group("System");
+    nda::array<double,2> latt;
+    nda::h5_read(sys, "lattice_vectors",    latt);   // rows a_i (bohr)
+    nda::h5_read(sys, "reciprocal_vectors", G.recvv);
+    nda::h5_read(sys, "atomic_positions",   G.tau);
+    nda::h5_read(sys, "atomic_id",          G.aid);
+    G.nat = G.tau.shape(0);
+
+    // normalize atomic_id to 0-based (mirror read_vnl_h5; robust to 1-based files)
+    int id_min = *std::min_element(G.aid.begin(), G.aid.end());
+    utils::check(id_min==0 or id_min==1,
+                 "load_vloc_geom: invalid atomic_id array (min id:{}).", id_min);
+    G.aid() -= id_min;
+
+    G.Omega = std::abs(
+        latt(0,0)*(latt(1,1)*latt(2,2)-latt(1,2)*latt(2,1))
+      - latt(0,1)*(latt(1,0)*latt(2,2)-latt(1,2)*latt(2,0))
+      + latt(0,2)*(latt(1,0)*latt(2,1)-latt(1,1)*latt(2,0)));
+
+    h5::group ham = grp0.open_group("Hamiltonian");
+    std::string type(""); h5::h5_read_attribute(ham, "pp_type", type);
+    h5::group ncpp = ham.open_group(type);
+    utils::check(ncpp.has_subgroup("vloc_radial") and ncpp.has_dataset("z_valence"),
+                 "load_vloc_geom: the mean-field h5 '{}' is missing the "
+                 "'vloc_radial' group / 'z_valence' dataset needed for the e-ph "
+                 "local vertex. Regenerate the mean field with the updated pw2coqui "
+                 "(which writes the per-species radial local pseudopotential).",
+                 input_file_name);
+    h5::group vrg = ncpp.open_group("vloc_radial");
+    nda::array<double,1> zval;
+    nda::h5_read(ncpp, "z_valence", zval);
+    for(long a=0;a<G.nat;++a) G.nsp = std::max(G.nsp, long(G.aid(a))+1);
+    G.vsp.resize(G.nsp);
+    for(long it=0; it<G.nsp; ++it) {
+      utils::check(vrg.has_subgroup("sp"+std::to_string(it)),
+                   "load_vloc_geom: missing vloc_radial/sp{} in {}.", it, input_file_name);
+      h5::group sp = vrg.open_group("sp"+std::to_string(it));
+      nda::array<double,1> r, rab, vloc;
+      nda::h5_read(sp, "r",    r);
+      nda::h5_read(sp, "rab",  rab);
+      nda::h5_read(sp, "vloc", vloc);
+      vloc *= 0.5;                                   // Ry -> Ha
+      G.vsp[it] = make_vloc_radial(r, rab, vloc, zval(it));
+    }
+    return G;
+  }
 } // anonymous namespace
 
 template<typename MF_t>
@@ -306,57 +546,15 @@ auto pseudopot::build_dvloc_ion(MF_t &mf, nda::array_const_view<double,1> q_crys
   long NX = mf.fft_grid_dim(0), NY = mf.fft_grid_dim(1), NZ = mf.fft_grid_dim(2);
   long nnr = NX*NY*NZ;
 
-  // System geometry + per-species radial vloc, read from the MF h5 (as numpy did)
-  h5::file file(input_file_name, 'r');
-  h5::group grp0(file);
-  h5::group sys = grp0.open_group("System");
-  nda::array<double,2> latt, recvv, tau;
-  nda::array<int,1> aid;
-  nda::h5_read(sys, "lattice_vectors",    latt);   // rows a_i (bohr)
-  nda::h5_read(sys, "reciprocal_vectors", recvv);  // rows b_i (1/bohr)
-  nda::h5_read(sys, "atomic_positions",   tau);    // (nat,3) cart (bohr)
-  nda::h5_read(sys, "atomic_id",          aid);    // species per atom
-  long nat = tau.shape(0);
+  // System geometry + per-species radial vloc, read from the MF h5
+  auto geom = load_vloc_geom(input_file_name);
+  auto const& recvv = geom.recvv;
+  auto const& tau   = geom.tau;
+  auto const& aid   = geom.aid;
+  auto const& vsp   = geom.vsp;
+  double Omega = geom.Omega;
+  long nat = geom.nat, nsp = geom.nsp;
   long nmodes = 3*nat;
-
-  // normalize atomic_id to 0-based (mirror read_vnl_h5; robust to 1-based files)
-  {
-    int id_min = *std::min_element(aid.begin(), aid.end());
-    utils::check(id_min==0 or id_min==1,
-                 "build_dvloc_ion: invalid atomic_id array (min id:{}).", id_min);
-    aid() -= id_min;
-  }
-
-  double Omega = std::abs(
-      latt(0,0)*(latt(1,1)*latt(2,2)-latt(1,2)*latt(2,1))
-    - latt(0,1)*(latt(1,0)*latt(2,2)-latt(1,2)*latt(2,0))
-    + latt(0,2)*(latt(1,0)*latt(2,1)-latt(1,1)*latt(2,0)));
-
-  h5::group ham = grp0.open_group("Hamiltonian");
-  std::string type(""); h5::h5_read_attribute(ham, "pp_type", type);
-  h5::group ncpp = ham.open_group(type);
-  utils::check(ncpp.has_subgroup("vloc_radial") and ncpp.has_dataset("z_valence"),
-               "build_dvloc_ion: the mean-field h5 '{}' is missing the "
-               "'vloc_radial' group / 'z_valence' dataset needed for the e-ph "
-               "local vertex. Regenerate the mean field with the updated pw2coqui "
-               "(which writes the per-species radial local pseudopotential).",
-               input_file_name);
-  h5::group vrg = ncpp.open_group("vloc_radial");
-  nda::array<double,1> zval;
-  nda::h5_read(ncpp, "z_valence", zval);           // Hamiltonian/{type}/z_valence
-  long nsp = 0; for(long a=0;a<nat;++a) nsp = std::max(nsp, long(aid(a))+1);
-  std::vector<vloc_radial_t> vsp(nsp);
-  for(long it=0; it<nsp; ++it) {
-    utils::check(vrg.has_subgroup("sp"+std::to_string(it)),
-                 "build_dvloc_ion: missing vloc_radial/sp{} in {}.", it, input_file_name);
-    h5::group sp = vrg.open_group("sp"+std::to_string(it));
-    nda::array<double,1> r, rab, vloc;
-    nda::h5_read(sp, "r",    r);
-    nda::h5_read(sp, "rab",  rab);
-    nda::h5_read(sp, "vloc", vloc);
-    vloc *= 0.5;                                   // Ry -> Ha
-    vsp[it] = make_vloc_radial(r, rab, vloc, zval(it));
-  }
 
   // q in Cartesian (1/bohr): q_cart = sum_i q_cryst(i) b_i
   double qc[3];
@@ -404,11 +602,75 @@ auto pseudopot::build_dvloc_ion(MF_t &mf, nda::array_const_view<double,1> q_crys
   return dv;
 }
 
+template<typename MF_t>
+auto pseudopot::build_d2vloc_ion(MF_t &mf)
+  -> nda::array<ComplexType,2>
+{
+  utils::check(ptype == pp_ncpp_t, "pseudopot::build_d2vloc_ion: only NCPP is supported.");
+
+  // dense FFT grid eph_vertex_local works on
+  long NX = mf.fft_grid_dim(0), NY = mf.fft_grid_dim(1), NZ = mf.fft_grid_dim(2);
+  long nnr = NX*NY*NZ;
+
+  // System geometry + per-species radial vloc, read from the MF h5
+  auto geom = load_vloc_geom(input_file_name);
+  auto const& recvv = geom.recvv;
+  auto const& tau   = geom.tau;
+  auto const& aid   = geom.aid;
+  auto const& vsp   = geom.vsp;
+  double Omega = geom.Omega;
+  long nat = geom.nat, nsp = geom.nsp;
+  long npair = 6*nat;   // 6 symmetric Cartesian pairs per atom
+
+  // d2V(G) = -G_i G_j vloc_sp(|G|) e^{-iG.tau_ka}  on the dense grid (q=0).
+  // Create the FFT plan BEFORE filling d2vG (cf. build_dvloc_ion).
+  nda::array<ComplexType,4> d2vG(npair, NX, NY, NZ);
+  math::nda::fft<true> F(d2vG);
+  d2vG() = ComplexType(0.0);
+  std::vector<double> vGsp(nsp);
+  for(long ix=0; ix<NX; ++ix) {
+    long m0 = (ix < (NX+1)/2) ? ix : ix-NX;
+    for(long iy=0; iy<NY; ++iy) {
+      long m1 = (iy < (NY+1)/2) ? iy : iy-NY;
+      for(long iz=0; iz<NZ; ++iz) {
+        long m2 = (iz < (NZ+1)/2) ? iz : iz-NZ;
+        double Gc[3];
+        for(int d=0; d<3; ++d)
+          Gc[d] = double(m0)*recvv(0,d) + double(m1)*recvv(1,d) + double(m2)*recvv(2,d);
+        double Gm = std::sqrt(Gc[0]*Gc[0]+Gc[1]*Gc[1]+Gc[2]*Gc[2]);
+        for(long it=0; it<nsp; ++it) vGsp[it] = vloc_of_g(vsp[it], Gm, Omega);
+        for(long ka=0; ka<nat; ++ka) {
+          double ph = -(Gc[0]*tau(ka,0)+Gc[1]*tau(ka,1)+Gc[2]*tau(ka,2));
+          ComplexType sf(std::cos(ph), std::sin(ph));
+          ComplexType vsf = vGsp[aid(ka)] * sf;
+          for(int p=0; p<6; ++p)
+            d2vG(6*ka+p, ix, iy, iz) = -Gc[d2_pair_i[p]]*Gc[d2_pair_j[p]]*vsf;
+        }
+      }
+    }
+  }
+
+  // G -> r (unnormalized inverse FFT == numpy ifftn * nnr), batched over fields
+  F.backward(d2vG);
+
+  // flatten to (6*nat, nnr)
+  nda::array<ComplexType,2> d2v(npair, nnr);
+  auto d2vG2 = nda::reshape(d2vG, std::array<long,2>{npair, nnr});
+  for(long m=0;m<npair;++m)
+    for(long r=0;r<nnr;++r) d2v(m,r) = d2vG2(m,r);
+  return d2v;
+}
+
 // explicit template instantiations
-template void pseudopot::eph_projector_overlaps(mf::MF &, nda::array<ComplexType,5>&);
+template void pseudopot::eph_projector_overlaps(mf::MF &, nda::array<ComplexType,5>&,
+                                                nda::array<ComplexType,5>*);
 template auto pseudopot::eph_vertex_nonlocal(mf::MF &, nda::array_const_view<double,1>)
     -> nda::array<ComplexType,5>;
+template auto pseudopot::eph_vertex_nonlocal_d2(mf::MF &)
+    -> nda::array<ComplexType,7>;
 template auto pseudopot::build_dvloc_ion(mf::MF &, nda::array_const_view<double,1>)
+    -> nda::array<ComplexType,2>;
+template auto pseudopot::build_d2vloc_ion(mf::MF &)
     -> nda::array<ComplexType,2>;
 
 } // namespace hamilt
