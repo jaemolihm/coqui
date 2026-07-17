@@ -126,6 +126,18 @@ namespace methods {
   */
   void make_isdf(std::shared_ptr<mf::MF> mf, ptree const& pt);
 
+ /**
+  * Compute only the ISDF interpolating (pivot) points and save them to an h5
+  * file that can be passed as "pivot_file" to a subsequent THC build. The
+  * interpolating vectors and the Coulomb matrix are NOT computed.
+  * Options in ptree:
+  *  - nIpts / thresh: stopping criteria of the pivoted Cholesky (as in thc).
+  *  - save: "thc_pivots.h5", output h5 file (Np, interpolating_points, ecut, fft_grid).
+  *  - X_orbital_range / Y_orbital_range: orbital ranges of the pair densities.
+  *  - ecut, chol_block_size, matrix_block_size, ...: as in thc.
+  */
+  void make_thc_pivots(std::shared_ptr<mf::MF> mf, ptree const& pt);
+
 
   // useful routine for unit_tests, etc
   inline ptree make_thc_ptree(double ecut = 0.0,

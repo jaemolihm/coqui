@@ -180,7 +180,125 @@ auto thc::load_basis_subset_fft_grid(nda::MemoryArrayOfRank<1> auto const& IPts,
     }
   }
 
-  return std::make_tuple(std::move(Psia),std::move(Psib)); 
+  return std::make_tuple(std::move(Psia),std::move(Psib));
+}
+
+/*
+ * Collocation matrices on externally provided interpolating points, in the same
+ * format/distribution as those returned by interpolating_points(). This mirrors
+ * the "Store" stage of chol_metric_impl, skipping the pivoted-Cholesky search.
+ */
+template<MEMORY_SPACE MEM>
+auto thc::interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq,
+                              nda::range a_range, nda::range b_range)
+     -> std::tuple<_darray_t_<MEM,4>, std::optional<_darray_t_<MEM,4>>>
+{
+  decltype(nda::range::all) all;
+  Timer.start("TOTAL");
+  app_log(2,"*******************************");
+  app_log(2," ERI::thc::interpolating_basis ");
+  app_log(2,"*******************************");
+  app_log(2,"  -memory space: {}",memory_space_to_string(MEM));
+  utils::memory_report(2, "thc::interpolating_basis");
+  set_range(a_range);
+  set_range(b_range);
+
+  long nspins = mf->nspin_in_basis();
+  long npol = mf->npol_in_basis();
+  long nkpts = mf->nkpts();
+  long Np = IPts.size();
+  auto Q = mf->Qpts()(iq,all);
+  bool gamma = (Q(0)*Q(0)+Q(1)*Q(1)+Q(2)*Q(2) < 1e-8);
+  utils::check(gamma, "thc::interpolating_basis: only q = Gamma is implemented.");
+  utils::check(npol == 1, "thc::interpolating_basis: npol>1 not yet implemented.");
+  utils::check(Np > 0, "thc::interpolating_basis: empty IPts.");
+  bool single_psi = (a_range == b_range);
+
+  // same processor grid and local subranges as chol_metric_impl
+  long nkpool = utils::find_proc_grid_max_npools(mpi->comm.size(),nkpts,distr_tol);
+  long nproc_per_pool = mpi->comm.size() / nkpool;
+  utils::check(nkpool*nproc_per_pool == mpi->comm.size(),
+               "Error in interpolating_basis: Problems with processor partitioning ");
+  utils::check(nproc_per_pool <= a_range.size(),
+               "Error in interpolating_basis: Too many processors. Decrease # of processors or increase distr_tol. ");
+  if(not single_psi)
+    utils::check(nproc_per_pool <= b_range.size(),
+                 "Error in interpolating_basis: Too many processors. Decrease # of processors or increase distr_tol. ");
+
+  nda::range k_subrange(1), a_subrange(1), b_subrange(1);
+  long arng_bsize = std::min( default_block_size, a_range.size()/nproc_per_pool);
+  long brng_bsize = std::min( default_block_size, b_range.size()/nproc_per_pool);
+  {
+    auto [a,b] = itertools::chunk_range(0,a_range.size()/arng_bsize,
+                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
+    a *= arng_bsize;
+    if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
+      b = a_range.size();
+    else
+      b *= arng_bsize;
+    a_subrange = nda::range(a,b);
+    std::tie(a,b) = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
+    k_subrange = nda::range(a,b);
+    if(not single_psi)
+    {
+      std::tie(a,b) = itertools::chunk_range(0,b_range.size()/brng_bsize,
+                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
+      a *= brng_bsize;
+      if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
+        b = b_range.size();
+      else
+        b *= brng_bsize;
+      b_subrange = nda::range(a,b);
+    }
+  }
+
+  // orbitals on the interpolating points for the local (k,a)/(k,b) blocks,
+  // in absolute band indices
+  nda::range a_load(a_range.first()+a_subrange.first(), a_range.first()+a_subrange.last());
+  nda::range b_load = single_psi ? a_load :
+      nda::range(b_range.first()+b_subrange.first(), b_range.first()+b_subrange.last());
+  auto [Pa,Pb] = (mf->orb_on_fft_grid()) ?
+      load_basis_subset_fft_grid<MEM>(IPts,iq,k_subrange,a_load,b_load) :
+      load_basis_subset_nonuniform_rgrid<MEM>(IPts,iq,k_subrange,a_load,b_load);
+
+  auto Xskau = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
+       {nspins*npol,nkpts,a_range.size(),Np},
+       {nspins*npol,k_subrange.size(),a_subrange.size(),Np},
+       {0,k_subrange.first(),a_subrange.first(),0},{1,1,arng_bsize,Np});
+  Xskau.local() = Pa;
+
+  // redistribute into more slate friendly layout (as in chol_metric_impl)
+  if(nproc_per_pool > 1) {
+    long nx = std::max(1l, std::min( nproc_per_pool,
+           a_range.size() / default_block_size) );
+    while( nproc_per_pool%nx != 0 ) --nx;
+    long ny = nproc_per_pool/nx;
+    long bu = std::min( Np/std::max(nx,ny), default_block_size );
+    math::nda::redistribute_in_place(Xskau,{1,nkpool,nx,ny},
+                                     {1,1,default_block_size,bu});
+  }
+
+  std::optional<_darray_t_<MEM,4>> Xskbu;
+  if(not single_psi)
+  {
+    Xskbu = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
+       {nspins*npol,nkpts,b_range.size(),Np},
+       {nspins*npol,k_subrange.size(),b_subrange.size(),Np},
+       {0,k_subrange.first(),b_subrange.first(),0},{1,1,brng_bsize,Np});
+    Xskbu->local() = Pb;
+    if(nproc_per_pool > 1) {
+      long nx = std::max(1l, std::min( nproc_per_pool,
+             b_range.size() / default_block_size) );
+      while( nproc_per_pool%nx != 0 ) --nx;
+      long ny = nproc_per_pool/nx;
+      long bu = std::min( Np/std::max(nx,ny), default_block_size );
+      math::nda::redistribute_in_place(*Xskbu,{1,nkpool,nx,ny},
+                                       {1,1,default_block_size,bu});
+    }
+  }
+  mpi->comm.barrier();
+  Timer.stop("TOTAL");
+  return std::make_tuple(std::move(Xskau), std::move(Xskbu));
 }
 
 template<MEMORY_SPACE MEM>

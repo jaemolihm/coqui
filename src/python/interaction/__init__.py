@@ -18,7 +18,7 @@ limitations under the License.
 ==========================================================================
 """
 
-from .thc import make_thc_coulomb, run_isdf
+from .thc import make_thc_coulomb, make_thc_pivots, run_isdf
 from .cholesky import make_chol_coulomb
 
 # import PySCF converter module only if PySCF is available
@@ -78,4 +78,4 @@ def compute_delta_X_adj(mf, Deltapsi_adj_prefix, r_P, delta_r_P, q_vec_cryst, ff
     return arr if arr.size else None
 
 
-__all__ = ["make_thc_coulomb", "make_chol_coulomb", "run_isdf", "compute_delta_X", "compute_delta_X_adj"]
+__all__ = ["make_thc_coulomb", "make_thc_pivots", "make_chol_coulomb", "run_isdf", "compute_delta_X", "compute_delta_X_adj"]

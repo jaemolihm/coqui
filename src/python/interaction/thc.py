@@ -22,6 +22,7 @@ import json
 
 from coqui._lib.eri_module import ThcCoulomb
 from coqui._lib.eri_module import run_isdf as isdf_cxx
+from coqui._lib.eri_module import make_thc_pivots as make_thc_pivots_cxx
 
 
 def make_thc_coulomb(mf, params):
@@ -63,6 +64,14 @@ def make_thc_coulomb(mf, params):
         - ``cd_dir`` *(str, optional, default ``""``)* — directory containing
           pre-computed Cholesky-decomposed Coulomb integrals. When provided, a
           least-squares THC fit is performed instead of ISDF.
+        - ``pivot_file`` *(str, optional, default ``""``)* — HDF5 file holding
+          precomputed interpolating points (``interpolating_points`` dataset,
+          e.g. the ``save`` file of a previous THC run). When provided, the
+          ISDF pivot search is skipped and those pivot points are reused; only
+          the interpolating vectors and the Coulomb matrix are recomputed for
+          the current mean field. The pivot indices refer to the FFT grid, so
+          both calculations must use the same ``ecut`` (checked against the
+          file's ``fft_grid``). ``nIpts`` is ignored when set.
         - ``chol_block_size`` *(int, optional, default ``8``)* — block size for
           the internal Cholesky step.
         - ``band_weights`` *(bool, optional, default ``True``)* — for an
@@ -90,6 +99,50 @@ def make_thc_coulomb(mf, params):
         thc = make_thc_coulomb(mf, {"save": "svo_isdf.h5", "storage": "incore"})
     """
     return ThcCoulomb(mf, json.dumps(params))
+
+
+def make_thc_pivots(mf, params):
+    """
+    Compute only the ISDF interpolating (pivot) points and save them to an
+    HDF5 file, without evaluating the interpolating vectors or the Coulomb
+    matrix. The resulting file can be passed as ``pivot_file`` to
+    ``make_thc_coulomb`` to build THC integrals on those fixed pivot points
+    (possibly for a different mean field on the same FFT grid, e.g. a
+    basis-augmented one).
+
+    Parameters
+    ----------
+    mf : Mf
+        Mean-field object for the target system, obtained from ``make_mf``.
+    params : dict
+        Pivot computation options. Supported keys:
+
+        - ``thresh`` *(float)* / ``nIpts`` *(int)* — stopping criteria of the
+          pivoted Cholesky selection, as in ``make_thc_coulomb``. At least one
+          must be set.
+        - ``ecut`` *(float, optional, default ``1.4 * mf.ecutwfc()``)* —
+          plane-wave cutoff defining the FFT grid the pivot indices refer to.
+          Use the same value in the subsequent ``make_thc_coulomb`` call.
+        - ``save`` *(str, optional, default ``"thc_pivots.h5"``)* — output HDF5
+          file (``Np``, ``interpolating_points``, ``ecut``, ``fft_grid``).
+        - ``X_orbital_range`` / ``Y_orbital_range`` *(optional)* — orbital
+          ranges of the pair densities used in the pivot search.
+        - ``band_weights`` *(bool, optional, default ``True``)* — as in
+          ``make_thc_coulomb``: weight the pivot search by the augmentation
+          singular values of an augmented mean field.
+        - ``chol_block_size``, ``matrix_block_size``, ... — as in
+          ``make_thc_coulomb``.
+
+    Examples
+    --------
+    ::
+
+        from coqui.interaction import make_thc_pivots, make_thc_coulomb
+
+        make_thc_pivots(mf_orig, {"thresh": 1e-4, "save": "pivots.h5"})
+        thc = make_thc_coulomb(mf_aug, {"thresh": 1e-4, "pivot_file": "pivots.h5"})
+    """
+    make_thc_pivots_cxx(mf, json.dumps(params))
 
 
 def run_isdf(mf, params):

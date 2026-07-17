@@ -224,8 +224,15 @@ static auto const fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "Deltapsi_adj_prefix", "r_P", "delta_r_P", "q_vec_cryst",
     "fft_grid")};
 
-// run_isdf
+// make_thc_pivots
 static auto const fun_17 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const std::string &thc_params) {
+      return coqui_py::make_thc_pivots(mf, thc_params);
+    },
+    "mf", "thc_params")};
+
+// run_isdf
+static auto const fun_18 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf, const std::string &thc_params) {
       return coqui_py::run_isdf(mf, thc_params);
     },
@@ -234,6 +241,7 @@ static auto const fun_17 = c2py::dispatcher_f_kw_t{c2py::cfun(
 static const auto doc_d_15 = fun_15.doc(R"DOC()DOC");
 static const auto doc_d_16 = fun_16.doc(R"DOC()DOC");
 static const auto doc_d_17 = fun_17.doc(R"DOC()DOC");
+static const auto doc_d_18 = fun_18.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -241,8 +249,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_15.c_str()},
     {"compute_delta_X_adj", (PyCFunction)c2py::pyfkw<fun_16>,
      METH_VARARGS | METH_KEYWORDS, doc_d_16.c_str()},
-    {"run_isdf", (PyCFunction)c2py::pyfkw<fun_17>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_17.c_str()},
+    {"make_thc_pivots", (PyCFunction)c2py::pyfkw<fun_17>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_17.c_str()},
+    {"run_isdf", (PyCFunction)c2py::pyfkw<fun_18>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_18.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

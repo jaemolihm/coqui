@@ -99,20 +99,26 @@ class thc
   auto const& get_rho_g() const { return rho_g; }
   auto const& get_vG()   const { return vG; }
 
+  /**
+   * Compute collocation matrices on a given set of interpolating (pivot) points:
+   *     Xa(s,k,a,u) = phi^{k}_a(r_u) * exp(i k.r_u),        a in a_range
+   *     Xb(s,k,b,u) = phi^{k-q}_b(r_u) * exp(i (k-q).r_u),  b in b_range
+   * The returned arrays have the same content, format and distribution as the
+   * collocation matrices returned by interpolating_points(), so they can be
+   * passed directly to evaluate(). Xb is std::nullopt when a_range == b_range
+   * at q = Gamma (same convention as interpolating_points).
+   * Only q = Gamma (iq with |Q|=0) is currently supported.
+   *
+   * @param IPts     - [INPUT] pivot point indices on the rho_g FFT grid, (Np)
+   * @param iq       - [INPUT] index of the q-point (must be at Gamma)
+   * @param a_range  - [INPUT] orbital range for phi^{k}_a
+   * @param b_range  - [INPUT] orbital range for phi^{k-q}_b
+   */
   template<MEMORY_SPACE MEM = HOST_MEMORY>
   auto interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq=0,
-              nda::range k_range = nda::range(-1,-1), 
               nda::range a_range = nda::range(-1,-1),
               nda::range b_range = nda::range(-1,-1))
-       -> std::tuple<memory::darray_t<memory::array<MEM,ComplexType,2>,mpi3::communicator>,
-          	     memory::darray_t<memory::array<MEM,ComplexType,2>,mpi3::communicator>>;
-
-  template<MEMORY_SPACE MEM = HOST_MEMORY>
-  auto interpolating_basis(bool left, memory::array<MEM,long,1> const& IPts, int iq=0,
-              nda::range k_range = nda::range(-1,-1), 
-              nda::range a_range = nda::range(-1,-1),
-              nda::range b_range = nda::range(-1,-1))
-       -> memory::darray_t<memory::array<MEM,ComplexType,2>,mpi3::communicator>;
+       -> std::tuple<_darray_t_<MEM,4>, std::optional<_darray_t_<MEM,4>>>;
 
   /**
    * Compute interpolating points for phi^{k,*}_a(r)phi^{k-q}_b(r) at a given q-point.
@@ -351,16 +357,6 @@ class thc
 
   //fft plans
   int howmany_fft = -1;
-
-  template<MEMORY_SPACE MEM = HOST_MEMORY>
-  auto interpolating_basis_fft_grid(bool left, memory::array<MEM,long,1> const& IPts, int iq,
-              nda::range k_range, nda::range a_range)
-    -> memory::darray_t<memory::array<MEM,ComplexType,2>,mpi3::communicator>;
-
-  template<MEMORY_SPACE MEM = HOST_MEMORY>
-  auto interpolating_basis_nonuniform_rgrid(bool left, memory::array<MEM,long,1> const& IPts, int iq,
-              nda::range k_range, nda::range a_range)
-    -> memory::darray_t<memory::array<MEM,ComplexType,2>,mpi3::communicator>;
 
   /**
    * Solves normal equation given a set of interpolating points and three-index tensor B

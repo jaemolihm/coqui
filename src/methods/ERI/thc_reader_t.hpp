@@ -79,7 +79,8 @@ namespace methods {
       _storage(string_to_eri_storage_enum(io::tolower_copy(io::get_value_with_default<std::string>(pt,"storage","incore")))), 
       _eri_file( io::get_value_with_default<std::string>(pt,"save","") ), 
       _format( io::get_value_with_default<std::string>(pt,"format","bdft") ),
-      _cd_dir( io::get_value_with_default<std::string>(pt,"cd_dir","") ), 
+      _cd_dir( io::get_value_with_default<std::string>(pt,"cd_dir","") ),
+      _pivot_file( io::get_value_with_default<std::string>(pt,"pivot_file","") ),
       _X_type("q_indep"),
       _thc_builder_opt(thc(_MF.get(), *_mpi, pt, false)),
       _Np( int(io::get_value_with_default<int>(pt,"nIpts",0)) ), 
@@ -106,7 +107,11 @@ namespace methods {
         thresh = (_Np > 0) ? 1e-13 : 1e-5;
       }
       utils::check( _Np>0 or thresh>0.0, "Error in thc_reader_t: Must set nIpts and/or thresh");
-      if(_storage == eri_storage_e::outcore and _eri_file == "") 
+      utils::check( _pivot_file == "" or _cd_dir == "",
+                    "thc_reader_t: pivot_file is not supported together with cd_dir (LS-THC).");
+      utils::check( _pivot_file == "" or not isdf_only,
+                    "thc_reader_t: pivot_file is not supported with isdf_only.");
+      if(_storage == eri_storage_e::outcore and _eri_file == "")
         _eri_file = "./thc.eri.h5";
 
       if (intialize) {
@@ -196,6 +201,8 @@ namespace methods {
                  "║  ║ ║║═╬╗║ ║║   ║ ├─┤│  ║  │ ││ ││  │ ││││├┴┐\n"
                  "╚═╝╚═╝╚═╝╚╚═╝╩   ╩ ┴ ┴└─┘╚═╝└─┘└─┘┴─┘└─┘┴ ┴└─┘\n");
       app_log(1, "  Algorithm                       = {}", (_cd_dir=="")? "ISDF" : "LS-THC");
+      if (_pivot_file != "")
+        app_log(1, "  Interpolating points            = read from {}", _pivot_file);
       app_log(1, "  THC integrals access            = {}", eriform_enum_to_string(_storage));
       app_log(1, "  Found precomputed THC integrals = {}", !build_eri);
       if (build_eri) {
@@ -216,13 +223,60 @@ namespace methods {
       app_log(1, "  Y orbital index range          = [{},{})\n", y_range.first(),y_range.last());
     }
 
+    // Read precomputed interpolating points from _pivot_file and evaluate the
+    // collocation matrices on them, returning the same tuple as
+    // thc::interpolating_points(). The pivot indices refer to the rho_g FFT
+    // grid, so the file's fft_grid must match the current THC grid.
+    template<MEMORY_SPACE MEM>
+    std::tuple<memory::array<MEM,long,1>, dArray_t<MEM,4>, std::optional<dArray_t<MEM,4>>>
+    collocation_from_pivot_file() {
+      nda::array<long,1> rp_h;
+      {
+        h5::file file(_pivot_file, 'r');
+        h5::group grp(file);
+        nda::h5_read(grp, "interpolating_points", rp_h);
+        auto mesh = _thc_builder_opt.value().get_fft_mesh();
+        if (grp.has_dataset("fft_grid")) {
+          nda::array<long,1> fft_grid;
+          nda::h5_read(grp, "fft_grid", fft_grid);
+          utils::check(fft_grid.size() == 3 and fft_grid(0) == mesh(0) and
+                       fft_grid(1) == mesh(1) and fft_grid(2) == mesh(2),
+                       "thc_reader_t: FFT mesh mismatch between pivot_file ({},{},{}) and "
+                       "the current THC grid ({},{},{}). Use the same ecut in both calculations.",
+                       fft_grid(0), fft_grid(1), fft_grid(2), mesh(0), mesh(1), mesh(2));
+        } else {
+          app_log(1, "[WARNING] thc_reader_t: pivot_file lacks the 'fft_grid' dataset; "
+                     "skipping the grid-consistency check.");
+        }
+        long nnr = mesh(0)*mesh(1)*mesh(2);
+        for (auto r : rp_h)
+          utils::check(r >= 0 and r < nnr,
+                       "thc_reader_t: pivot index {} out of range [0,{}) in pivot_file: {}",
+                       r, nnr, _pivot_file);
+      }
+      app_log(1, "  THC: reusing {} interpolating points from pivot_file: {}",
+              rp_h.size(), _pivot_file);
+      if (_Np > 0 and _Np != rp_h.size())
+        app_log(1, "  [WARNING] thc_reader_t: nIpts = {} is ignored in favor of the {} points "
+                   "from pivot_file.", _Np, rp_h.size());
+      memory::array<MEM,long,1> ri(rp_h.size());
+      ri = rp_h;
+      auto [dXa,dXb] = _thc_builder_opt.value().interpolating_basis<MEM>(ri, 0, x_range, y_range);
+      return {std::move(ri), std::move(dXa), std::move(dXb)};
+    }
+
     void build() {
       _Timer.start("BUILD_TOTAL");
 
       _Timer.start("BUILD_THC");
       {
-        auto eval = [&]<MEMORY_SPACE MEM>() { 
-          auto [ri,dXa,dXb] = _thc_builder_opt.value().interpolating_points<MEM>(0, _Np, x_range, y_range);
+        auto eval = [&]<MEMORY_SPACE MEM>() {
+          // Time the raw orbital IO across the two THC phases (interpolating
+          // points + interpolating vectors); reported right after phase 2 below.
+          _MF->reset_orbital_io_timer();
+          auto [ri,dXa,dXb] = (_pivot_file != "") ?
+              collocation_from_pivot_file<MEM>() :
+              _thc_builder_opt.value().interpolating_points<MEM>(0, _Np, x_range, y_range);
           _rp = std::move(ri);
           _Np = _rp.size();
           _Timer.stop("BUILD_THC");
@@ -234,6 +288,8 @@ namespace methods {
           _Timer.start("BUILD_THC");
           auto [_dZ_d, _Chi_head_d, _Chi_bar_head_d, _dSinv_Ivec_d] = _thc_builder_opt.value().evaluate<MEM>(_rp,dXa,dXb,_get_Sinv_Ivec,x_range,y_range);
           utils::check( _get_Sinv_Ivec == _dSinv_Ivec_d.has_value(), "Error: Inconsistent optional return value.");
+          // both orbital-read phases are done; report the accumulated /evc IO.
+          _MF->report_orbital_io();
           _Timer.stop("BUILD_THC");
 
           // copy to host memory if needed, otherwise just move
@@ -1005,6 +1061,9 @@ namespace methods {
     // eri format to store
     std::string _format;
     std::string _cd_dir;     // directory for CD eris;
+    // Optional h5 file holding precomputed interpolating (pivot) points; when set,
+    // build() reuses those pivots instead of running the pivoted-Cholesky search.
+    std::string _pivot_file;
     std::string _X_type;
 
     std::optional<thc> _thc_builder_opt;

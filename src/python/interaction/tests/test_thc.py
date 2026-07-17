@@ -67,6 +67,96 @@ def test_thc_restart(mpi):
     mpi.barrier()
 
 
+def test_thc_given_pivots(mpi):
+    import numpy as np
+    import h5py
+
+    mf = construct_qe_mf(mpi, "qe_lih222_sym")
+    ref_file = "thc_pivot_ref.eri.h5"
+    new_file = "thc_pivot_given.eri.h5"
+    eri_params = {
+        "storage": "incore",
+        "nIpts": mf.nbnd() * 10,
+        "thresh": 1e-10,
+        "ecut": mf.ecutrho(),
+        "chol_block_size": 1,
+        "init": True
+    }
+    if mpi.root():
+        for f in (ref_file, new_file):
+            if os.path.exists(f):
+                os.remove(f)
+    mpi.barrier()
+
+    eri_ref = coqui.make_thc_coulomb(mf, {**eri_params, "save": ref_file})
+    # rebuild reusing the pivots of the reference: same collocation matrices
+    # and Coulomb matrix must come out
+    eri_given = coqui.make_thc_coulomb(
+        mf, {**eri_params, "save": new_file, "pivot_file": ref_file})
+    assert eri_given.Np() == eri_ref.Np()
+    mpi.barrier()
+
+    if mpi.root():
+        with h5py.File(ref_file, "r") as fr, h5py.File(new_file, "r") as fn:
+            rp_ref = fr["interpolating_points"][()]
+            rp_new = fn["interpolating_points"][()]
+            X_ref = fr["collocation_matrix"][()]
+            X_new = fn["collocation_matrix"][()]
+            V_ref = fr["coulomb_matrix"][()]
+            V_new = fn["coulomb_matrix"][()]
+        assert np.array_equal(rp_ref, rp_new)
+        assert np.linalg.norm(X_new - X_ref) / np.linalg.norm(X_ref) < 1e-10
+        assert np.linalg.norm(V_new - V_ref) / np.linalg.norm(V_ref) < 1e-8
+        os.remove(ref_file)
+        os.remove(new_file)
+    mpi.barrier()
+
+
+def test_thc_pivots_only(mpi):
+    import numpy as np
+    import h5py
+
+    mf = construct_qe_mf(mpi, "qe_lih222_sym")
+    pivot_file = "thc_pivots_only.h5"
+    thc_file = "thc_from_pivots_only.eri.h5"
+    if mpi.root():
+        for f in (pivot_file, thc_file):
+            if os.path.exists(f):
+                os.remove(f)
+    mpi.barrier()
+
+    # pivot search only (no interpolating vectors / Coulomb matrix)
+    coqui.make_thc_pivots(mf, {
+        "nIpts": mf.nbnd() * 10,
+        "thresh": 1e-10,
+        "ecut": mf.ecutrho(),
+        "chol_block_size": 1,
+        "save": pivot_file,
+    })
+    # full THC build on those pivots
+    eri = coqui.make_thc_coulomb(mf, {
+        "storage": "incore",
+        "thresh": 1e-10,
+        "ecut": mf.ecutrho(),
+        "chol_block_size": 1,
+        "init": True,
+        "save": thc_file,
+        "pivot_file": pivot_file,
+    })
+    mpi.barrier()
+
+    if mpi.root():
+        with h5py.File(pivot_file, "r") as fp, h5py.File(thc_file, "r") as ft:
+            rp_only = fp["interpolating_points"][()]
+            rp_thc = ft["interpolating_points"][()]
+            assert fp["Np"][()] == rp_only.size
+        assert eri.Np() == rp_only.size
+        assert np.array_equal(rp_only, rp_thc)
+        os.remove(pivot_file)
+        os.remove(thc_file)
+    mpi.barrier()
+
+
 def test_ls_thc_eri(mpi):
     mf = construct_qe_mf(mpi, "qe_lih222")
     chol_params = {

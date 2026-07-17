@@ -617,6 +617,12 @@ template std::tuple<array<M,long,1>,  \
 thc::interpolating_points<M>(array_view<M,ComplexType,4,nda::C_layout> const&,int,int);
 
 
+// interpolating_basis
+#define __ibasis__(M) \
+template std::tuple<darray_t<array<M,ComplexType,4>,communicator>,  \
+    std::optional<darray_t<array<M,ComplexType,4>,communicator>>>  \
+thc::interpolating_basis<M>(array<M,long,1> const&,int,range,range);
+
 // evaluate
 #define __eval_ls__(M)  \
 template darray_t<array<M,ComplexType,2>,communicator> \
@@ -677,6 +683,7 @@ thc::evaluate<M>(h5::group&,std::string,array<M,long,1> const&,  \
     darray_t<array<M,ComplexType,4>,communicator> const&,std::array<long, 3>);  \
 
 __ipts__(HOST_MEMORY)
+__ibasis__(HOST_MEMORY)
 __eval_ls__(HOST_MEMORY)
 __eval__(HOST_MEMORY)
 
@@ -698,6 +705,9 @@ template void thc::save<HOST_MEMORY>(h5::group&,std::string,memory::host_array<l
 
 __ipts__(DEVICE_MEMORY)
 __ipts__(UNIFIED_MEMORY)
+
+__ibasis__(DEVICE_MEMORY)
+__ibasis__(UNIFIED_MEMORY)
 
 __eval__(DEVICE_MEMORY)
 __eval__(UNIFIED_MEMORY)

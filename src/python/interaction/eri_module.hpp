@@ -39,6 +39,13 @@ namespace coqui_py {
     methods::make_isdf(mf.get_mf(), parser.get_root());
   }
 
+  // Compute only the ISDF interpolating (pivot) points and save them to an h5
+  // file usable as "pivot_file" in a subsequent THC build.
+  void make_thc_pivots(const Mf &mf, const std::string &thc_params) {
+    auto parser = InputParser(thc_params);
+    methods::make_thc_pivots(mf.get_mf(), parser.get_root());
+  }
+
   C2PY_IGNORE
   inline decltype(auto) make_thc(const Mf &mf, const std::string &thc_params) {
     auto parser = InputParser(thc_params);

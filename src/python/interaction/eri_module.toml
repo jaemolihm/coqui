@@ -17,7 +17,7 @@ namespaces = ""
 #    if reject_names and reject_names matches Qname : skip X
 #    else keep X.
 #
-match_names = "coqui_py::(ThcCoulomb|CholCoulomb|run_isdf|compute_delta_X|compute_delta_X_adj)"
+match_names = "coqui_py::(ThcCoulomb|CholCoulomb|run_isdf|make_thc_pivots|compute_delta_X|compute_delta_X_adj)"
 reject_names = ""
 
 # If true, transform methods with no arguments into a read only property

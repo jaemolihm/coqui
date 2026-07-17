@@ -63,6 +63,42 @@ void make_isdf(std::shared_ptr<mf::MF> mf, ptree const& pt) {
   thc_reader_t isdf(std::move(mf), pt, false, isdf_only);
 };
 
+void make_thc_pivots(std::shared_ptr<mf::MF> mf, ptree const& pt) {
+  std::string err = "make_thc_pivots - missing required input: ";
+  auto nIpts = io::get_value_with_default<int>(pt,"nIpts",0);
+  auto thresh = io::get_value_with_default<double>(pt,"thresh",0.0);
+  utils::check( nIpts>0 or thresh>0.0, "{} Must set nIpts and/or thresh", err);
+  auto save = io::get_value_with_default<std::string>(pt,"save","thc_pivots.h5");
+  utils::check(mf->has_orbital_set(),
+               "Error in make_thc_pivots: MF types that have no orbital sets (e.g type=model) are not supported.");
+
+  long nbnd = mf->nbnd();
+  auto x_range = io::get_value_with_default<nda::range>(pt,"X_orbital_range",nda::range(nbnd));
+  auto y_range = io::get_value_with_default<nda::range>(pt,"Y_orbital_range",x_range);
+  utils::check(x_range.first() >= 0 and x_range.last() <= nbnd,
+               "make_thc_pivots: X orbitals out of range: ({},{}), nbnd:{}",
+               x_range.first(),x_range.last(),nbnd);
+  utils::check(y_range.first() >= 0 and y_range.last() <= nbnd,
+               "make_thc_pivots: Y orbitals out of range: ({},{}), nbnd:{}",
+               y_range.first(),y_range.last(),nbnd);
+
+  auto mpi = mf->mpi();
+  thc builder(mf.get(), *mpi, pt);
+  auto [ri, dXa, dXb] = builder.interpolating_points<HOST_MEMORY>(0, nIpts, x_range, y_range);
+
+  app_log(1, "make_thc_pivots: found {} interpolating points, saving to: {}", ri.size(), save);
+  if (mpi->comm.root()) {
+    h5::file file(save, 'w');
+    h5::group grp(file);
+    h5::h5_write(grp, "Np", (int)ri.size());
+    nda::h5_write(grp, "interpolating_points", ri, false);
+    h5::h5_write(grp, "ecut", builder.get_ecut());
+    nda::h5_write(grp, "fft_grid", builder.get_fft_mesh(), false);
+  }
+  mpi->comm.barrier();
+  builder.print_timers();
+};
+
 
 auto make_cholesky(std::shared_ptr<mf::MF> mf, ptree const& pt) -> chol_reader_t
 {
