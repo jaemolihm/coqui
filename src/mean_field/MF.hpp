@@ -374,6 +374,14 @@ class MF
     void get_orbital_set(char OT, int ispin, nda::range k_rng, nda::range b_rng, nda::range p_rng, A4D&& Orb, nda::range r = {-1,-1})
     { std::visit( [&](auto&& v) { v.get_orbital_set(OT,ispin,k_rng,b_rng,p_rng,std::forward<A4D>(Orb),r); }, var ); }
 
+    // Raw orbital-read IO diagnostic (only implemented by readers that support
+    // it, e.g. qe_readonly). No-op otherwise. Bracket a read phase with
+    // reset_orbital_io_timer() ... report_orbital_io() to log its /evc IO cost.
+    void reset_orbital_io_timer()
+    { std::visit( [&](auto&& v) { if constexpr (requires { v.reset_orbital_io_timer(); }) v.reset_orbital_io_timer(); }, var ); }
+    void report_orbital_io()
+    { std::visit( [&](auto&& v) { if constexpr (requires { v.report_orbital_io(); }) v.report_orbital_io(); }, var ); }
+
     /* accessor functions for pseudopot shared pointer */
     void set_pseudopot(std::shared_ptr<hamilt::pseudopot> const& psp) 
     { return std::visit( [&](auto&& v) { v.set_pseudopot(psp); }, var ); }

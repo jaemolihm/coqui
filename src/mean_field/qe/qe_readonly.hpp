@@ -28,6 +28,7 @@
 #include <tuple>
 #include <optional>
 #include <algorithm>
+#include <chrono>  // for the raw /evc IO diagnostic timer
 #include "IO/AppAbort.hpp"
 #include "configuration.hpp"
 #include <nda/nda.hpp>
@@ -291,8 +292,23 @@ public:
     return std::make_tuple(sys.bz().kp_trev(k),  std::addressof(dmat.at(n)));
   }
 
-  void set_pseudopot(std::shared_ptr<hamilt::pseudopot> const& psp_) { psp = psp_; } 
-  std::shared_ptr<hamilt::pseudopot> get_pseudopot() { return psp; } 
+  void set_pseudopot(std::shared_ptr<hamilt::pseudopot> const& psp_) { psp = psp_; }
+  std::shared_ptr<hamilt::pseudopot> get_pseudopot() { return psp; }
+
+  // Diagnostic: accumulate the wall time spent reading raw /evc coefficients.
+  // reset_orbital_io_timer() zeroes the counters (call before a read phase);
+  // report_orbital_io() logs and zeroes them (call after). A memoization cache
+  // was tried here to skip the second THC read but proved inert at scale (the
+  // two THC phases use orthogonal orbital- vs g-distributions, so per-rank
+  // reads never overlap) while raw /evc IO is only ~1-2% of the orbital step;
+  // the timer is kept to document that IO is not the bottleneck.
+  void reset_orbital_io_timer() { evc_io_s = 0.0; evc_nread = 0; }
+  void report_orbital_io() {
+    if(evc_nread > 0)
+      app_log(2, "  [orbital IO] raw /evc reads: {:.3f} s over {} reads",
+              evc_io_s, evc_nread);
+    evc_io_s = 0.0; evc_nread = 0;
+  }
 
   void close()
   {
@@ -305,7 +321,7 @@ public:
     for(auto& f: wfc_k2g_list)
       if( f.has_value() )
         f = std::nullopt;
-  } 
+  }
 
 private:
 
@@ -323,8 +339,12 @@ private:
   std::vector<std::optional<nda::array<int,1>>> wfc_k2g_list;
 
   // shared ptr to pseudopot object. Not constructed here.
-  // can be set from the outside to avoid recomputing. 
+  // can be set from the outside to avoid recomputing.
   std::shared_ptr<hamilt::pseudopot> psp;
+
+  // raw /evc IO diagnostic (see reset_orbital_io_timer / report_orbital_io).
+  double evc_io_s = 0.0;
+  long evc_nread = 0;
 
   // plane wave cutoff for the FFT grid. 
   double ecut;
@@ -345,6 +365,18 @@ private:
     else 
       utils::check(ispin==0, "ispin!=0 without nspin=2");
     return sys.bz().kp_to_ibz(ik) + ispin*sys.bz().nkpts_ibz;
+  }
+
+  // Reads the raw /evc coefficients for (h5 index, b_rng) into Ok, of shape
+  // (nb, npol*npw), accumulating the read time into the /evc IO diagnostic.
+  void read_evc(int index, nda::range b_rng, int npw, nda::array<ComplexType,2>& Ok) {
+    using view = nda::array_view<RealType,2>;
+    int nb = b_rng.size();
+    view Ok_v{{nb,2*sys.npol*npw},reinterpret_cast<RealType*>(Ok.data())};
+    auto t0 = std::chrono::steady_clock::now();
+    h5_read(*(h5files[index]), "/evc", Ok_v, std::tuple{b_rng,nda::range::all});
+    evc_io_s += std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
+    ++evc_nread;
   }
 
   void open_if_needed(char OT, int index, int ispin, int ik) {
@@ -581,16 +613,15 @@ private:
     open_if_needed(OT,index,ispin,ik);
     Orb() = ComplexType(0.0);
     int npw = sys.npw[ik];
-    { 
+    {
 // use fallback allocator
       nda::array<ComplexType,2> Ok(nb,sys.npol*npw);
-      view Ok_v{{nb,2*sys.npol*npw},reinterpret_cast<RealType*>(Ok.data())}; 
-      h5_read(*(h5files[index]), "/evc", Ok_v,std::tuple{b_rng,all});
+      read_evc(index,b_rng,npw,Ok);
       // MAM: fractional translations!!!
       //if(ik >= sys.bz().nkpts_ibz and ft>0) Ok(all) *= Xft(all);
       if(OT=='w')
         utils::check(wfc_k2g_list[ik].has_value(), "Uninitialized state.");
-      else 
+      else
         utils::check(k2g_list[ik].has_value(), "Uninitialized state.");
       auto k2g = ( (OT=='w') ? *(wfc_k2g_list[ik]) :  *(k2g_list[ik]) );
       long n_ = ( (OT=='w') ? wfc_g.size() : nnr() );
@@ -637,17 +668,16 @@ private:
     open_if_needed(OT,index,ispin,ik);
     Orb() = ComplexType(0.0);
     int npw = sys.npw[ik];
-    { 
+    {
 // use fallback allocator
       // reading all polarizations for efficiency, at the expense of more memory
       nda::array<ComplexType,2> Ok(nb,sys.npol*npw);
-      view Ok_v{{nb,2*sys.npol*npw},reinterpret_cast<RealType*>(Ok.data())}; 
-      h5_read(*(h5files[index]), "/evc", Ok_v,std::tuple{b_rng,all});
+      read_evc(index,b_rng,npw,Ok);
       // MAM: fractional translations!!!
       //if(ik >= sys.bz().nkpts_ibz and ft>0) Ok(all) *= Xft(all);
       if(OT=='w')
         utils::check(wfc_k2g_list[ik].has_value(), "Uninitialized state.");
-      else 
+      else
         utils::check(k2g_list[ik].has_value(), "Uninitialized state.");
       auto k2g = ( (OT=='w') ? *(wfc_k2g_list[ik]) :  *(k2g_list[ik]) );
       long n_ = ( (OT=='w') ? wfc_g.size() : nnr() );
