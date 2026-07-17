@@ -123,7 +123,24 @@ public:
       const nda::array<ComplexType, 4>* Dm_ab = nullptr,
       bool div_corr = true,
       std::string div_treatment = "gygi",
-      const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr);
+      const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
+      sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
+
+  /**
+   * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
+   * per-node memory footprint of the large LR arrays: the node-replicated
+   * shared band-basis arrays (~ nk·nt·nb²) and the comm-distributed aux-basis
+   * arrays (~ nk·nt·NP²), plus the per-iteration transients. Called once at the
+   * top of run_lr so the layout can be inspected before the arrays allocate.
+   */
+  void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full);
+
+  /**
+   * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
+   * LR arrays uses, so the estimate above can be cross-checked against the
+   * actual layouts. Printed right after print_memory_estimate.
+   */
+  void print_distribution_summary(long NP, bool include_gw_sigma, bool gw_full);
 
   void print_setup_timers();
 

@@ -369,7 +369,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            include_gw_sigma=None,
            DeltaX_left=None, DeltaX_right=None,
            DeltaV_qPQ=None,
-           div_corr=True):
+           div_corr=True,
+           screened_interaction_file=None,
+           recompute_W=False,
+           unperturbed="checkpoint",
+           split_sigma_terms=False,
+           div_treatment=None):
     """
     Run unified linear response calculation.
 
@@ -433,6 +438,32 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Perturbation of THC auxiliary-basis Coulomb matrix δV^q, shape
         (nkpts, Np, Np), full-BZ q-grid. When provided, adds the δV
         correction terms to ΔJ (δV^{q=q_pert}·Dm) and ΔK (δV^R ⊙ Dm^R).
+    screened_interaction_file : str or None, optional
+        Explicit path to the screened-interaction HDF5 file (W_qtPQ). Used only
+        when gw_mode != "none" and recompute_W is False. If None (default), W is
+        read from thc_screened_interaction.h5 in the input checkpoint's
+        directory. Ignored when recompute_W is True.
+    recompute_W : bool, optional
+        If True, recompute W on the fly from the checkpoint Green's function
+        (RPA: Π = eval_Pi_qdep(G), W_c = dyson_W_from_Pi_tau(Π)) instead of
+        reading it from disk. Guarantees W is consistent with the currently-
+        loaded THC. Standard GW (RPA) only; requires the no-symmetry (full-q)
+        ground state. Default False.
+    unperturbed : str, optional
+        Unperturbed reference (default "checkpoint"):
+        - "checkpoint": interacting G rebuilt from the checkpoint F+Σ (scGW LR)
+        - "mf_dft": DFT/KS mean-field G0 built directly from the mean-field
+          eigenvalues/orbitals (one-shot G0W0@DFT). W0 is then the RPA screened
+          interaction from G0 (recompute_W is forced on) and the checkpoint is
+          used only for the IAFT grid + metadata.
+    split_sigma_terms : bool, optional
+        If True, store the two one-shot ΔΣ terms separately (default False):
+        DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
+        (G0·dW0). Requires gw_mode="full" and max_iter=1. See run_lr_g0w0.
+    div_treatment : str or None, optional
+        Divergence treatment for the ε⁻¹ head. For unperturbed="mf_dft" the
+        checkpoint holds none, so this selects it (default "gygi" in C++).
+        Ignored for unperturbed="checkpoint" (read from the checkpoint).
 
     Returns
     -------
@@ -468,6 +499,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if gw_mode not in ("none", "fixed_W", "full"):
         raise ValueError(f"Unknown gw_mode '{gw_mode}'. Must be 'none', 'fixed_W', or 'full'.")
 
+    if recompute_W and screened_interaction_file is not None:
+        raise ValueError(
+            "run_lr: screened_interaction_file and recompute_W are mutually "
+            "exclusive. Pass a W file path to read W from disk, or recompute_W=True "
+            "to recompute it from the checkpoint Green's function.")
+
     # Parse iter_alg dict with defaults
     if iter_alg is None:
         iter_alg = {}
@@ -492,12 +529,82 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     # Pass div_corr flag through params dict (read by C++ run_lr_calc)
     params_with_div = dict(params)
     params_with_div["div_corr"] = bool(div_corr)
+    # Optional explicit path to the screened-interaction (W) HDF5 file. When
+    # omitted, C++ auto-derives it from the input checkpoint's directory.
+    if screened_interaction_file is not None:
+        params_with_div["screened_interaction_file"] = str(screened_interaction_file)
+    # Recompute W from the checkpoint Green's function instead of reading it.
+    params_with_div["recompute_W"] = bool(recompute_W)
+    # Unperturbed reference and split-term output (one-shot G0W0@DFT).
+    params_with_div["unperturbed"] = str(unperturbed)
+    params_with_div["split_sigma_terms"] = bool(split_sigma_terms)
+    if div_treatment is not None:
+        params_with_div["div_treatment"] = str(div_treatment)
 
     return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
                       alg, mixing, max_subsp_size, diis_warmup,
                       dx_left, dx_right, dv_qPQ)
+
+def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment=None):
+    """
+    One-shot G0W0@DFT electron-phonon linear response.
+
+    Computes the one-shot response of the G0W0 self-energy to a perturbation,
+    on top of a DFT/KS mean-field reference:
+
+        G0  = DFT/KS Green's function (built from the mean-field eigenvalues/orbitals)
+        W0  = RPA screened interaction from G0
+        dG0 = G0 · ΔH0 · G0
+        dΣ  = dG0·W0 + G0·dW0,   dW0 = (Z+W_c0)·dΠ0·(Z+W_c0),  dΠ0 = -dG0·G0 - G0·dG0
+
+    This is a thin wrapper over run_lr that pins the one-shot G0W0 configuration:
+    unperturbed="mf_dft", gw_mode="full", max_iter=1, and split-term output. The
+    Hartree response is excluded (include_hartree=False) because the perturbation
+    ΔH0 is expected to be the DFT-screened potential ΔH_KS (= g_scr), which already
+    contains the DFT Hartree/xc screening; the exchange response is kept
+    (include_exchange=True) so that, together with ΔΣ term 1, it reconstitutes the
+    full-W term dG0·W0. The DFT exchange-correlation should be subtracted downstream.
+
+    Output in {output}.mbpt.h5 / "linear_response":
+        DeltaSigma_tskij     = total correlation ΔΣ = dG0·W_c0 + G0·dW0
+        DeltaSigma_GdW_tskij = the G0·dW0 piece, broken out separately
+        DeltaF_skij          = exchange ΔK (= -dG0·v, the v part of dG0·W0)
+    so dG0·W_c0 = DeltaSigma_tskij - DeltaSigma_GdW_tskij, and the full
+    dG0·W0 = DeltaF_skij + (DeltaSigma_tskij - DeltaSigma_GdW_tskij).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including prefix/output/input_type/input_iter (see run_lr).
+        The checkpoint is used only for the IAFT grid + metadata; G0 is rebuilt
+        from the mean field.
+    h_int : ThcCoulomb
+        THC ERI handler. Requires the no-symmetry (full-q) ground state.
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,).
+    DeltaH0_skij : np.ndarray or None
+        DFT-screened perturbation ΔH_KS (= g_scr), shape (ns, nk, nb, nb).
+        Required on the MPI global root; ignored on non-root ranks.
+    div_corr : bool, optional
+        Apply the Madelung/head divergence corrections to ΔΣ (default True).
+        Kept as an opt-out for experimentation; production G0W0 wants True.
+    div_treatment : str or None, optional
+        q→0 divergence scheme for the ε⁻¹ head (default "gygi" in C++). Selects
+        how W0's head is built (and, when div_corr, how the LR head correction
+        is applied); relevant even when div_corr=False.
+
+    Returns
+    -------
+    tuple[int, float]
+        (niter, Delta_mu). One-shot performs a single LR iteration.
+    """
+    return run_lr(params, h_int, q_vec, DeltaH0_skij,
+                  include_hartree=False, include_exchange=True,
+                  gw_mode="full", max_iter=1,
+                  unperturbed="mf_dft", split_sigma_terms=True,
+                  div_corr=div_corr, div_treatment=div_treatment)
 
 def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):
     """

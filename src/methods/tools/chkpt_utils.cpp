@@ -629,7 +629,8 @@ void dump_lr(communicator_t& comm,
              int niter,
              bool include_hartree,
              bool include_exchange,
-             bool include_gw_sigma) {
+             bool include_gw_sigma,
+             Sigma_t const* sDeltaSigma2_tskij) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -661,6 +662,17 @@ void dump_lr(communicator_t& comm,
       auto DeltaSigma_loc = sDeltaSigma_tskij->local();
       nda::h5_write(lr_grp, "DeltaSigma_tskij", DeltaSigma_loc, false);
     }
+    // Split-term one-shot G0W0 output (opt-in): DeltaSigma_tskij above holds the
+    // TOTAL correlation ΔΣ = dG0·W_c0 + G0·dW0 (same as the fused output); this
+    // breaks out the G0·dW0 piece. So dG0·W_c0 = DeltaSigma_tskij - DeltaSigma_GdW,
+    // and the full dG0·W0 = DeltaF (exchange) + (DeltaSigma_tskij - DeltaSigma_GdW).
+    // The flag + GdW dataset are written only in split mode, so the standard
+    // (fused) output format is unchanged.
+    if (sDeltaSigma2_tskij != nullptr) {
+      h5::h5_write(lr_grp, "split_sigma_terms", 1);
+      auto DeltaSigma_GdW_loc = sDeltaSigma2_tskij->local();
+      nda::h5_write(lr_grp, "DeltaSigma_GdW_tskij", DeltaSigma_GdW_loc, false);
+    }
 
     app_log(2, "LR results written to \"linear_response/\" in {}", filename);
     app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
@@ -682,7 +694,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_5D_t> const*,
-                      double, int, bool, bool, bool);
+                      double, int, bool, bool, bool,
+                      sArray_t<Array_view_5D_t> const*);
 
   } // chkpt
 } // methods

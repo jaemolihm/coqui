@@ -25,6 +25,7 @@
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/thc_solver_comm.hpp"
+#include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
 #include "utilities/lr_utils.hpp"
@@ -107,13 +108,17 @@ std::tuple<int, double> lr_driver::run_lr(
     const nda::array<ComplexType, 4>* Dm_ab,
     bool div_corr,
     std::string div_treatment,
-    const nda::array_view<ComplexType, 3>* DeltaV_qPQ) {
+    const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
+    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
   _Timer.start("LR_SCF");
 
   bool need_hf = include_hartree || include_exchange;
   bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
   bool gw_full = (gw_mode == lr_gw_update_mode::full);
+  // One-shot G0W0: store the two ΔΣ terms separately instead of fusing them.
+  // ΔΣ term1 (-ΔG⊙W_c) → sDeltaSigma_tskij, ΔΣ term2 (-G⊙ΔW) → sDeltaSigma_term2.
+  bool split_sigma_terms = (sDeltaSigma_term2_tskij != nullptr);
 
   utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS",
                "lr_driver::run_lr: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
@@ -123,6 +128,16 @@ std::tuple<int, double> lr_driver::run_lr(
                  "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
     utils::check(dW_qtPQ != nullptr && eps_inv_head != nullptr,
                  "lr_driver::run_lr: gw_mode != none but dW_qtPQ or eps_inv_head is null.");
+  }
+  if (split_sigma_terms) {
+    utils::check(gw_full,
+                 "lr_driver::run_lr: split ΔΣ terms require gw_mode='full'.");
+    utils::check(max_iter == 1,
+                 "lr_driver::run_lr: split ΔΣ terms are only meaningful for a "
+                 "one-shot solve (max_iter=1), got max_iter={}.", max_iter);
+    utils::check(sDeltaX_left == nullptr && sDeltaX_right == nullptr,
+                 "lr_driver::run_lr: split ΔΣ terms do not support the DeltaX IBC "
+                 "correction (term 2 has no IBC path).");
   }
 
   const char* gw_mode_str = "none";
@@ -149,6 +164,11 @@ std::tuple<int, double> lr_driver::run_lr(
     app_log(1, "  diis_warmup = {}", iter_params.diis_warmup);
   }
 
+  // Estimate the persistent large-array memory footprint for this path, then
+  // summarize the MPI distribution patterns the large arrays use.
+  print_memory_estimate(thc.Np(), include_gw_sigma, gw_full);
+  print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
+
   // Initialize lr_hf solver if needed
   if (need_hf && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
@@ -158,6 +178,13 @@ std::tuple<int, double> lr_driver::run_lr(
   std::unique_ptr<solvers::lr_gw> lr_gw_solver;
   if (include_gw_sigma) {
     lr_gw_solver = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), div_treatment);
+  }
+  // Split-term mode (one-shot G0W0) needs a second lr_gw for term 2: each solver
+  // caches a workspace keyed on its (term1,term2) usage. Built once here rather
+  // than in the (single-iteration) loop.
+  std::unique_ptr<solvers::lr_gw> lr_gw_solver2;
+  if (split_sigma_terms) {
+    lr_gw_solver2 = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), div_treatment);
   }
 
   // Create lr_rpa_pi and lr_scr_coulomb_t solvers for full mode
@@ -384,24 +411,56 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.barrier();
       _Timer.stop("LR_GW_W");
 
-      // Step 3e-3f: Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
+      // Step 3e-3f: ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW
       _Timer.start("LR_GW_SIGMA");
       _Timer.start("LR_GW_DW_TRANSPOSE");
       auto dDeltaW_qtPQ = utils::transpose_axes_01(dDeltaW_tqPQ, _mpi->comm);
       dDeltaW_tqPQ.reset();
       _Timer.stop("LR_GW_DW_TRANSPOSE");
-      lr_gw_solver->evaluate_sigma(
-          *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
-          sG_tskij.local(), dDeltaW_qtPQ, thc,
-          *opt_dG_tsRPQ, *opt_dG_mtau_tsRPQ, ibc_ptr);
-      // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
-      if (div_corr) {
-        lr_gw_solver->apply_div_correction_DeltaG(
-            *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
-        // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
-        if (is_q_gamma()) {
-          lr_gw_solver->apply_div_correction_G(
-              *sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+      if (split_sigma_terms) {
+        // One-shot G0W0: compute the two terms separately, then store
+        //   sDeltaSigma_tskij       = term1 + term2  (total ΔΣ, same as fused)
+        //   sDeltaSigma_term2_tskij = term2 (G0·dW0)  [written as DeltaSigma_GdW]
+        // term 1 (-ΔG⊙W_c + div) and term 2 (-G⊙ΔW + div) use separate solver
+        // instances (lr_gw_solver / lr_gw_solver2, built once above) — the
+        // workspace is cached per (term1,term2) combination.
+        lr_gw_solver->evaluate_sigma_DeltaG(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ, thc, ibc_ptr);
+        lr_gw_solver2->evaluate_sigma_DeltaW(
+            *sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc,
+            *opt_dG_tsRPQ, *opt_dG_mtau_tsRPQ);
+        if (div_corr) {
+          lr_gw_solver->apply_div_correction_DeltaG(
+              *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+          if (is_q_gamma()) {
+            lr_gw_solver2->apply_div_correction_G(
+                *sDeltaSigma_term2_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+          }
+        }
+        // Accumulate term2 into sDeltaSigma_tskij so it holds the total ΔΣ.
+        // Both arrays are node-replicated shared memory (each solver all_reduced
+        // its result), so add once per node on the node root.
+        sDeltaSigma_tskij->win().fence();
+        sDeltaSigma_term2_tskij->win().fence();
+        if (_mpi->node_comm.root())
+          sDeltaSigma_tskij->local() += sDeltaSigma_term2_tskij->local();
+        sDeltaSigma_tskij->win().fence();
+        _mpi->comm.barrier();
+      } else {
+        // Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (single R-space pass)
+        lr_gw_solver->evaluate_sigma(
+            *sDeltaSigma_tskij, sDeltaG_tskij.local(), *opt_dW_tRPQ,
+            sG_tskij.local(), dDeltaW_qtPQ, thc,
+            *opt_dG_tsRPQ, *opt_dG_mtau_tsRPQ, ibc_ptr);
+        // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
+        if (div_corr) {
+          lr_gw_solver->apply_div_correction_DeltaG(
+              *sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, *eps_inv_head);
+          // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+          if (is_q_gamma()) {
+            lr_gw_solver->apply_div_correction_G(
+                *sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+          }
         }
       }
       _mpi->comm.barrier();
@@ -541,6 +600,213 @@ std::tuple<int, double> lr_driver::run_lr(
 }
 
 
+void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full) {
+  // Dimensions of the large arrays.
+  const long nt   = _nts;                          // # imaginary-time points (full grid)
+  const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
+  const long nwb  = _dyson.FT()->nw_b();           // # bosonic Matsubara frequencies (W(iω))
+  const long nwbh = (nwb % 2 == 0) ? nwb / 2 : nwb / 2 + 1;      // half bosonic ω-grid (W_full)
+  const long nth  = (_nts % 2 == 0) ? _nts / 2 : _nts / 2 + 1;   // half τ-grid (W/Π/G^R)
+  const long ns   = _ns;
+  const long nki  = _nkpts_ibz;                    // IBZ k-points (shared band-basis arrays)
+  const long nq   = _nkpts;                        // full-BZ q/R points (distributed aux arrays)
+  const long nb   = _nbnd;
+  const int  n_nodes = std::max(1, _mpi->internode_comm.size());
+
+  const double bytes_per = static_cast<double>(sizeof(ComplexType));
+  const double to_GB = 1.0 / (1024.0 * 1024.0 * 1024.0);
+
+  // {name, shape string, # elements, is_distributed}
+  struct entry_t { std::string name; std::string shape; double nelem; bool dist; };
+  std::vector<entry_t> arrays;
+
+  auto band5 = [&](long n0) { return double(n0) * ns * nki * nb * nb; };  // (n0,ns,nk_ibz,nb,nb)
+  auto aux4  = [&](long n0) { return double(n0) * nq * NP * NP; };        // (n0,nq,NP,NP)
+  auto aux5  = [&](long n0) { return double(n0) * ns * nq * NP * NP; };   // (n0,ns,nq,NP,NP)
+
+  auto shp5b = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nki, nb, nb); };
+  auto shp4a = [&](long n0) { return fmt::format("({},{},{},{})", n0, nq, NP, NP); };
+  auto shp5a = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nq, NP, NP); };
+
+  // --- Shared (replicated per node), band basis ~ nk·nt·nb² ---
+  // sG_tskij is caller-owned but resident throughout run_lr, so count it here.
+  arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false});
+  arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false});
+  arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false});
+  if (include_gw_sigma) {
+    arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false});
+    arrays.push_back({"sDeltaSigma_prev_tskij", shp5b(nt), band5(nt), false});
+  }
+
+  // --- Distributed (over global comm), aux basis ~ nk·nt·NP² ---
+  if (include_gw_sigma) {
+    arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true});
+  }
+  if (gw_full) {
+    arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true});
+    arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true});
+    arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true});
+    // Solver-owned FT staging buffers: allocated once in compute_W_full_omega,
+    // resident for the whole loop (persistent by lifetime, though internal).
+    arrays.push_back({"_ft_buffer_t",  shp4a(nth),  aux4(nth),  true});
+    arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
+    if (!is_q_gamma())
+      arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true});
+  }
+
+  auto gb = [&](double nelem) { return nelem * bytes_per * to_GB; };
+
+  // Persistent totals.
+  double shared_GB = 0.0, dist_GB = 0.0;
+  for (auto const& a : arrays) {
+    if (a.dist) dist_GB += gb(a.nelem); else shared_GB += gb(a.nelem);
+  }
+  double dist_per_node_GB = dist_GB / n_nodes;
+  double total_per_node_GB = shared_GB + dist_per_node_GB;
+
+  // --- Per-iteration transients: scratch arrays (~ nk·nt·n²) allocated and
+  //     freed within one SCF iteration, on top of the persistent set.
+  //     Two mutually-exclusive phases:
+  //       dyson : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
+  //       gwsig : ΔΠ/ΔW(τ) + its (t,q)→(q,t) transpose scratch (gw_full only)
+  //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
+  //     two never coexist — the peak adds only the larger: max(dyson, gwsig).
+  enum phase_t { DYSON, GWSIG };
+  struct tentry_t { std::string name; std::string shape; double nelem; phase_t ph; };
+  std::vector<tentry_t> trans;
+
+  // lr_dyson ω-side band scratch: ΔG(iω) + (ΔΣ(iω) when GW active). Distributed.
+  trans.push_back({include_gw_sigma ? "ΔG(iω)+ΔΣ(iω) (lr_dyson)" : "ΔG(iω) (lr_dyson)",
+                   fmt::format("{}x({},{},{},{},{})", include_gw_sigma ? 2 : 1, nw, ns, nki, nb, nb),
+                   (include_gw_sigma ? 2.0 : 1.0) * band5(nw), DYSON});
+  if (gw_full) {
+    trans.push_back({"ΔΠ/ΔW(τ)",          shp4a(nth), aux4(nth), GWSIG});
+    trans.push_back({"ΔW transpose copy", shp4a(nth), aux4(nth), GWSIG});
+  }
+
+  double t_dyson = 0.0, t_gwsig = 0.0;
+  for (auto const& t : trans)
+    (t.ph == DYSON ? t_dyson : t_gwsig) += t.nelem;
+  bool dyson_dominates = t_dyson >= t_gwsig;
+  double peak_trans_nelem = std::max(t_dyson, t_gwsig);
+  // All transients here are distributed (band ΔG(iω) included).
+  double peak_dist_GB = dist_GB + gb(peak_trans_nelem);
+  double peak_per_node_GB = shared_GB + peak_dist_GB / n_nodes;
+
+  // Level-2 persistent breakdown (printed before the level-1 totals).
+  app_log(2, "\n  LR memory estimate (persistent arrays ~ nk·nt·n², n ∈ {{nbnd={}, NP={}}})", nb, NP);
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    {:<26s}{:<26s}{:>8s}   {}", "quantity", "shape", "GB", "location");
+  for (auto const& a : arrays)
+    app_log(2, "    {:<26s}{:<26s}{:>8.3f}   {}",
+            a.name, a.shape, gb(a.nelem), a.dist ? "distributed" : "shared");
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    shared total:        {:8.3f} GB/node  (replicated on each of {} node(s))",
+          shared_GB, n_nodes);
+  app_log(2, "    distributed total:   {:8.3f} GB        (÷ {} node(s) = {:.3f} GB/node)",
+          dist_GB, n_nodes, dist_per_node_GB);
+
+  // Level-2 per-iteration transient breakdown.
+  app_log(2, "\n  LR memory per-iteration transients (allocated/freed within an iteration):");
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    {:<26s}{:<26s}{:>8s}   {}", "quantity", "shape", "GB", "phase");
+  for (auto const& t : trans)
+    app_log(2, "    {:<26s}{:<26s}{:>8.3f}   {}", t.name, t.shape, gb(t.nelem),
+            (t.ph == DYSON) ? "Dyson" : "ΔW/Σ");
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    peak transient:      {:8.3f} GB        = max(Dyson {:.3f}, ΔW/Σ {:.3f}) [{} dominates]",
+          gb(peak_trans_nelem), gb(t_dyson), gb(t_gwsig),
+          dyson_dominates ? "Dyson" : "ΔW/Σ");
+  app_log(2, "    (distributed; ÷ {} node(s) = {:.3f} GB/node added)",
+          n_nodes, gb(peak_trans_nelem) / n_nodes);
+
+  app_log(1, "  Estimated LR memory (persistent): {:.3f} GB/node", total_per_node_GB);
+  app_log(1, "  Estimated LR memory (peak):       {:.3f} GB/node", peak_per_node_GB);
+  app_log(2, "");
+}
+
+
+void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool gw_full) {
+  const long nproc = _mpi->comm.size();
+  const long nw   = _dyson.FT()->nw_f();
+  const long nwb  = _dyson.FT()->nw_b();
+  const long nwbh = (nwb % 2 == 0) ? nwb / 2 : nwb / 2 + 1;
+  const long nth  = (_nts % 2 == 0) ? _nts / 2 : _nts / 2 + 1;
+  const long nq   = _nkpts;
+  const long nki  = _nkpts_ibz;
+
+  // Aux τ-dist (q-local) grid — the same helper the allocators use.
+  auto [tau_pg, tau_bs] = utils::lr_W_q_local_dist(nproc, nth, NP);
+  (void)tau_bs;
+
+  auto pg4 = [](const std::array<long,4>& g, const char* ax) {
+    return fmt::format("{}=({},{},{},{})", ax, g[0], g[1], g[2], g[3]); };
+  auto pg5 = [](const std::array<long,5>& g, const char* ax) {
+    return fmt::format("{}=({},{},{},{},{})", ax, g[0], g[1], g[2], g[3], g[4]); };
+
+  app_log(2, "\n  LR distribution patterns (nproc = {}):", nproc);
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    {:<22s}{:<30s}{}", "pattern", "pgrid", "arrays");
+
+  // Aux τ-dist (q-local) — present whenever a W self-energy is active.
+  if (include_gw_sigma) {
+    const char* arrs = gw_full ? "dW_tRPQ, dG_tsRPQ, dG_mtau, ΔΠ/ΔW" : "dW_tRPQ";
+    app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
+            pg4(tau_pg, "(t,q,P,Q)"), arrs);
+  }
+  // Aux FT-buffer + ω-side — only the full-GW W Dyson pipeline (mirrors the
+  // distribution choice in lr_scr_coulomb_t::compute_W_full_omega).
+  if (gw_full) {
+    auto [ftb_pg, ftb_bs] =
+        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nth, nq, NP, NP});
+    (void)ftb_bs;
+    std::array<long,4> w_pg, w_bs;
+    if (ftb_pg[2] == 1 && ftb_pg[3] == 1) {
+      w_pg = ftb_pg; w_bs = ftb_bs;
+    } else {
+      std::tie(w_pg, w_bs) = utils::lr_W_proc_grid(nproc, nq, nwbh, NP);
+    }
+    (void)w_bs;
+    app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer",
+            pg4(ftb_pg, "(·,q,P,Q)"), "_ft_buffer_t, _ft_buffer_w");
+    app_log(2, "    {:<22s}{:<30s}{}", "aux ω-side",
+            pg4(w_pg, "(w,q,P,Q)"),
+            is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ");
+  }
+
+  // Band-basis Dyson grids — mirror the inline proc-grid math in
+  // lr_dyson::solve_lr_dyson (ω-side and the τ redistribute target).
+  std::array<long,5> dyw_pg;
+  {
+    long np = nproc;
+    long nwpools = utils::find_proc_grid_max_npools(np, nw, 0.4);
+    np /= nwpools;
+    long nkpools = utils::find_proc_grid_max_npools(np, nki, 0.4);
+    np /= nkpools;
+    long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
+    long np_j = np / np_i;
+    dyw_pg = {nwpools, 1, nkpools, np_i, np_j};
+  }
+  std::array<long,5> dyt_pg;
+  {
+    long np = nproc;
+    long nkpools = utils::find_proc_grid_max_npools(np, nki, 0.2);
+    np /= nkpools;
+    long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
+    long np_j = np / np_i;
+    dyt_pg = {1, 1, nkpools, np_i, np_j};
+  }
+  app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(ω)",
+          pg5(dyw_pg, "(w,s,k,i,j)"),
+          include_gw_sigma ? "ΔG(iω), ΔΣ(iω)" : "ΔG(iω)");
+  app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(τ)",
+          pg5(dyt_pg, "(·,·,k,i,j)"), "ΔG(τ) (+ redistribute tmp)");
+  app_log(2, "  {}", std::string(72, '-'));
+  app_log(2, "    (aux & band arrays are distributed over comm; "
+             "shared arrays are node-replicated)\n");
+}
+
+
 void lr_driver::print_setup_timers() {
   app_log(2, "\n  LR_DRIVER_SETUP timers");
   app_log(2, "  -----------------------");
@@ -602,6 +868,7 @@ template std::tuple<int, double> lr_driver::run_lr(
     int, double, bool, const lr_iter_params&,
     const sArray_t<Array_view_4D_t>*, const sArray_t<Array_view_4D_t>*,
     const nda::array<ComplexType, 4>*, bool, std::string,
-    const nda::array_view<ComplexType, 3>*);
+    const nda::array_view<ComplexType, 3>*,
+    sArray_t<Array_view_5D_t>*);
 
 } // namespace methods

@@ -173,6 +173,10 @@ namespace methods {
    * @param include_hartree   - [INPUT] whether Hartree was included
    * @param include_exchange  - [INPUT] whether Exchange was included
    * @param include_gw_sigma  - [INPUT] whether GW self-energy was included
+   * @param sDeltaSigma2_tskij - [INPUT] optional G0·dW0 term for split-term
+   *   one-shot G0W0 output. When non-null, sDeltaSigma_tskij holds the total ΔΣ
+   *   and this holds the G0·dW0 piece, written as "DeltaSigma_GdW_tskij".
+   *   Nullptr for the standard fused output.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -186,7 +190,8 @@ namespace methods {
                int niter,
                bool include_hartree,
                bool include_exchange,
-               bool include_gw_sigma);
+               bool include_gw_sigma,
+               Sigma_t const* sDeltaSigma2_tskij = nullptr);
 
   }; // chkpt
 

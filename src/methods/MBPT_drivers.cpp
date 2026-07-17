@@ -94,13 +94,9 @@ inline simple_dyson make_dyson_with_h0_source(
     const std::string& chkpt_prefix,
     double mu_tol = 1e-9,
     std::string mu_update_alg = "bisection") {
-  // An augmented (non-eigenstate) basis carries only kinetic-energy seed eigval,
-  // so H0 read from a checkpoint would be inconsistent with the basis. Force it
-  // to be recomputed from the orbitals.
-  utils::check(!(mf_ptr != nullptr && mf_ptr->is_augmented()) || h0_source == "compute",
-      "h0_source must be \"compute\" for an augmented mean-field basis (got \"{}\"). "
-      "The augmented basis is not an eigenbasis, so H0 must be built from the orbitals.",
-      h0_source);
+  // Both sources are valid for an augmented basis: "compute" rebuilds H0 from the
+  // orbitals, while "checkpoint" reads the stored H0_skij (a genuine computed H0,
+  // not the placeholder eigenvalues), so the two agree.
   if (h0_source == "checkpoint") {
     app_log(1, "  H0 source                = checkpoint ({}.mbpt.h5)", chkpt_prefix);
     return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix, mu_tol, mu_update_alg);
@@ -1087,6 +1083,9 @@ std::string read_div_treatment(mpi_context_t& mpi,
  * @param input_grp   - SCF group name in checkpoint (e.g., "scf")
  * @param input_iter  - Iteration to read (-1 = final_iter)
  * @param nt          - Number of tau points (from IAFT)
+ * @param screened_interaction_file - Explicit path to the W_qtPQ HDF5 file.
+ *                      If empty, falls back to thc_screened_interaction.h5 in
+ *                      the input checkpoint's directory.
  * @return (dW_qtPQ, eps_inv_head, div_treatment) tuple
  */
 template<typename mpi_context_t, typename THC_t>
@@ -1096,15 +1095,19 @@ auto load_W_and_eps_inv_head(
     const std::string& input_file,
     const std::string& input_grp,
     long input_iter,
-    long nt)
+    long nt,
+    const std::string& screened_interaction_file = "")
 {
   auto mf = thc.MF();
   long nkpts = mf->nkpts();
   long NP = thc.Np();
   long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
 
-  // Read W from thc_screened_interaction.h5 (same directory as checkpoint)
-  auto w_file = (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string();
+  // Read W from the explicit screened_interaction_file if given; otherwise fall
+  // back to thc_screened_interaction.h5 in the input checkpoint's directory.
+  auto w_file = screened_interaction_file.empty()
+      ? (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string()
+      : screened_interaction_file;
   app_log(2, "Reading W from {}...", w_file);
 
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
@@ -1155,6 +1158,61 @@ auto load_W_and_eps_inv_head(
 }
 
 /**
+ * Helper: recompute W and eps_inv_head from the (already-built) unperturbed
+ * Green's function instead of reading W from a screened-interaction file.
+ *
+ * This reuses the exact scGW pipeline (scr_coulomb_t::eval_Pi_qdep +
+ * dyson_W_from_Pi_tau + div_utils::eps_inv_head_t), so the recomputed W_c is,
+ * by construction, consistent with the currently-loaded THC. RPA screening
+ * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
+ * the no-symmetry requirement below + the RPA screen_type.
+ *
+ * Returns the same (dW_qtPQ, eps_inv_head) as load_W_and_eps_inv_head (sans
+ * div_treatment, which the caller already holds), so it is a drop-in at the
+ * call site.
+ *
+ * @param mpi           - MPI context
+ * @param thc           - THC ERI
+ * @param ft            - IAFT (from checkpoint)
+ * @param sG_tskij      - Unperturbed G(τ) shared array (nt, ns, nk, nb, nb)
+ * @param div_treatment - Divergence treatment scGW used (from checkpoint)
+ */
+template<typename mpi_context_t, typename THC_t, typename sArray_5D_t>
+auto recompute_W_and_eps_inv_head(
+    mpi_context_t& mpi,
+    THC_t& thc,
+    imag_axes_ft::IAFT const& ft,
+    sArray_5D_t& sG_tskij,
+    const std::string& div_treatment)
+{
+  auto mf = thc.MF();
+  long nkpts = mf->nkpts();
+
+  // RPA polarization Π and W Dyson require the full q-grid (no symmetry).
+  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
+               "recompute_W_and_eps_inv_head: No symmetry required. "
+               "nqpts={}, nqpts_ibz={}, nkpts={}",
+               mf->nqpts(), mf->nqpts_ibz(), nkpts);
+
+  // Standard GW: W is RPA-screened. cRPA / edmft are not supported here.
+  solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
+
+  auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
+  mpi.comm.barrier();
+  auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+  mpi.comm.barrier();
+
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+
+  // Transpose (t,q,P,Q) → (q,t,P,Q) to match load_W_and_eps_inv_head layout.
+  auto dW_qtPQ = utils::transpose_axes_01(dW_tqPQ, mpi.comm);
+  mpi.comm.barrier();
+
+  return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
+}
+
+/**
  * Unified linear response calculation.
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
@@ -1198,6 +1256,23 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
+  // Explicit screened-interaction (W) file. Empty => auto-derive from the input
+  // checkpoint's directory (thc_screened_interaction.h5).
+  auto screened_interaction_file =
+      io::get_value_with_default<std::string>(pt, "screened_interaction_file", "");
+  // When true, recompute W from the checkpoint Green's function (RPA) instead
+  // of reading it from disk.
+  auto recompute_W = io::get_value_with_default<bool>(pt, "recompute_W", false);
+  // Unperturbed reference: "checkpoint" (interacting G rebuilt from the
+  // checkpoint F+Σ, default) or "mf_dft" (DFT/KS mean-field G0 built directly
+  // from the mean-field eigenvalues/orbitals, for one-shot G0W0@DFT LR). In the
+  // "mf_dft" case W0 is the RPA screened interaction from G0 (recompute_W is
+  // forced on) and the checkpoint is used only for the IAFT grid + metadata.
+  auto unperturbed = io::get_value_with_default<std::string>(pt, "unperturbed", "checkpoint");
+  utils::check(unperturbed == "checkpoint" || unperturbed == "mf_dft",
+               "run_lr_calc: unperturbed must be 'checkpoint' or 'mf_dft', got '{}'", unperturbed);
+  // One-shot G0W0: store the two ΔΣ terms (dG0·W0, G0·dW0) separately.
+  auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1205,8 +1280,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   utils::memlog("run_lr_calc: entry");
 
-  // Validate checkpoint contains required data
-  {
+  // Validate checkpoint contains required data. The "mf_dft" reference rebuilds
+  // G0 from the mean field and reads only IAFT + metadata from the checkpoint,
+  // so it does not require the SCF F/Σ groups.
+  if (unperturbed == "checkpoint") {
     h5::file file(input_file, 'r');
     auto root = h5::group(file);
     utils::check(root.has_subgroup(input_grp),
@@ -1255,22 +1332,38 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
 
-  // Read F and Sigma from checkpoint
   double mu = 0.0;
-  lr_init_timer.start("LR_INIT_READ_SCF");
-  chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
-                  prefix, input_grp, input_iter);
-  mpi->comm.barrier();
-  lr_init_timer.stop("LR_INIT_READ_SCF");
+  if (unperturbed == "mf_dft") {
+    // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
+    // coefficients / energies from the mean field, set μ to conserve N, and
+    // build G0(τ) directly (Σ=0). sF_skij and sSigma_tskij are left unused in
+    // this branch. See qp_scf_common::write_mf_data for the same recipe.
+    app_log(2, "Building DFT/KS mean-field reference G0 (G0W0@DFT)...");
+    lr_init_timer.start("LR_INIT_UPDATE_G");
+    auto [sMO_skia, sE_ska] = get_mf_MOs(*mpi, *mf, *dyson.PSP());
+    mu = update_mu(0.0, *mf, sE_ska, ft.beta());
+    app_log(2, "  DFT reference mu = {:.8f}", mu);
+    update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
+    update_Dm(sDm_skij, sMO_skia, sE_ska, mu, ft.beta());
+    mpi->comm.barrier();
+    lr_init_timer.stop("LR_INIT_UPDATE_G");
+  } else {
+    // Read F and Sigma from checkpoint
+    lr_init_timer.start("LR_INIT_READ_SCF");
+    chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
+                    prefix, input_grp, input_iter);
+    mpi->comm.barrier();
+    lr_init_timer.stop("LR_INIT_READ_SCF");
 
-  // Compute G from F and Sigma via Dyson equation
-  app_log(2, "Computing unperturbed Green's function from checkpoint...");
-  app_log(2, "  h0_source = {}", h0_source);
-  app_log(2, "  mu = {:.8f}", mu);
-  lr_init_timer.start("LR_INIT_UPDATE_G");
-  update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
-  mpi->comm.barrier();
-  lr_init_timer.stop("LR_INIT_UPDATE_G");
+    // Compute G from F and Sigma via Dyson equation
+    app_log(2, "Computing unperturbed Green's function from checkpoint...");
+    app_log(2, "  h0_source = {}", h0_source);
+    app_log(2, "  mu = {:.8f}", mu);
+    lr_init_timer.start("LR_INIT_UPDATE_G");
+    update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+    mpi->comm.barrier();
+    lr_init_timer.stop("LR_INIT_UPDATE_G");
+  }
 
   // Validate DeltaH0 shape on root before broadcasting
   if (mpi->comm.root()) {
@@ -1304,8 +1397,20 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     lr_state.sDeltaSigma_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
+  // Split-term output (one-shot G0W0): array for the G0·dW0 piece; the total
+  // ΔΣ (= dG0·W_c0 + G0·dW0) stays in sDeltaSigma_tskij.
+  if (split_sigma_terms)
+    utils::check(include_gw_sigma && gw_mode == lr_gw_update_mode::full,
+                 "run_lr_calc: split_sigma_terms requires gw_mode='full'.");
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaSigma2;
+  if (include_gw_sigma && split_sigma_terms) {
+    opt_sDeltaSigma2.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+        *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  }
 
-  // Load W and eps_inv_head if GW self-energy is requested
+  // Load W and eps_inv_head if GW self-energy is requested. W is either read
+  // from disk (explicit screened_interaction_file, else the auto-derived path)
+  // or recomputed on the fly from the checkpoint Green's function (RPA).
   using dW_type = std::tuple_element_t<0, decltype(load_W_and_eps_inv_head(
       *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()))>;
   std::optional<dW_type> opt_dW;
@@ -1313,10 +1418,32 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   std::string div_treatment = "gygi";
   if (include_gw_sigma) {
     lr_init_timer.start("LR_INIT_LOAD_W");
-    auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(*mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f());
-    opt_dW.emplace(std::move(dW));
-    opt_eps_inv.emplace(std::move(eps_inv));
-    div_treatment = div_str;
+    if (unperturbed == "mf_dft") {
+      // G0W0@DFT: W0 is the RPA screened interaction built from the DFT G0.
+      // The checkpoint holds no scGW W (or div_treatment), so recompute and
+      // take div_treatment from params (default matches the C++ default).
+      utils::check(screened_interaction_file.empty(),
+                   "run_lr_calc: unperturbed='mf_dft' builds W0 from G0 (RPA); "
+                   "screened_interaction_file must not be set.");
+      recompute_W = true;
+      div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
+    } else {
+      div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+    }
+    if (recompute_W) {
+      app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
+      auto [dW, eps_inv] = recompute_W_and_eps_inv_head(
+          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment);
+      opt_dW.emplace(std::move(dW));
+      opt_eps_inv.emplace(std::move(eps_inv));
+    } else {
+      auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(
+          *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f(),
+          screened_interaction_file);
+      opt_dW.emplace(std::move(dW));
+      opt_eps_inv.emplace(std::move(eps_inv));
+      div_treatment = div_str;
+    }
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }
 
@@ -1372,6 +1499,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   lr_state.kpq_map.emplace(driver.kpq_map());
   auto& thc = eri.corr_eri->get();
   auto* pDeltaSigma = lr_state.sDeltaSigma_tskij ? &(*lr_state.sDeltaSigma_tskij) : nullptr;
+  auto* pDeltaSigma2 = opt_sDeltaSigma2 ? &(*opt_sDeltaSigma2) : nullptr;
   auto* pDeltaX_left = opt_sDeltaX_left ? &(*opt_sDeltaX_left) : nullptr;
   auto* pDeltaX_right = opt_sDeltaX_right ? &(*opt_sDeltaX_right) : nullptr;
   // Bind a view to the DeltaV shared window (lifetime tied to opt_sDeltaV_qPQ).
@@ -1394,7 +1522,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
       pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
-      pDeltaV_qPQ);
+      pDeltaV_qPQ, pDeltaSigma2);
   lr_state.Delta_mu.emplace(Delta_mu);
   mpi->comm.barrier();
 
@@ -1405,7 +1533,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
                  lr_state.sDeltaF_skij.value(), pDeltaSigma,
                  Delta_mu, niter,
-                 include_hartree, include_exchange, include_gw_sigma);
+                 include_hartree, include_exchange, include_gw_sigma,
+                 pDeltaSigma2);
 
   utils::memlog("run_lr_calc: exit (before RAII)");
   return std::make_tuple(niter, Delta_mu);
