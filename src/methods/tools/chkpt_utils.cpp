@@ -87,7 +87,7 @@ void dump_scf(communicator_t &comm, long iter,
               const X_t &F, const Xt_t &Sigma,
               double mu, std::string output,
               std::string input_grp, long input_iter,
-              bool slim) {
+              bool slim, const X_t *K) {
   if (comm.root()) {
     using clock_t = std::chrono::steady_clock;
     auto elapsed = [](clock_t::time_point a, clock_t::time_point b) {
@@ -126,6 +126,9 @@ void dump_scf(communicator_t &comm, long iter,
       auto t3 = clock_t::now(); t_Sigma = elapsed(t2, t3);
 
       nda::h5_write(iter_grp, "F_skij", F.local(), false);
+      // Opt-in exchange-only Fock K (F = J + K). Written only when requested so
+      // the default checkpoint layout is unchanged.
+      if (K) nda::h5_write(iter_grp, "K_skij", K->local(), false);
       nda::h5_write(iter_grp, "Dm_skij", Dm.local(), false);
       h5::h5_write(iter_grp, "mu", mu);
       h5::h5_write(iter_grp, "Sigma_not_stored", slim);
@@ -532,7 +535,7 @@ template void dump_scf(
     mpi3::communicator&, long,
     const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t>&,
-    double, std::string, std::string, long, bool);
+    double, std::string, std::string, long, bool, const sArray_t<Array_view_4D_t>*);
 
 template void dump_scf(
     mpi3::communicator&, long,

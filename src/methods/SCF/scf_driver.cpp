@@ -39,7 +39,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
               solvers::mb_solver_t<corr_solver_t> mb_solver, iter_scf::iter_scf_t *iter_solver,
               int niter, bool restart, double conv_tol, bool const_mu,
               std::string input_grp, int input_iter, bool eval_thermodynamics,
-              bool compute_exchange, bool keep_w, bool chkpt_slim)
+              bool compute_exchange, bool keep_w, bool chkpt_slim, bool dump_exchange)
               -> std::tuple<double, double> {
   utils::TimerManager Timer;
   auto mpi = mb_eri.corr_eri->get().mpi();
@@ -85,6 +85,11 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   auto& sDm_skij = mb_state.sDm_skij.value();
   auto& sG_tskij = mb_state.sG_tskij.value();
   auto& sSigma_tskij = mb_state.sSigma_tskij.value();
+  // Opt-in exchange-only Fock K (F = J + K), written to the checkpoint alongside F.
+  std::optional<sArray_t<Array_view_4D_t>> sK_skij;
+  if (dump_exchange)
+    sK_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   double mu = 0.0;
   Timer.stop("STATE_ALLOC");
   Timer.start("INIT_FOCK");
@@ -158,6 +163,21 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
         mb_solver.hf->evaluate(sF_skij, sDm_skij.local(), mb_eri.corr_eri->get(),
                                dyson.sS_skij().local(), true, compute_exchange);
       }
+      // Exchange-only Fock K from the same density used for F (Hartree off,
+      // exchange on), so that F = J + K holds for the stored matrices.
+      if (dump_exchange) {
+        auto& sK = sK_skij.value();
+        if (mb_eri.hf_eri) {
+          mb_solver.hf->evaluate(sK, sDm_skij.local(), mb_eri.hf_eri->get(),
+                                 dyson.sS_skij().local(), false, true);
+        } else if (mb_eri.hartree_eri and mb_eri.exchange_eri) {
+          mb_solver.hf->evaluate(sK, sDm_skij.local(), mb_eri.exchange_eri->get(),
+                                 dyson.sS_skij().local(), false, true);
+        } else {
+          mb_solver.hf->evaluate(sK, sDm_skij.local(), mb_eri.corr_eri->get(),
+                                 dyson.sS_skij().local(), false, true);
+        }
+      }
       mpi->comm.barrier();
     }
     // correlated solver for dynamic self-energy, e.g. gw, gf2
@@ -176,6 +196,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
 
     if (mpi->node_comm.root()) {
       hermitize_in_tau(sF_skij.local(), "Fock matrix");
+      if (dump_exchange) hermitize_in_tau(sK_skij.value().local(), "exchange matrix");
       hermitize_in_tau(sSigma_tskij.local(), "dynamic self-energy");
     }
     mpi->comm.barrier();
@@ -242,7 +263,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     bool write_slim = chkpt_slim && !is_last;
     chkpt::dump_scf(mpi->comm, output_iter, sDm_skij, sG_tskij, sF_skij,
                     sSigma_tskij, mu, mb_state.coqui_prefix,
-                    input_grp, input_iter, write_slim);
+                    input_grp, input_iter, write_slim,
+                    dump_exchange ? &sK_skij.value() : nullptr);
     Timer.stop("WRITE");
     output_iter++;
   } while (output_iter<output_iter_init+niter and not converged());
@@ -493,7 +515,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gw_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GW_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)
@@ -524,7 +546,7 @@ scf_loop(MBState&, simple_dyson&, \
          const imag_axes_ft::IAFT&, \
          solvers::mb_solver_t<solvers::gf2_t>, \
          iter_scf::iter_scf_t*, \
-         int, bool, double, bool, std::string, int, bool, bool, bool, bool);
+         int, bool, double, bool, std::string, int, bool, bool, bool, bool, bool);
 
 // All combinations of thc/chol for 4 eri slots
 GF2_SCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)

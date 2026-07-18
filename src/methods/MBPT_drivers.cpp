@@ -208,6 +208,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  // Opt-in: additionally write the exchange-only Fock K_skij (F = J + K) to the
+  // checkpoint for every iteration F is written. Default (false) leaves output unchanged.
+  auto dump_exchange = io::get_value_with_default<bool>(pt,"dump_exchange",false);
   // Opt-in slim checkpoint: skip frequency-dependent Sigma_tskij and G_tskij on
   // non-final SCF iterations (and skip zero Sigma). Default (false) writes the
   // full old dataset layout.
@@ -271,7 +274,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
              /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
+             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
   } else if(solver_type == "gw") {
 
@@ -297,7 +300,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                greens_func_source, greens_func_iteration, 
                /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
                /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
-               /*chkpt_slim=*/chkpt_slim);
+               /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
@@ -321,7 +324,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                greens_func_source, greens_func_iteration, 
                /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
                /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
-               /*chkpt_slim=*/chkpt_slim);
+               /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
       if (dump_w_to_h5) {
         auto& W_qtPQ = mb_state.dW_qtPQ.value();
@@ -369,14 +372,14 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration,
                /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange,
-               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
+               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
     } else {
       solvers::scr_coulomb_t scr_eri(&ft, "rpa", div_treatment);
       scf_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf, &gf2, &scr_eri),
                iter_solver.get(), niter, restart, conv_thr, const_mu,
                greens_func_source, greens_func_iteration,
                /*eval_thermodynamics=*/eval_thermodynamics, /*compute_exchange=*/compute_exchange,
-               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
+               /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
     }
 
   } else if(solver_type == "gw_dca") {
@@ -480,6 +483,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
+  // Opt-in: additionally write the exchange-only Fock K_skij (F = J + K) to the
+  // checkpoint for every iteration F is written. Default (false) leaves output unchanged.
+  auto dump_exchange = io::get_value_with_default<bool>(pt,"dump_exchange",false);
   // Opt-in slim checkpoint: skip frequency-dependent Sigma_tskij and G_tskij on
   // non-final SCF iterations (and skip zero Sigma). Default (false) writes the
   // full old dataset layout.
@@ -546,7 +552,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
              iter_solver.get(), niter, restart, conv_thr, const_mu,
              greens_func_source, greens_func_iteration, 
              /*eval_thermodynamics=*/io::get_value_with_default<bool>(pt, "eval_thermodynamics", false),
-             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim);
+             /*compute_exchange=*/compute_exchange, /*keep_w=*/false, /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);

@@ -111,6 +111,12 @@ def run_hf(params, h_int, h_int_exchange=None):
         - ``compute_exchange`` *(bool, optional, default ``True``)* — whether to
           compute the exchange (K) term in the Fock matrix. Set to ``False`` for
           Hartree-only calculations.
+        - ``dump_exchange`` *(bool, optional, default ``False``)* — if ``True``,
+          additionally writes the exchange-only Fock matrix ``K_skij`` to the
+          checkpoint (``scf/iter{N}/K_skij``) alongside the full Fock
+          ``F_skij`` (= J + K), for every iteration ``F_skij`` is written. The
+          stored ``F_skij`` is unchanged. Useful downstream for the bare-exchange
+          static self-energy correction ``K - Vxc``.
         - ``iaft`` *(dict, optional)* — imaginary-axis frequency-grid settings:
 
           - ``wmax`` *(float, optional, units: Hartree)* — maximum frequency in Hartree. If omitted,

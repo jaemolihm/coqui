@@ -57,7 +57,7 @@ namespace methods {
                 const X_t &Dm, const Xt_t &G, const X_t &F, const Xt_t &Sigma,
                 double mu, std::string output = "bdft",
                 std::string input_grp="scf", long input_iter=-1,
-                bool slim=false);
+                bool slim=false, const X_t *K=nullptr);
 
   template<typename communicator_t, typename X_4D_t, typename X_3D_t>
   void dump_scf(communicator_t &comm, long iter,
