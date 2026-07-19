@@ -63,8 +63,13 @@ using boost::mpi3::communicator;
 using memory::darray_t;
 using memory::host_array;
 
-momentum_augmenter::momentum_augmenter(mf::MF& mf)
+momentum_augmenter::momentum_augmenter(mf::MF& mf, std::vector<int> dirs)
+  : _dirs(std::move(dirs))
 {
+  if(_dirs.empty()) _dirs = {0,1,2};
+  for(int d : _dirs)
+    utils::check(d >= 0 and d <= 2,
+                 "momentum_augmenter: direction {} out of range (expected 0,1,2).", d);
   auto const& wfc_g = *mf.wfc_truncated_grid();
   long ngm = wfc_g.size();
   _miller = nda::array<int,2>(ngm,3);
@@ -85,9 +90,14 @@ void momentum_augmenter::generate_raw(int ispin, int ik, long g0,
   utils::check(g0 >= 0 and g0 + ng_loc <= _miller.shape(0),
                "momentum_augmenter: G slice [{},{}) out of range (ngm {}).",
                g0, g0+ng_loc, _miller.shape(0));
-  utils::check(raw_out.shape(0) == 3*nbnd_aug and raw_out.shape(1) == ng_loc,
+  long n_dir = long(_dirs.size());
+  utils::check(raw_out.shape(0) == n_dir*nbnd_aug and raw_out.shape(1) == ng_loc,
                "momentum_augmenter: raw_out shape mismatch.");
-  for(int alpha=0; alpha<3; ++alpha) {
+  // Channel c indexes the selected directions (compact); alpha is the actual
+  // Cartesian direction _dirs[c]. Raw states of band b for channel c are placed
+  // at row c*nbnd_aug + b (matching add_augmentation's layout).
+  for(long c=0; c<n_dir; ++c) {
+    int alpha = _dirs[c];
     for(long ig=0; ig<ng_loc; ++ig) {
       long g = g0 + ig;
       double kpG = _kcart(ik,alpha)
@@ -95,17 +105,18 @@ void momentum_augmenter::generate_raw(int ispin, int ik, long g0,
                  + double(_miller(g,1)) * _recv(1,alpha)
                  + double(_miller(g,2)) * _recv(2,alpha);
       for(long b=0; b<nbnd_aug; ++b)
-        raw_out(alpha*nbnd_aug + b, ig) = kpG * psi_base(b, ig);
+        raw_out(c*nbnd_aug + b, ig) = kpG * psi_base(b, ig);
     }
   }
 }
 
-std::shared_ptr<orbital_augmenter_t> make_augmenter(mf::MF& mf, ptree const& pt)
+std::shared_ptr<orbital_augmenter_t> make_augmenter(mf::MF& mf, ptree const& pt,
+                                                    std::vector<int> const& dirs)
 {
   auto type = io::get_value_with_default<std::string>(pt, "type", "momentum");
   io::tolower(type);
   if(type == "momentum") {
-    return std::make_shared<momentum_augmenter>(mf);
+    return std::make_shared<momentum_augmenter>(mf, dirs);
   } else if(type == "dpsi") {
     APP_ABORT("make_augmenter: augment type 'dpsi' not implemented yet.");
   } else {

@@ -107,7 +107,7 @@ def make_mf(mpi, params, mf_type):
 
 
 def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
-               nbnd_aug=-1, epstol=1e-4, dtau_step=0.1):
+               nbnd_aug=-1, epstol=1e-4, dirs=None, dtau_step=0.1):
     """Create an augmented mean-field system from an existing one.
 
     Keeps the original ``nbnd`` bands and appends orthonormalized augmentation
@@ -144,12 +144,20 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
         Dimensionless singular-value cutoff: a state is kept when the residual
         amplitude s of its ``dtau_step``-scaled raw state satisfies
         ``s >= epstol``.
+    dirs : sequence of int or None
+        For ``augment_type="momentum"``, the Cartesian directions (subset of
+        ``{0, 1, 2}`` = x, y, z) whose momentum images p_alpha psi are appended.
+        ``None`` (or empty) uses all three directions — the standard momentum
+        augmentation. A single direction, e.g. ``dirs=[0]``, augments with p_x
+        only, for phonon-mode-resolved studies where mode (kappa, d) is
+        augmented with p_d alone.
     dtau_step : float
         Displacement step in bohr multiplying the raw dpsi/dtau states
         (default 0.1).
     """
+    dirs_list = [] if dirs is None else [int(d) for d in dirs]
     return mf.augment_basis(prefix, outdir, augment_type, int(nbnd_aug),
-                            float(epstol), float(dtau_step))
+                            float(epstol), dirs_list, float(dtau_step))
 
 
 def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,

@@ -63,19 +63,25 @@ struct orbital_augmenter_t
 };
 
 /**
- * Momentum augmentation: raw states are p̂_α ψ_b = (k+G)_α ψ_b(G) for the three
- * Cartesian directions α, evaluated on the wavefunction G-grid (same support as
- * ψ_b, so no regridding). k and G must share the Cartesian convention taken
- * from the mean-field object. The raw states carry units of 1/bohr and are
- * scaled by dtau_step (bohr) in add_augmentation, so their overall scale
- * matters: it sets the singular values used for truncation and the THC fit
- * weights.
+ * Momentum augmentation: raw states are p̂_α ψ_b = (k+G)_α ψ_b(G) for the
+ * selected Cartesian directions α, evaluated on the wavefunction G-grid (same
+ * support as ψ_b, so no regridding). k and G must share the Cartesian
+ * convention taken from the mean-field object. The raw states carry units of
+ * 1/bohr and are scaled by dtau_step (bohr) in add_augmentation, so their
+ * overall scale matters: it sets the singular values used for truncation and
+ * the THC fit weights.
+ *
+ * `dirs` selects which Cartesian directions contribute (a subset of {0,1,2} =
+ * {x,y,z}); the default {0,1,2} reproduces the full three-direction momentum
+ * augmentation. A single direction (e.g. {0}) yields a direction-specific
+ * augmentation p̂_x ψ only, used for phonon-mode-resolved studies where the
+ * mode (κ, d) is augmented with p̂_d only.
  */
 struct momentum_augmenter : orbital_augmenter_t
 {
-  momentum_augmenter(mf::MF& mf);
+  momentum_augmenter(mf::MF& mf, std::vector<int> dirs = {0,1,2});
 
-  int n_raw_per_band() const override { return 3; }
+  int n_raw_per_band() const override { return int(_dirs.size()); }
   std::string type() const override { return "momentum"; }
 
   void generate_raw(int ispin, int ik, long g0,
@@ -83,13 +89,17 @@ struct momentum_augmenter : orbital_augmenter_t
                     nda::array_view<ComplexType,2> raw_out) const override;
 
 private:
+  std::vector<int> _dirs;                  // Cartesian directions in {0,1,2} to include
   nda::array<int,2> _miller;               // (ngm, 3) Miller indices of the wfc grid
   nda::stack_array<double,3,3> _recv;      // reciprocal vectors, recv(i,:) = i-th vector (Cartesian)
   nda::array<double,2> _kcart;             // (nkpts_ibz, 3) IBZ k-points (Cartesian)
 };
 
-// Build an augmenter from an input block. `type` selects the transform.
-std::shared_ptr<orbital_augmenter_t> make_augmenter(mf::MF& mf, ptree const& pt);
+// Build an augmenter from an input block. `type` selects the transform. For the
+// momentum augmenter, `dirs` selects the Cartesian directions (subset of
+// {0,1,2}); an empty `dirs` means all three (x,y,z).
+std::shared_ptr<orbital_augmenter_t> make_augmenter(mf::MF& mf, ptree const& pt,
+                                                    std::vector<int> const& dirs = {});
 
 // Augment the mean-field basis: keep the original nbnd bands and append the
 // orthonormalized augmentation states produced by `augmenter` from the first

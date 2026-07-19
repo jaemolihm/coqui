@@ -121,14 +121,18 @@ namespace coqui_py {
      *                   0 = none: original orbitals in augmented bdft format)
      * @param epstol     dimensionless singular-value cutoff (thresholds s, the
      *                   residual amplitude of the dtau_step-scaled raw state)
+     * @param dirs       for type="momentum", the Cartesian directions (subset of
+     *                   {0,1,2} = {x,y,z}) whose p̂_α ψ states are appended; an
+     *                   empty list means all three directions
      * @param dtau_step  displacement step (bohr) scaling the raw dψ/dτ states
      */
     Mf augment_basis(const std::string& prefix, const std::string& outdir,
                      const std::string& type, long nbnd_aug, double epstol,
-                     double dtau_step) const {
+                     const std::vector<long>& dirs, double dtau_step) const {
       std::string fn = outdir + "/" + prefix + ".h5";
       auto parser = InputParser(std::string("{\"type\": \"") + type + "\"}");
-      auto augmenter = orbitals::make_augmenter(*_mf, parser.get_root());
+      std::vector<int> dirs_i(dirs.begin(), dirs.end());
+      auto augmenter = orbitals::make_augmenter(*_mf, parser.get_root(), dirs_i);
       auto new_mf = orbitals::add_augmentation<HOST_MEMORY>(*_mf, fn, augmenter,
                                                             nbnd_aug, epstol, dtau_step);
       return Mf(std::make_shared<mf::MF>(std::move(new_mf)));

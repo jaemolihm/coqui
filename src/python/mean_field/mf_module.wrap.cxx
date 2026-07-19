@@ -131,11 +131,12 @@ static auto const fun_22 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 static auto const fun_23 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self, const std::string &prefix,
        const std::string &outdir, const std::string &type, long nbnd_aug,
-       double epstol, double dtau_step) {
+       double epstol, const std::vector<long> &dirs, double dtau_step) {
       return self.augment_basis(prefix, outdir, type, nbnd_aug, epstol,
-                                dtau_step);
+                                dirs, dtau_step);
     },
-    "self", "prefix", "outdir", "type", "nbnd_aug", "epstol", "dtau_step")};
+    "self", "prefix", "outdir", "type", "nbnd_aug", "epstol", "dirs",
+    "dtau_step")};
 
 // eph_projector_overlaps
 static auto const fun_24 = c2py::dispatcher_f_kw_t{c2py::cmethod(
