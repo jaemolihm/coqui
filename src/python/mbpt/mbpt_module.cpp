@@ -24,6 +24,8 @@
 #include "methods/MBPT_drivers.h"
 #include "methods/HF/lr_hf.hpp"
 #include "methods/HF/hf_t.h"
+#include "methods/SCF/scf_common.hpp"
+#include "numerics/imag_axes_ft/iaft_utils.hpp"
 #include "utilities/lr_utils.hpp"
 
 #include "python/interaction/eri_module.hpp"
@@ -171,6 +173,94 @@ namespace coqui_py {
     mpi->comm.barrier();
 
     return DeltaF_skij;
+  }
+
+
+  /**
+   * @brief Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (test API)
+   *
+   * Python entry point for methods::lr_qp_approx (the q-aware LR-qpGW static
+   * map). Wraps the numpy inputs into node-shared arrays, reads the IAFT from
+   * the checkpoint, builds a qp_params_t from the AC parameters, and returns the
+   * resulting static ΔV_QPGW(k) in the primary basis.
+   *
+   * @param h_int           - [INPUT] THC ERI handler (source of MPI + MF)
+   * @param prefix          - [INPUT] checkpoint prefix; IAFT read from prefix.mbpt.h5
+   * @param DeltaSigma_tskij - [INPUT] dynamic ΔΣ_k(τ), (nt, ns, nk, nb, nb)
+   * @param MO_skia         - [INPUT] frozen QP MO coefficients C, (ns, nk, nb, nb)
+   * @param E_ska           - [INPUT] frozen QP energies ε, (ns, nk, nb)
+   * @param mu              - [INPUT] frozen chemical potential
+   * @param kpq_map         - [INPUT] k → k+q index map, (nk,)
+   * @param q_is_gamma      - [INPUT] whether q ≈ 0 (enables Hermitization)
+   * @param off_diag_mode   - [INPUT] "qp_energy" or "fermi"
+   * @param ac_alg          - [INPUT] analytic-continuation algorithm (e.g. "pade")
+   * @param Nfit            - [INPUT] # of AC fit parameters
+   * @param eta             - [INPUT] AC broadening
+   * @return                - [OUTPUT] static ΔV_QPGW(k), (ns, nk, nb, nb)
+   */
+  nda::array<ComplexType, 4> lr_qp_approx(
+      ThcCoulomb& h_int,
+      const std::string& prefix,
+      nda::array<ComplexType, 5> const& DeltaSigma_tskij,
+      nda::array<ComplexType, 4> const& MO_skia,
+      nda::array<ComplexType, 3> const& E_ska,
+      double mu,
+      nda::array<long, 1> const& kpq_map,
+      bool q_is_gamma,
+      std::string off_diag_mode,
+      std::string ac_alg,
+      int Nfit,
+      double eta) {
+
+    using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+    using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+    using Array_view_3D_t = nda::array_view<ComplexType, 3>;
+
+    auto& thc = h_int.get_eri();
+    auto mpi = thc.mpi();
+
+    long nt = DeltaSigma_tskij.shape(0);
+    long ns = DeltaSigma_tskij.shape(1);
+    long nk = DeltaSigma_tskij.shape(2);
+    long nb = DeltaSigma_tskij.shape(3);
+
+    auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+        *mpi, {nt, ns, nk, nb, nb});
+    auto sMO_skia = math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {ns, nk, nb, nb});
+    auto sE_ska = math::shm::make_shared_array<Array_view_3D_t>(
+        *mpi, {ns, nk, nb});
+
+    sDeltaSigma_tskij.win().fence();
+    sMO_skia.win().fence();
+    sE_ska.win().fence();
+    if (mpi->node_comm.root()) {
+      sDeltaSigma_tskij.local() = DeltaSigma_tskij;
+      sMO_skia.local() = MO_skia;
+      sE_ska.local() = E_ska;
+    }
+    sDeltaSigma_tskij.win().fence();
+    sMO_skia.win().fence();
+    sE_ska.win().fence();
+    mpi->comm.barrier();
+
+    // lr_qp_approx takes a 32-bit kpq_map; the exposed calculate_kpq_map returns
+    // int64, so narrow it here.
+    nda::array<int, 1> kpq_int(kpq_map.shape(0));
+    for (long i = 0; i < kpq_map.shape(0); ++i)
+      kpq_int(i) = static_cast<int>(kpq_map(i));
+
+    imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(prefix + ".mbpt.h5", false));
+    methods::qp_params_t qp_params{"sc", ac_alg, Nfit, eta, 1e-8, "qpscf", false, off_diag_mode};
+
+    auto sDeltaVcorr_skij = methods::lr_qp_approx(
+        sDeltaSigma_tskij, sMO_skia, sE_ska, mu, kpq_int, q_is_gamma, ft, qp_params);
+
+    nda::array<ComplexType, 4> DeltaVcorr_skij(ns, nk, nb, nb);
+    DeltaVcorr_skij = sDeltaVcorr_skij.local();
+    mpi->comm.barrier();
+
+    return DeltaVcorr_skij;
   }
 
 

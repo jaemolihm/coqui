@@ -612,6 +612,85 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment
                   unperturbed="mf_dft", split_sigma_terms=True,
                   div_corr=div_corr, div_treatment=div_treatment)
 
+def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
+                gw_mode="full", max_iter=50, tol=1e-8,
+                fix_density=False, iter_alg=None):
+    """
+    Quasiparticle-GW (qpGW) electron-phonon linear response.
+
+    Linear response of the static qpGW effective Hamiltonian
+    H_eff = H0 + F[Dm] + V_QPGW to a one-body perturbation ΔH0, on top of a
+    converged qpGW checkpoint. Each LR iteration:
+
+        ΔG_QP = G_QP · [ΔH0 + ΔF + ΔV_QPGW - Δμ·S] · G_QP     (frozen G_QP)
+        ΔF     = lr_hf(ΔDm)                                   (Hartree + exchange)
+        ΔΣ(iω) = -ΔG_QP⊙W0 - G_QP⊙ΔW                          (gw_mode="full")
+        ΔV_QPGW = lr_qp_approx(ΔΣ; frozen C, ε, μ, kpq_map)   (q-aware static map)
+
+    The frozen QP orbitals/energies (C, ε, μ) are reconstructed from the
+    checkpoint's Heff = H0 + F; W0 is the RPA screened interaction from G_QP
+    (recompute_W is forced on). The static ΔV_QPGW is the DIIS/damping-mixed and
+    convergence-tracked quantity; the dynamic ΔΣ is not in the Dyson RHS.
+
+    Adopted approximations (both quantified by the FD test, see docs):
+      - Frozen-orbital linearization of the static map (drop ΔC, Δε inside
+        lr_qp_approx; the full QP-state response is still kept exactly in G_QP
+        via the two-sided resolvent).
+      - The Padé analytic continuation is nonlinear in its input, so feeding ΔΣ
+        through it gives Padé[ΔΣ], not the consistent d/dλ(Padé[Σ]).
+
+    Parameters
+    ----------
+    params : dict
+        prefix/output/input_type/input_iter (see run_lr). Must point at a
+        converged qpGW checkpoint.
+    h_int : ThcCoulomb
+        THC ERI handler. Requires the no-symmetry (full-q) ground state.
+    q_vec : array-like
+        Perturbation wavevector in crystal coordinates, shape (3,).
+    DeltaH0_skij : np.ndarray or None
+        Perturbation, shape (ns, nk, nb, nb). Required on the MPI global root.
+    gw_mode : str, optional
+        Screening response of ΔΣ: "full" (ΔW responds via lr_rpa_pi, default) or
+        "fixed_W" (W frozen). Match the unperturbed qpGW run.
+    max_iter : int, optional
+        Max LR SCF iterations (default 50 = self-consistent). Use 1 for the
+        one-shot/linearized variant.
+    tol : float, optional
+        Convergence tolerance on ||ΔV_QPGW_new - ΔV_QPGW_old|| (default 1e-8).
+    fix_density : bool, optional
+        Enforce ΔN=0 via Δμ (q=0 only). Default False.
+    iter_alg : dict or None, optional
+        Iteration algorithm (damping/DIIS); see run_lr.
+
+    Notes on parameters
+    -------------------
+    The AC parameters (ac_alg, Nfit, eta, off_diag_mode) and div_treatment are
+    NOT accepted here: the LR run always reuses exactly what the ground-state
+    qpGW run used, read from the checkpoint ("scf/qp_params" and
+    "scf/div_treatment", written by run_qpgw). Re-run qpGW if the checkpoint
+    predates this and does not carry them.
+
+    Returns
+    -------
+    tuple[int, float]
+        (niter, Delta_mu).
+
+    Notes
+    -----
+    Output in {output}.mbpt.h5 / "linear_response": DeltaVcorr_skij (static
+    ΔV_QPGW) alongside ΔG/ΔDm/ΔF and the (informational) dynamic ΔΣ.
+    """
+    p = dict(params)
+    p["qp_static_sigma"] = True
+    if gw_mode not in ("fixed_W", "full"):
+        raise ValueError(f"run_lr_qpgw: gw_mode must be 'fixed_W' or 'full', got '{gw_mode}'.")
+    return run_lr(p, h_int, q_vec, DeltaH0_skij,
+                  include_hartree=True, include_exchange=True,
+                  gw_mode=gw_mode, max_iter=max_iter, tol=tol,
+                  fix_density=fix_density, iter_alg=iter_alg,
+                  unperturbed="checkpoint")
+
 def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, compute_exchange=True):
     """
     Compute linear response Fock matrix from LR density matrix.
@@ -667,6 +746,62 @@ def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, com
         S_skij = np.asarray(S_skij, dtype=np.complex128)
 
     return lr_hf_cpp(h_int, q_vec, DeltaDm_skij, S_skij, compute_hartree, compute_exchange)
+
+
+def lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia, E_ska, mu,
+                 kpq_map, q_is_gamma, off_diag_mode="qp_energy",
+                 ac_alg="pade", Nfit=18, eta=1e-3):
+    """
+    Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (LR-qpGW map).
+
+    Thin wrapper over the C++ methods::lr_qp_approx (see the C++ docstring). The
+    IAFT grid is read from the qpGW checkpoint {prefix}.mbpt.h5; the frozen QP
+    eigenbasis (MO_skia, E_ska), μ, k→k+q map, and AC parameters are provided by
+    the caller. Intended for testing the static map from Python.
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb
+        THC ERI handler (source of MPI + mean field).
+    prefix : str
+        Checkpoint prefix; the IAFT is read from {prefix}.mbpt.h5.
+    DeltaSigma_tskij : np.ndarray
+        Dynamic ΔΣ_k(τ), shape (nt, ns, nk, nb, nb), complex.
+    MO_skia : np.ndarray
+        Frozen QP MO coefficients C, shape (ns, nk, nb, nb), complex.
+    E_ska : np.ndarray
+        Frozen QP energies ε, shape (ns, nk, nb), complex.
+    mu : float
+        Frozen chemical potential.
+    kpq_map : np.ndarray
+        k → k+q index map, shape (nk,), int. Build via coqui.mbpt.calculate_kpq_map.
+    q_is_gamma : bool
+        Whether q ≈ 0 (enables the q=0 Hermitization branch).
+    off_diag_mode : str, optional
+        "qp_energy" (default) or "fermi". Match the qpGW run.
+    ac_alg : str, optional
+        Analytic-continuation algorithm (default "pade").
+    Nfit : int, optional
+        Number of AC fit parameters (default 18).
+    eta : float, optional
+        AC broadening (default 1e-3). Pass the value the qpGW run used (π/β).
+
+    Returns
+    -------
+    np.ndarray
+        Static ΔV_QPGW(k) in the primary basis, shape (ns, nk, nb, nb).
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_qp_approx as lr_qp_approx_cpp
+
+    DeltaSigma_tskij = np.asarray(DeltaSigma_tskij, dtype=np.complex128)
+    MO_skia = np.asarray(MO_skia, dtype=np.complex128)
+    E_ska = np.asarray(E_ska, dtype=np.complex128)
+    kpq_map = np.asarray(kpq_map, dtype=np.int64)
+
+    return lr_qp_approx_cpp(h_int, str(prefix), DeltaSigma_tskij, MO_skia, E_ska,
+                            float(mu), kpq_map, bool(q_is_gamma),
+                            str(off_diag_mode), str(ac_alg), int(Nfit), float(eta))
 
 
 def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=True):

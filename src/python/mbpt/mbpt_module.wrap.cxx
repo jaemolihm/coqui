@@ -312,6 +312,21 @@ static auto const fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ")};
 
+// lr_qp_approx
+static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &h_int, const std::string &prefix,
+       const nda::array<ComplexType, 5> &DeltaSigma_tskij,
+       const nda::array<ComplexType, 4> &MO_skia,
+       const nda::array<ComplexType, 3> &E_ska, double mu,
+       const nda::array<long, 1> &kpq_map, bool q_is_gamma,
+       std::string off_diag_mode, std::string ac_alg, int Nfit, double eta) {
+      return coqui_py::lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia,
+                                    E_ska, mu, kpq_map, q_is_gamma,
+                                    off_diag_mode, ac_alg, Nfit, eta);
+    },
+    "h_int", "prefix", "DeltaSigma_tskij", "MO_skia", "E_ska", "mu", "kpq_map",
+    "q_is_gamma", "off_diag_mode", "ac_alg", "Nfit", "eta")};
+
 static const auto doc_d_0 =
     fun_0.doc(R"DOC(
 Compute k+q mapping for linear response calculations
@@ -697,6 +712,55 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
     {c2py::python_typename<std::tuple<int, double>>()});
+static const auto doc_d_14 =
+    fun_14.doc(R"DOC(
+Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (test API)
+
+Parameters
+----------
+h_int : {par_0}
+   - [INPUT] THC ERI handler (source of MPI + MF)
+prefix : {par_1}
+   - [INPUT] checkpoint prefix; IAFT read from prefix.mbpt.h5
+DeltaSigma_tskij : {par_2}
+   - [INPUT] dynamic ΔΣ_k(τ), (nt, ns, nk, nb, nb)
+MO_skia : {par_3}
+   - [INPUT] frozen QP MO coefficients C, (ns, nk, nb, nb)
+E_ska : {par_4}
+   - [INPUT] frozen QP energies ε, (ns, nk, nb)
+mu : {par_5}
+   - [INPUT] frozen chemical potential
+kpq_map : {par_6}
+   - [INPUT] k → k+q index map, (nk,)
+q_is_gamma : {par_7}
+   - [INPUT] whether q ≈ 0 (enables Hermitization)
+off_diag_mode : {par_8}
+   - [INPUT] "qp_energy" or "fermi"
+ac_alg : {par_9}
+   - [INPUT] analytic-continuation algorithm (e.g. "pade")
+Nfit : {par_10}
+   - [INPUT] # of AC fit parameters
+eta : {par_11}
+   - [INPUT] AC broadening
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] static ΔV_QPGW(k), (ns, nk, nb, nb)
+)DOC",
+               {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
+                {c2py::python_typename<const std::string &>()},
+                {c2py::python_typename<const nda::array<ComplexType, 5> &>()},
+                {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
+                {c2py::python_typename<const nda::array<ComplexType, 3> &>()},
+                {c2py::python_typename<double>()},
+                {c2py::python_typename<const nda::array<long, 1> &>()},
+                {c2py::python_typename<bool>()},
+                {c2py::python_typename<std::string>()},
+                {c2py::python_typename<std::string>()},
+                {c2py::python_typename<int>()},
+                {c2py::python_typename<double>()}},
+               {c2py::python_typename<nda::array<ComplexType, 4>>()});
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -724,6 +788,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_10.c_str()},
     {"lr_hf", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
      doc_d_11.c_str()},
+    {"lr_qp_approx", (PyCFunction)c2py::pyfkw<fun_14>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_14.c_str()},
     {"mbpt", (PyCFunction)c2py::pyfkw<fun_12>, METH_VARARGS | METH_KEYWORDS,
      doc_d_12.c_str()},
     {"run_lr", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,

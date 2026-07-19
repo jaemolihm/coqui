@@ -83,6 +83,17 @@ namespace methods {
   long read_qpscf(mpi3::shared_communicator node_comm,
                   X_4D_t &Heff_skij, double &mu, std::string output);
 
+  /**
+   * Read the frozen QP eigenbasis (MO coefficients + energies) stored by a qpGW
+   * run in "scf/iter{iter}" (datasets MO_skia / E_ska; see the dump_scf qp
+   * overload). Fills the shared arrays sMO_skia (ns,nk,nb,nb) and sE_ska
+   * (ns,nk,nb). iter=-1 selects final_iter. Errors if the datasets are absent.
+   */
+  template<typename X_4D_t, typename X_3D_t>
+  void read_qp_MOs(mpi3::shared_communicator node_comm,
+                   X_4D_t &sMO_skia, X_3D_t &sE_ska,
+                   std::string output, std::string h5_grp="scf", long iter=-1);
+
   template<typename X_4D_t, typename X_3D_t>
   void write_qpgw_results(std::string filename, long gw_iter,
                           const X_3D_t &sE_ska,
@@ -191,7 +202,30 @@ namespace methods {
                bool include_hartree,
                bool include_exchange,
                bool include_gw_sigma,
-               Sigma_t const* sDeltaSigma2_tskij = nullptr);
+               Sigma_t const* sDeltaSigma2_tskij = nullptr,
+               F_t const* sDeltaVcorr_skij = nullptr);
+
+  /**
+   * Write the qpGW analytic-continuation parameters into the SCF checkpoint
+   * ("scf/qp_params"), so a later LR-qpGW run can statify ΔΣ with exactly the
+   * parameters the unperturbed qpGW run used. Also stashes div_treatment on the
+   * top-level "scf" group so the divergence head is reconstructed consistently.
+   */
+  template<typename communicator_t>
+  void dump_qp_params(communicator_t& comm, std::string filename,
+                      std::string const& off_diag_mode, double eta,
+                      std::string const& ac_alg, int Nfit,
+                      std::string const& div_treatment);
+
+  /**
+   * Read the qpGW AC parameters written by dump_qp_params. Returns true and
+   * fills the outputs if "scf/qp_params" is present; returns false (leaving
+   * the outputs untouched) otherwise.
+   */
+  template<typename communicator_t>
+  bool read_qp_params(communicator_t& comm, std::string filename,
+                      std::string& off_diag_mode, double& eta,
+                      std::string& ac_alg, int& Nfit);
 
   }; // chkpt
 

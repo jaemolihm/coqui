@@ -336,10 +336,11 @@ double qp_scf_loop(
   qp_params_t& qp_params, 
   solvers::mb_solver_t<corr_solver_t> mb_solver,
   iter_scf::iter_scf_t *iter_solver,
-  int niter, 
-  bool restart, 
+  int niter,
+  bool restart,
   double conv_tol,
-  bool compute_exchange) {
+  bool compute_exchange,
+  std::string h0_source) {
 
   using math::shm::make_shared_array;
   utils::TimerManager Timer;
@@ -389,7 +390,16 @@ double qp_scf_loop(
   auto sH0_skij = make_shared_array<Array_view_4D_t>(*mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   mb_state.sS_skij.emplace(make_shared_array<Array_view_4D_t>(*mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   auto& sS_skij = mb_state.sS_skij.value();
-  hamilt::set_H0(*mf, psp.get(), sH0_skij);
+  utils::check(h0_source == "compute" || h0_source == "checkpoint",
+               "qp_scf_loop: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
+  if (h0_source == "checkpoint") {
+    // Read the stored H0 from the checkpoint instead of recomputing it from the
+    // mean field.
+    app_log(1, "  H0 source                   = checkpoint ({}.mbpt.h5)", mb_state.coqui_prefix);
+    chkpt::read_H0(mpi->node_comm, mb_state.coqui_prefix, sH0_skij);
+  } else {
+    hamilt::set_H0(*mf, psp.get(), sH0_skij);
+  }
   hamilt::set_ovlp(*mf, sS_skij);
 
   // Obtains MO coefficients and energies from the given mean-field object
@@ -577,7 +587,7 @@ qp_scf_loop(MBState&,                         \
             qp_params_t&, \
             solvers::mb_solver_t<solvers::gw_t>,       \
             iter_scf::iter_scf_t*, \
-            int, bool, double, bool);
+            int, bool, double, bool, std::string);
 
 // All combinations of thc/chol for 4 eri slots
 QPSCF_LOOP_INST(thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t)

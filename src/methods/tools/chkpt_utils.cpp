@@ -302,6 +302,35 @@ long read_qpscf(mpi3::shared_communicator node_comm,
 }
 
 template<typename X_4D_t, typename X_3D_t>
+void read_qp_MOs(mpi3::shared_communicator node_comm,
+                 X_4D_t &sMO_skia, X_3D_t &sE_ska,
+                 std::string output, std::string h5_grp, long iter) {
+  sMO_skia.win().fence();
+  sE_ska.win().fence();
+  if (node_comm.root()) {
+    std::string filename = output + ".mbpt.h5";
+    h5::file file(filename, 'r');
+    auto scf_grp = h5::group(file).open_group(h5_grp);
+    if (iter == -1) h5::h5_read(scf_grp, "final_iter", iter);
+    utils::check(scf_grp.has_subgroup("iter"+std::to_string(iter)),
+                 "read_qp_MOs: \"{}/iter{}\" h5 group does not exist in {}.",
+                 h5_grp, iter, filename);
+    auto iter_grp = scf_grp.open_group("iter"+std::to_string(iter));
+    utils::check(iter_grp.has_dataset("MO_skia") && iter_grp.has_dataset("E_ska"),
+                 "read_qp_MOs: '{}/iter{}' has no MO_skia/E_ska datasets (not a qp "
+                 "checkpoint). Re-run qpGW so the QP eigenbasis is persisted.",
+                 h5_grp, iter);
+    auto MO_loc = sMO_skia.local();
+    auto E_loc = sE_ska.local();
+    nda::h5_read(iter_grp, "MO_skia", MO_loc);
+    nda::h5_read(iter_grp, "E_ska", E_loc);
+  }
+  sMO_skia.win().fence();
+  sE_ska.win().fence();
+  node_comm.barrier();
+}
+
+template<typename X_4D_t, typename X_3D_t>
 void write_qpgw_results(std::string filename, long gw_iter,
                         const X_3D_t &E_ska,
                         const X_4D_t &MO_skia,
@@ -634,7 +663,8 @@ void dump_lr(communicator_t& comm,
              bool include_hartree,
              bool include_exchange,
              bool include_gw_sigma,
-             Sigma_t const* sDeltaSigma2_tskij) {
+             Sigma_t const* sDeltaSigma2_tskij,
+             F_t const* sDeltaVcorr_skij) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -677,6 +707,14 @@ void dump_lr(communicator_t& comm,
       auto DeltaSigma_GdW_loc = sDeltaSigma2_tskij->local();
       nda::h5_write(lr_grp, "DeltaSigma_GdW_tskij", DeltaSigma_GdW_loc, false);
     }
+    // Static ΔV_QPGW (LR-qpGW): the frequency-independent correlation potential
+    // response that entered the Dyson RHS in place of the dynamic ΔΣ. Written
+    // only in qp mode (additive dataset; standard output format is unchanged).
+    if (sDeltaVcorr_skij != nullptr) {
+      h5::h5_write(lr_grp, "qp_static_sigma", 1);
+      auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
+      nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
+    }
 
     app_log(2, "LR results written to \"linear_response/\" in {}", filename);
     app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
@@ -684,9 +722,85 @@ void dump_lr(communicator_t& comm,
   comm.barrier();
 }
 
+template<typename communicator_t>
+void dump_qp_params(communicator_t& comm, std::string filename,
+                    std::string const& off_diag_mode, double eta,
+                    std::string const& ac_alg, int Nfit,
+                    std::string const& div_treatment) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_qp_params: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    utils::check(grp.has_subgroup("scf"),
+                 "dump_qp_params: '{}' has no 'scf' group.", filename);
+    auto scf_grp = grp.open_group("scf");
+    auto qp_grp = scf_grp.has_subgroup("qp_params") ?
+                  scf_grp.open_group("qp_params") : scf_grp.create_group("qp_params");
+    h5::h5_write(qp_grp, "off_diag_mode", off_diag_mode);
+    h5::h5_write(qp_grp, "eta", eta);
+    h5::h5_write(qp_grp, "ac_alg", ac_alg);
+    h5::h5_write(qp_grp, "Nfit", Nfit);
+    // Stash div_treatment on the scf group (same convention as
+    // scr_coulomb_t::dump_eps_inv_head) so LR reconstructs the head consistently.
+    if (!scf_grp.has_dataset("div_treatment"))
+      h5::h5_write(scf_grp, "div_treatment", div_treatment);
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
+bool read_qp_params(communicator_t& comm, std::string filename,
+                    std::string& off_diag_mode, double& eta,
+                    std::string& ac_alg, int& Nfit) {
+  int found = 0;
+  char odm_buf[64] = {0};
+  char ac_buf[64] = {0};
+  if (comm.root()) {
+    h5::file file(filename, 'r');
+    auto grp = h5::group(file);
+    if (grp.has_subgroup("scf")) {
+      auto scf_grp = grp.open_group("scf");
+      if (scf_grp.has_subgroup("qp_params")) {
+        auto qp_grp = scf_grp.open_group("qp_params");
+        h5::h5_read(qp_grp, "off_diag_mode", off_diag_mode);
+        h5::h5_read(qp_grp, "eta", eta);
+        h5::h5_read(qp_grp, "ac_alg", ac_alg);
+        h5::h5_read(qp_grp, "Nfit", Nfit);
+        utils::check(off_diag_mode.size() < sizeof(odm_buf) && ac_alg.size() < sizeof(ac_buf),
+                     "read_qp_params: string field too long.");
+        std::copy(off_diag_mode.begin(), off_diag_mode.end(), odm_buf);
+        std::copy(ac_alg.begin(), ac_alg.end(), ac_buf);
+        found = 1;
+      }
+    }
+  }
+  comm.broadcast_n(&found, 1, 0);
+  if (found) {
+    comm.broadcast_n(&eta, 1, 0);
+    comm.broadcast_n(&Nfit, 1, 0);
+    comm.broadcast_n(odm_buf, sizeof(odm_buf), 0);
+    comm.broadcast_n(ac_buf, sizeof(ac_buf), 0);
+    off_diag_mode = std::string(odm_buf);
+    ac_alg = std::string(ac_buf);
+  }
+  comm.barrier();
+  return found != 0;
+}
+
 // LR template instantiations
 template bool read_DeltaH0(mpi3::shared_communicator&, std::string,
                            nda::array<double, 1>&, sArray_t<Array_view_4D_t>&);
+
+template void dump_qp_params(mpi3::communicator&, std::string,
+                             std::string const&, double, std::string const&, int,
+                             std::string const&);
+template bool read_qp_params(mpi3::communicator&, std::string,
+                             std::string&, double&, std::string&, int&);
+
+template void read_qp_MOs(mpi3::shared_communicator,
+                          sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,
+                          std::string, std::string, long);
 
 template void write_DeltaH0(mpi3::communicator&, std::string,
                             nda::array<double, 1> const&,
@@ -699,7 +813,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_5D_t> const*,
                       double, int, bool, bool, bool,
-                      sArray_t<Array_view_5D_t> const*);
+                      sArray_t<Array_view_5D_t> const*,
+                      sArray_t<Array_view_4D_t> const*);
 
   } // chkpt
 } // methods

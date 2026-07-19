@@ -19,7 +19,8 @@ limitations under the License.
 """
 
 from .mbpt_driver import (
-    run_hf, run_gw, run_evgw, run_qpgw, run_lr, run_lr_g0w0, run_lr_hf,
+    run_hf, run_gw, run_evgw, run_qpgw, run_lr, run_lr_g0w0, run_lr_qpgw, run_lr_hf,
+    lr_qp_approx,
     hf_evaluate, run_lr_gw_sigma_DeltaG, gw_evaluate_sigma,
     run_lr_gw_Pi, gw_evaluate_Pi,
     run_lr_gw_W, gw_evaluate_W_from_Pi,
@@ -40,7 +41,9 @@ __all__ = [
     # Linear response
     "run_lr",
     "run_lr_g0w0",
+    "run_lr_qpgw",
     "run_lr_hf",
+    "lr_qp_approx",
     "hf_evaluate",
     # LR-GW
     "run_lr_gw_sigma_DeltaG",

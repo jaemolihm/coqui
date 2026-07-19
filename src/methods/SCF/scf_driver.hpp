@@ -62,7 +62,7 @@ double qp_scf_loop(MBState &mb_state, eri_t &mb_eri, const imag_axes_ft::IAFT& F
                    qp_params_t &qp_params, solvers::mb_solver_t<corr_solver_t> mb_solver,
                    iter_scf::iter_scf_t *iter_solver = nullptr, int niter = 1,
                    bool restart = false, double conv_tol = 1e-8,
-                   bool compute_exchange = true);
+                   bool compute_exchange = true, std::string h0_source = "compute");
 
 /**
  * RPA energy functional loop.
