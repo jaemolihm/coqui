@@ -263,6 +263,31 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
 }
 
 /**
+ * DFT Hartree + exchange-correlation potential V_Hxc = V_H + V_xc in a distributed
+ * array, evaluated from the converged QE local potentials (svsc - svloc) stored in the
+ * pseudopot object. Used to seed the iter-0 Fock/effective Hamiltonian of an augmented
+ * (non-eigenstate) basis, where the mf.eigval() slot holds kinetic Rayleigh seeds
+ * rather than KS eigenvalues. Only supported for QE/bdft backends with a local/semilocal
+ * functional (see gen_V_Hxc_aug guards).
+ * @return - A distributed array with global shape = (nspin, nkpts_ibz, nbnd, nbnd)
+ */
+template<MEMORY_SPACE MEM = HOST_MEMORY>
+auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
+               nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
+               std::array<long,4> pgrid = {0}, std::array<long,4> bz = {1,1,2048,2048})
+{
+  if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
+  if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
+  utils::check(mf.mf_type() == mf::qe_source or mf.mf_type() == mf::bdft_source,
+               "V_Hxc_aug: only supported for QE/bdft mean-field backends.");
+  using larray = memory::array<MEM,ComplexType,4>;
+  utils::check(psp != nullptr, "V_Hxc_aug: Missing pseudopot object.");
+  auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
+                                                          nda::range(-1,-1), k_range, b_range, bz);
+  return detail::gen_V_Hxc_aug<MEM>(mf,psp,k_range,b_range,psi);
+}
+
+/**
  * One-body Hamiltonian associated with a MF object in a shared memory array
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
  * @param exclude_H0 [INPUT] - exclude kinetic + pseudo/external potential or not

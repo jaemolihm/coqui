@@ -23,6 +23,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 
 #include "configuration.hpp"
@@ -43,10 +44,13 @@
 #include "nda/linalg.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/distributed_array/nda_utils.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "grids/g_grids.hpp"
 #include "mean_field/MF.hpp"
 #include "mean_field/distributed_orbital_readers.hpp"
+#include "hamiltonian/pseudo/pseudopot.h"
+#include "hamiltonian/one_body_hamiltonian.hpp"
 #include "itertools/itertools.hpp"
 
 #include "orbitals/orbital_augmenter.h"
@@ -350,6 +354,82 @@ auto rayleigh_eigvals(mf::MF& mf,
   return eig;
 }
 
+// Upgrade the augmented-basis eigval seed from the kinetic Rayleigh diagonal to the
+// full DFT Kohn-Sham diagonal
+//   eps_i = Re[ <phi_i|H0|phi_i> + <phi_i|V_H + V_xc|phi_i> ],
+// evaluated in the augmented basis. Returns the KS diagonal over the IBZ
+// (nspin, nkpts_ibz, nbnd_aug) on all ranks, or std::nullopt (with a warning) when the
+// DFT V_Hxc is unavailable -- pyscf-parented augmentation (no exported DFT local
+// potential) or a meta-GGA/hybrid functional (no multiplicative V_xc) -- in which case
+// the caller keeps the kinetic seed. Requires a provisional write of the augmented h5
+// (`fn`) so a pseudopot for the augmented band count and the augmented orbitals can be
+// read back; V_Hxc = svsc - svloc then follows from that pseudopot. (Hybrid functionals
+// have no reliable exported signal yet and are not detected -- a known gap.)
+template<class DArr>
+std::optional<nda::array<double,3>>
+try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
+                  nda::array<double,3> const& band_weights,
+                  nda::array<double,3> const& kinetic_eig_ibz,
+                  std::string const& augment_type)
+{
+  // Only QE-derived parents export the DFT local potential (svsc/svloc) into the
+  // augmented h5 (mirrors the pseudopot write condition in bdft_readonly). Pyscf
+  // parents write no Hamiltonian group, so make_pseudopot would fail -- skip here.
+  bool pp_available =
+      (mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) or
+      (mf.input_file_type() == mf::h5_input_type   and mf.mf_type() != mf::pyscf_source);
+  if (not pp_available) {
+    app_warning("Basis augmentation: DFT V_Hxc not available for this mean-field parent "
+                "(missing scf_local_potential / vxc_with_nlcc); augmented eigval seeded "
+                "with the kinetic (Rayleigh) diagonal only. This is expected for pyscf "
+                "parents, QE-xml parents, and meta-GGA/hybrid functionals.");
+    return std::nullopt;
+  }
+
+  // Provisional write: build the augmented h5 with the kinetic seed so its pseudopot
+  // (rebuilt for the augmented band count) and orbitals can be read back. The caller
+  // then writes the h5 a second time with the KS seed -- this double write is
+  // intentional: the pseudopot can only be rebuilt from the augmented h5, and
+  // augmentation is a one-time setup step, so the extra write is acceptable.
+  auto aug_mf = mf::MF(mf::bdft::bdft_readonly(mf, fn, psi, kinetic_eig_ibz,
+                                               augment_type, band_weights));
+  auto psp = hamilt::make_pseudopot(aug_mf);
+  if (not psp->has_local_vhxc()) {
+    app_warning("Basis augmentation: DFT V_Hxc not available for this mean-field parent "
+                "(missing scf_local_potential / vxc_with_nlcc); augmented eigval seeded "
+                "with the kinetic (Rayleigh) diagonal only. This is expected for pyscf "
+                "parents, QE-xml parents, and meta-GGA/hybrid functionals.");
+    return std::nullopt;
+  }
+
+  auto& mpi = *aug_mf.mpi();
+  long nspin = aug_mf.nspin();
+  long nkpts_ibz = aug_mf.nkpts_ibz();
+  long norb = aug_mf.nbnd();
+  using array_view_4d_t = nda::array_view<ComplexType,4>;
+
+  // H0 and V_Hxc matrices in the augmented basis; only the diagonals are needed.
+  auto sH0 = math::shm::make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, norb, norb});
+  hamilt::set_H0(aug_mf, psp.get(), sH0);
+
+  auto dVHxc = hamilt::V_Hxc_aug<HOST_MEMORY>(aug_mf, mpi.comm, psp.get());
+  auto sVHxc = math::shm::make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, norb, norb});
+  math::nda::gather_to_shm(dVHxc, sVHxc);
+  mpi.comm.barrier();
+
+  auto ks_eig_ibz = nda::array<double,3>::zeros({nspin, nkpts_ibz, norb});
+  if (mpi.comm.root()) {
+    auto H0l = sH0.local();
+    auto Vl  = sVHxc.local();
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k)
+        for (long i = 0; i < norb; ++i)
+          ks_eig_ibz(s,k,i) = std::real(H0l(s,k,i,i) + Vl(s,k,i,i));
+  }
+  mpi.comm.broadcast_n(ks_eig_ibz.data(), ks_eig_ibz.size(), 0);
+  return ks_eig_ibz;
+}
+
 template<MEMORY_SPACE MEM>
 mf::MF add_augmentation(mf::MF& mf, std::string fn,
                         std::shared_ptr<orbital_augmenter_t> augmenter,
@@ -401,9 +481,14 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   if(nbnd_aug == 0) {
     // No augmentation states: emit the original orbitals in the augmented bdft
-    // format (kinetic-energy eigval seed + pseudopot, h0_source="compute") so a
-    // zero-augmentation baseline runs through the same downstream pipeline.
+    // format (DFT KS eigval seed + pseudopot, h0_source="compute") so a
+    // zero-augmentation baseline runs through the same downstream pipeline. The
+    // originals are true DFT eigenstates, so their KS diagonal reproduces the parent
+    // eigenvalues; when V_Hxc is unavailable the kinetic diagonal is used instead.
     auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
+    if(auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
+                                   augmenter->type()))
+      eig_ibz = std::move(*ks);
     return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, augmenter->type()));
   }
 
@@ -434,8 +519,11 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
   auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
 
-  // kinetic-energy eigenvalue seed for the (non-eigen) basis
+  // DFT Kohn-Sham eigval seed for the (non-eigen) augmented basis, falling back to the
+  // kinetic Rayleigh diagonal when the DFT V_Hxc is unavailable.
   auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_full);
+  if(auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz, augmenter->type()))
+    eig_ibz = std::move(*ks);
 
   return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type(),
                                         band_weights));

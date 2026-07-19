@@ -287,6 +287,20 @@ class pseudopot
     return D;
   }
 
+  // Converged DFT local potentials on the real-space FFT grid (Hartree units):
+  //   scf_local_potential() = V_H + V_xc + V_loc   (svsc)
+  //   pp_local_potential()  = V_loc (ionic local pp) (svloc)
+  // so scf_local_potential() - pp_local_potential() = V_H + V_xc. Populated only
+  // for QE-derived pseudopotentials (h5 input); used to seed the augmented Fock.
+  sarray_t<nda::array_view<ComplexType,3>> const& scf_local_potential() const { return svsc; }
+  sarray_t<nda::array_view<ComplexType,3>> const& pp_local_potential() const { return svloc; }
+
+  // True when a complete local/semilocal (LDA/GGA) V_xc is available, i.e. the
+  // exported scf_local_potential includes a multiplicative V_xc (signalled by the
+  // "vxc_with_nlcc" dataset). False for meta-GGA/hybrid functionals, whose V_xc is
+  // not purely multiplicative and is therefore absent from scf_local_potential.
+  bool has_local_vhxc() const { return has_local_vxc; }
+
   private:
 
   // mpi communicators
@@ -314,6 +328,10 @@ class pseudopot
   // spin-orbit
   bool spinorbit_loc = false;
   bool spinorbit_nl = false;
+
+  // whether a multiplicative (LDA/GGA) V_xc is available in scf_local_potential;
+  // see has_local_vhxc(). Set from the "vxc_with_nlcc" dataset in read_vnl_h5.
+  bool has_local_vxc = false;
 
   // number of spins 
   int nspin = 1;

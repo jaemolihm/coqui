@@ -13,6 +13,8 @@
 #include "mean_field/MF.hpp"
 #include "mean_field/distributed_orbital_readers.hpp"
 #include "hamiltonian/matrix_elements.h"
+#include "hamiltonian/add_vloc.hpp"
+#include "utilities/mpi_context.h"
 #include "utilities/proc_grid_partition.hpp"
 
 namespace hamilt::detail
@@ -174,9 +176,92 @@ auto gen_Vxc(mf::MF& mf,
   return Vxc_ij;
 }
 
+/**
+ * Compute the matrix elements of the DFT Hartree + exchange-correlation potential
+ * V_Hxc = V_H + V_xc using FFT, for seeding the iter-0 Fock/effective Hamiltonian of
+ * an augmented (non-eigenstate) basis. Unlike gen_Vxc, no density matrix and no
+ * Poisson solve are needed: the converged local potentials are already imported from
+ * QE and stored in the pseudopot object, so
+ *   V_Hxc(r) = svsc(r) - svloc(r) = (V_H + V_xc + V_loc) - V_loc,   in Hartree,
+ * on the real-space FFT grid. This routine is a near-clone of gen_Vxc with vr formed
+ * from svsc - svloc instead of the exported vxc.
+ *
+ * @tparam MEM - Type parameter for memory space
+ * @param mf   - Coqui's mean-field handler
+ * @param psp  - Pseudopotential handler holding the converged DFT local potentials
+ * @param k_range - Index range for k-points
+ * @param b_range - Index range for orbitals
+ * @param psi  - Single-particle basis (s, k, i, g) on the "wfc" grid
+ * @return V_Hxc_ij in a distributed array (s, k, i, j)
+ */
+template<MEMORY_SPACE MEM>
+auto gen_V_Hxc_aug(mf::MF& mf, pseudopot* psp,
+            nda::range k_range, nda::range b_range,
+            memory::darray_t<memory::array<MEM,ComplexType,4>, mpi3::communicator>& psi)
+{
+  decltype(nda::range::all) all;
+  using larray = memory::array<MEM,ComplexType,4>;
+  using math::nda::make_distributed_array;
+  utils::check(k_range.size() == psi.global_shape()[1], "Shape mismatch.");
+  utils::check(b_range.size() == psi.global_shape()[2], "Shape mismatch.");
+  utils::check(psp != nullptr, "gen_V_Hxc_aug: Missing pseudopot object.");
+
+  // Guard: the DFT V_Hxc seed requires a QE-derived parent with a local/semilocal
+  // (LDA/GGA) functional whose V_xc is multiplicative (signalled by has_local_vhxc()).
+  // Meta-GGA/hybrid or pyscf-parented augmentation -- where svsc/svloc are absent or
+  // incomplete -- is refused. Callers that can fall back should check has_local_vhxc()
+  // first (see orbitals::try_ks_eigval_ibz).
+  if (!psp->has_local_vhxc())
+    APP_ABORT("gen_V_Hxc_aug: the augmented DFT V_Hxc seed requires a QE-derived parent "
+              "with a local/semilocal (LDA/GGA) functional. The mean field '{}' has no "
+              "usable multiplicative V_xc, so H_KS_aug cannot be seeded from svsc - svloc.",
+              mf.filename());
+
+  auto comm = psi.communicator();
+  long nspin = psi.global_shape()[0];
+  long nkpts = psi.global_shape()[1];
+  long M = psi.global_shape()[2];
+  int npol = mf.npol();
+  auto fft_mesh = mf.fft_grid_dim();
+
+  // V_Hxc(r) = svsc(r) - svloc(r), on the real-space FFT grid (Hartree units).
+  // V_loc is diagonal in polarization: when svloc carries a single polarization
+  // channel it is subtracted only from the diagonal spin blocks (p = ip*npol+ip).
+  auto vsc = psp->scf_local_potential().local();
+  auto vloc = psp->pp_local_potential().local();
+  memory::array<HOST_MEMORY,ComplexType,3> vr(vsc.shape());
+  if (vloc.shape()[1] == vsc.shape()[1]) {
+    vr() = vsc - vloc;
+  } else {
+    utils::check(vloc.shape()[1] == 1, "gen_V_Hxc_aug: unexpected svloc polarization shape.");
+    vr() = vsc;
+    for (int ip = 0; ip < npol; ++ip)
+      vr(all, ip*npol+ip, all) = vsc(all, ip*npol+ip, all) - vloc(all, 0, all);
+  }
+
+  // hpsi(is,ik,ia,g) = V_Hxc * psi
+  auto mpi_context = utils::make_mpi_context(*comm);
+  auto swfc_to_rho = hamilt::detail::make_wfc_to_rho(mpi_context, mf, fft_mesh);
+  auto hpsi = make_distributed_array<larray>(*comm,psi.grid(),psi.global_shape(),psi.block_size());
+  hpsi.local() = ComplexType{0.0};
+  hamilt::add_vloc(npol, fft_mesh, swfc_to_rho.local(), vr, psi, hpsi);
+
+  auto V_ij = make_distributed_array<larray>(
+      *comm, psi.grid(), {nspin,nkpts,M,M},
+      {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+  V_ij.local() = ComplexType(0.0);
+
+  // V_ij = conj(psi(i,:)) * hpsi(j,:) = conj( psi(i,:) * conj(hpsi(j,:)) )
+  math::nda::slate_ops::multiply(ComplexType(1.0),psi,math::nda::dagger(hpsi),
+                                 ComplexType(0.0),V_ij);
+  nda::tensor::scale(ComplexType(1.0),V_ij.local(),nda::tensor::op::CONJ);
+
+  return V_ij;
+}
+
 // MAM: mf object should keep a flag which in case basis set is orthonormal, e.g. from QE...
 template<MEMORY_SPACE MEM, bool diagonal = false>
-auto gen_ovlp(boost::mpi3::communicator& comm, 
+auto gen_ovlp(boost::mpi3::communicator& comm,
               memory::darray_t<memory::array<MEM,ComplexType,4>, mpi3::communicator>& psi) 
 {
   decltype(nda::range::all) all;

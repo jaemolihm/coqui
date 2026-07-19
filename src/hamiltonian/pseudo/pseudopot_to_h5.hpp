@@ -262,6 +262,13 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
         nda::h5_read(grp_,"pp_local_component",vr);
         nda::h5_write(grp,"pp_local_component",vr);
       }
+      // Propagate the multiplicative-V_xc signal: its presence marks a local/semilocal
+      // (LDA/GGA) functional, read back by pseudopot::has_local_vhxc() to gate the DFT
+      // V_Hxc seed of an augmented basis. Absent for meta-GGA/hybrid parents.
+      if( grp_.has_dataset("vxc_with_nlcc") ) {
+        nda::h5_read(grp_,"vxc_with_nlcc",vl);
+        nda::h5_write(grp,"vxc_with_nlcc",vl);
+      }
     }
 
     {

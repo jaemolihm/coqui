@@ -409,6 +409,11 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
 
   h5::group grp = grp1.open_group(type);
 
+  // A multiplicative (LDA/GGA) V_xc is exported alongside the potential only when
+  // "vxc_with_nlcc" is present; it is skipped for meta-GGA/hybrid functionals, whose
+  // V_xc is not purely local. Records whether scf_local_potential carries a full V_xc.
+  has_local_vxc = grp.has_dataset("vxc_with_nlcc");
+
   int nk, npwx;
   h5::h5_read_attribute(grp,"number_of_nspins",nspin);
   h5::h5_read_attribute(grp,"number_of_polarizations",npol);

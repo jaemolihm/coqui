@@ -21,6 +21,9 @@
 
 #undef NDEBUG
 
+#include <cmath>
+#include <algorithm>
+
 #include "catch2/catch.hpp"
 
 #include "configuration.hpp"
@@ -42,6 +45,7 @@
 #include "hamiltonian/one_body_hamiltonian.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "orbitals/orbital_generator.h"
+#include "orbitals/orbital_augmenter.h"
 #include "utilities/mpi_context.h"
 
 namespace bdft_tests
@@ -88,8 +92,97 @@ TEST_CASE("add_pgto", "[orbit]")
 }
 */
 
+// Write-time DFT KS eigval seed for an augmented basis. With nbnd_aug=0 the augmented
+// basis is exactly the parent's DFT eigenstates, so the KS diagonal seed
+//   eps_i = Re[<phi_i|H0 + V_H + V_xc|phi_i>]
+// must reproduce the parent QE eigenvalues over the IBZ. This exercises the full
+// write-time path (provisional h5 write, augmented-band pseudopot rebuild, V_Hxc from
+// svsc - svloc) end-to-end. Uses the h5 QE fixture so the DFT local potential is present.
+TEST_CASE("aug_ks_seed", "[orbit]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto qe_mf = mf::default_MF(mpi, "qe_lih223", mf::h5_input_type);
+
+  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+  // nbnd_aug=0: zero-augmentation baseline; the KS diagonal should equal parent eigvals.
+  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug.h5", augmenter,
+                                                        0, 1e-6, 1e-2);
+
+  long nspin = qe_mf.nspin();
+  long nkpts_ibz = qe_mf.nkpts_ibz();
+  long nbnd = qe_mf.nbnd();
+  auto all = nda::range::all;
+  auto ref = qe_mf.eigval()(all, nda::range(nkpts_ibz), all);
+  auto got = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
+
+  double num = 0.0, den = 0.0;
+  for (long s = 0; s < nspin; ++s)
+    for (long k = 0; k < nkpts_ibz; ++k)
+      for (long i = 0; i < nbnd; ++i) {
+        double d = got(s,k,i) - ref(s,k,i);
+        num += d*d;
+        den += ref(s,k,i)*ref(s,k,i);
+      }
+  double rel = std::sqrt(num) / std::sqrt(den);
+  app_log(2, "aug_ks_seed: ||KS_diag - QE_eigval|| / ||QE_eigval|| (IBZ) = {}", rel);
+  utils::VALUE_EQUAL(rel, 0.0, 1e-4);
+
+  mpi->comm.barrier();
+  if(mpi->comm.root()) remove("dummy_aug.h5");
+  mpi->comm.barrier();
+}
+
+// Same KS seed with a genuinely augmented basis (nbnd_aug>0). The original bands survive
+// orthonormalize_augmentation unchanged, so the KS diagonal over the ORIGINAL band block
+// (the first nbnd of the nbnd+n_aug seeded eigval) must still reproduce the parent
+// eigenvalues, even with augmentation states appended. The augmented-band entries have no
+// ground truth, so we only require them to be finite/real.
+TEST_CASE("aug_ks_seed_partial", "[orbit]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto qe_mf = mf::default_MF(mpi, "qe_lih223", mf::h5_input_type);
+
+  long nspin = qe_mf.nspin();
+  long nkpts_ibz = qe_mf.nkpts_ibz();
+  long nbnd = qe_mf.nbnd();
+  long nbnd_aug = std::min(2L, nbnd);
+
+  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug_p.h5", augmenter,
+                                                        nbnd_aug, 1e-6, 1e-2);
+
+  long norb = aug_mf.nbnd();
+  REQUIRE(norb > nbnd); // augmentation states were actually appended
+  auto all = nda::range::all;
+  auto ref = qe_mf.eigval()(all, nda::range(nkpts_ibz), all);
+  auto got = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
+
+  // original block (first nbnd): KS diagonal must equal parent eigenvalues
+  double num = 0.0, den = 0.0;
+  for (long s = 0; s < nspin; ++s)
+    for (long k = 0; k < nkpts_ibz; ++k)
+      for (long i = 0; i < nbnd; ++i) {
+        double d = got(s,k,i) - ref(s,k,i);
+        num += d*d;
+        den += ref(s,k,i)*ref(s,k,i);
+      }
+  double rel = std::sqrt(num) / std::sqrt(den);
+  app_log(2, "aug_ks_seed_partial: original-block ||KS_diag - QE_eigval|| / ||QE_eigval|| = {}", rel);
+  utils::VALUE_EQUAL(rel, 0.0, 1e-4);
+
+  // augmented block (nbnd..norb): no ground truth, just require finite/real seeds
+  for (long s = 0; s < nspin; ++s)
+    for (long k = 0; k < nkpts_ibz; ++k)
+      for (long i = nbnd; i < norb; ++i)
+        REQUIRE(std::isfinite(got(s,k,i)));
+
+  mpi->comm.barrier();
+  if(mpi->comm.root()) remove("dummy_aug_p.h5");
+  mpi->comm.barrier();
+}
+
 TEST_CASE("eig_select", "[orbit]")
-{ 
+{
   auto& mpi = utils::make_unit_test_mpi_context();
   auto qe_mf = mf::default_MF(mpi,mf::qe_source);
 

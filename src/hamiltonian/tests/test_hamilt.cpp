@@ -297,7 +297,51 @@ void check_F(mpi_context_t& mpi, mf::MF& mfobj) {
   utils::ARRAY_EQUAL(sF.local(), sF0.local(), 1e-4);
 }
 
-// should only be called with HF calculations or hybrid DFT 
+// Correctness gate for the augmented DFT V_Hxc seed. On a NON-augmented (KS
+// eigenstate) basis the seed
+//   H_KS = H0 + <phi|svsc - svloc|phi> = H0 + V_H + V_xc
+// must reproduce diag(KS eigenvalues) = hamilt::F(). This validates the
+// svsc - svloc potential subtraction and the add_vloc projection independently of
+// augmentation, using the eigenvalues as an external ground truth.
+template<MEMORY_SPACE MEM>
+void check_KS_seed(mpi_context_t& mpi, mf::MF& mfobj) {
+
+  hamilt::pseudopot V(mfobj);
+  long nspin = mfobj.nspin();
+  long nkpts_ibz = mfobj.nkpts_ibz();
+  long nbnd = mfobj.nbnd();
+
+  // H0 + V_Hxc_aug, gathered into a shared array
+  auto H0 = hamilt::H0<MEM>(mfobj, mpi.comm, &V);
+  auto dHxc = hamilt::V_Hxc_aug<MEM>(mfobj, mpi.comm, &V);
+
+  auto sSeed = make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, nbnd, nbnd});
+  math::nda::gather_to_shm(H0, sSeed);
+  auto sT = make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, nbnd, nbnd});
+  math::nda::gather_to_shm(dHxc, sT);
+  if(mpi.node_comm.root()) sSeed.local() += sT.local();
+  mpi.node_comm.barrier();
+
+  // reference: diag(KS eigenvalues)
+  auto F = hamilt::F<MEM>(mfobj, mpi.comm, nda::range(nkpts_ibz), nda::range(nbnd));
+  auto sF = make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, nbnd, nbnd});
+  math::nda::gather_to_shm(F, sF);
+  mpi.node_comm.barrier();
+
+  auto Abs = nda::map([](ComplexType _x_) { return std::abs(_x_); });
+  double norm = -1;
+  if (sF.node_comm()->root()) {
+    nda::array<RealType,4> res_abs(nspin, nkpts_ibz, nbnd, nbnd);
+    res_abs = Abs(sSeed.local() - sF.local());
+    norm = nda::max_element(res_abs);
+  }
+  sF.node_comm()->broadcast_n(&norm, 1, 0);
+  app_log(2, "Norm of (H0 + V_Hxc_aug) - diag(eigval) = {}", norm);
+
+  utils::ARRAY_EQUAL(sSeed.local(), sF.local(), 1e-4);
+}
+
+// should only be called with HF calculations or hybrid DFT
 template<MEMORY_SPACE MEM>
 void check_K(mpi_context_t& mpi, std::shared_ptr<mf::MF> &mfobj, double x) {
 
@@ -602,11 +646,49 @@ void test_F_impl(std::shared_ptr<mpi_context_t> &mpi)
 
 TEST_CASE("mf_F", "[hamilt]") {
   auto& mpi = utils::make_unit_test_mpi_context();
-  
+
   test_F_impl<HOST_MEMORY>(mpi);
 #if defined(ENABLE_DEVICE)
   test_F_impl<DEVICE_MEMORY>(mpi);
   test_F_impl<UNIFIED_MEMORY>(mpi);
+#endif
+}
+
+template<MEMORY_SPACE MEM>
+void test_ks_seed_impl(std::shared_ptr<mpi_context_t> &mpi)
+{
+  SECTION("lih223")
+  {
+    auto qe_h5 = mf::default_MF(mpi, "qe_lih223", mf::h5_input_type);
+    check_KS_seed<MEM>(*mpi, qe_h5);
+  }
+
+  SECTION("lih223_inv")
+  {
+    auto qe_h5 = mf::default_MF(mpi, "qe_lih223_inv", mf::h5_input_type);
+    check_KS_seed<MEM>(*mpi, qe_h5);
+  }
+
+  SECTION("lih223_sym")
+  {
+    auto qe_h5 = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
+    check_KS_seed<MEM>(*mpi, qe_h5);
+  }
+
+  SECTION("GaAs222_so")
+  {
+    auto qe_h5 = mf::default_MF(mpi, "qe_GaAs222_so", mf::h5_input_type);
+    check_KS_seed<MEM>(*mpi, qe_h5);
+  }
+}
+
+TEST_CASE("ks_seed", "[hamilt]") {
+  auto& mpi = utils::make_unit_test_mpi_context();
+
+  test_ks_seed_impl<HOST_MEMORY>(mpi);
+#if defined(ENABLE_DEVICE)
+  test_ks_seed_impl<DEVICE_MEMORY>(mpi);
+  test_ks_seed_impl<UNIFIED_MEMORY>(mpi);
 #endif
 }
 
