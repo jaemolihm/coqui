@@ -23,6 +23,7 @@
 
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_precompute.hpp"
+#include "methods/SCF/scf_common.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/thc_solver_comm.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
@@ -63,7 +64,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
                   "LR_DRIVER_SETUP_DN_DMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA", "LR_GW_DW_TRANSPOSE",
-                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2",
+                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2", "LR_QPGW_STATIC",
                    "LR_ITER_ALG", "LR_SAVE", "LR_CONVERGENCE"}) {
     _Timer.add(v);
   }
@@ -109,13 +110,26 @@ std::tuple<int, double> lr_driver::run_lr(
     bool div_corr,
     std::string div_treatment,
     const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
+    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
+    const lr_qp_static_params* qp_static,
+    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij) {
 
   _Timer.start("LR_SCF");
 
   bool need_hf = include_hartree || include_exchange;
   bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
   bool gw_full = (gw_mode == lr_gw_update_mode::full);
+  // LR-qpGW static-map mode: statify the dynamic ΔΣ(iω) into a static ΔV_QPGW(k)
+  // each iteration (frozen orbitals), feed it into the Dyson RHS in place of the
+  // dynamic ΔΣ, and track it for DIIS/damping/convergence.
+  bool qp_mode = (qp_static != nullptr);
+  // Which quantity is tracked/mixed in the Dyson RHS alongside ΔF:
+  //   has_Vcorr — static ΔV_QPGW (qp mode) is the mixed/tracked quantity
+  //   has_Sigma — dynamic ΔΣ(iω) (standard GW path) is the mixed/tracked quantity
+  // include_gw_sigma still gates construction/compute of the GW pipeline (qpGW
+  // computes ΔΣ before statifying it into ΔV_QPGW).
+  bool has_Vcorr = qp_mode;
+  bool has_Sigma = include_gw_sigma && !qp_mode;
   // One-shot G0W0: store the two ΔΣ terms separately instead of fusing them.
   // ΔΣ term1 (-ΔG⊙W_c) → sDeltaSigma_tskij, ΔΣ term2 (-G⊙ΔW) → sDeltaSigma_term2.
   bool split_sigma_terms = (sDeltaSigma_term2_tskij != nullptr);
@@ -139,6 +153,14 @@ std::tuple<int, double> lr_driver::run_lr(
                  "lr_driver::run_lr: split ΔΣ terms do not support the DeltaX IBC "
                  "correction (term 2 has no IBC path).");
   }
+  if (qp_mode) {
+    utils::check(include_gw_sigma,
+                 "lr_driver::run_lr: qp_static mode requires gw_mode != none.");
+    utils::check(!split_sigma_terms,
+                 "lr_driver::run_lr: qp_static mode is incompatible with split ΔΣ terms.");
+    utils::check(qp_static->sMO_skia != nullptr && qp_static->sE_ska != nullptr,
+                 "lr_driver::run_lr: qp_static mode requires sMO_skia and sE_ska.");
+  }
 
   const char* gw_mode_str = "none";
   switch (gw_mode) {
@@ -157,6 +179,7 @@ std::tuple<int, double> lr_driver::run_lr(
   app_log(1, "  include_hartree = {}", include_hartree ? "true" : "false");
   app_log(1, "  include_exchange = {}", include_exchange ? "true" : "false");
   app_log(1, "  gw_mode = {}", gw_mode_str);
+  app_log(1, "  qp_static_sigma = {}", qp_mode ? "true" : "false");
   app_log(1, "  iter_alg = {}", iter_params.alg);
   app_log(1, "  mixing = {:.2f}", mixing);
   if (use_diis) {
@@ -291,16 +314,25 @@ std::tuple<int, double> lr_driver::run_lr(
   // Allocate arrays for previous Fock matrix (for damping/DIIS)
   auto sDeltaF_prev_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-  // Previous ΔΣ only needed when GW is active (saves a full 5D allocation)
-  auto sDeltaSigma_prev_tskij = include_gw_sigma
+  // Previous ΔΣ only needed when GW is active and not in qp mode (in qp mode the
+  // dynamic ΔΣ is not tracked; the static ΔV_QPGW is tracked instead).
+  auto sDeltaSigma_prev_tskij = has_Sigma
       ? math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {1, 1, 1, 1, 1});
+  // Static ΔV_QPGW (current + previous) tracked in qp mode.
+  auto sDeltaVcorr_skij = has_Vcorr
+      ? math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd})
+      : math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {1, 1, 1, 1});
+  auto sDeltaVcorr_prev_skij = has_Vcorr
+      ? math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd})
+      : math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {1, 1, 1, 1});
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
 
   _Timer.start("LR_DRIVER_SETUP_MISC");
   // Initialize ΔF = 0 (and ΔΣ = 0 if GW active); set_zero ends with fence + node_sync
   sDeltaF_skij.set_zero();
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
+  if (has_Vcorr) sDeltaVcorr_skij.set_zero();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -348,7 +380,9 @@ std::tuple<int, double> lr_driver::run_lr(
     if (_mpi->node_comm.root() && iter > 1) {
       sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
       sDeltaF_prev_skij.local() = sDeltaF_skij.local();
-      if (include_gw_sigma) {
+      if (has_Vcorr) {
+        sDeltaVcorr_prev_skij.local() = sDeltaVcorr_skij.local();
+      } else if (has_Sigma) {
         sDeltaSigma_prev_tskij.local() = sDeltaSigma_tskij->local();
       }
     }
@@ -356,12 +390,16 @@ std::tuple<int, double> lr_driver::run_lr(
     _Timer.stop("LR_SAVE");
 
     // Step 1: Solve LR Dyson equation
-    // ΔG = G_{k+q} · [ΔH0 + ΔF + ΔΣ - Δμ·S] · G_k
+    // ΔG = G_{k+q} · [ΔH0 + ΔF + (ΔΣ | ΔV_QPGW) - Δμ·S] · G_k
+    // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
+    // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
+    sArray_t<Array_view_5D_t>* dyson_sigma = has_Sigma ? sDeltaSigma_tskij : nullptr;
+    const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
-        sDeltaF_skij, sDeltaSigma_tskij,
-        fix_density, Delta_mu);
+        sDeltaF_skij, dyson_sigma,
+        fix_density, Delta_mu, dyson_vcorr);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -492,14 +530,38 @@ std::tuple<int, double> lr_driver::run_lr(
       _Timer.stop("LR_GW_SIGMA");
     }
 
+    // Step 3g (qp mode): statify the dynamic ΔΣ(iω) into the static ΔV_QPGW(k)
+    // using the frozen QP orbitals/energies. ΔV_QPGW is the tracked/mixed static
+    // quantity and enters the Dyson RHS at the next iteration.
+    if (qp_mode) {
+      _Timer.start("LR_QPGW_STATIC");
+      auto sVcorr = lr_qp_approx(
+          *sDeltaSigma_tskij, *qp_static->sMO_skia, *qp_static->sE_ska,
+          qp_static->mu, _lr_dyson.kpq_map(), is_q_gamma(),
+          *_dyson.FT(), qp_static->qp_params);
+      sDeltaVcorr_skij.win().fence();
+      if (_mpi->node_comm.root())
+        sDeltaVcorr_skij.local() = sVcorr.local();
+      sDeltaVcorr_skij.win().fence();
+      _mpi->comm.barrier();
+      _Timer.stop("LR_QPGW_STATIC");
+    }
+
     // Step 4: Apply iteration algorithm (DIIS or damping) on combined (ΔF, ΔΣ)
     _Timer.start("LR_ITER_ALG");
     if (iter > 1 && (need_hf || include_gw_sigma)) {
+      // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
+      // standard path, or the static ΔV_QPGW in qp mode.
       if (use_diis) {
         // Distributed DIIS: every node rank participates, each operating on its
         // element-slice of the shared ΔF/ΔΣ and writing the mixed result back in
         // place. Pass .local() views directly (in/out).
-        if (include_gw_sigma) {
+        if (has_Vcorr) {
+          _lr_diis->next_step_combined(
+              _mpi->node_comm,
+              sDeltaF_skij.local(), sDeltaF_prev_skij.local(),
+              sDeltaVcorr_skij.local(), sDeltaVcorr_prev_skij.local(), iter);
+        } else if (has_Sigma) {
           _lr_diis->next_step_combined(
               _mpi->node_comm,
               sDeltaF_skij.local(), sDeltaF_prev_skij.local(),
@@ -514,7 +576,10 @@ std::tuple<int, double> lr_driver::run_lr(
       } else if (mixing < 1.0 && _mpi->node_comm.root()) {
         sDeltaF_skij.local() = mixing * sDeltaF_skij.local()
                                + (1.0 - mixing) * sDeltaF_prev_skij.local();
-        if (include_gw_sigma) {
+        if (has_Vcorr) {
+          sDeltaVcorr_skij.local() = mixing * sDeltaVcorr_skij.local()
+                                     + (1.0 - mixing) * sDeltaVcorr_prev_skij.local();
+        } else if (has_Sigma) {
           sDeltaSigma_tskij->local() = mixing * sDeltaSigma_tskij->local()
                                        + (1.0 - mixing) * sDeltaSigma_prev_tskij.local();
         }
@@ -525,7 +590,8 @@ std::tuple<int, double> lr_driver::run_lr(
       // buffer below (barrier alone is insufficient under the MPI-3
       // separate shared-memory model).
       sDeltaF_skij.win().fence();
-      if (sDeltaSigma_tskij) sDeltaSigma_tskij->win().fence();
+      if (has_Vcorr) sDeltaVcorr_skij.win().fence();
+      else if (has_Sigma) sDeltaSigma_tskij->win().fence();
       _mpi->node_comm.barrier();
       // The iter-alg step is computed independently on each node's shared replica,
       // so the per-node results can drift apart by floating-point noise (different
@@ -534,14 +600,18 @@ std::tuple<int, double> lr_driver::run_lr(
       if (_mpi->node_comm.root()) {
         _mpi->internode_comm.broadcast_n(sDeltaF_skij.local().data(),
                                          sDeltaF_skij.local().size(), 0);
-        if (include_gw_sigma) {
+        if (has_Vcorr) {
+          _mpi->internode_comm.broadcast_n(sDeltaVcorr_skij.local().data(),
+                                           sDeltaVcorr_skij.local().size(), 0);
+        } else if (has_Sigma) {
           _mpi->internode_comm.broadcast_n(sDeltaSigma_tskij->local().data(),
                                            sDeltaSigma_tskij->local().size(), 0);
         }
       }
       // Make node root's overwrite visible to its node peers
       sDeltaF_skij.win().fence();
-      if (sDeltaSigma_tskij) sDeltaSigma_tskij->win().fence();
+      if (has_Vcorr) sDeltaVcorr_skij.win().fence();
+      else if (has_Sigma) sDeltaSigma_tskij->win().fence();
       _mpi->comm.barrier();
     }
     _Timer.stop("LR_ITER_ALG");
@@ -555,10 +625,18 @@ std::tuple<int, double> lr_driver::run_lr(
     _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
     _mpi->comm.broadcast_n(&norm_DeltaF_diff, 1, 0);
 
-    // Compute norms of ΔΣ and ΔΣ-ΔΣ_prev for logging
+    // Compute norms of the tracked static second quantity (dynamic ΔΣ in the
+    // standard path; static ΔV_QPGW in qp mode) for logging/convergence.
     double norm_DeltaSigma = 0.0;
     double norm_DeltaSigma_diff = 0.0;
-    if (include_gw_sigma) {
+    if (has_Vcorr) {
+      auto norms_V = utils::lr_distributed_norm(
+          _mpi->node_comm, sDeltaVcorr_skij.local(), sDeltaVcorr_prev_skij.local(), iter > 1);
+      norm_DeltaSigma = norms_V.first;
+      norm_DeltaSigma_diff = norms_V.second;
+      _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
+      _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
+    } else if (has_Sigma) {
       auto norms_Sigma = utils::lr_distributed_norm(
           _mpi->node_comm, sDeltaSigma_tskij->local(), sDeltaSigma_prev_tskij.local(), iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
@@ -593,7 +671,7 @@ std::tuple<int, double> lr_driver::run_lr(
     if (iter > 1) {
       bool dm_converged = norm_DeltaDm_diff < tol;
       bool f_converged = !need_hf || norm_DeltaF_diff < tol;
-      bool sigma_converged = !include_gw_sigma || norm_DeltaSigma_diff < tol;
+      bool sigma_converged = !(has_Sigma || has_Vcorr) || norm_DeltaSigma_diff < tol;
       if (dm_converged && f_converged && sigma_converged) {
         converged = true;
         break;
@@ -608,6 +686,15 @@ std::tuple<int, double> lr_driver::run_lr(
   // Free the G^R cache (not needed by the post-loop HF/IBC epilogue)
   opt_dG_tsRPQ.reset();
   opt_dG_mtau_tsRPQ.reset();
+
+  // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
+  if (qp_mode && sDeltaVcorr_out_skij != nullptr) {
+    sDeltaVcorr_out_skij->win().fence();
+    if (_mpi->node_comm.root())
+      sDeltaVcorr_out_skij->local() = sDeltaVcorr_skij.local();
+    sDeltaVcorr_out_skij->win().fence();
+    _mpi->comm.barrier();
+  }
 
   // Report results
   if (converged) {
@@ -870,6 +957,7 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_DW_TRANSPOSE"), _Timer.number_of_calls("LR_GW_DW_TRANSPOSE"));
   if (gw_solver) gw_solver->print_subclocks(2, sub_indent);
   app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
+  app_log(2, "      - LR qpGW static (total): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_QPGW_STATIC"), _Timer.number_of_calls("LR_QPGW_STATIC"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
   app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
   app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));
@@ -894,6 +982,8 @@ template std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_4D_t>*, const sArray_t<Array_view_4D_t>*,
     const nda::array<ComplexType, 4>*, bool, std::string,
     const nda::array_view<ComplexType, 3>*,
-    sArray_t<Array_view_5D_t>*);
+    sArray_t<Array_view_5D_t>*,
+    const lr_qp_static_params*,
+    sArray_t<Array_view_4D_t>*);
 
 } // namespace methods

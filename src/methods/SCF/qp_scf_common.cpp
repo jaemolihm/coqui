@@ -551,6 +551,163 @@ auto qp_approx(const sArray_t<Array_view_5D_t> &sSigma_tskij,
   return sVcorr_skij;
 }
 
+// Cannot reuse `qp_approx` (in src/methods/SCF/qp_scf_common.cpp): that
+// transforms with C(k)/ε(k) on both band indices, which is only correct for a
+// k←k self-energy block. The LR self-energy ΔΣ_k is a (k+q ← k) block (its left
+// index contracts with G(k+q) in the Dyson RHS), so the left transform/energy
+// must use C(k+q)/ε(k+q). The AC/Padé statification core is identical and reused
+// as-is.
+auto lr_qp_approx(const sArray_t<Array_view_5D_t> &sDeltaSigma_tskij,
+                  const sArray_t<Array_view_4D_t> &sMO_skia,
+                  const sArray_t<Array_view_3D_t> &sE_ska, double mu,
+                  const nda::array<int, 1> &kpq_map, bool q_is_gamma,
+                  const imag_axes_ft::IAFT &FT, const qp_params_t &qp_params)
+                  -> sArray_t<Array_view_4D_t> {
+  using math::shm::make_shared_array;
+  using math::nda::make_distributed_array;
+  using local_Array_5D_t = nda::array<ComplexType, 5>;
+
+  auto comm = sDeltaSigma_tskij.communicator();
+  auto internode_comm = sDeltaSigma_tskij.internode_comm();
+  auto node_comm = sDeltaSigma_tskij.node_comm();
+  auto [ns, nkpts, nbnd] = sE_ska.shape();
+  auto nt = FT.nt_f();
+  auto nw = FT.nw_f();
+
+  int np = comm->size();
+  long nkpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
+  np /= nkpools;
+  long np_a = utils::find_proc_grid_min_diff(np, 1, 1);
+  long np_b = np / np_a;
+  utils::check(nkpools > 0 and nkpools <= nkpts,
+               "lr_qp_approx:: nkpools <= 0 or nkpools > nkpts. nkpools = {}", nkpools);
+  utils::check(comm->size() % nkpools == 0, "lr_qp_approx:: gcomm.size() % nkpools != 0");
+  utils::check(np_a < nbnd and np_b < nbnd, "lr_qp_approx: np_a({}) or np_b({}) > nbnd({})", np_a, np_b, nbnd);
+
+  auto dDeltaSigma_wskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
+                                                               {nw, ns, nkpts, nbnd, nbnd}, {1, 1, 1, 1, 1});
+  auto s_rng = dDeltaSigma_wskab.local_range(1);
+  auto k_rng = dDeltaSigma_wskab.local_range(2);
+  auto a_rng = dDeltaSigma_wskab.local_range(3);
+  auto b_rng = dDeltaSigma_wskab.local_range(4);
+  auto [nw_loc, ns_loc, nk_loc, na_loc, nb_loc] = dDeltaSigma_wskab.local_shape();
+
+  // ------ basis transform ΔΣ_k → MO basis: ΔΣ̃_ab = [C(k+q)† ΔΣ_k C(k)]_ab ------
+  {
+    auto dDeltaSigma_tskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
+                                                               {nt, ns, nkpts, nbnd, nbnd},
+                                                               {1, 1, 1, 1, 1});
+    auto DeltaSigma_tskab_loc = dDeltaSigma_tskab.local();
+
+    nda::array<ComplexType, 2> Ck_jb(nbnd, nb_loc);          // C(k) columns b
+    nda::array<ComplexType, 2> DeltaSigmaC_ib(nbnd, nb_loc);
+    nda::array<ComplexType, 2> Ckq_dag_ai(na_loc, nbnd);     // C(k+q)† rows a
+    auto DeltaSigma_ab = Ck_jb(nda::range(na_loc), nda::range::all);
+    for (size_t it = 0; it < nt; ++it) {
+      for (auto [is_loc, is]: itertools::enumerate(s_rng)) {
+        for (auto [ik_loc, ik]: itertools::enumerate(k_rng)) {
+          long ikq = kpq_map(ik);
+          Ck_jb = sMO_skia.local()(is, ik, nda::range::all, b_rng);
+          nda::blas::gemm(sDeltaSigma_tskij.local()(it, is, ik, nda::ellipsis{}), Ck_jb, DeltaSigmaC_ib);
+
+          auto Ckq_ia = sMO_skia.local()(is, ikq, nda::range::all, a_rng);
+          Ckq_dag_ai = nda::transpose(nda::conj(Ckq_ia));
+          nda::blas::gemm(Ckq_dag_ai, DeltaSigmaC_ib, DeltaSigma_ab);
+          DeltaSigma_tskab_loc(it, is_loc, ik_loc, nda::range::all, nda::range::all) = DeltaSigma_ab;
+        }
+      }
+    }
+    FT.tau_to_w(dDeltaSigma_tskab.local(), dDeltaSigma_wskab.local(), imag_axes_ft::fermion);
+  }
+
+  // Static approximation for ΔV_QPGW
+  long dim1 = ns_loc * nk_loc * na_loc * nb_loc;
+  // bypass clang openmp error: error: capturing a structured binding is not yet supported in OpenMP
+  auto nk_loc_ = nk_loc;
+  auto na_loc_ = na_loc;
+  auto nb_loc_ = nb_loc;
+  auto I_to_skab = [&](size_t I) {
+    size_t s_loc = I / (nk_loc_*na_loc_*nb_loc_);
+    size_t k_loc = ( I / (na_loc_*nb_loc_) ) % nk_loc_;
+    size_t a_loc = ( I / nb_loc_ ) % na_loc_;
+    size_t b_loc = I % nb_loc_;
+    return std::make_tuple(s_rng.first()+s_loc, k_rng.first()+k_loc, a_rng.first()+a_loc, b_rng.first()+b_loc);
+  };
+
+  analyt_cont::AC_t AC(qp_params.ac_alg);
+  auto n_to_iw = nda::map([&](int n) { return FT.omega(n); });
+  nda::array<ComplexType, 1> iw_mesh(n_to_iw(FT.wn_mesh()));
+
+  app_log(2, "\n* Applying the LR static (QPGW) approximation to ΔΣ(w): ");
+  app_log(2, "  - processor grid for ΔV_QPGW : (s, k, a, b) = ({}, {}, {}, {})", 1, nkpools, np_a, np_b);
+  app_log(2, "  - ac algorithm:               {}", qp_params.ac_alg);
+  app_log(2, "  - eta:                        {}", qp_params.eta);
+  app_log(2, "  - off-diagonal mode:          {}", qp_params.off_diag_mode);
+  app_log(2, "  - Hermitize (q=0):            {}\n", q_is_gamma ? "yes" : "no");
+  auto DeltaSigma_loc_2D = nda::reshape(dDeltaSigma_wskab.local(), std::array<long, 2>{nw, dim1});
+  AC.init(iw_mesh, DeltaSigma_loc_2D, qp_params.Nfit);
+
+  auto sDeltaVcorr_skij = make_shared_array<Array_view_4D_t>(*comm, *internode_comm, *node_comm, {ns, nkpts, nbnd, nbnd});
+  sDeltaVcorr_skij.win().fence();
+  for (size_t I = 0; I < dim1; ++I) {
+    auto [s, k, a, b] = I_to_skab(I);
+    long kq = kpq_map(k);
+    if (qp_params.off_diag_mode == "qp_energy") {
+      // left index a on k+q, right index b on k
+      double eps_a = sE_ska.local()(s, kq, a).real() - mu;
+      double eps_b = sE_ska.local()(s, k,  b).real() - mu;
+      sDeltaVcorr_skij.local()(s, k, a, b) = 0.5 * ( AC.evaluate(ComplexType(eps_a, qp_params.eta), I)
+                                                 + AC.evaluate(ComplexType(eps_b, qp_params.eta), I) );
+    } else if (qp_params.off_diag_mode == "fermi") {
+      double eps_a = (a == b)? sE_ska.local()(s, kq, a).real() - mu : 0.0;
+      sDeltaVcorr_skij.local()(s, k, a, b) = AC.evaluate(ComplexType(eps_a, qp_params.eta), I);
+    } else {
+      utils::check(false, "lr_qp_approx: unknown off-diagonal mode: {}", qp_params.off_diag_mode);
+    }
+  }
+  sDeltaVcorr_skij.win().fence();
+  sDeltaVcorr_skij.all_reduce();
+
+  // prepare for inverse transformation from MO to primary basis (all k)
+  auto sMOinv_skai = make_shared_array<Array_view_4D_t>(*comm, *internode_comm, *node_comm, {ns, nkpts, nbnd, nbnd});
+  sMOinv_skai.win().fence();
+  for (size_t sk = node_comm->rank(); sk < ns*nkpts; sk += node_comm->size()) {
+    size_t is = sk / nkpts;
+    size_t ik = sk % nkpts;
+    auto MO = make_matrix_view(sMO_skia.local()(is, ik, nda::ellipsis{}));
+    sMOinv_skai.local()(is, ik, nda::ellipsis{}) = nda::inverse(MO);
+  }
+  sMOinv_skai.win().fence();
+
+  // back-transform: ΔV_QPGW,ij(k) = (C(k+q)⁻¹)† · [Herm?] ΔV_ab · C(k)⁻¹
+  sDeltaVcorr_skij.win().fence();
+  if (node_comm->rank() < ns*nkpts) {
+    nda::array<ComplexType, 2> DeltaV_ab(nbnd, nbnd);
+    nda::array<ComplexType, 2> DeltaVC_aj(nbnd, nbnd);
+    nda::array<ComplexType, 2> Cdag_ia(nbnd, nbnd);
+    for (size_t sk = node_comm->rank(); sk < ns*nkpts; sk += node_comm->size()) {
+      size_t is = sk / nkpts;
+      size_t ik = sk % nkpts;
+      long ikq = kpq_map(ik);
+
+      if (q_is_gamma) {
+        // Intra-k block (q=0): impose Hermiticity on ΔV
+        DeltaV_ab = 0.5 * ( sDeltaVcorr_skij.local()(is, ik, nda::ellipsis{})
+                       + nda::transpose(nda::conj(sDeltaVcorr_skij.local()(is, ik, nda::ellipsis{}))) );
+      } else {
+        // Inter-k block (q/=0): ΔV maps k and k+q /= q and cannot be made Hermitian.
+        DeltaV_ab = sDeltaVcorr_skij.local()(is, ik, nda::ellipsis{});
+      }
+
+      nda::blas::gemm(DeltaV_ab, sMOinv_skai.local()(is, ik, nda::ellipsis{}), DeltaVC_aj);
+      Cdag_ia = nda::transpose(nda::conj(sMOinv_skai.local()(is, ikq, nda::ellipsis{})));
+      nda::blas::gemm(Cdag_ia, DeltaVC_aj, sDeltaVcorr_skij.local()(is, ik, nda::ellipsis{}));
+    }
+  }
+  sDeltaVcorr_skij.win().fence();
+  return sDeltaVcorr_skij;
+}
+
 template<typename eri_t, typename corr_solver_t>
 void add_qpscf_vcorr(MBState &mb_state,
                      double mu,

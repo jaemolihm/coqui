@@ -111,6 +111,8 @@ public:
    * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
    * @param Delta_mu          - [INPUT] Chemical potential shift (used only if fix_density=false)
+   * @param sDeltaVcorr_skij  - [INPUT] static ΔV_QPGW (ns, nk, nb, nb), nullptr if not used.
+   *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
    * @return The Δμ value used (computed if fix_density=true, otherwise the input value)
    */
   template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
@@ -122,7 +124,8 @@ public:
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
       bool fix_density = false,
-      double Delta_mu = 0.0);
+      double Delta_mu = 0.0,
+      const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   /**
    * @brief Compute LR density matrix from LR Green's function
@@ -225,7 +228,8 @@ private:
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij,
-      double Delta_mu);
+      double Delta_mu,
+      const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;

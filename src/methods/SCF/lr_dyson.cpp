@@ -70,7 +70,8 @@ double lr_dyson::solve_lr_dyson(
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
     bool fix_density,
-    double Delta_mu) {
+    double Delta_mu,
+    const DeltaF_t* sDeltaVcorr_skij) {
 
   utils::check(_cached_G_wskij != nullptr,
                "solve_lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
@@ -91,7 +92,7 @@ double lr_dyson::solve_lr_dyson(
 
     // First pass: solve with Δμ=0
     solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
-                        sDeltaF_skij, sDeltaSigma_tskij, 0.0);
+                        sDeltaF_skij, sDeltaSigma_tskij, 0.0, sDeltaVcorr_skij);
     _Timer.start("LR_DYSON_DM");
     compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
     _Timer.stop("LR_DYSON_DM");
@@ -116,7 +117,7 @@ double lr_dyson::solve_lr_dyson(
 
       // Second pass: solve with computed Δμ
       solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
-                          sDeltaF_skij, sDeltaSigma_tskij, Delta_mu);
+                          sDeltaF_skij, sDeltaSigma_tskij, Delta_mu, sDeltaVcorr_skij);
       _Timer.start("LR_DYSON_DM");
       compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
       _Timer.stop("LR_DYSON_DM");
@@ -135,7 +136,7 @@ double lr_dyson::solve_lr_dyson(
     // For q≠0, Δμ is meaningless — force to zero to prevent silent pollution
     if (!_is_q_gamma) Delta_mu = 0.0;
     solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
-                        sDeltaF_skij, sDeltaSigma_tskij, Delta_mu);
+                        sDeltaF_skij, sDeltaSigma_tskij, Delta_mu, sDeltaVcorr_skij);
     _Timer.start("LR_DYSON_DM");
     compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
     _Timer.stop("LR_DYSON_DM");
@@ -154,7 +155,8 @@ void lr_dyson::solve_lr_dyson_impl(
     const DeltaH0_t& sDeltaH0_skij,
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
-    double Delta_mu) {
+    double Delta_mu,
+    const DeltaF_t* sDeltaVcorr_skij) {
 
   using math::nda::make_distributed_array;
   using Array_5D_t = nda::array<ComplexType, 5>;
@@ -224,6 +226,8 @@ void lr_dyson::solve_lr_dyson_impl(
   auto DeltaH0_loc = sDeltaH0_skij.local();
   auto DeltaF_loc = sDeltaF_skij.local();
   auto S_loc = _dyson.sS_skij().local();
+  // Optional static ΔV_QPGW (LR-qpGW): frequency-independent one-body term.
+  bool has_Vcorr = (sDeltaVcorr_skij != nullptr);
 
   // Temporary matrices
   nda::matrix<ComplexType> X_ij(_nbnd, _nbnd);
@@ -245,13 +249,16 @@ void lr_dyson::solve_lr_dyson_impl(
         auto DeltaH0_k = DeltaH0_loc(is, ik, nda::range::all, nda::range::all);
         auto DeltaF_k = DeltaF_loc(is, ik, nda::range::all, nda::range::all);
 
-        // Build X = ΔH0 + ΔF [+ ΔΣ] - Δμ·S
+        // Build X = ΔH0 + ΔF [+ ΔΣ] [+ ΔV_QPGW] - Δμ·S
         auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
         X_ij = DeltaH0_k + DeltaF_k - Delta_mu * S_k;
         if (sDeltaSigma_tskij) {
           auto DeltaSigma_w_loc = opt_dDeltaSigma_wskij->local();
           auto DeltaSigma_k = DeltaSigma_w_loc(n, s, k, nda::range::all, nda::range::all);
           X_ij += DeltaSigma_k;
+        }
+        if (has_Vcorr) {
+          X_ij += sDeltaVcorr_skij->local()(is, ik, nda::range::all, nda::range::all);
         }
 
         // ΔG = G_{k+q} @ X @ G_k
@@ -507,14 +514,16 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
-    double);
+    double,
+    const sArray_t<Array_view_4D_t>*);
 
 template void lr_dyson::solve_lr_dyson_impl(
     sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
-    double);
+    double,
+    const sArray_t<Array_view_4D_t>*);
 
 template void lr_dyson::compute_lr_dm(
     sArray_t<Array_view_4D_t>&,

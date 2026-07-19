@@ -293,6 +293,42 @@ auto qp_approx(const sArray_t<Array_view_5D_t> &sSigma_tskij,
   -> sArray_t<Array_view_4D_t>;
 
 /**
+ * q-aware linear-response static (QPGW) approximation of a dynamic ΔΣ.
+ *
+ * Statifies the linear-response self-energy ΔΣ_k(iω), which is a (k+q ← k)
+ * block, into a static ΔV_QPGW(k) with the unperturbed (frozen) QP orbitals /
+ * energies C, ε, μ. This is the frozen-orbital linearization of qp_approx used
+ * by the LR-qpGW driver mode; it reuses qp_approx's AC/Padé core unchanged but
+ * needs a distinct basis-transform because the left band index contracts with
+ * G(k+q) and the right with G(k):
+ *
+ *   ΔΣ̃_ab(z)      = [ C(k+q)† · ΔΣ_k(z) · C(k) ]_ab              (a↔k+q, b↔k)
+ *   ΔV_ab         = ½[ ΔΣ̃_ab(ε_a(k+q)−μ) + ΔΣ̃_ab(ε_b(k)−μ) ]     ("qp_energy")
+ *   ΔV_QPGW_ij(k) = [ (C(k+q)⁻¹)† · [Herm?] ΔV · C(k)⁻¹ ]_ij
+ *
+ * The explicit Hermitization ½(V+V†) is applied only at q=0 (k+q=k, an intra-k
+ * block); for q≠0 (ΔV_{k+q,k})† is the −q block, so it is skipped. The two-energy
+ * ½[Σ̃(ζ_a)+Σ̃(ζ_b)] symmetrization applies at all q. Cannot reuse qp_approx
+ * verbatim (that uses C(k)/ε(k) on both indices, correct only for a k←k block).
+ *
+ * @param sDeltaSigma_tskij - [INPUT] LR self-energy ΔΣ_k(τ), (k+q ← k) block
+ * @param sMO_skia          - [INPUT] frozen QP MO coefficients C
+ * @param sE_ska            - [INPUT] frozen QP energies ε
+ * @param mu                - [INPUT] frozen chemical potential
+ * @param kpq_map           - [INPUT] k → k+q index map (nkpts,)
+ * @param q_is_gamma        - [INPUT] whether q ≈ 0 (enables Hermitization)
+ * @param FT                - [INPUT] imaginary-axes Fourier transform driver
+ * @param qp_params         - [INPUT] AC/off-diagonal parameters (frozen qpGW run)
+ * @return static ΔV_QPGW(k) in the primary basis, (ns, nkpts, nb, nb)
+ */
+auto lr_qp_approx(const sArray_t<Array_view_5D_t> &sDeltaSigma_tskij,
+                  const sArray_t<Array_view_4D_t> &sMO_skia,
+                  const sArray_t<Array_view_3D_t> &sE_ska, double mu,
+                  const nda::array<int, 1> &kpq_map, bool q_is_gamma,
+                  const imag_axes_ft::IAFT &FT, const qp_params_t &qp_params)
+  -> sArray_t<Array_view_4D_t>;
+
+/**
  * Given a correlated solver, compute the dynamic self-energy and
  * solve the quasi-particle Eqn in the presence of correlated potential V_corr(w) in MO basis
  * Specifically, this functions does the following:

@@ -38,6 +38,7 @@
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/ERI/detail/concepts.hpp"
+#include "methods/SCF/qp_params_t.h"
 
 namespace methods {
 
@@ -49,6 +50,20 @@ namespace methods {
  * full:    ΔΣ = -ΔG ⊙ W - G ⊙ ΔW,  ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
  */
 enum class lr_gw_update_mode { none, fixed_W, full };
+
+/**
+ * LR-qpGW static-map inputs. When passed to run_lr (non-null), the driver runs
+ * in "qp_static_sigma" mode: after the dynamic ΔΣ(iω) is assembled it is
+ * statified via lr_qp_approx into a static ΔV_QPGW(k) (frozen orbitals C/ε/μ),
+ * which enters the frequency-independent one-body term of the Dyson RHS in place
+ * of the dynamic ΔΣ. DIIS/damping and convergence then track ΔV_QPGW.
+ */
+struct lr_qp_static_params {
+  qp_params_t qp_params;
+  const math::shm::shared_array<nda::array_view<ComplexType, 4>>* sMO_skia = nullptr;
+  const math::shm::shared_array<nda::array_view<ComplexType, 3>>* sE_ska = nullptr;
+  double mu = 0.0;
+};
 
 /**
  * @class lr_driver
@@ -124,7 +139,9 @@ public:
       bool div_corr = true,
       std::string div_treatment = "gygi",
       const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
-      sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
+      sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
+      const lr_qp_static_params* qp_static = nullptr,
+      sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the

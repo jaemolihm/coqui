@@ -17,7 +17,7 @@ namespaces = ""
 #    if reject_names and reject_names matches Qname : skip X
 #    else keep X.
 #
-match_names = "coqui_py::(mbpt|run_lr|calculate_kpq_map|lr_hf|hf_evaluate|lr_gw_sigma_DeltaG|lr_gw_sigma_DeltaW|lr_gw_Pi|lr_gw_W|gw_evaluate_sigma|gw_evaluate_sigma_with_W|gw_evaluate_Pi|gw_evaluate_W_from_Pi|compute_eps_inv_head)"
+match_names = "coqui_py::(mbpt|run_lr|calculate_kpq_map|lr_hf|lr_qp_approx|hf_evaluate|lr_gw_sigma_DeltaG|lr_gw_sigma_DeltaW|lr_gw_Pi|lr_gw_W|gw_evaluate_sigma|gw_evaluate_sigma_with_W|gw_evaluate_Pi|gw_evaluate_W_from_Pi|compute_eps_inv_head)"
 reject_names = ""
 
 # If true, transform methods with no arguments into a read only property

@@ -451,7 +451,12 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     solvers::gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
     qp_scf_loop(mb_state, eri, ft, qp_params, mb_solver_t(&hf,&gw,&scr_eri), iter_solver.get(),
-                niter, restart, conv_thr, /*compute_exchange=*/compute_exchange);
+                niter, restart, conv_thr, /*compute_exchange=*/compute_exchange, h0_source);
+
+    // Always persist the qp params + div_treatment so a later LR-qpGW run can
+    // statify ΔΣ with exactly the continuation this qpGW run used.
+    chkpt::dump_qp_params(mpi->comm, output + ".mbpt.h5",
+                          off_diag_mode, eta, ac_alg, Nfit, div_treatment);
 
   } else
     APP_ABORT("mbpt: Unknown solver type: {}",solver_type);
@@ -1280,6 +1285,20 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // One-shot G0W0: store the two ΔΣ terms (dG0·W0, G0·dW0) separately.
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
 
+  // LR-qpGW: statify the dynamic ΔΣ(iω) into a static ΔV_QPGW each iteration
+  // (frozen QP orbitals from the qpGW checkpoint). Uses W0=RPA[G_QP] (recompute_W
+  // forced on).
+  auto qp_static_sigma = io::get_value_with_default<bool>(pt, "qp_static_sigma", false);
+  if (qp_static_sigma) {
+    utils::check(unperturbed == "checkpoint",
+                 "run_lr_calc: qp_static_sigma requires unperturbed='checkpoint' (a qpGW checkpoint).");
+    utils::check(gw_mode != lr_gw_update_mode::none,
+                 "run_lr_calc: qp_static_sigma requires a GW self-energy (gw_mode != none).");
+    utils::check(!split_sigma_terms,
+                 "run_lr_calc: qp_static_sigma is incompatible with split_sigma_terms.");
+    recompute_W = true;  // W0 = RPA[G_QP]
+  }
+
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
                "run_lr_calc: Input checkpoint {} does not exist!", input_file);
@@ -1371,6 +1390,38 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   }
 
+  // LR-qpGW: read the frozen QP eigenbasis (C, ε) directly from the qpGW
+  // checkpoint. The qpGW run stores its eigenbasis (MO_skia/E_ska), so we read
+  // it rather than re-diagonalizing H0+F — re-diagonalization can introduce an
+  // arbitrary gauge in the degenerate/near-degenerate subspaces.
+  std::optional<math::shm::shared_array<Array_view_4D_t>> opt_sMO_qp;
+  std::optional<math::shm::shared_array<nda::array_view<ComplexType, 3>>> opt_sE_qp;
+  qp_params_t qp_params;
+  if (qp_static_sigma) {
+    opt_sMO_qp.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+    opt_sE_qp.emplace(math::shm::make_shared_array<nda::array_view<ComplexType, 3>>(
+        *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd()}));
+    chkpt::read_qp_MOs(mpi->node_comm, opt_sMO_qp.value(), opt_sE_qp.value(),
+                       prefix, input_grp, input_iter);
+    mpi->comm.barrier();
+
+    // AC parameters: always read from the persisted qpGW values (dump_qp_params).
+    std::string ac_alg, off_diag_mode;
+    double eta = 0.0;
+    int Nfit = 0;
+    bool from_chkpt = chkpt::read_qp_params(mpi->comm, input_file,
+                                            off_diag_mode, eta, ac_alg, Nfit);
+    utils::check(from_chkpt,
+                 "run_lr_calc: qp_static_sigma requires 'scf/qp_params' in {}. "
+                 "Re-run qpGW so the AC parameters are persisted.", input_file);
+    utils::check(off_diag_mode == "fermi" || off_diag_mode == "qp_energy",
+                 "run_lr_calc: unknown off_diag_mode '{}'", off_diag_mode);
+    qp_params = qp_params_t{"sc", ac_alg, Nfit, eta, 1e-8, "qpscf", false, off_diag_mode};
+    app_log(2, "LR-qpGW static map: off_diag_mode={}, ac_alg={}, Nfit={}, eta={:.6e} (from checkpoint)",
+            off_diag_mode, ac_alg, Nfit, eta);
+  }
+
   // Validate DeltaH0 shape on root before broadcasting
   if (mpi->comm.root()) {
     utils::check(DeltaH0_skij_root.has_value(),
@@ -1433,6 +1484,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                    "screened_interaction_file must not be set.");
       recompute_W = true;
       div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
+    } else if (qp_static_sigma) {
+      // The qpGW checkpoint always stores scf/div_treatment (dump_qp_params), so
+      // read it directly; W0 = RPA[G_QP].
+      div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     } else {
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     }
@@ -1519,6 +1574,23 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     Dm_ab_local = sDm_skij.local();
     Dm_ab_ptr = &Dm_ab_local;
   }
+
+  // LR-qpGW static-map inputs + output ΔV_QPGW array.
+  std::optional<lr_qp_static_params> opt_qp_static;
+  std::optional<math::shm::shared_array<Array_view_4D_t>> opt_sDeltaVcorr;
+  if (qp_static_sigma) {
+    lr_qp_static_params qps;
+    qps.qp_params = qp_params;
+    qps.sMO_skia = &opt_sMO_qp.value();
+    qps.sE_ska = &opt_sE_qp.value();
+    qps.mu = mu;
+    opt_qp_static.emplace(qps);
+    opt_sDeltaVcorr.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+        *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  }
+  const lr_qp_static_params* pQpStatic = opt_qp_static ? &(*opt_qp_static) : nullptr;
+  auto* pDeltaVcorr = opt_sDeltaVcorr ? &(*opt_sDeltaVcorr) : nullptr;
+
   auto [niter, Delta_mu] = driver.run_lr(
       lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
       lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -1528,7 +1600,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
       pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
-      pDeltaV_qPQ, pDeltaSigma2);
+      pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr);
   lr_state.Delta_mu.emplace(Delta_mu);
   mpi->comm.barrier();
 
@@ -1540,7 +1612,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  lr_state.sDeltaF_skij.value(), pDeltaSigma,
                  Delta_mu, niter,
                  include_hartree, include_exchange, include_gw_sigma,
-                 pDeltaSigma2);
+                 pDeltaSigma2, pDeltaVcorr);
 
   utils::memlog("run_lr_calc: exit (before RAII)");
   return std::make_tuple(niter, Delta_mu);
