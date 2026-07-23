@@ -67,10 +67,10 @@ namespace methods {
                          double madelung) {
 
       if (_div_treatment == "ignore_g0") {
-        app_log(1, "No finite-size correction to the non-local HF exchange potential.\n");
+        app_log(2, "No finite-size correction to the non-local HF exchange potential.\n");
         return;
       }
-      app_log(1, "  Treatment of long-wavelength divergence in the non-local HF exchange potential : {}\n",
+      app_log(2, "  Treatment of long-wavelength divergence in the non-local HF exchange potential : {}\n",
               _div_treatment);
 
       decltype(nda::range::all) all;

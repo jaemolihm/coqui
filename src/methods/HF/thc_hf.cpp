@@ -43,11 +43,11 @@ namespace methods {
                         THC_ERI auto &&thc, const nda::MemoryArrayOfRank<4> auto &S_skij,
                         bool hartree, bool exchange) {
       // http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20thc-hf
-      app_log(1, "\n"
+      app_log(2, "\n"
                  "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌┬┐┬ ┬┌─┐ ┬ ┬┌─┐\n"
                  "║  ║ ║║═╬╗║ ║║   │ ├─┤│───├─┤├┤ \n"
                  "╚═╝╚═╝╚═╝╚╚═╝╩   ┴ ┴ ┴└─┘ ┴ ┴└  \n");
-      app_log(1, "  Hartree, Exchange             = {}, {}\n"
+      app_log(2, "  Hartree, Exchange             = {}, {}\n"
                  "  Number of spins               = {}\n"
                  "  Number of polarizations       = {}\n"
                  "  Number of bands               = {}\n"

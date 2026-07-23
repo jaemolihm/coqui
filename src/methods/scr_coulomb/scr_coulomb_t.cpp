@@ -63,10 +63,10 @@ namespace solvers {
     using math::shm::make_shared_array;
 
     // http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20screened%20coulomb
-    app_log(1, "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌─┐┌─┐┬─┐┌─┐┌─┐┌┐┌┌─┐┌┬┐  ┌─┐┌─┐┬ ┬┬  ┌─┐┌┬┐┌┐ \n"
+    app_log(2, "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌─┐┌─┐┬─┐┌─┐┌─┐┌┐┌┌─┐┌┬┐  ┌─┐┌─┐┬ ┬┬  ┌─┐┌┬┐┌┐ \n"
                "║  ║ ║║═╬╗║ ║║  └─┐│  ├┬┘├┤ ├┤ │││├┤  ││  │  │ ││ ││  │ ││││├┴┐\n"
                "╚═╝╚═╝╚═╝╚╚═╝╩  └─┘└─┘┴└─└─┘└─┘┘└┘└─┘─┴┘  └─┘└─┘└─┘┴─┘└─┘┴ ┴└─┘\n");
-    app_log(1, "  Screening type                = {}\n"
+    app_log(2, "  Screening type                = {}\n"
                "  Number of bands               = {}\n"
                "  Number of THC auxiliary basis = {}\n"
                "  K-points                      = {} total, {} in the IBZ\n"
@@ -74,7 +74,7 @@ namespace solvers {
             _screen_type, thc.MF()->nbnd(), thc.Np(),
             thc.MF()->nkpts(), thc.MF()->nkpts_ibz(),
           _div_treatment);
-    _ft->metadata_log();
+    _ft->metadata_log(2);
 
     utils::check(thc.mpi() == mb_state.mpi,
                  "scr_coulomb_t::update_w: THC_ERI and MBState should have the same MPI context.");

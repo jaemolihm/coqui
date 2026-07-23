@@ -97,17 +97,17 @@ namespace imag_axes_ft {
 
       ~IR() {}
 
-      void metadata_log() const {
+      void metadata_log(int level = 1) const {
         std::string prec_prefix = prec_to_prefix(prec);
 
-        app_log(1, "  Mesh details on the imaginary axis");
-        app_log(1, "  ----------------------------------");
-        app_log(1, "  Intermediate Representation");
-        app_log(1, "  Beta                   = {} a.u.", beta);
-        app_log(1, "  Frequency cutoff       = {} a.u.", wmax);
-        app_log(1, "  Lambda                 = {}", lambda);
-        app_log(1, "  Precision              = {}", prec_prefix);
-        app_log(1, "  nt_f, nt_b, nw_f, nw_b = {}, {}, {}, {}\n", nt_f, nt_b, nw_f, nw_b);
+        app_log(level, "  Mesh details on the imaginary axis");
+        app_log(level, "  ----------------------------------");
+        app_log(level, "  Intermediate Representation");
+        app_log(level, "  Beta                   = {} a.u.", beta);
+        app_log(level, "  Frequency cutoff       = {} a.u.", wmax);
+        app_log(level, "  Lambda                 = {}", lambda);
+        app_log(level, "  Precision              = {}", prec_prefix);
+        app_log(level, "  nt_f, nt_b, nw_f, nw_b = {}, {}, {}, {}\n", nt_f, nt_b, nw_f, nw_b);
       }
 
       std::string ir_file(double lmbda, std::string prec_prefix) {

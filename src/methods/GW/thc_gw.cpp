@@ -46,12 +46,12 @@ namespace methods {
     void gw_t::evaluate(MBState &mb_state, THC_ERI auto const& thc, bool verbose) {
       if (verbose) {
         //http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20thc-gw
-        app_log(1, "\n"
+        app_log(2, "\n"
                    "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌┬┐┬ ┬┌─┐ ┌─┐┬ ┬\n"
                    "║  ║ ║║═╬╗║ ║║   │ ├─┤│───│ ┬│││\n"
                    "╚═╝╚═╝╚═╝╚╚═╝╩   ┴ ┴ ┴└─┘ └─┘└┴┘\n");
         //utils::check(scr_eri!=nullptr, "gw_t::evaluate: scr_eri is missing in thc_gw solver.");
-        app_log(1, "  Screening type                = {}\n"
+        app_log(2, "  Screening type                = {}\n"
                    "  Number of bands               = {}\n"
                    "  Number of THC auxiliary basis = {}\n"
                    "  K-points                      = {} total, {} in the IBZ\n"
@@ -59,7 +59,7 @@ namespace methods {
                 mb_state.screen_type,
                 thc.MF()->nbnd(), thc.Np(), thc.MF()->nkpts(), thc.MF()->nkpts_ibz(),
                 _div_treatment);
-        _ft->metadata_log();
+        _ft->metadata_log(2);
       }
       utils::check(mb_state.mpi == thc.mpi(),
                    "gw_t::evaluate: THC_ERI and MBState should have the same MPI context.");
@@ -115,12 +115,12 @@ namespace methods {
                         THC_ERI auto const& thc, scr_coulomb_t* scr_eri, bool verbose) {
       if (verbose) {
         //http://patorjk.com/software/taag/#p=display&f=Calvin%20S&t=COQUI%20thc-gw
-        app_log(1, "\n"
+        app_log(2, "\n"
                    "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌┬┐┬ ┬┌─┐ ┌─┐┬ ┬\n"
                    "║  ║ ║║═╬╗║ ║║   │ ├─┤│───│ ┬│││\n"
                    "╚═╝╚═╝╚═╝╚╚═╝╩   ┴ ┴ ┴└─┘ └─┘└┴┘\n");
         utils::check(scr_eri!=nullptr, "gw_t::evaluate: scr_eri is missing in thc_gw solver.");
-        app_log(1, "  polarizability = {}\n"
+        app_log(2, "  polarizability = {}\n"
                    "  nbnd  = {}\n"
                    "  THC auxiliary basis  = {}\n"
                    "  nkpts = {}\n"
@@ -129,7 +129,7 @@ namespace methods {
                 scr_eri->screen_type(),
                 thc.MF()->nbnd(), thc.Np(), thc.MF()->nkpts(), thc.MF()->nkpts_ibz(),
                 _div_treatment);
-        _ft->metadata_log();
+        _ft->metadata_log(2);
       }
       utils::check(_ft->nt_f() == _ft->nt_b(),
                    "thc-gw: We assume nt_f == nt_b at least for now. \n"

@@ -302,8 +302,8 @@ namespace imag_axes_ft {
         return ir_basis;
       }
     }
-    void metadata_log() const {
-      std::visit( [&](auto&& v) { v.metadata_log(); }, grid_var);
+    void metadata_log(int level = 1) const {
+      std::visit( [&](auto&& v) { v.metadata_log(level); }, grid_var);
     }
     std::string prec() const {
       return std::visit( [&](auto&& v) { return v.prec; }, grid_var);
