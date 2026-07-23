@@ -59,8 +59,15 @@ def make_thc_coulomb(mf, params):
           stored after construction. ``"incore"`` keeps them in memory;
           ``"outcore"`` reads them from the HDF5 file on demand.
         - ``save`` *(str, optional, default ``""``)* — path to an HDF5 file for
-          saving (or loading) the THC integrals. An empty string disables file I/O. 
-          If the file exists, the THC integrals are automatically loaded. 
+          saving (or loading) the THC integrals. An empty string disables file I/O.
+          If the file exists, the THC integrals are automatically loaded.
+        - ``source`` *(str, optional, default ``"auto"``)* — where the THC
+          integrals come from. ``"auto"`` reads from ``save`` if that file
+          exists and otherwise builds them (the historical behavior).
+          ``"read"`` always reads from ``save`` and raises if the file is
+          missing; ``nIpts``/``thresh`` are not needed in this mode (``Np`` is
+          taken from the file). ``"compute"`` always rebuilds, ignoring any
+          pre-existing ``save`` file.
         - ``cd_dir`` *(str, optional, default ``""``)* — directory containing
           pre-computed Cholesky-decomposed Coulomb integrals. When provided, a
           least-squares THC fit is performed instead of ISDF.

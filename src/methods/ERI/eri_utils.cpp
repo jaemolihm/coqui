@@ -25,23 +25,43 @@ namespace methods
 {
 
 auto make_thc(std::shared_ptr<mf::MF> mf, ptree const& pt) -> thc_reader_t {
-  std::string err = "make_thc - missing required input: ";
-  // required: reading just to check at this level
-  auto nIpts = io::get_value_with_default<int>(pt,"nIpts",0);
-  auto thresh = io::get_value_with_default<double>(pt,"thresh",0.0);
-  utils::check( nIpts>0 or thresh>0.0, "Error: Must set nIpts and/or thresh");
-
   // generic optional
   auto storage = io::get_value_with_default<std::string>(pt,"storage","incore");
   io::tolower(storage);
   auto init = io::get_value_with_default<bool>(pt, "init", true);
+  auto source = io::get_value_with_default<std::string>(pt,"source","auto");
+  io::tolower(source);
 
   // check options
-  err = std::string("make_thc - Incorrect input - ");
+  std::string err = std::string("make_thc - Incorrect input - ");
   utils::check(storage == "incore" or storage == "outcore", err+"storage: {}", storage);
+  utils::check(source == "auto" or source == "read" or source == "compute",
+               err+"source: {} (expected 'auto', 'read', or 'compute')", source);
 
   auto save = io::get_value_with_default<std::string>(pt,"save",(storage == "incore"?"":"./thc.eri.h5"));
-  bool build_eri = (save=="" or !std::filesystem::exists(save))? true : false;
+  bool file_exists = (save != "" and std::filesystem::exists(save));
+
+  // decide whether to build (recompute) the ERIs or read them from file:
+  //   "auto"    - read if the save file exists, otherwise build (default)
+  //   "read"    - always read; error if the save file is missing
+  //   "compute" - always build (ignore any pre-existing save file)
+  bool build_eri;
+  if (source == "read") {
+    utils::check(save != "", "Error in make_thc: source='read' requires a 'save' file path.");
+    utils::check(file_exists, "Error in make_thc: source='read' but save file ({}) does not exist.", save);
+    build_eri = false;
+  } else if (source == "compute") {
+    build_eri = true;
+  } else { // auto
+    build_eri = not file_exists;
+  }
+
+  // nIpts/thresh are stopping criteria for the build; only required when building
+  if (build_eri) {
+    auto nIpts = io::get_value_with_default<int>(pt,"nIpts",0);
+    auto thresh = io::get_value_with_default<double>(pt,"thresh",0.0);
+    utils::check( nIpts>0 or thresh>0.0, "Error: Must set nIpts and/or thresh");
+  }
 
   // only mf with orbitals can be built, otherwise must be read from file
   utils::check(mf->has_orbital_set() or not build_eri, "Error in make_thc: MF types that have no orbital sets (e.g type=model), can not be built, they must be read from file. save file ({}) must be provided or could not be opened.",save);
