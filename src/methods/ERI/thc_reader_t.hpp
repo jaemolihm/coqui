@@ -184,6 +184,19 @@ namespace methods {
 
   private:
 
+    // Guard the integral accessors against use before init(). A THC object
+    // constructed with init=false (Python) / intialize=false (C++) leaves the
+    // collocation/Coulomb data as tiny placeholder arrays until init() reads or
+    // builds them; touching X/Y/Z/dZ first yields garbage GEMMs and a cryptic
+    // downstream abort. Fail fast with an actionable message instead.
+    void _check_initialized(const char* who) const {
+      utils::check(_initialized,
+                   "thc_reader_t::{}: THC integrals have not been initialized. "
+                   "The object was created with init=false and init() was never "
+                   "called. Construct with init=true, or call .init() before "
+                   "accessing the integrals.", who);
+    }
+
     // Copy rho_g and vG out of the thc builder, then discard the builder. Called
     // from each build path (build / build_from_CD / build_isdf_only) so that
     // downstream consumers that need √v(G+q) after init can still access the
@@ -591,6 +604,7 @@ namespace methods {
       _Timer.stop("BUILD_TOTAL");
       _thc_builder_opt.value().print_timers();
       capture_builder_state();
+      _initialized = true;
       app_log(2, "***************************************************");
       app_log(2, "                  THC-READER::BUILD_ISDF_ONLY() ");
       app_log(2, "***************************************************");
@@ -700,6 +714,7 @@ namespace methods {
      */
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto X(int is, int ip, int ik) const {
+      _check_initialized("X");
       _Timer.start("READ_X");
       utils::check(is >= 0 and is < _ns, "Error in thc::reader_t::X(is,ip,ik): is out of bounds: is:{}",is);
       utils::check(ip >= 0 and ip < _npol, "Error in thc::reader_t::X(is,ip,ik): is out of bounds: ip:{}",ip);
@@ -717,6 +732,7 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto X() const {
+      _check_initialized("X");
       if constexpr (MEM == HOST_MEMORY) {
         auto X_ = _X_shm.local();
         return std::as_const(X_);
@@ -728,6 +744,7 @@ namespace methods {
     // The q-independent collocation matrix
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto Y(int is, int ip, int ik) const {
+      _check_initialized("Y");
       if(x_range == y_range) {
         return X<MEM>(is,ip,ik);
       } else {
@@ -750,6 +767,7 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto Y() const {
+      _check_initialized("Y");
       if constexpr (MEM == HOST_MEMORY) {
         if(x_range == y_range) {
           auto X_ = _X_shm.local();
@@ -771,6 +789,7 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     memory::array<MEM, ComplexType, 2> Z_same_q(int iq) const {
+      _check_initialized("Z_same_q");
       _Timer.start("READ_V");
       nda::array<ComplexType, 2> Zq(_Np, _Np);
       if (_storage == eri_storage_e::incore) {
@@ -795,6 +814,7 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     memory::array<MEM, ComplexType, 2> Z(int iq, bool same_q=false) const {
+      _check_initialized("Z");
       if (same_q)
         return Z_same_q<MEM>(iq);
       _Timer.start("READ_V");
@@ -826,6 +846,7 @@ namespace methods {
     memory::array<MEM, ComplexType, 2> Z(long iq, nda::range P_rng, nda::range Q_rng,
                                  long qpool_id, long nqpool,
                                  mpi3::communicator &q_intra_comm) const {
+      _check_initialized("Z");
       _Timer.start("READ_V");
       nda::array<ComplexType, 2> Z_PQ(P_rng.size(), Q_rng.size());
       Z_PQ() = 0.0;
@@ -864,6 +885,7 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto dZ(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+      _check_initialized("dZ");
       _Timer.start("READ_V");
       auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
       if (_storage == eri_storage_e::incore) {
