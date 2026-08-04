@@ -178,25 +178,10 @@ void lr_dyson::solve_lr_dyson_impl(
   auto G_w = _cached_G_wskij->local();
 
   // Processor grid for ΔG (and ΔΣ if present)
-  std::array<long, 5> w_pgrid;
-  std::array<long, 5> w_bsize;
-  {
-    int np = _context->comm.size();
-    int nwpools = utils::find_proc_grid_max_npools(np, _nw, 0.4);
-    np /= nwpools;
-    int nkpools = utils::find_proc_grid_max_npools(np, _nkpts_ibz, 0.4);
-    np /= nkpools;
-    int np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-    int np_j = np / np_i;
-
-    w_pgrid = {nwpools, 1, nkpools, np_i, np_j};
-    long ibsize = std::min({1024L, (long)_nbnd / np_i, (long)_nbnd / np_j});
-    if (ibsize < 1) ibsize = 1;
-    w_bsize = {1, 1, 1, ibsize, ibsize};
-
-    utils::check(nwpools * nkpools * np_i * np_j == _context->comm.size(),
-                 "lr_dyson: pgrid mismatches!");
-  }
+  auto [w_pgrid, w_bsize] =
+      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  utils::check(w_pgrid[0] * w_pgrid[2] * w_pgrid[3] * w_pgrid[4] == _context->comm.size(),
+               "lr_dyson: pgrid mismatches!");
 
   // Transform ΔΣ from tau to frequency (only when GW is active)
   _Timer.start("LR_DYSON_TAU_TO_W");
@@ -218,9 +203,25 @@ void lr_dyson::solve_lr_dyson_impl(
                                                           {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize);
   _Timer.stop("LR_DYSON_ALLOC");
 
-  // Loop bounds from the output distributed array
+  // Loop bounds from the output distributed array. lr_dyson_omega_pgrid keeps
+  // the band axes undivided whenever the ω axis has room, but in the fallback
+  // each rank owns only the (i_rng, j_rng) block of ΔG.
   auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dDeltaG_wskij.local_shape();
   auto [w_org, s_org, k_org, i_org, j_org] = dDeltaG_wskij.origin();
+  auto i_rng = dDeltaG_wskij.local_range(3);
+  auto j_rng = dDeltaG_wskij.local_range(4);
+
+  // ΔG = G_{k+q}·X·G_k couples every band, so X must be the full nbnd × nbnd
+  // matrix. ΔH0, ΔF, S and ΔV_QPGW live in shared memory and are always whole,
+  // but ΔΣ(iω) is distributed on w_pgrid: in the band-split fallback no rank
+  // holds all of it and the product cannot be formed.
+  utils::check(sDeltaSigma_tskij == nullptr or w_pgrid[3]*w_pgrid[4] == 1,
+               "solve_lr_dyson_impl: ΔΣ is distributed over the band axes "
+               "(pgrid (w,s,k,i,j) = ({},{},{},{},{})), which the ΔG = G·X·G "
+               "product does not support. This happens only when nw = {} is too "
+               "small to absorb the ranks the (ω, k) pools left over; run LR-GW "
+               "on fewer ranks, or with a finer imaginary-frequency grid.",
+               w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3], w_pgrid[4], _nw);
 
   auto DeltaG_w_loc = dDeltaG_wskij.local();
   auto DeltaH0_loc = sDeltaH0_skij.local();
@@ -265,7 +266,7 @@ void lr_dyson::solve_lr_dyson_impl(
         nda::blas::gemm(ComplexType(1.0), X_ij, G_k, ComplexType(0.0), tmp);
         nda::blas::gemm(ComplexType(1.0), G_kq, tmp, ComplexType(0.0), DeltaG_ij);
 
-        DeltaG_w_loc(n, s, k, nda::range::all, nda::range::all) = DeltaG_ij;
+        DeltaG_w_loc(n, s, k, nda::ellipsis{}) = DeltaG_ij(i_rng, j_rng);
       }
     }
   }

@@ -886,19 +886,11 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
             is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ");
   }
 
-  // Band-basis Dyson grids — mirror the inline proc-grid math in
-  // lr_dyson::solve_lr_dyson (ω-side and the τ redistribute target).
-  std::array<long,5> dyw_pg;
-  {
-    long np = nproc;
-    long nwpools = utils::find_proc_grid_max_npools(np, nw, 0.4);
-    np /= nwpools;
-    long nkpools = utils::find_proc_grid_max_npools(np, nki, 0.4);
-    np /= nkpools;
-    long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-    long np_j = np / np_i;
-    dyw_pg = {nwpools, 1, nkpools, np_i, np_j};
-  }
+  // Band-basis Dyson grids — the ω-side comes from the same helper
+  // solve_lr_dyson_impl allocates with; the τ redistribute target mirrors the
+  // inline proc-grid math there.
+  auto [dyw_pg, dyw_bs] = lr_dyson_omega_pgrid(nproc, nw, nki, _nbnd);
+  (void)dyw_bs;
   std::array<long,5> dyt_pg;
   {
     long np = nproc;

@@ -30,8 +30,52 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "utilities/lr_utils.hpp"
+#include "utilities/proc_grid_partition.hpp"
 
 namespace methods {
+
+/**
+ * @brief Processor grid and block size for the ω-side band-basis LR Dyson arrays
+ *        (ΔG(iω), and ΔΣ(iω) when GW is active).
+ *
+ * ΔG = G_{k+q}·X·G_k is evaluated as two local gemms on complete nbnd x nbnd
+ * matrices, so a rank cannot work from a partial band block: X is assembled from
+ * ΔH0, ΔF, S (+ ΔV_QPGW, ΔΣ) and every one of those has to be whole. The band
+ * axes are therefore left undivided whenever possible — ranks that the (ω, k)
+ * pools cannot absorb go onto the ω axis, which only needs nw >= nwpools (the
+ * split may be uneven; chunk_range handles that).
+ *
+ * Splitting the band axes is the last resort, taken only when the ω axis has no
+ * room. It costs every rank the full nbnd^3 product per (ω, s, k) of which it
+ * keeps one block, and it leaves ΔΣ unusable, so LR-GW rejects it.
+ *
+ * Kept in one place because lr_driver's distribution report has to agree with
+ * what solve_lr_dyson_impl actually allocates.
+ *
+ * @return {pgrid, bsize} over the (w, s, k, i, j) axes.
+ */
+inline std::pair<std::array<long, 5>, std::array<long, 5>>
+lr_dyson_omega_pgrid(long nproc, long nw, long nkpts_ibz, long nbnd) {
+  long np = nproc;
+  long nwpools = utils::find_proc_grid_max_npools(np, nw, 0.4);
+  np /= nwpools;
+  long nkpools = utils::find_proc_grid_max_npools(np, nkpts_ibz, 0.4);
+  np /= nkpools;
+
+  long np_i = 1, np_j = 1;
+  if (np > 1) {
+    if (nwpools * np <= nw) {
+      nwpools *= np;
+    } else {
+      np_i = utils::find_proc_grid_min_diff(np, 1, 1);
+      np_j = np / np_i;
+    }
+  }
+
+  long ibsize = std::min({1024L, nbnd / np_i, nbnd / np_j});
+  if (ibsize < 1) ibsize = 1;
+  return {{nwpools, 1, nkpools, np_i, np_j}, {1, 1, 1, ibsize, ibsize}};
+}
 
 /**
  * @class lr_dyson

@@ -283,4 +283,124 @@ namespace lr_dyson_tests {
     context->comm.barrier();
   }
 
+  TEST_CASE("lr_dyson_dm_hermiticity_q0", "[methods_scf]") {
+    /**
+     * ΔDm must be Hermitian for a Hermitian ΔH0, whatever processor grid the LR
+     * Dyson equation picks.
+     *
+     * The grid splits the band axes of ΔG (np_i > 1) whenever the (ω, k) pools
+     * cannot absorb the rank count; each rank then owns only a block of ΔG, and
+     * storing the full nbnd x nbnd product into that block instead of the rank's
+     * own slice leaves ΔDm ~100% non-Hermitian. That path is NOT reachable here:
+     * this system has nbnd = 8, which caps np_i, and nk_ibz = 8 absorbs every
+     * leftover rank at unit-test rank counts (the grid logged below is always
+     * (np,1,1,1,1)). Band-distributed coverage therefore needs a larger system
+     * and a rank count the pools cannot absorb.
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+
+    // Report the grid the LR Dyson equation will use, so it is visible whether
+    // this rank count actually exercises the band-distributed path. Queried from
+    // the helper the solver itself allocates with, not re-derived here.
+    {
+      auto [pg, bs] = lr_dyson_omega_pgrid(context->comm.size(), ft.nw_f(), nk, nb);
+      app_log(2, "lr_dyson_dm_hermiticity_q0: nw = {}, nk_ibz = {}, nbnd = {}, "
+                 "LR pgrid (w,s,k,i,j) = ({},{},{},{},{}), band bsize = {}",
+              ft.nw_f(), nk, nb, pg[0], pg[1], pg[2], pg[3], pg[4], bs[3]);
+    }
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    nda::array<double, 1> q_vec{0.0, 0.0, 0.0};
+    lr_dyson lr_dys(dyson, q_vec);
+
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> DeltaH0(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> DeltaF(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> DeltaG(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> DeltaDm(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+
+    if (context->node_comm.root()) Sigma.local()() = 0.0;
+    context->comm.barrier();
+
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    context->comm.barrier();
+
+    // Hermitian ΔH0, zero ΔF
+    if (context->node_comm.root()) {
+      std::srand(42);
+      auto DH0_loc = DeltaH0.local();
+      DeltaF.local() = ComplexType(0.0);
+      for (int is = 0; is < ns; ++is) {
+        for (int ik = 0; ik < nk; ++ik) {
+          for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j <= i; ++j) {
+              double re = 0.01 * (std::rand() / double(RAND_MAX) - 0.5);
+              double im = (i == j) ? 0.0 : 0.01 * (std::rand() / double(RAND_MAX) - 0.5);
+              DH0_loc(is, ik, i, j) = ComplexType(re, im);
+              DH0_loc(is, ik, j, i) = ComplexType(re, -im);
+            }
+          }
+        }
+      }
+    }
+    context->comm.barrier();
+
+    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    lr_dys.set_cached_G_omega(&sG_wskij);
+    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, DeltaH0, DeltaF,
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+    context->comm.barrier();
+
+    double nonherm = 0.0, max_dDm = 0.0;
+    if (context->node_comm.root()) {
+      auto dDm = DeltaDm.local();
+      for (int is = 0; is < ns; ++is) {
+        for (int ik = 0; ik < nk; ++ik) {
+          for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j < nb; ++j) {
+              nonherm = std::max(nonherm,
+                                 std::abs(dDm(is, ik, i, j) - std::conj(dDm(is, ik, j, i))));
+              max_dDm = std::max(max_dDm, std::abs(dDm(is, ik, i, j)));
+            }
+          }
+        }
+      }
+    }
+    context->comm.broadcast_value(nonherm, 0);
+    context->comm.broadcast_value(max_dDm, 0);
+
+    INFO("max |ΔDm| = " << max_dDm);
+    INFO("max |ΔDm - ΔDm^H| = " << nonherm);
+    CHECK(max_dDm > 1e-12);  // a zero ΔDm would make the check vacuous
+    CHECK(nonherm / (max_dDm + 1e-15) < 1e-8);
+    context->comm.barrier();
+  }
+
 } // lr_dyson_tests
