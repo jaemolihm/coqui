@@ -34,6 +34,7 @@
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "nda/linalg.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/h5.hpp"
 #include "utilities/test_common.hpp"
@@ -412,6 +413,56 @@ std::cout<<" nx: " <<nx <<std::endl;
 
 #endif
 
+}
+
+// slate_ops::inverse over the processor grids simple_dyson can pick: the band
+// axis may end up split over an arbitrary rank count, with a block size as
+// small as nbnd/np_i.
+TEST_CASE("distributed_inverse", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  const long N = 40;
+
+  nda::array<ComplexType, 2> A(N, N);
+  for (long i = 0; i < N; ++i)
+    for (long j = 0; j < N; ++j)
+      A(i, j) = ComplexType(std::sin(0.3*i + 0.7*j + 1.0), std::cos(0.2*i - 0.5*j))
+                + (i == j ? ComplexType(2*N) : ComplexType(0));
+
+  nda::array<ComplexType, 2> Ainv_ref(A);
+  {
+    nda::matrix_view<ComplexType> Am(Ainv_ref);
+    Ainv_ref = nda::inverse(Am);
+  }
+
+  auto check = [&](long np_i, long np_j) {
+    if (np_i*np_j != world.size()) return;
+    long bsize = std::min({1024l, N/np_i, N/np_j});
+    if (bsize < 1) return;
+
+    auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
+                  shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
+    dA.local() = A(dA.local_range(0), dA.local_range(1));
+
+    math::nda::slate_ops::inverse(dA);
+
+    double err = 0.0;
+    auto Aloc = dA.local();
+    for (auto [i, in] : itertools::enumerate(dA.local_range(0)))
+      for (auto [j, jn] : itertools::enumerate(dA.local_range(1)))
+        err = std::max(err, std::abs(Aloc(i, j) - Ainv_ref(in, jn)));
+    // Identical on every rank after the reduction, so CHECK cannot diverge.
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    app_log(2, "  inverse: pgrid = ({}, {}), bsize = {}, max error = {:.3e}",
+            np_i, np_j, bsize, err);
+    INFO("pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize);
+    CHECK(err < 1e-10);
+  };
+
+  check(world.size(), 1);
+  check(1, world.size());
+  long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
+  check(nx, world.size()/nx);
 }
 
 /*
