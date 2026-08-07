@@ -59,16 +59,17 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   Binv() = 0;
   eig_inv() = 0;
 
+  auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
   double eig_max = nda::max_element(eig);
-  double eig_min = nda::min_element(eig);
-  double cond = eig_max / eig_min;
+  double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
 
   const double eig_thresh = 1E-12;
 
   app_log(2, "DIIS: Condition number of B: {}", cond);
 
+  // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
   for (auto i : nda::range(0, eig.size())) {
-    if (eig(i) * cond > eig_thresh) {
+    if (eig(i) > eig_thresh * eig_max) {
       eig_inv(i, i) = 1.0 / (eig(i));
     }
   }
@@ -79,8 +80,8 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   nda::array<double, 1> x(B.shape()[1]);
   nda::blas::gemv(1.0, Binv, bb, 0.0, x);
 
-  std::complex<double> sum = std::accumulate(x.begin(), x.end(), 0.0);
-  return nda::make_regular(nda::real(x / sum));
+  double sum = std::accumulate(x.begin(), x.end(), 0.0);
+  return nda::make_regular(x / sum);
 }
 
 } // namespace iter_scf
