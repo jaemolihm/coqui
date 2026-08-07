@@ -69,6 +69,7 @@ struct qe_system
             nda::array<double, 3> occ_,
             std::vector<utils::symm_op> symm_list_,
             double efermi_,
+            bool has_efermi_,
             bool use_trev):
         mpi(std::move(mpi_)),
         outdir(out),
@@ -95,6 +96,7 @@ struct qe_system
         at_ids(ids),
         at_pos(pos),
         efermi(efermi_),
+        has_efermi(has_efermi_),
         ecutrho(ecrho),
         fft_mesh(mesh),
         latt(latt_),
@@ -163,6 +165,7 @@ struct qe_system
             nda::array<double, 3> occ_,
             [[maybe_unused]] std::vector<utils::symm_op> symm_list_,
             double efermi_,
+            bool has_efermi_,
             bz_symm const& bz_):
         mpi(std::move(mpi_)),
         outdir(out),
@@ -188,6 +191,7 @@ struct qe_system
         at_ids(ids),
         at_pos(pos),
         efermi(efermi_),
+        has_efermi(has_efermi_),
         ecutrho(ecrho),
         fft_mesh(mesh),
         latt(latt_),
@@ -267,7 +271,8 @@ struct qe_system
     h5::h5_write_attribute(sgrp, "number_of_elec", nelec);
     h5::h5_write_attribute(sgrp, "madelung_constant", madelung);
     h5::h5_write_attribute(sgrp, "nuclear_energy", enuc);
-    h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
+    // absence is what tells a reader has_efermi = false
+    if(has_efermi) h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
     h5::h5_write_attribute(sgrp, "number_of_bands", nbnd);
     h5::h5_write(sgrp, "species", species);
     nda::h5_write(sgrp, "atomic_id", at_ids, false);
@@ -334,6 +339,9 @@ struct qe_system
   double madelung = 0.0;                // madelung constant for finite-size corrections
   double enuc=0.0;                      // nuclear energy
   double efermi=0.0;                    // fermi energy
+  // true when efermi carries a value obtained from the source (QE xml, or a
+  // fermi_energy attribute in the h5); false means the 0.0 default.
+  bool has_efermi=false;
 
   bool orb_on_fft_grid = true;          // orbitals are stored on FFT grid or not
   double ecutrho = 0.0;                 // plane-wave cutoffs

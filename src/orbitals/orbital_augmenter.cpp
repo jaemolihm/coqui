@@ -724,10 +724,15 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   if(R == 0) {
     // No δψ states: emit the M kept originals in the augmented bdft format
-    // (kinetic-energy eigval seed + pseudopot, h0_source="compute") so a
-    // zero-augmentation baseline runs through the same downstream pipeline. Mirrors the momentum
+    // (DFT KS eigval seed + pseudopot, h0_source="compute") so a zero-augmentation
+    // baseline runs through the same downstream pipeline. The originals are true DFT
+    // eigenstates, so their KS diagonal reproduces the parent eigenvalues; when V_Hxc
+    // is unavailable the kinetic diagonal is used instead. Mirrors the momentum
     // add_augmentation(nbnd_aug==0) baseline.
     auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
+    if(auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
+                                   std::string("dpsi")))
+      eig_ibz = std::move(*ks);
     return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, std::string("dpsi")));
   }
 
@@ -845,7 +850,13 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
   auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
+
+  // DFT Kohn-Sham eigval seed for the (non-eigen) augmented basis, falling back to the
+  // kinetic Rayleigh diagonal when the DFT V_Hxc is unavailable.
   auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
+  if(auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz,
+                                 std::string("dpsi")))
+    eig_ibz = std::move(*ks);
 
   return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi"),
                                         band_weights));

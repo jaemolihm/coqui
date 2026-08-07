@@ -72,6 +72,8 @@ namespace mf {
         madelung(mad),
         enuc(e0),
         efermi(0.0),
+        // this constructor takes no Fermi energy; 0.0 is the unset default
+        has_efermi(false),
         k_weight(_symm.nkpts_ibz,double(_symm.nkpts)/_symm.nkpts_ibz),
         ndims(3),
         nspin(nspin_),
@@ -138,6 +140,9 @@ namespace mf {
       double enuc = 0.0;
       // fermi energy
       double efermi = 0.0;
+      // true when efermi carries a value assigned by the source; false means the
+      // 0.0 default.
+      bool has_efermi = false;
 
       // weight of kpoint in averages
       nda::array<double, 1> k_weight;
@@ -226,7 +231,8 @@ namespace mf {
         h5::h5_write_attribute(sgrp, "number_of_elec", nelec);
         h5::h5_write_attribute(sgrp, "madelung_constant", madelung);
         h5::h5_write_attribute(sgrp, "nuclear_energy", enuc);
-        h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
+        // absence is what tells a reader has_efermi = false
+        if(has_efermi) h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
 
         nda::h5_write(sgrp, "kpoint_weights", k_weight, false);
 
@@ -268,8 +274,10 @@ namespace mf {
         h5::h5_read_attribute(sgrp, "number_of_elec", nelec);
         h5::h5_read_attribute(sgrp, "madelung_constant", madelung);
         h5::h5_read_attribute(sgrp, "nuclear_energy", enuc);
-        if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") )
+        if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") ) {
           h5::h5_read_attribute(sgrp, "fermi_energy", efermi);
+          has_efermi = true;
+        }
 
         // temporary!
         utils::check(nspin_in_basis == nspin, "nspin_in_basis != nspin not yet allowed",nspin_in_basis,nspin);

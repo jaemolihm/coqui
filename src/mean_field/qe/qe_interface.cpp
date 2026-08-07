@@ -286,7 +286,7 @@ qe_system read_xml(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi
   return qe_system(std::move(mpi),outdir,prefix,xml_input_type,no_q_sym,
 		   alat,npwx,ngm,ngms,nelec,3,nspin,(noncolin?2:1),spinorbit,
 		   ecrho,species,at_ids,at_pos,fft_mesh,
-		   lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,not noinv);
+		   lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,true,not noinv);
 }
 
 qe_system read_h5(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi,
@@ -317,6 +317,7 @@ qe_system read_h5(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi,
   double ecrho = 0.0;
   double enuc=0.0;                      // nuclear energy
   double efermi = 0.0;
+  bool has_efermi = false;              // true only if the h5 carries fermi_energy
 
   nda::stack_array<int,3> fft_mesh;
 
@@ -333,8 +334,10 @@ qe_system read_h5(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi,
   else
     npol = 1;
   h5::h5_read_attribute(sgrp, "nuclear_energy", enuc);
-  if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") )
+  if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") ) {
     h5::h5_read_attribute(sgrp, "fermi_energy", efermi);
+    has_efermi = true;
+  }
   h5::h5_read_attribute(sgrp, "number_of_elec", nelec);
   int lso = 0;
   if( H5Aexists(h5::hid_t(sgrp),"lspinorbit") )
@@ -487,12 +490,12 @@ qe_system read_h5(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi,
     return qe_system(std::move(mpi),outdir,prefix,h5_input_type,false,
                      alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
                      ecrho,species,at_ids,at_pos,fft_mesh,
-                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,bz);
+                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,bz);
   } else {
     return qe_system(std::move(mpi),outdir,prefix,h5_input_type,false,
                      alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
                      ecrho,species,at_ids,at_pos,fft_mesh,
-                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,not noinv);
+                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,not noinv);
   } 
 }
 

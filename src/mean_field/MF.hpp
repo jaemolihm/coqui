@@ -327,6 +327,12 @@ class MF
     auto efermi() const
     { return std::visit( [&](auto&& v) { return v.get_sys().efermi; }, var ); }
 
+    // True when efermi() carries a value obtained from the mean-field source.
+    // False means the 0.0 default (e.g. an h5 without a fermi_energy attribute),
+    // which must not be used as a Fermi level.
+    bool has_efermi() const
+    { return std::visit( [&](auto&& v) { return v.get_sys().has_efermi; }, var ); }
+
     // True if the orbital basis was produced by basis augmentation (a
     // non-eigenstate basis). Only the bdft backend carries this flag.
     bool is_augmented() const

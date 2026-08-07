@@ -123,6 +123,9 @@ namespace mf {
       double enuc = 0.0;
       // fermi energy
       double efermi = 0.0;
+      // true when efermi carries a value read from (or inherited from) the
+      // source; false means the 0.0 default, which is not a Fermi energy.
+      bool has_efermi = false;
 
       // weight of kpoint in averages
       nda::array<double, 1> k_weight;
@@ -201,7 +204,9 @@ namespace mf {
         h5::h5_write_attribute(sgrp, "number_of_elec", nelec);
         h5::h5_write_attribute(sgrp, "madelung_constant", madelung);
         h5::h5_write_attribute(sgrp, "nuclear_energy", enuc);
-        h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
+        // absence is what tells a reader has_efermi = false, so writing the 0.0
+        // default would turn it into a real Fermi energy on the next read
+        if(has_efermi) h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
         h5::h5_write_attribute(sgrp, "augmented", int(augmented));
         if(augmented) h5::h5_write(sgrp, "augment_type", augment_type);
         h5::h5_write(sgrp, "species", species);
@@ -282,8 +287,10 @@ namespace mf {
         h5::h5_read_attribute(sgrp, "number_of_elec", nelec);
         h5::h5_read_attribute(sgrp, "madelung_constant", madelung);
         h5::h5_read_attribute(sgrp, "nuclear_energy", enuc);
-        if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") )
+        if( H5Aexists(h5::hid_t(sgrp),"fermi_energy") ) {
           h5::h5_read_attribute(sgrp, "fermi_energy", efermi);
+          has_efermi = true;
+        }
         // stored as int (h5 has no native bool); absent in pre-augmentation files
         if( H5Aexists(h5::hid_t(sgrp),"augmented") ) {
           int augmented_flag = 0;
@@ -419,6 +426,7 @@ namespace mf {
         madelung = mf.madelung();
         enuc     = 0;
         efermi   = mf.efermi();
+        has_efermi = mf.has_efermi();
 
         k_weight   = mf.k_weight();
         if( std::abs( nda::sum(k_weight) - 1.0 ) > 1e-6 )
