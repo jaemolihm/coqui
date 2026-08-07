@@ -118,6 +118,23 @@ public:
    * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
    * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
    * @param iter_params        - [INPUT] Iteration algorithm parameters (damping/DIIS)
+   * @param DeltaF_ibc_out     - [OUTPUT] If non-null AND DeltaX was provided, the
+   *                              precomputed IBC aux→primary correction
+   *                              δX†·F_PQ·X + X†·F_PQ·δX (ns, nk_ibz, nb, nb)
+   *                              is copied here before return. Otherwise left
+   *                              untouched (size 0 → caller can skip persisting).
+   * @param F_PQ_out           - [OUTPUT] If non-null AND DeltaX was provided, the
+   *                              gathered unperturbed V_HF in aux basis
+   *                              (ns, nk_ibz, NP, NP) is copied here.
+   * @param DeltaF_PQ_out      - [OUTPUT] If non-null AND HF is active, the LR Fock
+   *                              in aux basis at convergence (ns, nk_ibz, NP, NP)
+   *                              is gathered here via one extra lr_hf::evaluate
+   *                              call. Consumed, with F_PQ_out, by the Python
+   *                              phonon post-processors (ΔΔF_ibc T1/T3 terms).
+   * @param include_xc         - [INPUT] LR-DFT: add the semilocal xc kernel to the
+   *                              direct channel, i.e. use (V + Vxc)(q) in ΔJ.
+   *                              Requires include_hartree and a THC carrying Vxc;
+   *                              rejected together with include_exchange.
    * @return Tuple of (number of iterations, final Δμ)
    */
   template<THC_ERI THC_t, typename dW_t>
@@ -141,7 +158,11 @@ public:
       const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
       const lr_qp_static_params* qp_static = nullptr,
-      sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr);
+      sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
+      nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
+      nda::array<ComplexType, 4>* F_PQ_out = nullptr,
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
+      bool include_xc = false);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the

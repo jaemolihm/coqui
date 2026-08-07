@@ -97,6 +97,14 @@ public:
    * @param S_skij           - [INPUT] Overlap matrix (ns, nk_ibz, nb, nb)
    * @param compute_hartree  - [INPUT] Whether to compute Hartree term (default: true)
    * @param compute_exchange - [INPUT] Whether to compute Exchange term (default: true)
+   * @param DeltaF_PQ_out    - [OUTPUT] If non-null, a replicated copy of ΔF in
+   *                           aux (PQ) basis, captured before the band-basis IBC
+   *                           correction is added. Consumed by the Python phonon
+   *                           post-processors (ΔΔF_ibc T1 term).
+   * @param compute_xc       - [INPUT] Add the semilocal xc kernel to the direct
+   *                           channel, i.e. use (V + Vxc)(q) in ΔJ. Requires a
+   *                           THC carrying Vxc and compute_exchange = false; see
+   *                           thc_lr_hf for why it cannot reach ΔK.
    */
   using dArray_4D_t = dArray_t<nda::array<ComplexType, 4>>;
 
@@ -109,7 +117,9 @@ public:
                 bool compute_exchange = true,
                 const lr_ibc_DeltaX* ibc = nullptr,
                 const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
-                const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
+                const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
+                nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
+                bool compute_xc = false);
 
   /// Print the LR HF timer block (header + total + subclocks) at log level `level`.
   inline void print_timers(int level = 2) {
@@ -170,7 +180,9 @@ private:
                  bool compute_exchange,
                  const lr_ibc_DeltaX* ibc = nullptr,
                  const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
-                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr);
+                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
+                 nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
+                 bool compute_xc = false);
 
   /**
    * @brief LR finite-size correction for K based on "PRB 80, 085114(2009)"

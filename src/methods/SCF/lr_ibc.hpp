@@ -83,6 +83,15 @@ namespace methods {
     // Held in a node-local shared-memory window (one copy per node) when
     // present. std::nullopt when the GW-Sigma path is inactive.
     std::optional<sArray_5D_t> sDeltaSigma_ibc_tskij;      // (nt, ns, nk_ibz, nb, nb)
+
+    // Unperturbed V_HF in aux (PQ) basis, gathered from `lr_precompute_V_HF_PQ` on
+    // the root rank only (it is several GB at production NP, and only the root
+    // writes it). Consumed by the Python phonon post-processors, which build the
+    // ΔΔF_ibc curvature terms
+    //   T3 = δX_adj†·F_PQ·δX' + δX_adj'†·F_PQ·δX
+    // that have no C++ path. Empty off root, and everywhere unless the caller asked
+    // for it via build_lr_ibc's keep_F_PQ.
+    nda::array<ComplexType, 4> F_PQ_skij;                  // (ns, nk_ibz, NP, NP)
   };
 
 
@@ -556,6 +565,9 @@ namespace methods {
    *   3. DeltaSigma_ibc = DeltaX correction on Σ_GW_PQ
    *
    * @param dW_tRPQ  - [INPUT] W_c in R-space, nullable (required if include_gw_sigma)
+   * @param keep_F_PQ - [INPUT] Retain F_PQ (root only) for the Python curvature
+   *                    post-processors. Off by default: the array is
+   *                    (ns, nk_ibz, NP, NP), several GB at production NP.
    */
   template<typename mpi_context_t, typename dW_t>
   lr_ibc_DeltaX build_lr_ibc(
@@ -569,7 +581,8 @@ namespace methods {
       const nda::array<ComplexType, 4>* Dm_ab,
       const lr_ibc_DeltaX::sArray_5D_t* sG_tskij,
       dW_t* dW_tRPQ,
-      bool include_hartree, bool include_exchange, bool include_gw_sigma) {
+      bool include_hartree, bool include_exchange, bool include_gw_sigma,
+      bool keep_F_PQ = false) {
 
     long ns = MF->nspin();
     long nkpts_ibz = MF->nkpts_ibz();
@@ -587,7 +600,8 @@ namespace methods {
         q_vec, kpq_map,
         Dm_ab, sG_tskij,
         std::move(DeltaF_ibc),
-        std::nullopt
+        std::nullopt,
+        {}  // F_PQ_skij — populated below if the HF path runs
     };
 
     // --- Compute DeltaF_ibc from V_HF_PQ ---
@@ -597,6 +611,14 @@ namespace methods {
       // Use lr_precompute_V_HF_PQ (from lr_precompute.hpp)
       auto dF_PQ = lr_precompute_V_HF_PQ(mpi, MF, thc, *Dm_ab,
                                            include_hartree, include_exchange);
+
+      // Root-only copy for the Python curvature post-processors, which is where it
+      // is written from. Replicating it would cost several GB on every rank.
+      if (keep_F_PQ) {
+        if (mpi.comm.root())
+          ibc.F_PQ_skij = nda::array<ComplexType, 4>(dF_PQ.global_shape());
+        math::nda::gather(0, dF_PQ, std::addressof(ibc.F_PQ_skij));
+      }
 
       // Compute DeltaX correction on V_HF_PQ → DeltaF_ibc
       ibc.DeltaF_ibc_skij.resize({ns, nkpts_ibz, nbnd, nbnd});

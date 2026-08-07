@@ -1285,6 +1285,38 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // One-shot G0W0: store the two ΔΣ terms (dG0·W0, G0·dW0) separately.
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
 
+  // LR-DFT: add the semilocal xc kernel to the direct channel, i.e. use
+  // (V + Vxc)(q) in ΔJ. Deliberately an explicit opt-in rather than keyed off
+  // the presence of a Vxc dataset in the THC: otherwise an --mbpt Hartree run
+  // against a Vxc-carrying THC file would silently become LR-DFT.
+  auto include_xc = io::get_value_with_default<bool>(pt, "include_xc", false);
+
+  // Aux-basis (THC) Fock matrices F_PQ / ΔF_PQ, consumed only by the DeltaX/IBC
+  // ΔΔF curvature post-processors in Python. Opt-in, because they are
+  // (nspin, nkpts_ibz, Np, Np): at production Np they dwarf every other LR
+  // output (~13 GB per array at Np = 3.7k) in the checkpoint, and capturing
+  // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
+  // not do IBC should never pay for them.
+  auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
+  if (include_xc) {
+    utils::check(include_hartree,
+                 "run_lr_calc: include_xc = true requires include_hartree = true.");
+    utils::check(!include_exchange,
+                 "run_lr_calc: include_xc = true is incompatible with "
+                 "include_exchange = true. The semilocal xc kernel contracts with "
+                 "the diagonal density response only; LR-DFT is include_hartree = "
+                 "true, include_exchange = false.");
+    utils::check(gw_mode == lr_gw_update_mode::none,
+                 "run_lr_calc: include_xc = true is incompatible with a GW self-energy "
+                 "(gw_mode != none): f_xc and ΔΣ_GW both carry the correlation "
+                 "response, so the two together double-count it. include_xc works only "
+                 "in the Hartree mode.");
+    utils::check(eri.corr_eri->get().has_Vxc(),
+                 "run_lr_calc: include_xc = true but the THC integrals carry no "
+                 "xc-kernel matrix. Rebuild the THC with 'Vxc_file' set (deleting "
+                 "any stale THC checkpoint first), or set include_xc = false.");
+  }
+
   // LR-qpGW: statify the dynamic ΔΣ(iω) into a static ΔV_QPGW each iteration
   // (frozen QP orbitals from the qpGW checkpoint). Uses W0=RPA[G_QP] (recompute_W
   // forced on).
@@ -1591,6 +1623,18 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   const lr_qp_static_params* pQpStatic = opt_qp_static ? &(*opt_qp_static) : nullptr;
   auto* pDeltaVcorr = opt_sDeltaVcorr ? &(*opt_sDeltaVcorr) : nullptr;
 
+  // Under output_aux_fock, catches the precomputed IBC aux→primary correction
+  //   DeltaF_ibc = δX†·F_PQ·X + X†·F_PQ·δX
+  // when DeltaX is in play, plus F_PQ (unperturbed V_HF in aux basis) and ΔF_PQ
+  // (LR Fock in aux basis at convergence). The Python phonon post-processors build
+  // the ΔΔF_ibc T1/T3 curvature terms from these; there is no C++ path for them.
+  // All three ride the same flag so the default checkpoint keeps exactly the
+  // dataset set it had before. Each is left at size 0 when its branch does not
+  // run, and only the populated ones are persisted.
+  nda::array<ComplexType, 4> DeltaF_ibc_skij;
+  nda::array<ComplexType, 4> F_PQ_skij;
+  nda::array<ComplexType, 4> DeltaF_PQ_skij;
+
   auto [niter, Delta_mu] = driver.run_lr(
       lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
       lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -1600,7 +1644,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
       pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
-      pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr);
+      pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr,
+      output_aux_fock ? &DeltaF_ibc_skij : nullptr,
+      output_aux_fock ? &F_PQ_skij : nullptr,
+      output_aux_fock ? &DeltaF_PQ_skij : nullptr, include_xc);
   lr_state.Delta_mu.emplace(Delta_mu);
   mpi->comm.barrier();
 
@@ -1613,6 +1660,35 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  Delta_mu, niter,
                  include_hartree, include_exchange, include_gw_sigma,
                  pDeltaSigma2, pDeltaVcorr);
+
+  // Persist the IBC aux→primary correction and the aux-basis Fock matrices
+  // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
+  // DeltaF_ibc as
+  //   dE/dx = spin · Σ_{s,k} w_k · Tr(DeltaF_ibc[s,k] · Dm[s,k]),
+  // and the phonon drivers contract F_PQ / ΔF_PQ against δX for the ΔΔF_ibc
+  // curvature terms.
+  if (mpi->comm.root() && (DeltaF_ibc_skij.size() > 0 ||
+                           F_PQ_skij.size() > 0 ||
+                           DeltaF_PQ_skij.size() > 0)) {
+    h5::file file(output + ".mbpt.h5", 'a');
+    h5::group grp(file);
+    auto lr_grp = grp.has_subgroup("linear_response") ?
+                  grp.open_group("linear_response") :
+                  grp.create_group("linear_response");
+    if (DeltaF_ibc_skij.size() > 0) {
+      nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
+      app_log(2, "  - DeltaF_ibc_skij written to \"linear_response/\"");
+    }
+    if (F_PQ_skij.size() > 0) {
+      nda::h5_write(lr_grp, "F_PQ_skij", F_PQ_skij, false);
+      app_log(2, "  - F_PQ_skij written to \"linear_response/\"");
+    }
+    if (DeltaF_PQ_skij.size() > 0) {
+      nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
+      app_log(2, "  - DeltaF_PQ_skij written to \"linear_response/\"");
+    }
+  }
+  mpi->comm.barrier();
 
   utils::memlog("run_lr_calc: exit (before RAII)");
   return std::make_tuple(niter, Delta_mu);

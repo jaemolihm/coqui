@@ -92,11 +92,14 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      bool compute_exchange,
                      const lr_ibc_DeltaX* ibc,
                      const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
-                     const nda::array<ComplexType, 4>* Dm_skij_unpert) {
+                     const nda::array<ComplexType, 4>* Dm_skij_unpert,
+                     nda::array<ComplexType, 4>* DeltaF_PQ_out,
+                     bool compute_xc) {
   _Timer.start("LR_HF");
   app_log(3, "Evaluating LR Fock matrix (ΔF from ΔDm):");
   app_log(3, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
   app_log(3, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
+  app_log(3, "  - Semilocal xc kernel in ΔJ: {}", compute_xc ? "yes" : "no");
   app_log(3, "  - DeltaX correction: {}", ibc ? "yes" : "no");
   app_log(3, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
 
@@ -108,8 +111,20 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                "lr_hf::evaluate: DeltaV_qPQ provided but no unperturbed Dm "
                "(pass Dm_skij_unpert or an lr_ibc_DeltaX with Dm_ab set).");
 
+  // The semilocal xc kernel only exists for the diagonal (direct) density
+  // response, so it may only be requested for a Hartree-type LR. Refusing the
+  // combination here rather than downstream keeps v + f_xc + Fock from being
+  // requestable at all.
+  utils::check(!compute_xc || compute_hartree,
+               "lr_hf::evaluate: compute_xc requires compute_hartree.");
+  utils::check(!compute_xc || !compute_exchange,
+               "lr_hf::evaluate: compute_xc is incompatible with compute_exchange. "
+               "The semilocal xc kernel contracts with the diagonal density "
+               "response only; v + f_xc + Fock is not a defined theory here. "
+               "LR-DFT is include_hartree = true, include_exchange = false.");
+
   thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange,
-            ibc, DeltaV_qPQ, Dm_unpert_for_dV);
+            ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc);
 
   // Add LR finite-size correction for exchange
   if (compute_exchange) {
@@ -131,7 +146,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                       bool compute_exchange,
                       const lr_ibc_DeltaX* ibc,
                       const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
-                      const nda::array<ComplexType, 4>* Dm_skij_unpert) {
+                      const nda::array<ComplexType, 4>* Dm_skij_unpert,
+                      nda::array<ComplexType, 4>* DeltaF_PQ_out,
+                      bool compute_xc) {
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
   // V(q) at _q_ibz_idx instead of q=0, and _MF->Qpts() for U FT.
@@ -193,6 +210,29 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // Keep a copy of V(q) for Hartree (V(q=0) when q is Gamma, V(q) otherwise)
   nda::array<ComplexType, 2> Uq_PQ(NP_loc, NQ_loc);
   Uq_PQ() = dU_qPQ_loc(_q_ibz_idx, nda::ellipsis{});
+
+  // LR-DFT: the direct channel uses (V + Vxc)(q). Vxc is folded into this
+  // private copy, which is taken before dU_qPQ_loc is FT'd q→R in place and is
+  // read only by the ΔJ gemv below — the exchange path works off U(R)_PQ, so the
+  // xc kernel structurally cannot reach ΔK. It carries no spin factor of its
+  // own: the (ns==1) factor 2 multiplies the density (DeltaDm_QQ /
+  // Dm_QQ_unpert), and QE's dmuxc at nspin_mag=1 is dV_xc/dρ_total, the same
+  // structure as v, so it inherits that factor exactly as the Coulomb term does.
+  if (compute_xc) {
+    utils::check(thc.has_Vxc(),
+                 "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
+                 "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
+                 "THC checkpoint), or set include_xc = false.");
+    _Timer.start("Z_FETCH");
+    auto dVxc_qPQ = thc.dVxc({1, np_P, np_Q});
+    _Timer.stop("Z_FETCH");
+    utils::check(dVxc_qPQ.local_shape() == dU_qPQ.local_shape() and
+                 dVxc_qPQ.origin() == dU_qPQ.origin(),
+                 "lr_hf: Vxc and Coulomb distributions differ.");
+    Uq_PQ() += dVxc_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
+    app_log(2, "  LR-DFT: direct channel uses V(q) + Vxc(q) at q index {}.",
+            _q_ibz_idx);
+  }
 
   // Accumulate diagonal indices of ΔDm for the Hartree term
   nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
@@ -560,6 +600,22 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   }
 
   _Timer.start("MISC");
+  // Root-only ΔF_PQ for the Python phonon post-processors, gathered rather than
+  // replicated: the array is (ns, nkpts_ibz, NP, NP), ~14 GB per rank at NP ~ 3.6k.
+  // Captured before the band-basis IBC correction is added to sDeltaF_skij, so this
+  // is the pure aux-basis LR Fock (it likewise excludes the Madelung K correction,
+  // which lr_hf::evaluate applies in band basis after this routine returns).
+  if (DeltaF_PQ_out) {
+    // dDeltaF_skPQ is re-zeroed per polarization block, so for npol > 1 it holds only
+    // the last block at this point, not the full ΔF.
+    utils::check(npol == 1,
+                 "lr_hf: the aux-basis ΔF_PQ output is implemented for npol = 1 only "
+                 "(npol = {}). Set output_aux_fock = false.", npol);
+    if (_mpi->comm.rank() == 0)
+      *DeltaF_PQ_out = nda::array<ComplexType, 4>(dDeltaF_skPQ.global_shape());
+    math::nda::gather(0, dDeltaF_skPQ, DeltaF_PQ_out);
+  }
+
   // Add precomputed IBC correction for aux→primary (DeltaX terms on unperturbed F_PQ).
   // Added once here — covers all (ip,iq) pairs since V_HF_PQ includes the full sum.
   if (ibc && ibc->DeltaF_ibc_skij.size() > 0) {
@@ -643,7 +699,9 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                bool, bool,
                                const lr_ibc_DeltaX*,
                                const nda::array_view<ComplexType, 3>*,
-                               const nda::array<ComplexType, 4>*);
+                               const nda::array<ComplexType, 4>*,
+                               nda::array<ComplexType, 4>*,
+                               bool);
 
 template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const sArray_t<Arrv4D>&,
@@ -652,7 +710,9 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                bool, bool,
                                const lr_ibc_DeltaX*,
                                const nda::array_view<ComplexType, 3>*,
-                               const nda::array<ComplexType, 4>*);
+                               const nda::array<ComplexType, 4>*,
+                               nda::array<ComplexType, 4>*,
+                               bool);
 
 template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
                                          Arrv4D const&,

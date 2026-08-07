@@ -399,6 +399,22 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
           Must refer to an existing .mbpt.h5 checkpoint; results are appended.
         - input_type: HDF5 group to read checkpoint from (default: "scf")
         - input_iter: Iteration number to read (default: -1 = use final_iter)
+        - include_xc: LR-DFT. Add the semilocal xc kernel to the direct
+          (Hartree) channel, i.e. use (V + Vxc)(q) in ΔJ (default False).
+          Works only in the Hartree mode: requires ``include_hartree=True``,
+          ``include_exchange=False``, ``gw_mode="none"``, and a ``h_int`` built
+          with the THC ``Vxc_file`` option; each is a hard error otherwise.
+          (f_xc and ΔΣ_GW both carry the correlation response, so combining them
+          would double-count it.) It is an explicit flag rather than being keyed
+          off the presence of Vxc in the THC file, so a Hartree run against a
+          Vxc-carrying THC stays a Hartree run.
+        - output_aux_fock: Also write DeltaF_ibc_skij and the aux-basis (THC)
+          Fock matrices F_PQ_skij / DeltaF_PQ_skij to "linear_response/"
+          (default False). Only the DeltaX/IBC ddF curvature post-processors read
+          them. The two _PQ arrays are (nspin, nkpts_ibz, Np, Np) — ~13 GB at
+          Np = 3.7k — and capturing DeltaF_PQ costs one extra Fock build on the
+          converged DeltaDm, so a run that does not do IBC should leave this off.
+          npol > 1 is not supported for the _PQ output.
     h_int : ThcCoulomb
         THC ERI handler
     q_vec : array-like

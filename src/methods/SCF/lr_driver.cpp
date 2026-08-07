@@ -112,7 +112,11 @@ std::tuple<int, double> lr_driver::run_lr(
     const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
     const lr_qp_static_params* qp_static,
-    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij) {
+    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij,
+    nda::array<ComplexType, 4>* DeltaF_ibc_out,
+    nda::array<ComplexType, 4>* F_PQ_out,
+    nda::array<ComplexType, 4>* DeltaF_PQ_out,
+    bool include_xc) {
 
   _Timer.start("LR_SCF");
 
@@ -178,6 +182,7 @@ std::tuple<int, double> lr_driver::run_lr(
   app_log(1, "  fix_density = {}", fix_density ? "true" : "false");
   app_log(1, "  include_hartree = {}", include_hartree ? "true" : "false");
   app_log(1, "  include_exchange = {}", include_exchange ? "true" : "false");
+  app_log(1, "  include_xc = {}", include_xc ? "true" : "false");
   app_log(1, "  gw_mode = {}", gw_mode_str);
   app_log(1, "  qp_static_sigma = {}", qp_mode ? "true" : "false");
   app_log(1, "  iter_alg = {}", iter_params.alg);
@@ -350,7 +355,8 @@ std::tuple<int, double> lr_driver::run_lr(
         _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
         Dm_ab, &sG_tskij,
         opt_dW_tRPQ ? &(*opt_dW_tRPQ) : nullptr,
-        include_hartree, include_exchange, include_gw_sigma));
+        include_hartree, include_exchange, include_gw_sigma,
+        F_PQ_out != nullptr));
 
     app_log(2, "  DeltaX IBC correction: setup complete.");
     utils::memlog("lr_driver::run_lr: after build_lr_ibc");
@@ -422,7 +428,7 @@ std::tuple<int, double> lr_driver::run_lr(
       const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       _lr_hf->evaluate(sDeltaF_skij, sDeltaDm_skij, thc, sS_skij.local(),
                        include_hartree, include_exchange, ibc_ptr,
-                       DeltaV_qPQ, Dm_ab);
+                       DeltaV_qPQ, Dm_ab, nullptr, include_xc);
       _Timer.stop("LR_HF");
       _mpi->comm.barrier();
     }
@@ -704,6 +710,34 @@ std::tuple<int, double> lr_driver::run_lr(
   }
   app_log(1, "  Final Δμ = {:.6e}", Delta_mu);
 
+  // Expose the precomputed IBC aux→primary correction
+  //   δX†·F_PQ·X + X†·F_PQ·δX   (= ∂_τ Σ^(δX) in band basis)
+  // so callers can persist it for downstream gradient evaluations.
+  if (DeltaF_ibc_out && opt_ibc && opt_ibc->DeltaF_ibc_skij.size() > 0) {
+    *DeltaF_ibc_out = opt_ibc->DeltaF_ibc_skij;
+  }
+
+  // Expose F_PQ (unperturbed) and ΔF_PQ (LR Fock at convergence) in aux basis
+  // for the Python phonon post-processors, which build the ΔΔF_ibc T1/T3 terms
+  // that have no C++ path.
+  if (F_PQ_out && opt_ibc && opt_ibc->F_PQ_skij.size() > 0) {
+    *F_PQ_out = std::move(opt_ibc->F_PQ_skij);
+  }
+  if (DeltaF_PQ_out && need_hf) {
+    // One extra lr_hf::evaluate on the converged ΔDm just to capture ΔF_PQ. It writes
+    // into a scratch ΔF rather than sDeltaF_skij: the converged sDeltaF_skij is the
+    // mixed (DIIS/damped) iterate the caller persists, and re-evaluating from ΔDm
+    // would replace it with a different matrix, so an output-only flag would change
+    // the DeltaF_skij dataset.
+    auto sDeltaF_scratch = math::shm::make_shared_array<Array_view_4D_t>(
+        *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+    const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
+    _lr_hf->evaluate(sDeltaF_scratch, sDeltaDm_skij, thc, sS_skij.local(),
+                     include_hartree, include_exchange, ibc_ptr,
+                     DeltaV_qPQ, Dm_ab,
+                     DeltaF_PQ_out, include_xc);
+  }
+
   // Final hierarchical timer report (printed once, at verbosity >= 2).
   // Per-step solver prints inside the loop are gated to verbosity >= 3.
   print_timers(lr_pi_solver.get(), lr_scr_solver.get(), lr_gw_solver.get());
@@ -976,6 +1010,10 @@ template std::tuple<int, double> lr_driver::run_lr(
     const nda::array_view<ComplexType, 3>*,
     sArray_t<Array_view_5D_t>*,
     const lr_qp_static_params*,
-    sArray_t<Array_view_4D_t>*);
+    sArray_t<Array_view_4D_t>*,
+    nda::array<ComplexType, 4>*,
+    nda::array<ComplexType, 4>*,
+    nda::array<ComplexType, 4>*,
+    bool);
 
 } // namespace methods
