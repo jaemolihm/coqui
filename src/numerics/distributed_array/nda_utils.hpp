@@ -1536,8 +1536,10 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   for(int r=0; r<rank; ++r)
     rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
-  // The stores above are published to the other node ranks by the node_sync()
-  // (node barrier + win.sync()) that opens all_reduce_parallel below.
+  // Release the stores above before the barrier: every node rank reads the whole
+  // window in the reduce below, and all_reduce_parallel's opening node_sync() is
+  // barrier-then-sync, which acquires but does not publish what this rank wrote.
+  sA.win().sync();
   sA.communicator()->barrier();
   toc("GATHER_SHM_ASSIGN");
 

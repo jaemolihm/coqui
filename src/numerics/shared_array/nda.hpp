@@ -163,6 +163,9 @@ namespace math {
             _internode_comm->all_reduce_in_place_n(start, count, std::plus<>{});
           }
         }
+        // Release the root's stores; node_sync() is barrier-then-sync, i.e. the acquire
+        // half, so on its own it does not publish what this rank just wrote.
+        _win->sync();
         node_sync();
       }
 
@@ -189,8 +192,19 @@ namespace math {
         // node, so its chunk would go unreduced. Chunk by the smallest node in the job.
         // Depends only on the communicators, so it is resolved once per array: every
         // rank takes this branch on the same call, which keeps the collective matched.
-        if (_reduce_nchunks < 0)
+        if (_reduce_nchunks < 0) {
           _reduce_nchunks = _gcomm->all_reduce_value(long(_node_comm->size()), mpi3::min<>{});
+          // The chunking is only a partition if _internode_comm was split by node rank
+          // (make_mpi_context does). One built some other way can span fewer than all
+          // nodes, which would silently leave its chunk unreduced. Checked in the same
+          // one-time block so the steady state stays collective-free.
+          long nnodes = _gcomm->all_reduce_value(long(_node_comm->root() ? 1 : 0), std::plus<>{});
+          utils::check(_node_comm->rank() >= _reduce_nchunks or
+                       long(_internode_comm->size()) == nnodes,
+                       "shm::shared_array::all_reduce_parallel: internode_comm (size {}) does "
+                       "not span all {} nodes; it must be built as "
+                       "comm.split(node_comm.rank(), ...).", _internode_comm->size(), nnodes);
+        }
         long nchunks = _reduce_nchunks;
         node_sync();
         if (_node_comm->rank() < nchunks) {
@@ -204,6 +218,9 @@ namespace math {
             _internode_comm->all_reduce_in_place_n(start, count, std::plus<>{});
           }
         }
+        // Release the reducing ranks' stores; node_sync() is barrier-then-sync, i.e. the
+        // acquire half. Up to nchunks ranks write here, not just the root.
+        _win->sync();
         node_sync();
       }
 
@@ -216,6 +233,9 @@ namespace math {
             _internode_comm->broadcast_n(start, count, src_node);
           }
         }
+        // Release the root's stores; node_sync() is barrier-then-sync, i.e. the acquire
+        // half, so on its own it does not publish what this rank just wrote.
+        _win->sync();
         node_sync();
       }
 
