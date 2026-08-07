@@ -54,9 +54,9 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   utils::check(thresh == 0.0 or thresh > 1e-14,
                "Error in thc::chol_metric_impl_ibz: Invalid threshold:{}. Must be either 0.0 or larger than 1e-14.", thresh);
   utils::check(mf->npol_in_basis() == 1, "Error in chol_metric_impl_ibz: npol>1 not yet implemented.");
-  utils::check(not has_band_weights,
-               "Error in chol_metric_impl_ibz: band weights not implemented with k-point "
-               "symmetries. Use a full-BZ k-grid or set band_weights = false.");
+  utils::check(not has_band_weights or
+               (a_range.last() <= band_weight.extent(2) and b_range.last() <= band_weight.extent(2)),
+               "Error in chol_metric_impl_ibz: orbital range exceeds the band-weight table.");
 
   // storage space, to be adjusted synamically later on
   int nmax = (nIpts > 0 ? nIpts : 6*int(sqrt(a_range.size()*b_range.size()))); 
@@ -71,7 +71,34 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   auto kp_symm = mf->kp_symm();  
   auto trev_pair = mf->kp_trev_pair();  
   long ntrev_pairs = mf->nkpts_trev_pairs();
-  ComplexType Znorm = ComplexType(1.0)/std::sqrt(std::sqrt(RealType(a_range.size()*b_range.size()*nspins*nkpts)));
+  RealType na_eff = effective_band_count(a_range);
+  RealType nb_eff = effective_band_count(b_range);
+  ComplexType Znorm = ComplexType(1.0)/std::sqrt(std::sqrt(RealType(na_eff*nb_eff*nspins*nkpts)));
+
+  // Research diagnostic (exclude_unprotected_pairs): subtract M_aug from the pivot
+  // metric (M_keep = M_full - M_aug), where M_aug is the same construction
+  // restricted to the unprotected band tail [unprot_band_start, nbnd). The Diag
+  // and Tab blocks below then run twice, over all bands (+1) and over the tail
+  // (-1); the band restriction is applied before each square, so the subtracted
+  // term is |rho_tail|^2 and not (rho_full - rho_tail)^2. The per-band weights
+  // are already folded into Psia, so the tail restriction automatically carries
+  // w_a*w_b. Note: the subtracted term makes the metric lose strict positive-
+  // semidefiniteness; the 1e-14 residual floor in the pivot loop below guards
+  // against pathological cases.
+  const bool apf_active = exclude_unprotected_pairs;
+  long a0_aug = 0;
+  if(apf_active) {
+    utils::check(unprot_band_start >= 0,
+                 "Error in chol_metric_impl_ibz: unprot_band_start not set for exclude_unprotected_pairs.");
+    // The range must straddle the tail start: below it there is nothing to subtract,
+    // and above it the sub-range would be empty, silently turning the exclusion into
+    // a no-op instead of an error.
+    utils::check(a_range.first() <= unprot_band_start and unprot_band_start < a_range.last(),
+                 "Error in chol_metric_impl_ibz: exclude_unprotected_pairs requires an orbital "
+                 "range [{}, {}) containing the unprotected tail start ({}).",
+                 a_range.first(), a_range.last(), unprot_band_start);
+    a0_aug = unprot_band_start - a_range.first();
+  }
 
   // setting up pointer to appropriate communicator here, to simplify code below 
   auto& local_comm = utils::get_dev_comm<MEM>(*mpi);
@@ -216,6 +243,23 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   // 4D views into local sector of Psi
   auto Psia = nda::reshape(distPsia.local(),shape_t<4>{nspins,nkpts_ibz,a_range.size(),r_range.size()});
 
+  if(has_band_weights) {
+    // fold the per-band fit weights into the orbitals: the pivoted Cholesky then
+    // acts on the weighted pair-density metric. The weights are divided back out
+    // of the returned collocation matrix below. A band weight is symmetry
+    // invariant (eigval is symmetry-expanded at read time), so weighting the IBZ
+    // orbitals once here is equivalent to weighting every star member, and the
+    // IBZ k index addresses the full-BZ table directly (the IBZ is the leading
+    // block of the k list).
+    for( auto is : itertools::range(nspins) )
+      for( auto k : itertools::range(nkpts_ibz) )
+        for( auto a : itertools::range(a_range.size()) ) {
+          double w = band_weight(is,k,a_range.first()+a);
+          if(w != 1.0)
+            nda::tensor::scale(ComplexType(w), Psia(is,k,a,nda::range::all));
+        }
+  }
+
   /*********************************************
                  Diagonal/Residual 
   *********************************************/
@@ -229,43 +273,56 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   memory::array<MEM,ComplexType,1> Diag(r_range.size(),0.0);
   if constexpr (MEM==HOST_MEMORY) {
     memory::array<MEM,ComplexType,1> Tr(r_range.size(),0.0);
-    for( auto ispin : itertools::range(nspins) ) {
-      for( auto k : itertools::range(nkpts_ibz) ) {
-        RealType scl = ( trev_pair(k) >= 0 ? 2.0 : 1.0 );
-        for( auto r : itertools::range(r_range.size()) ) { 
-          auto Lrr = nda::blas::dotc(Psia(ispin,k,all,r),Psia(ispin,k,all,r));
-          Tr(r) = std::conj(Lrr) * Lrr; 
-          Diag(r) += scl*Tr(r); // from k in IBZ 
-        }
-        for( auto [is, ik] : itertools::zip(Skibz(k,nda::range(ns_per_kibz(k)-1)),
-                                            Ks(k,nda::range(ns_per_kibz(k)-1))) ) { 
-          scl = ( trev_pair(ik) >= 0 ? 2.0 : 1.0 );
-          for( auto r : itertools::range(r_range.size()) ) 
-            Diag(r) += scl*Tr(Sr_to_r(is,r)); 
+    // one accumulation pass over the band sub-range [a_lo, na), with sign
+    // sgn: pass 1 is (0, +1) and, when exclude_unprotected_pairs is active,
+    // pass 2 is (a0_aug, -1).
+    auto diag_pass = [&](long a_lo, RealType sgn) {
+      nda::range a_rng(a_lo, a_range.size());
+      for( auto ispin : itertools::range(nspins) ) {
+        for( auto k : itertools::range(nkpts_ibz) ) {
+          RealType scl = sgn*( trev_pair(k) >= 0 ? 2.0 : 1.0 );
+          for( auto r : itertools::range(r_range.size()) ) {
+            auto Lrr = nda::blas::dotc(Psia(ispin,k,a_rng,r),Psia(ispin,k,a_rng,r));
+            Tr(r) = std::conj(Lrr) * Lrr;
+            Diag(r) += scl*Tr(r); // from k in IBZ
+          }
+          for( auto [is, ik] : itertools::zip(Skibz(k,nda::range(ns_per_kibz(k)-1)),
+                                              Ks(k,nda::range(ns_per_kibz(k)-1))) ) {
+            scl = sgn*( trev_pair(ik) >= 0 ? 2.0 : 1.0 );
+            for( auto r : itertools::range(r_range.size()) )
+              Diag(r) += scl*Tr(Sr_to_r(is,r));
+          }
         }
       }
-    }
+    };
+    diag_pass(0, 1.0);
+    if( apf_active ) diag_pass(a0_aug, -1.0);
   } else {
     // is it worth using all this memory to speed up the contraction???
     // consider batching over kpoints
     memory::device_array<ComplexType,3> Lr(nspins,nkpts_ibz,r_range.size());
-    nda::tensor::contract(nda::conj(Psia),"skar",Psia,"skar",Lr,"skr");
-    // L(r) = conj(Lr) * Lr
-    nda::tensor::elementwise(ComplexType(1.0),nda::conj(Lr),"skr",
-                             ComplexType(1.0),Lr,"skr",nda::tensor::op::MUL);
-    for( auto ispin : itertools::range(nspins) ) {
-      for( auto k : itertools::range(nkpts_ibz) ) {
-        ComplexType scl = ( trev_pair(k) >= 0 ? ComplexType(2.0) : ComplexType(1.0) );
-        // Diag() += scl * Lr(is,k,all)
-        nda::tensor::add(scl,Lr(ispin,k,all),"r",ComplexType(1.0),Diag,"r");
-        for( auto [is, ik] : itertools::zip(Skibz(k,nda::range(ns_per_kibz(k)-1)),
-                                            Ks(k,nda::range(ns_per_kibz(k)-1))) ) {
-          scl = ( trev_pair(ik) >= 0 ? ComplexType(2.0) : ComplexType(1.0) );
-          // Diag(r) = Diag(r) + scl * Lr(Sr_to_r(r))
-          nda::copy_select(false,Sr_to_r(is,all),scl,Lr(ispin,k,all),ComplexType(1.0),Diag);
+    auto diag_pass = [&](long a_lo, ComplexType sgn) {
+      auto Psia_ = Psia(all,all,nda::range(a_lo,a_range.size()),all);
+      nda::tensor::contract(nda::conj(Psia_),"skar",Psia_,"skar",Lr,"skr");
+      // L(r) = conj(Lr) * Lr
+      nda::tensor::elementwise(ComplexType(1.0),nda::conj(Lr),"skr",
+                               ComplexType(1.0),Lr,"skr",nda::tensor::op::MUL);
+      for( auto ispin : itertools::range(nspins) ) {
+        for( auto k : itertools::range(nkpts_ibz) ) {
+          ComplexType scl = sgn*( trev_pair(k) >= 0 ? ComplexType(2.0) : ComplexType(1.0) );
+          // Diag() += scl * Lr(is,k,all)
+          nda::tensor::add(scl,Lr(ispin,k,all),"r",ComplexType(1.0),Diag,"r");
+          for( auto [is, ik] : itertools::zip(Skibz(k,nda::range(ns_per_kibz(k)-1)),
+                                              Ks(k,nda::range(ns_per_kibz(k)-1))) ) {
+            scl = sgn*( trev_pair(ik) >= 0 ? ComplexType(2.0) : ComplexType(1.0) );
+            // Diag(r) = Diag(r) + scl * Lr(Sr_to_r(r))
+            nda::copy_select(false,Sr_to_r(is,all),scl,Lr(ispin,k,all),ComplexType(1.0),Diag);
+          }
         }
       }
-    }
+    };
+    diag_pass(0, ComplexType(1.0));
+    if( apf_active ) diag_pass(a0_aug, ComplexType(-1.0));
   }
   // find index and value of maximum element  
   utils::max_element_multi(Diag,lmax_res_val(nda::range(0,block_size)),
@@ -406,13 +463,19 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
     Timer.start("ip_chol");
     Tab() = ComplexType(0.0);
     if constexpr (MEM==HOST_MEMORY) {
-      // MAM: could dispatch with batched gemm, but nda implementation is not ideal, 
+      // MAM: could dispatch with batched gemm, but nda implementation is not ideal,
       //      e.g. how to transpose the A/B matrices meaningfully?
+      // one [gemm -> conj(L)*L -> Tab] pass over the band sub-range [a_lo, na),
+      // with sign sgn: pass 1 is (0, +1) and, when exclude_unprotected_pairs is
+      // active, pass 2 is (a0_aug, -1). Lr is fully rewritten by the gemm, so
+      // both passes share it.
+      auto tab_pass = [&](long a_lo, RealType sgn) {
+      nda::range a_rng(a_lo, a_range.size());
       Timer.start("ip_chol_gemm");
       for( auto is : itertools::range(nspins) ) {
         for( auto k : itertools::range(nkpts_ibz) ) {
-          nda::blas::gemm(nda::transpose(Paki4d(is,k,all,all)),
-                          Psia(is,k,all,all),Lr(is,k,all,all));
+          nda::blas::gemm(nda::transpose(Paki4d(is,k,a_rng,all)),
+                          Psia(is,k,a_rng,all),Lr(is,k,all,all));
         }
       }
       Timer.stop("ip_chol_gemm");
@@ -420,27 +483,33 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
       auto L5D = nda::reshape(Lr,shape_t<5>{nspins,nkpts_ibz,block_size,max_ns_per_kibz,r_range.size()});
       {
         for( auto ispin : itertools::range(nspins) )
-          for( auto ik : itertools::range(nkpts_ibz) ) { 
+          for( auto ik : itertools::range(nkpts_ibz) ) {
             {
-              RealType scl = ( trev_pair(ik)>=0 ? 2.0 : 1.0 );
+              RealType scl = sgn*( trev_pair(ik)>=0 ? 2.0 : 1.0 );
               auto L_ = L5D(ispin,ik,all,0,all);
               Tab += scl*nda::conj(L_)*L_;
             }
-            for( auto ib : itertools::range(block_size) ) 
+            for( auto ib : itertools::range(block_size) )
               for( auto [i,is] : itertools::enumerate(Skibz(ik,nda::range(ns_per_kibz(ik)-1))) ) {
-                RealType scl = ( trev_pair(Ks(ik,i))>=0 ? 2.0 : 1.0 );
-                auto Ls = L5D(ispin,ik,ib,i+1,all); 
+                RealType scl = sgn*( trev_pair(Ks(ik,i))>=0 ? 2.0 : 1.0 );
+                auto Ls = L5D(ispin,ik,ib,i+1,all);
                 for( auto [r,sr] : itertools::enumerate(Sr_to_r(is,all)) ) {
-                  auto L_ = Ls(sr); 
-                  Tab(ib,r) += scl*std::conj(L_)*L_; 
+                  auto L_ = Ls(sr);
+                  Tab(ib,r) += scl*std::conj(L_)*L_;
                 }
               }
           }
       }
       Timer.stop("ip_chol_hadd");
+      };
+      tab_pass(0, 1.0);
+      if( apf_active ) tab_pass(a0_aug, -1.0);
     } else {
+      auto tab_pass = [&](long a_lo, ComplexType sgn) {
+      auto Paki4d_ = Paki4d(all,all,nda::range(a_lo,a_range.size()),all);
+      auto Psia_ = Psia(all,all,nda::range(a_lo,a_range.size()),all);
       Timer.start("ip_chol_gemm");
-      nda::tensor::contract(Paki4d,"skau",Psia,"skar",Lr,"skur");
+      nda::tensor::contract(Paki4d_,"skau",Psia_,"skar",Lr,"skur");
       { // L(r) = conj(Lr) * Lr
         auto L1D = nda::reshape(Lr,shape_t<1>{Lr.size()});
         nda::tensor::elementwise(ComplexType(1.0),nda::conj(L1D),"r",
@@ -451,17 +520,20 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
       auto L5D = nda::reshape(Lr,shape_t<5>{nspins,nkpts_ibz,block_size,max_ns_per_kibz,r_range.size()});
       {
         for( auto ik : itertools::range(nkpts_ibz) ) {
-          ComplexType scl = ( trev_pair(ik)>=0 ? ComplexType(2.0) : ComplexType(1.0) );
+          ComplexType scl = sgn*( trev_pair(ik)>=0 ? ComplexType(2.0) : ComplexType(1.0) );
           for( auto ispin : itertools::range(nspins) )
             nda::tensor::add(scl,L5D(ispin,ik,all,0,all),ComplexType(1.0),Tab);
           for( auto [i,is] : itertools::enumerate(Skibz(ik,nda::range(ns_per_kibz(ik)-1))) ) {
-            scl = ( trev_pair(Ks(ik,i))>=0 ? ComplexType(2.0) : ComplexType(1.0) );
-            for( auto ispin : itertools::range(nspins) ) 
+            scl = sgn*( trev_pair(Ks(ik,i))>=0 ? ComplexType(2.0) : ComplexType(1.0) );
+            for( auto ispin : itertools::range(nspins) )
               nda::copy_select(false,1,Sr_to_r(is,all),scl,L5D(ispin,ik,all,i+1,all),ComplexType(1.0),Tab);
           }
         }
       }
       Timer.stop("ip_chol_hadd");
+      };
+      tab_pass(0, ComplexType(1.0));
+      if( apf_active ) tab_pass(a0_aug, ComplexType(-1.0));
     }
 
     // orthonormalize cholesky vector
@@ -682,6 +754,19 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
       Xloc(all,all,all,i) = Pskau[i]; 
     // remove normalization
     nda::tensor::scale(ComplexType(1.0)/Znorm, Xloc);
+    if(has_band_weights) {
+      // divide the per-band fit weights back out: the returned collocation
+      // matrix is the unweighted orbitals at the pivot points. k runs over the
+      // full BZ here, and w(s,k,b) = w(s,kp_to_ibz(k),b); w is real, so it
+      // commutes with the conjugation in the time-reversal branch below.
+      for( auto is : itertools::range(nspins) )
+        for( auto [ik,k] : itertools::enumerate(k_subrange) )
+          for( auto [ia,a] : itertools::enumerate(a_subrange) ) {
+            double w = band_weight(is,k,a_range.first()+a);
+            if(w != 1.0)
+              nda::tensor::scale(ComplexType(1.0/w), Xloc(is,ik,ia,all));
+          }
+    }
     for( int is=0; is<nspins; ++is ) {
       for( auto [ik,k] : itertools::enumerate(k_subrange) ) {
         utils::rspace_phase_factor(kpts_c(k,all),rho_g.mesh(),ipts,phase);
@@ -825,28 +910,41 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   // of them are kept. Normalizing by sum_a w^2 (averaged over spin/k) keeps the
   // metric - and hence nIpts at fixed thresh - independent of how many
   // near-null states are retained. Reduces to na (nb) for unit weights.
-  RealType na_eff = RealType(a_range.size());
-  RealType nb_eff = RealType(b_range.size());
-  if(has_band_weights) {
-    RealType wa = 0.0, wb = 0.0;
-    for( auto is : itertools::range(nspins) )
-      for( auto k : itertools::range(nkpts) ) {
-        for( auto a : itertools::range(a_range.size()) ) {
-          double w = band_weight(is,k,a_range.first()+a);
-          wa += w*w;
-        }
-        for( auto b : itertools::range(b_range.size()) ) {
-          double w = band_weight(is,k,b_range.first()+b);
-          wb += w*w;
-        }
-      }
-    na_eff = wa / RealType(nspins*nkpts);
-    nb_eff = wb / RealType(nspins*nkpts);
-    app_log(2,"  chol_metric_impl: effective weighted band counts for metric "
-              "normalization: na_eff = {:.3f} (na = {}), nb_eff = {:.3f} (nb = {})",
-            na_eff, a_range.size(), nb_eff, b_range.size());
-  }
+  RealType na_eff = effective_band_count(a_range);
+  RealType nb_eff = effective_band_count(b_range);
   ComplexType Znorm = ComplexType(1.0)/std::sqrt(std::sqrt(RealType(na_eff*nb_eff*nspins*nkpts*npol)));
+
+  // Research diagnostic (exclude_unprotected_pairs): subtract M_aug from the pivot
+  // metric (M_keep = M_full - M_aug), where M_aug is the same metric construction
+  // restricted to the unprotected band tail [unprot_band_start, nbnd). Everything
+  // below is gated on apf_active so the default (exclude_unprotected_pairs ==
+  // false) path is byte-identical. The per-band weights are already folded into
+  // Psia/Psib, so the tail restriction automatically carries w_a*w_b; do not
+  // re-apply weights. Note: the subtracted term makes the metric lose strict
+  // positive-semidefiniteness; the 1e-14 residual floor in the pivot loop below
+  // guards against pathological cases.
+  const bool apf_active = exclude_unprotected_pairs;
+  const RealType apf_w = RealType(-1.0);
+  long a0_aug = 0, b0_aug = 0;
+  if(apf_active) {
+    utils::check(C_skai==nullptr,
+                 "Error in chol_metric_impl: exclude_unprotected_pairs not supported with rotated orbitals (C_skai).");
+    utils::check(unprot_band_start >= 0,
+                 "Error in chol_metric_impl: unprot_band_start not set for exclude_unprotected_pairs.");
+    // Both ranges must straddle the tail start: below it there is nothing to subtract,
+    // and above it the sub-range would be empty, silently turning the exclusion into a
+    // no-op instead of an error.
+    utils::check(a_range.first() <= unprot_band_start and unprot_band_start < a_range.last(),
+                 "Error in chol_metric_impl: exclude_unprotected_pairs requires an orbital range "
+                 "[{}, {}) containing the unprotected tail start ({}).",
+                 a_range.first(), a_range.last(), unprot_band_start);
+    utils::check(b_range.first() <= unprot_band_start and unprot_band_start < b_range.last(),
+                 "Error in chol_metric_impl: exclude_unprotected_pairs requires an orbital range "
+                 "[{}, {}) containing the unprotected tail start ({}).",
+                 b_range.first(), b_range.last(), unprot_band_start);
+    a0_aug = unprot_band_start - a_range.first();
+    b0_aug = unprot_band_start - b_range.first();
+  }
 
   // processor grid for accumulating collation matrix. Redistribution to requested grid at the end
   long nkpool = utils::find_proc_grid_max_npools(mpi->comm.size(),nkpts,distr_tol);
@@ -1050,6 +1148,17 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
               auto Rrr = nda::blas::dotc(Psib(is,kb,all,p,r),Psib(is,kb,all,p,r));
               Diag(r) += std::conj(Lrr) * Rrr;
             }
+            if( apf_active ) {
+              auto Lrr_a = nda::blas::dotc(Psia(is,ka,nda::range(a0_aug,a_range.size()),p,r),
+                                           Psia(is,ka,nda::range(a0_aug,a_range.size()),p,r));
+              if( single_psi ) {
+                Diag(r) += apf_w * std::conj(Lrr_a) * Lrr_a;
+              } else {
+                auto Rrr_a = nda::blas::dotc(Psib(is,kb,nda::range(b0_aug,b_range.size()),p,r),
+                                             Psib(is,kb,nda::range(b0_aug,b_range.size()),p,r));
+                Diag(r) += apf_w * std::conj(Lrr_a) * Rrr_a;
+              }
+            }
           }
         }
       }
@@ -1082,8 +1191,34 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
         }
       }
     }
+    if( apf_active ) {
+      auto Psia_aug = Psia(all,all,nda::range(a0_aug,a_range.size()),all,all);
+      memory::device_array<ComplexType,4> Lr_a(nspins,nkpts,npol,r_range.size());
+      nda::tensor::contract(nda::conj(Psia_aug),"skapr",Psia_aug,"skapr",Lr_a,"skpr");
+      if(single_psi) {
+        for( auto is : itertools::range(nspins) )
+          for( auto k : itertools::range(nkpts) )
+            for( auto p : itertools::range(npol) )
+              nda::tensor::contract(ComplexType(apf_w),nda::conj(Lr_a(is,k,p,all)),"r",
+                                                       Lr_a(is,k,p,all),"r",
+                                    ComplexType(1.0),Diag,"r");
+      } else {
+        auto Psib_aug = Psib(all,all,nda::range(b0_aug,b_range.size()),all,all);
+        memory::device_array<ComplexType,4> Rr_a(nspins,nkpts,npol,r_range.size());
+        nda::tensor::contract(nda::conj(Psib_aug),"skbpr",Psib_aug,"skbpr",Rr_a,"skpr");
+        for( auto is : itertools::range(nspins) )
+          for( auto k : itertools::range(nkpts) ) {
+            long ka = k;
+            long kb = mf->qk_to_k2(iq,ka);
+            for( auto p : itertools::range(npol) )
+              nda::tensor::contract(ComplexType(apf_w),nda::conj(Lr_a(is,ka,p,all)),"r",
+                                                       Rr_a(is,kb,p,all),"r",
+                                    ComplexType(1.0),Diag,"r");
+          }
+      }
+    }
   }
-  // find index and value of maximum element  
+  // find index and value of maximum element
   utils::max_element_multi(Diag,lmax_res_val(nda::range(0,block_size)),
                            lmax_res_indx(nda::range(0,block_size)));
 // MAM: dyn_thresh should be set by the magnitude of the residual at position nmax-nchol 
@@ -1139,8 +1274,15 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
                 nspins*nkpts*(a_range.size()+b_scale*b_range.size())*npol));
   memory::array<MEM,ComplexType,5> Lr(nspins,nkpts,npol,block_size,r_range.size());
   memory::array<MEM,ComplexType,5> Rr;
-  if(not single_psi) 
+  if(not single_psi)
     Rr = memory::array<MEM,ComplexType,5>(nspins,nkpts,npol,block_size,r_range.size());
+  // exclude_unprotected_pairs: scratch for the tail-only metric contribution.
+  memory::array<MEM,ComplexType,5> Lr_a, Rr_a;
+  if(apf_active) {
+    Lr_a = memory::array<MEM,ComplexType,5>(nspins,nkpts,npol,block_size,r_range.size());
+    if(not single_psi)
+      Rr_a = memory::array<MEM,ComplexType,5>(nspins,nkpts,npol,block_size,r_range.size());
+  }
   auto Tab = memory::array<MEM,ComplexType,2>::zeros({block_size,r_range.size()});
   nda::array<long,1> ur(block_size,-1);  // global index of chosen grid point
   nda::array<int,1> piv(block_size+1,0);
@@ -1255,7 +1397,58 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       } else {
         nda::tensor::contract(Paki5d,"skapu",Psia,"skapr",Lr,"skpur");
         nda::tensor::contract(Pbki5d,"skbpu",Psib,"skbpr",Rr,"skpur");
-        nda::tensor::contract(nda::conj(Lr),"skpur",Rr,"skpur",Tab,"ur");    
+        nda::tensor::contract(nda::conj(Lr),"skpur",Rr,"skpur",Tab,"ur");
+      }
+    }
+
+    // exclude_unprotected_pairs: subtract M_aug from the metric row (apf_w = -1),
+    // with M_aug the same construction restricted to the unprotected band tail.
+    // The band restriction is applied to both gemm factors *before* the square,
+    // so this subtracts |rho_tail|^2, not (rho_full - rho_tail)^2.
+    if( apf_active ) {
+      nda::range a_aug(a0_aug, a_range.size());
+      nda::range b_aug(b0_aug, b_range.size());
+      if constexpr (MEM==HOST_MEMORY) {
+        for( auto is : itertools::range(nspins) ) {
+          for( auto k : itertools::range(nkpts) ) {
+            long ka = k;
+            long kb = mf->qk_to_k2(iq, ka);
+            for( auto p : itertools::range(npol) ) {
+              nda::blas::gemm(nda::transpose(Paki5d(is,ka,a_aug,p,all)),
+                              Psia(is,ka,a_aug,p,all),Lr_a(is,ka,p,all,all));
+              if(not single_psi)
+                nda::blas::gemm(nda::transpose(Pbki5d(is,kb,b_aug,p,all)),
+                                Psib(is,kb,b_aug,p,all),Rr_a(is,kb,p,all,all));
+            }
+          }
+        }
+        if(single_psi) {
+          auto T1D = nda::reshape(Tab,shape_t<1>{block_size*r_range.size()});
+          auto La2D = nda::reshape(Lr_a,shape_t<2>{nspins*nkpts*npol,block_size*r_range.size()});
+          for( auto isk : itertools::range(nspins*nkpts*npol) )
+            T1D(all) += ComplexType(apf_w)*nda::conj(La2D(isk,all))*La2D(isk,all);
+        } else {
+          auto La3D = nda::reshape(Lr_a,shape_t<3>{nspins*nkpts*npol,block_size,r_range.size()});
+          auto Ra3D = nda::reshape(Rr_a,shape_t<3>{nspins*nkpts*npol,block_size,r_range.size()});
+          for( auto ib : itertools::range(block_size) )
+            for( auto r : itertools::range(r_range.size()) )
+              Tab(ib,r) += ComplexType(apf_w)*nda::blas::dotc(La3D(all,ib,r),Ra3D(all,ib,r));
+        }
+      } else {
+        auto Paki5d_aug = Paki5d(all,all,a_aug,all,all);
+        auto Psia_aug = Psia(all,all,a_aug,all,all);
+        if(single_psi) {
+          nda::tensor::contract(Paki5d_aug,"skapu",Psia_aug,"skapr",Lr_a,"skpur");
+          nda::tensor::contract(ComplexType(apf_w),nda::conj(Lr_a),"skpur",Lr_a,"skpur",
+                                ComplexType(1.0),Tab,"ur");
+        } else {
+          auto Pbki5d_aug = Pbki5d(all,all,b_aug,all,all);
+          auto Psib_aug = Psib(all,all,b_aug,all,all);
+          nda::tensor::contract(Paki5d_aug,"skapu",Psia_aug,"skapr",Lr_a,"skpur");
+          nda::tensor::contract(Pbki5d_aug,"skbpu",Psib_aug,"skbpr",Rr_a,"skpur");
+          nda::tensor::contract(ComplexType(apf_w),nda::conj(Lr_a),"skpur",Rr_a,"skpur",
+                                ComplexType(1.0),Tab,"ur");
+        }
       }
     }
 
@@ -1623,8 +1816,88 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 
 }
 
+/*
+ * Vxc(q,u,v) from the interpolating vectors. The kernel fields are read once and
+ * replicated; for each q slab the full zeta^q(u,G) is assembled on every rank of
+ * the q-subcommunicator (a zeroed buffer plus an all-reduce, as in lr_thc), and
+ * compute_Vxc_for_q spreads the pivot-block work over that subcommunicator.
+ * Each rank then keeps only its (u,v) block, matching the Coulomb matrix layout.
+ */
+template<MEMORY_SPACE MEM, typename DArr_t>
+void thc::build_Vxc_quv(DArr_t const& Z_quG,
+                        std::array<long, 3> pgrid3D,
+                        std::array<long, 3> block_size)
+{
+  decltype(nda::range::all) all;
+  long nqpts_ibz = mf->nqpts_ibz();
+  long nIpts = Z_quG.global_shape()[1];
+  long nG = rho_g.size();
+  utils::check(Z_quG.global_shape()[2] == nG,
+               "thc::build_Vxc_quv: the interpolating vectors are not in G-space "
+               "(shape(2) = {}, rho_g.size() = {}). Vxc requires a mean field with "
+               "orbitals on an FFT grid.", Z_quG.global_shape()[2], nG);
+  // The kernel fields carry no spin index (QE dgradcorr, nspin = 1), and the
+  // interpolating vectors are spin-summed, so there is nothing to pair a
+  // spin-resolved f_xc against.
+  utils::check(mf->nspin() == 1 and mf->npol_in_basis() == 1,
+               "thc::build_Vxc_quv: the semilocal xc kernel is implemented for nspin = 1, "
+               "npol = 1 only (nspin = {}, npol_in_basis = {}).",
+               mf->nspin(), mf->npol_in_basis());
+
+  Timer.start("VXC");
+  app_log(1, "\n  Building the semilocal xc-kernel matrix Vxc(q,u,v)");
+  // zeta_uG is replicated on every rank of the q-subcommunicator, and
+  // compute_Vxc_for_q adds 8*vxc_block_size*nnr complex on top of it.
+  app_log(2, "    Vxc buffers per rank: zeta(u,G) = {:.2f} GB, kernel blocks = {:.2f} GB "
+             "(Vxc_block_size = {})",
+          double(sizeof(ComplexType))*double(nIpts)*double(nG)/1e9,
+          double(sizeof(ComplexType))*8.0*double(vxc_block_size)*double(rho_g.nnr())/1e9,
+          vxc_block_size);
+  utils::memory_report(3, "thc::build_Vxc_quv (before kernel fields)");
+  auto xc = read_xc_kernel_fields(vxc_file, mpi->comm);
+
+  Vxc_quv.emplace(math::nda::make_distributed_array<memory::array<HOST_MEMORY,ComplexType,3>>(
+      mpi->comm, pgrid3D, {nqpts_ibz, nIpts, nIpts},
+      {block_size[0], block_size[1], block_size[1]}));
+  auto& dVxc = Vxc_quv.value();
+  utils::check(dVxc.local_range(0) == Z_quG.local_range(0) and
+               dVxc.local_range(1) == Z_quG.local_range(1),
+               "thc::build_Vxc_quv: partition mismatch with the interpolating vectors.");
+  dVxc.local() = ComplexType(0.0);
+
+  mpi3::communicator q_comm = mpi->comm.split(Z_quG.origin()[0], mpi->comm.rank());
+
+  auto Q = mf->Qpts();
+  auto u_rng = Z_quG.local_range(1);
+  auto g_rng = Z_quG.local_range(2);
+  nda::array<ComplexType,2> zeta_uG(nIpts, nG);
+  memory::array<HOST_MEMORY,ComplexType,2> Zh(u_rng.size(), g_rng.size());
+
+  for( auto [iq,q] : itertools::enumerate(Z_quG.local_range(0)) ) {
+    Zh = Z_quG.local()(iq,all,all);
+    zeta_uG() = ComplexType(0.0);
+    for( auto [iu,u] : itertools::enumerate(u_rng) )
+      for( auto [ig,g] : itertools::enumerate(g_rng) )
+        zeta_uG(u,g) = Zh(iu,ig);
+    q_comm.all_reduce_in_place_n(zeta_uG.data(), zeta_uG.size(), std::plus<>{});
+
+    nda::stack_array<double,3> q_cart;
+    for( int a=0; a<3; ++a ) q_cart(a) = Q(q,a);
+
+    auto Vxc_q = compute_Vxc_for_q(xc, rho_g, zeta_uG, q_cart, mf->volume(),
+                                   vxc_block_size, q_comm);
+
+    auto Vloc = dVxc.local();
+    for( auto [iu,u] : itertools::enumerate(dVxc.local_range(1)) )
+      for( auto [iv,v] : itertools::enumerate(dVxc.local_range(2)) )
+        Vloc(iq,iu,iv) = Vxc_q(u,v);
+  }
+  Timer.stop("VXC");
+  app_log(1, "  Vxc(q,u,v) done: {0:.3f} sec\n", Timer.elapsed("VXC"));
+}
+
 // MAM: Given C_skai, the only modification needed, in addition to implementing the version with
-// a separate Xb, is to pass as Xa: transpose(C_skai) * Xa, which will lead to the appropriate Tkur. 
+// a separate Xb, is to pass as Xa: transpose(C_skai) * Xa, which will lead to the appropriate Tkur.
 // Instead of expecting the users of the routine to do this, write a new evaluate routine that 
 // takes C_skia and expects both Xa and Xb (no optional since this case is always not single_psi) 
 // and generates transpose(C)*Xa = Xa_new, passes Xa_new to intvec_impl. 
@@ -1734,6 +2007,13 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
   Timer.stop("IntVecs"); 
 
   if constexpr (return_coul_matrix) {
+
+    // Semilocal xc kernel, contracted against the interpolating vectors while
+    // Z_quG still holds them unweighted. Deliberately a separate object from
+    // C_quv: Vxc is only valid in the direct (Hartree) channel, so it must not
+    // be folded into the Coulomb matrix this routine returns.
+    if(vxc_file != "")
+      build_Vxc_quv<MEM>(Z_quG, pgrid3D, block_size);
 
     // First compute the inverse of overlap matrices
     Timer.start("ZBAR");
@@ -1907,6 +2187,9 @@ auto thc::intvec_impl(int iq, nda::MemoryArrayOfRank<1> auto const& IPts,
   utils::check(not has_band_weights,
                "Error in thc::intvec_impl (LS-THC): band weights not implemented in the "
                "Cholesky-fit path. Set band_weights = false.");
+  utils::check(not exclude_unprotected_pairs,
+               "Error in thc::intvec_impl (LS-THC): exclude_unprotected_pairs not implemented in "
+               "the Cholesky-fit path. Set exclude_unprotected_pairs = false.");
 
   // temporary, optimize later!
   std::array<long, 2> pgrid2D = {mpi->comm.size(), 1};

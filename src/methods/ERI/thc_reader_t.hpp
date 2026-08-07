@@ -331,6 +331,14 @@ namespace methods {
 #endif
       }
 
+      // Take over Vxc before the builder is reset. It is already the physical
+      // matrix, so it must not pick up the _nkpts rescaling applied to _dZ below
+      // (that factor only undoes the 1/nkpts in the Coulomb assembly).
+      if (_thc_builder_opt.value().has_Vxc()) {
+        _Vxc = _thc_builder_opt.value().get_Vxc();
+        _vxc_source = _thc_builder_opt.value().get_vxc_file();
+      }
+
       // scale by nkpts
       auto Z_loc = _dZ.local();
       Z_loc *= _nkpts;
@@ -396,6 +404,10 @@ namespace methods {
     void build_from_CD() {
       using math::nda::make_distributed_array;
       utils::check(x_range==y_range, "thc_reader::build_from_CD: x_range!=y_range needs testing. Disabling for now.");
+      utils::check(not _thc_builder_opt.value().vxc_requested(),
+                   "thc_reader::build_from_CD: Vxc_file is only supported by the ISDF "
+                   "algorithm; the LS-THC (cd_dir) fit never forms the interpolating "
+                   "vectors in G-space.");
       _Timer.start("BUILD_TOTAL");
 
       _Timer.start("BUILD_THC");
@@ -545,6 +557,9 @@ namespace methods {
     }
 
     void build_isdf_only(bool check_accuracy=true, bool write_zeta_on_fft_mesh=false) {
+      utils::check(not _thc_builder_opt.value().vxc_requested(),
+                   "thc_reader::build_isdf_only: Vxc_file requires the full THC build "
+                   "(make_thc_coulomb), not the ISDF-only path.");
       _Timer.start("BUILD_TOTAL");
 
       _Timer.start("BUILD_ISDF");
@@ -681,7 +696,10 @@ namespace methods {
         _Y_shm.value().win().fence();
       }
 
-      if (_storage == eri_storage_e::incore) {
+      // Vxc is read for either storage mode: the build path keeps it resident under
+      // outcore too, so gating it on incore would make a rebuild and a reread of the
+      // same input disagree about has_Vxc().
+      if (_storage == eri_storage_e::incore or grp.has_dataset("Vxc")) {
         int np = _mpi->comm.size();
         long nqpools = utils::find_proc_grid_max_npools(np, _nqpts_ibz, 0.2);
         utils::check(nqpools > 0 and nqpools <= _nqpts_ibz, "thc_reader_t::build: nqpools <= 0 or nqpools > nqpts");
@@ -689,8 +707,20 @@ namespace methods {
         int np_PQ = np / nqpools;
         int np_P = utils::find_proc_grid_min_diff(np_PQ, 1, 1);
         int np_Q = np_PQ / np_P;
-        _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, {nqpools, np_P, np_Q}, {_nqpts_ibz, _Np, _Np});
-        math::nda::h5_read(grp, "coulomb_matrix", _dZ);
+        if (_storage == eri_storage_e::incore) {
+          _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, {nqpools, np_P, np_Q}, {_nqpts_ibz, _Np, _Np});
+          math::nda::h5_read(grp, "coulomb_matrix", _dZ);
+        }
+
+        if (grp.has_dataset("Vxc")) {
+          _Vxc = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, {nqpools, np_P, np_Q}, {_nqpts_ibz, _Np, _Np});
+          math::nda::h5_read(grp, "Vxc", _Vxc.value());
+          if (grp.has_dataset("Vxc_source")) {
+            h5::h5_read(grp, "Vxc_source", _vxc_source);
+          }
+          app_log(1, "  THC: found a semilocal xc-kernel matrix (Vxc) in {}{}.", _eri_file,
+                  _vxc_source.empty() ? "" : fmt::format(" (from {})", _vxc_source));
+        }
 
         _mpi->comm.barrier();
       }
@@ -911,6 +941,53 @@ namespace methods {
       }
     }
 
+    // Semilocal xc-kernel matrix. Only meaningful in the direct (Hartree)
+    // channel, where it adds to V(q); it is intentionally reachable only through
+    // this accessor and never through Z()/dZ(), so it cannot leak into the
+    // exchange channel, which contracts V(R) with the off-diagonal density.
+    bool has_Vxc() const { return _Vxc.has_value(); }
+
+    // Path of the kernel dump the stored Vxc was built from; empty when the THC file
+    // predates Vxc_source. Used to reject reuse of a Vxc built from a different dump.
+    std::string const& vxc_source() const { return _vxc_source; }
+
+    // Vxc(q,P,Q) redistributed onto the requested processor grid, mirroring dZ().
+    template<MEMORY_SPACE MEM = HOST_MEMORY>
+    auto dVxc(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+      _check_initialized("dVxc");
+      utils::check(_Vxc.has_value(),
+                   "thc_reader_t::dVxc: no xc-kernel matrix. Build the THC with "
+                   "Vxc_file set, or point 'save' at a THC file containing the "
+                   "'Vxc' dataset.");
+      auto dVxc_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+      math::nda::redistribute(_Vxc.value(), dVxc_qPQ);
+      if constexpr (MEM == HOST_MEMORY) {
+        return dVxc_qPQ;
+      } else {
+        auto dVxc_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+        dVxc_qPQ_d.local() = dVxc_qPQ.local();
+        return dVxc_qPQ_d;
+      }
+    }
+
+    // Vxc(q) for a single q, replicated on every rank.
+    nda::array<ComplexType, 2> Vxc(int iq) const {
+      _check_initialized("Vxc");
+      utils::check(_Vxc.has_value(),
+                   "thc_reader_t::Vxc: no xc-kernel matrix. Build the THC with "
+                   "Vxc_file set, or point 'save' at a THC file containing the "
+                   "'Vxc' dataset.");
+      // gather_sub_matrix matches nothing for an out-of-range iq, which would
+      // otherwise return a zero matrix instead of failing.
+      utils::check(iq >= 0 and iq < _nqpts_ibz,
+                   "thc_reader_t::Vxc: iq = {} out of range [0, {}).", iq, _nqpts_ibz);
+      nda::array<ComplexType, 2> Vq(_Np, _Np);
+      Vq() = ComplexType(0.0);
+      math::nda::gather_sub_matrix(iq, 0, _Vxc.value(), &Vq);
+      _mpi->comm.all_reduce_in_place_n(Vq.data(), Vq.size(), std::plus<>{});
+      return Vq;
+    }
+
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto basis_head() const {
       if constexpr (MEM == HOST_MEMORY) {
@@ -1116,6 +1193,14 @@ namespace methods {
     // keep everything as optionals to keep things simple
 
     dArray_t<HOST_MEMORY,3> _dZ;
+    // Semilocal xc-kernel matrix Vxc(q,P,Q), same shape and distribution as _dZ.
+    // Present only when the THC was built with Vxc_file, or read from a THC
+    // checkpoint that carries the "Vxc" dataset. Deliberately NOT merged into
+    // _dZ: Vxc is only defined in the direct (Hartree) channel, and dZ() feeds
+    // the exchange channel as well.
+    std::optional<dArray_t<HOST_MEMORY,3>> _Vxc;
+    // Kernel dump _Vxc was built from, when the THC file records it.
+    std::string _vxc_source;
     // Used if storing in HOST_MEMORY
     sArray_t<memory::array_view<HOST_MEMORY, ComplexType, 4>> _X_shm;
     std::optional<sArray_t<memory::array_view<HOST_MEMORY, ComplexType, 4>>> _Y_shm;

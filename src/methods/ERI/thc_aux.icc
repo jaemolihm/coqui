@@ -944,6 +944,9 @@ auto thc::get_ZquG_Cquv(nda::MemoryArrayOfRank<1> auto const& IPts,
     utils::check(not has_band_weights,
                  "Error in get_ZquG_Cquv: band weights not implemented for the r-space "
                  "algorithm (non-FFT orbital grids). Set band_weights = false.");
+    utils::check(not exclude_unprotected_pairs,
+                 "Error in get_ZquG_Cquv: exclude_unprotected_pairs not implemented for the "
+                 "r-space algorithm (non-FFT orbital grids). Set exclude_unprotected_pairs = false.");
     std::array<long, 3> block_size = {
       1,  // keep at one to minimize load imbalance
       std::min(long(default_block_size), std::min(nIpts/pgrid[1], nIpts/pgrid[2]) ),
@@ -1249,7 +1252,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
  *  L    3e. T(R,u,r) *= conj(T(R,u,r)) , technically at this point it becomes Z(R,u,r)
  *  D    3f. Z(q,u,r) = exp(iqR) T(R,u,r) 
  *  L    3g. C(q,u,v) = Z(q,u,rv)
- *  L    3h. Z(q,u,r) *= exp(-q*r)
+ *  L    3h. Z(q,u,r) *= exp(i*q*r)
  *  L    3i. Z(q,u,G) = fft(Z(q,u,r)) => mapped to truncated G grid 
  *
  *  NOTE: This routine assumes either 1. MEM=DEVICE/UNIFIED or 2. HOST with OpenMP implementation.
@@ -1284,6 +1287,13 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   auto wfc_to_rho = memory::to_memory_space<MEM>(swfc_to_rho.local());
   auto gv_to_fft = memory::to_memory_space<MEM>(wfc_grid->gv_to_fft());  // 'g' vector indexes of the wfc grid
   auto symm_list = mf->symm_list();
+
+  // exclude_unprotected_pairs in the zeta-fit is implemented only on the host/CPU
+  // backend (get_ZquG_Cquv_fft_shared_memory). Fail loudly here rather than
+  // silently ignoring it on the device path.
+  utils::check(not exclude_unprotected_pairs,
+               "exclude_unprotected_pairs in the THC zeta-fit is only supported on the host/CPU "
+               "backend; run on CPU (incore/host) or set exclude_unprotected_pairs = false.");
 
 // examine the role of both a_/b_range and Xb, need clear definitions of what is allowed
 //    - conditions: 1. a_range.size() == Xa.extent(2) always
@@ -1835,8 +1845,9 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
         arch::set_device_synchronization(true);
       }
 
-      // 4e. Z(q,u,r) *= exp(-q*r)
-      // add exp(i q*r) phase factor
+      // 4e. Z(q,u,r) *= exp(i*q*r). The interpolating vectors carry the pair
+      // density's e^{-iq.r} Bloch factor, so this strips it and the forward FFT
+      // below yields the coefficients of e^{i(G-q).r}.
       if constexpr (MEM==HOST_MEMORY) { 
         // Z_qux(q,u,x) = Z_qux(q,u,x) * phase(q,x)
         auto Z3d = nda::reshape(Zqur,std::array<long,3>{nqpts_ibz,nI,rho_g.nnr()});
@@ -2068,6 +2079,34 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
     if(Xb != nullptr) wska_b = make_band_weight_table(b_range);
   }
 
+  // exclude_unprotected_pairs: unprotected-tail sub-range for the two-pass fit.
+  // When active, each Ipt-block runs twice: pass 1 over all bands (as usual) and
+  // pass 2 restricted to the tail [unprot_band_start, nbnd), whose result is
+  // scaled by -1 and accumulated into C_quv / Z_qug (M_keep = M_full - M_aug).
+  // Both legs of each pass are sliced before the pair density is formed, so the
+  // subtracted term is |rho_tail|^2. Guarded so exclude_unprotected_pairs ==
+  // false runs pass 1 only and is byte-identical.
+  const bool apf_active = exclude_unprotected_pairs;
+  const RealType apf_w = RealType(-1.0);
+  long a0_aug = 0, b0_aug = 0;
+  if(apf_active) {
+    utils::check(unprot_band_start >= 0,
+                 "Error in get_ZquG_Cquv_fft_shared_memory: unprot_band_start not set for "
+                 "exclude_unprotected_pairs.");
+    // Both ranges must straddle the tail start: above it the sub-range would be empty,
+    // silently turning the exclusion into a no-op instead of an error.
+    utils::check(a_range.first() <= unprot_band_start and unprot_band_start < a_range.last(),
+                 "Error in get_ZquG_Cquv_fft_shared_memory: exclude_unprotected_pairs requires an "
+                 "orbital range [{}, {}) containing the unprotected tail start ({}).",
+                 a_range.first(), a_range.last(), unprot_band_start);
+    utils::check(b_range.first() <= unprot_band_start and unprot_band_start < b_range.last(),
+                 "Error in get_ZquG_Cquv_fft_shared_memory: exclude_unprotected_pairs requires an "
+                 "orbital range [{}, {}) containing the unprotected tail start ({}).",
+                 b_range.first(), b_range.last(), unprot_band_start);
+    a0_aug = unprot_band_start - a_range.first();
+    b0_aug = unprot_band_start - b_range.first();
+  }
+
   /*
    * (Significant) Memory usage in the remaining of this routine:
    *
@@ -2229,7 +2268,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   // -> valid multi-node), then GEMM the block with its g columns split over
   // node_comm. No g->u transpose and no full-g Psi replica. Per output element
   // this is the same contraction over a as the old gemm-then-redistribute path.
-  auto fill_Tkug_u = [&](auto& dP, auto const& sX_loc, int ispin_, int ipol_) {
+  auto fill_Tkug_u = [&](auto& dP, auto const& sX_loc, int ispin_, int ipol_, long b_lo=0) {
     long off = node_id*nI_per_node;
     long nb = dP.global_shape()[2];
     auto dPloc = dP.local();
@@ -2255,8 +2294,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
       Timer.start("GEMM");
       if( c1>c0 )
         for( auto [ik,k] : itertools::enumerate(kp_order) )
-          nda::blas::gemm(sX_loc(ik,nda::range(off,off+nI_per_node),all),
-                          sPloc(ispin_,kp_to_ibz(k),nda::range(0,nb),ipol_,nda::range(c0,c1)),
+          nda::blas::gemm(sX_loc(ik,nda::range(off,off+nI_per_node),nda::range(b_lo,nb)),
+                          sPloc(ispin_,kp_to_ibz(k),nda::range(b_lo,nb),ipol_,nda::range(c0,c1)),
                           sTkug_u_loc(ik,nda::range(0,nI_per_node),nda::range(gb0+c0,gb0+c1)));
       Timer.stop("GEMM");
       mpi->node_comm.barrier();
@@ -2328,7 +2367,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                    ((Xb!=nullptr)?ZRur_1d.data():TRur_1d.data())); 
       auto Zqur = memory::array_view<MEM,ComplexType,2>({nqpts_ibz, nI*rho_g.nnr()},Tkur_1d.data()); 
 
-      auto [kI0,kI1] = itertools::chunk_range(0,nkloc*nI,mpi->node_comm.size(),mpi->node_comm.rank());
+      long kI0=0, kI1=0;
+      std::tie(kI0,kI1) = itertools::chunk_range(0,nkloc*nI,mpi->node_comm.size(),mpi->node_comm.rank());
       nda::range kI_rng(kI0,kI1);
 
       using arr_v =  typename memory::array_view<MEM,ComplexType,4>;
@@ -2344,6 +2384,17 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                              math::fft::FFT_MEASURE|math::fft::FFT_DESTROY_INPUT);
       Timer.stop("FFTPLAN");
 
+      // Compute one block pass over the band sub-ranges [a_lo,nb) / [b_lo,nb) and
+      // extract into C_quv / Z_qug as dst = out_beta*dst + out_alpha*src. Called
+      // once over all bands (a_lo=b_lo=0, out_alpha=1, out_beta=scl_isp) and, when
+      // exclude_unprotected_pairs is active, a second time over the unprotected
+      // tail (a_lo=a0_aug, b_lo=b0_aug, out_alpha=-1, out_beta=1) to subtract the
+      // tail contribution. Buffers/FFT plan are shared across passes.
+      auto run_pass = [&](long a_lo, long b_lo, ComplexType out_alpha, ComplexType out_beta) {
+      // reset kI to the k-range (it is reused as the q-range in step 4c below)
+      std::tie(kI0,kI1) = itertools::chunk_range(0,nkloc*nI,mpi->node_comm.size(),mpi->node_comm.rank());
+      kI_rng = nda::range(kI0,kI1);
+
       {
         Timer.start("shmX");
         // Xaku for ipts in block, in shared memory, with kpts ordered by kp_to_ibz
@@ -2355,7 +2406,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
 
         Timer.start("TUR");
         // Tkug for the current block, built directly in the u-distribution
-        fill_Tkug_u(dPsia,sXaku.local(),ispin,ipol);
+        fill_Tkug_u(dPsia,sXaku.local(),ispin,ipol,a_lo);
         Timer.stop("TUR");
       }
 
@@ -2425,8 +2476,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
       if(Xb == nullptr) {
 
         // save to return now
-        // Exit loop if no more work!
-        if(nI==0) continue;
+        // Exit this pass if no more work!
+        if(nI==0) return;
 
         Timer.start("ZUR_had");
         {
@@ -2461,13 +2512,13 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         
           Timer.start("TUR");
           // Tkug for the current block, built directly in the u-distribution
-          fill_Tkug_u(*dPsib,sXbku.local(),ispin,ipol);
+          fill_Tkug_u(*dPsib,sXbku.local(),ispin,ipol,b_lo);
           Timer.stop("TUR");
         }
 
         // save to return now
-        // Exit loop if no more work!
-        if(nI==0) continue;
+        // Exit this pass if no more work!
+        if(nI==0) return;
 
         {
           Timer.start("EXTRA");
@@ -2557,16 +2608,17 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
-              nda::copy_select(false,IPts,ComplexType(1.0),T3d(iq,i,all),
-                               scl_isp,C_quv.local()(iq,iu-u0,all));
+              nda::copy_select(false,IPts,out_alpha,T3d(iq,i,all),
+                               out_beta,C_quv.local()(iq,iu-u0,all));
           }
         }
       }
       mpi->node_comm.barrier();
       Timer.stop("ZUR_Cquv");
 
-      // 4e. Z(q,u,r) *= exp(-q*r)
-      // add exp(i q*r) phase factor
+      // 4e. Z(q,u,r) *= exp(i*q*r). The interpolating vectors carry the pair
+      // density's e^{-iq.r} Bloch factor, so this strips it and the forward FFT
+      // below yields the coefficients of e^{i(G-q).r}.
       Timer.start("ZUR_pack");
       {
         // Z_qux(q,u,x) = Z_qux(q,u,x) * phase(q,x)
@@ -2610,13 +2662,19 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
         for( auto iq : nda::range(nqpts_ibz) ) {
           for( auto [i,iu] : itertools::enumerate(iu_for_sXb(ib, node_id, nda::range(nI))) ) {
             if(iu >= u0 and iu < u1)
-              nda::copy_select(false,rho_g.gv_to_fft(),ComplexType(1.0),Z3D(iq,i,all),
-                   scl_isp,Z_qug.local()(iq,iu-u0,all));
+              nda::copy_select(false,rho_g.gv_to_fft(),out_alpha,Z3D(iq,i,all),
+                   out_beta,Z_qug.local()(iq,iu-u0,all));
           }
         }
         Timer.stop("ZUR_pack");
       }
       mpi->node_comm.barrier();
+      }; // run_pass
+
+      // pass 1: all bands. pass 2 (unprotected tail, subtracted) only when active.
+      run_pass(0, 0, ComplexType(1.0), scl_isp);
+      if(apf_active)
+        run_pass(a0_aug, b0_aug, ComplexType(apf_w), ComplexType(1.0));
 
     } // b : loop over nIpts segments
     Timer.stop("ZUR");

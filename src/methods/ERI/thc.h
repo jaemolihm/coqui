@@ -95,6 +95,23 @@ class thc
 
   auto get_ecut() const { return ecut; }
   auto const& get_fft_mesh() const { return rho_g.mesh(); }
+  // Semilocal xc-kernel matrix Vxc(q,u,v), built during evaluate() when
+  // Vxc_file is set. Same shape/distribution as the Coulomb matrix, but a
+  // separate object: it is only valid in the direct (Hartree) channel, so it
+  // must never be folded into the Coulomb matrix returned by evaluate().
+  // has_Vxc() is "the matrix exists"; vxc_requested() is "the input asked for it".
+  // The two differ on any path that never reaches intvec_impl, so callers guarding a
+  // get_Vxc() must use has_Vxc() and callers rejecting an unsupported algorithm must
+  // use vxc_requested().
+  bool has_Vxc() const { return Vxc_quv.has_value(); }
+  bool vxc_requested() const { return vxc_file != ""; }
+  std::string const& get_vxc_file() const { return vxc_file; }
+  auto const& get_Vxc() const {
+    utils::check(Vxc_quv.has_value(),
+                 "thc::get_Vxc: the xc-kernel matrix has not been built. "
+                 "Vxc_file requires the full ISDF path (evaluate()).");
+    return Vxc_quv.value();
+  }
   // Accessors used by thc_reader_t to persist rho_g and vG beyond the builder's lifetime.
   auto const& get_rho_g() const { return rho_g; }
   auto const& get_vG()   const { return vG; }
@@ -346,14 +363,39 @@ class thc
   double memory_frac = 0.75;
   bool use_least_squares = false;
 
-  // Per-band fit weights of an augmented mean field, (nspin_in_basis, nkpts,
-  // nbnd), all > 0. Each orbital leg of the pivot-search metric and of the
-  // zeta-fit normal equations is scaled by its band weight (so each Gram
-  // factor carries w^2 per band); the returned collocation matrices and all
-  // downstream ERIs stay unweighted. Empty (has_band_weights = false) for
-  // non-augmented systems, trivial weights, or band_weights = false input.
+  // Per-band fit weights, (nspin_in_basis, nkpts, nbnd), all > 0. Each orbital
+  // leg of the pivot-search metric and of the zeta-fit normal equations is
+  // scaled by its band weight (so each Gram factor carries w^2 per band); the
+  // returned collocation matrices and all downstream ERIs stay unweighted.
+  // Empty (has_band_weights = false) for trivial weights, or when neither the
+  // augmentation singular values nor nbnd_protected supply any.
   nda::array<double,3> band_weight;
   bool has_band_weights = false;
+
+  // Number of protected bands N_P. When > 0, thc builds its own band_weight
+  // table: 1 for b < N_P and (E(s,k,N_P-1) - mu)/(E(s,k,b) - mu) for b >= N_P,
+  // i.e. the band tail is energy-suppressed in the pivot search and the zeta
+  // fit. -1 disables. On an augmented mean field the energy weights stop at the
+  // nbnd_orig input and the augmentation block keeps its singular values.
+  long nbnd_protected = -1;
+  // Research diagnostic: when true, drop the unprotected-unprotected pair
+  // densities (M_keep = M_full - M_aug) from the pivot-point-selection metric
+  // and the host zeta-fit. The unprotected set is the band tail
+  // [unprot_band_start, nbnd), independent of any band weights. Default false
+  // leaves both paths byte-identical.
+  bool exclude_unprotected_pairs = false;
+  long unprot_band_start = -1;
+
+  // Semilocal xc-kernel matrix. An empty path (the default) disables the whole
+  // path and leaves the Coulomb-only behavior byte-identical. When set, the
+  // interpolating vectors are contracted against the kernel fields in that file
+  // while they are still available inside intvec_impl, and the result is picked
+  // up by thc_reader_t through get_Vxc(). See thc_xc_kernel.hpp.
+  // std::optional: a default-constructed distributed_array carries a null
+  // communicator, and copying/moving one aborts in check_dimensions().
+  std::string vxc_file = "";
+  long vxc_block_size = 64;
+  std::optional<_darray_t_<HOST_MEMORY,3>> Vxc_quv;
 
   //fft plans
   int howmany_fft = -1;
@@ -524,6 +566,46 @@ class thc
           w(is,k,ia) = band_weight(is,k,orb_range.first()+ia);
     return w;
   }
+
+  // Effective (weight-squared) band count of orb_range for the metric
+  // normalization: with band weights, near-null states contribute ~nothing to
+  // the weighted metric but would still inflate the plain 1/(na*nb) factor, so
+  // the same absolute `thresh` would terminate the pivoted Cholesky earlier as
+  // more of them are kept. Normalizing by sum_a w^2 (averaged over spin and the
+  // full BZ) keeps the metric - and hence nIpts at fixed thresh - independent of
+  // how many near-null states are retained, and identical on the full-BZ and
+  // symmetry-reduced pivot paths. Reduces to orb_range.size() for unit weights.
+  double effective_band_count(nda::range orb_range) const
+  {
+    if(not has_band_weights) return double(orb_range.size());
+    long ns = band_weight.extent(0), nk = band_weight.extent(1);
+    double w2 = 0.0;
+    for( long is=0; is<ns; ++is )
+      for( long k=0; k<nk; ++k )
+        for( long a=0; a<orb_range.size(); ++a ) {
+          double w = band_weight(is,k,orb_range.first()+a);
+          w2 += w*w;
+        }
+    double n_eff = w2 / double(ns*nk);
+    app_log(2,"  thc: effective weighted band count for metric normalization: "
+              "n_eff = {:.3f} (n = {})", n_eff, orb_range.size());
+    return n_eff;
+  }
+
+  /**
+   * Build Vxc_quv from the interpolating vectors, in the same shape and
+   * distribution as the Coulomb matrix. Called from intvec_impl while Z_quG
+   * still holds the unweighted interpolating vectors (the Coulomb step scales
+   * them by sqrt(v(G)) in place afterwards).
+   *
+   * @param Z_quG      - [INPUT] interpolating vectors zeta^q_u(G), distributed
+   * @param pgrid3D    - [INPUT] processor grid of the Coulomb matrix
+   * @param block_size - [INPUT] block sizes of the Coulomb matrix
+   */
+  template<MEMORY_SPACE MEM = HOST_MEMORY, typename DArr_t>
+  void build_Vxc_quv(DArr_t const& Z_quG,
+                     std::array<long, 3> pgrid3D,
+                     std::array<long, 3> block_size);
 
   /**
    * Compute

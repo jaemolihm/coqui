@@ -43,6 +43,7 @@
 #include "numerics/distributed_array/h5.hpp"
 
 #include "mean_field/MF.hpp"
+#include "methods/ERI/thc_xc_kernel.hpp"
 
 #include "methods/ERI/thc.h"
 
@@ -67,6 +68,21 @@ auto make_grid(utils::Communicator auto&& comm, double ecut, mf::MF& mf)
   } else {
     return grids::truncated_g_grid( ecut, mesh, mf.recv() );
   }
+}
+
+// The interpolating vectors are truncated to rho_g before the ISDF fit, so at most
+// rho_g.size() of them can be linearly independent. Beyond that the THC overlap
+// matrix S = Z*dagger(Z) is exactly singular; its LU inverse in thc::evaluate() still
+// returns info==0 on roundoff-sized pivots, so the integrals come out silently wrong
+// rather than failing. Refuse to build in that regime.
+void check_npts_vs_pw(long nIpts, long npw, double ecut)
+{
+  utils::check( nIpts <= npw,
+                "thc::interpolating_points: number of interpolating points ({}) exceeds the "
+                "number of plane waves in the auxiliary basis ({}) at ecut = {} a.u.\n"
+                "  The THC integrals would be rank deficient. Increase 'ecut', or raise "
+                "'thresh' / lower 'nIpts' to keep the point count at or below {}.",
+                nIpts, npw, ecut, npw);
 }
 
 auto make_wfc_to_rho(utils::mpi_context_t<mpi3::communicator>& mpi,
@@ -96,10 +112,42 @@ auto make_wfc_to_rho(utils::mpi_context_t<mpi3::communicator>& mpi,
  *  - thresh: "1e-5", Threshold in cholesky decomposition.
  *  - band_weights: "true". For an augmented mean field, weight the bands by the
  *          stored augmentation singular values in the pivot search and zeta fit.
+ *  - nbnd_protected: "-1". Number of protected bands N_P. When > 0, the bands
+ *          b >= N_P are energy suppressed in the pivot search and zeta fit by
+ *          the weight (E(s,k,N_P-1) - mu)/(E(s,k,b) - mu), with mu the Fermi
+ *          energy of the mean field. Requires a mean field carrying a Fermi
+ *          energy. On an augmented mean field the energy weights stop at
+ *          nbnd_orig (see below) and the augmentation block keeps its singular
+ *          values. N_P == nbnd is accepted as an explicit no-op: the
+ *          unprotected tail is empty, so no weights are built and
+ *          exclude_unprotected_pairs is forced off, reproducing plain THC while
+ *          still checking the preconditions.
+ *  - nbnd_orig: "-1". Number of original (non-augmentation) bands of an
+ *          augmented mean field, i.e. the start of the augmentation block in
+ *          the [originals | augmentation] basis. Required with nbnd_protected
+ *          on an augmented mean field, meaningless otherwise: thc cannot infer
+ *          the block boundary from the mean field. Energy weights then cover
+ *          [nbnd_protected, nbnd_orig) and the stored augmentation singular
+ *          values cover [nbnd_orig, nbnd).
+ *  - exclude_unprotected_pairs: "nbnd_protected > 0". Research diagnostic. When
+ *          true, drop the unprotected-unprotected pair densities
+ *          (M_keep = M_full - M_aug) from the pivot-point-selection metric and,
+ *          in make_thc_coulomb, the host zeta-fit. The unprotected set is the
+ *          band tail [nbnd_protected, nbnd), so nbnd_protected is required. On
+ *          an augmented mean field that tail runs past nbnd_orig, i.e. the
+ *          augmentation states count as unprotected.
+ *  - Vxc_file: "". Path to an HDF5 file holding semilocal xc-kernel coefficient
+ *          fields (QE elph.x with write_xc_kernel = .true.). When non-empty, the
+ *          xc-kernel matrix Vxc(q,u,v) is built alongside the Coulomb matrix and
+ *          exposed by get_Vxc(). Empty (default) leaves the Coulomb path
+ *          untouched. Only valid for the ISDF algorithm.
  *  Performance related options:
  *  - matrix_block_size: 1024, Block size used in distributed arrays.
  *  - chol_block_size: "8", Block size in cholesky decomposition.
- *  - r_blk: "1", Number of iterations used to process real space grid in real space algorithm.  
+ *  - r_blk: "1", Number of iterations used to process real space grid in real space algorithm.
+ *  - Vxc_block_size: "64". Number of pivots per real-space block when building
+ *          Vxc. Memory scales as 8 * Vxc_block_size * nnr; the FFT count scales
+ *          as nIpts^2 / Vxc_block_size, so raise it if memory allows.
  *  - distr_tol: "0.2". Controls the processor grid. Larger values lead to more processors in k/Q grid axis.
  *  - memory_frac: "0.75". fraction of available memory in a node used to estimate memory requirements/utilization. 
  */
@@ -123,17 +171,131 @@ thc::thc(mf::MF *mf_,
   distr_tol( io::get_value_with_default<double>(pt,"distr_tol",0.2) ),
   memory_frac( io::get_value_with_default<double>(pt,"memory_frac",0.75) ),
   use_least_squares( io::get_value_with_default<bool>(pt,"use_least_squares",false) ),
+  nbnd_protected( io::get_value_with_default<long>(pt,"nbnd_protected",-1) ),
+  // default on whenever protected bands are requested; either can be overridden
+  exclude_unprotected_pairs( io::get_value_with_default<bool>(pt,"exclude_unprotected_pairs",
+                                                              nbnd_protected > 0) ),
+  vxc_file( io::get_value_with_default<std::string>(pt,"Vxc_file","") ),
+  vxc_block_size( io::get_value_with_default<long>(pt,"Vxc_block_size",64) ),
   howmany_fft(-1)
 {
   utils::check(mf != nullptr, "thc::Null pointer.");
   utils::check(mf->has_orbital_set(), "Error in thc: Invalid mf type. ");
   utils::check(default_block_size>0, "Error in thc: Invalid matrix_block_size:{}",default_block_size);
   utils::check(default_cholesky_block_size>0, "Error in thc: Invalid chol_block_size:{}",default_cholesky_block_size);
+  utils::check(vxc_block_size>0, "Error in thc: Invalid Vxc_block_size:{}",vxc_block_size);
 
   memory_frac = std::min( 0.90, std::max( 0.25, memory_frac ) );
 
-  if( io::get_value_with_default<bool>(pt,"band_weights",true) and mf->is_augmented() ) {
-    band_weight = mf->augmented_band_weights();
+  // Per-band fit weights for the pivot search and the zeta fit. band_weights is the
+  // master switch for both sources, which are combinable band range by band range:
+  // the energy suppression of the band tail [nbnd_protected, nbnd_energy_end) and,
+  // on an augmented mean field, the stored augmentation singular values on the
+  // augmentation block [nbnd_orig, nbnd). Both feed the same band_weight table.
+  bool protected_weights = false;
+  bool augmented = mf->is_augmented();
+  bool band_weights = io::get_value_with_default<bool>(pt,"band_weights",true);
+  bool aug_weights = augmented and band_weights;
+  long nbnd_orig = io::get_value_with_default<long>(pt,"nbnd_orig",-1);
+  long nbnd_energy_end = mf->nbnd();
+  if( nbnd_orig > 0 ) {
+    utils::check(augmented,
+                 "thc: nbnd_orig = {} is only meaningful for an augmented mean field.", nbnd_orig);
+    utils::check(nbnd_protected > 0,
+                 "thc: nbnd_orig = {} requires nbnd_protected > 0.", nbnd_orig);
+    utils::check(nbnd_orig <= mf->nbnd(),
+                 "thc: invalid nbnd_orig = {}. Requires nbnd_orig <= nbnd = {}.",
+                 nbnd_orig, mf->nbnd());
+  }
+  if( nbnd_protected > 0 ) {
+    long nb = mf->nbnd();
+    utils::check(nbnd_protected <= nb,
+                 "thc: invalid nbnd_protected = {}. Requires 0 < nbnd_protected <= nbnd = {}.",
+                 nbnd_protected, nb);
+    utils::check(mf->has_efermi(),
+                 "thc: nbnd_protected requires a mean field carrying a Fermi energy; regenerate "
+                 "the h5 with a pw2coqui that writes System/fermi_energy.");
+    if( augmented ) {
+      // The augmented basis is [originals | augmentation]; the energy weight is
+      // defined on the originals only, and their count is not recoverable from
+      // the mean field, so the caller must supply it.
+      utils::check(nbnd_orig > 0,
+                   "thc: nbnd_protected = {} on an augmented mean field requires nbnd_orig, the "
+                   "number of original (non-augmentation) bands: the energy weights cover "
+                   "[nbnd_protected, nbnd_orig) and the augmentation singular values cover "
+                   "[nbnd_orig, nbnd = {}).", nbnd_protected, nb);
+      utils::check(nbnd_protected <= nbnd_orig,
+                   "thc: invalid nbnd_protected = {}. Requires nbnd_protected <= nbnd_orig = {}.",
+                   nbnd_protected, nbnd_orig);
+      nbnd_energy_end = nbnd_orig;
+    }
+  }
+  if( nbnd_protected > 0 and nbnd_protected == mf->nbnd() ) {
+    // Every band protected: the tail [N_P, nbnd) is empty, so all weights would
+    // be one and there are no unprotected-unprotected pairs. Accepted as an
+    // explicit no-op (identical to omitting nbnd_protected), but the weight
+    // table and the pair exclusion are both skipped rather than built trivially:
+    // the exclusion's metric subtraction would otherwise run over a zero-length
+    // band range. The has_efermi precondition above still applies, so this stays
+    // a faithful dry run of a real protected-band setup.
+    utils::check(not (exclude_unprotected_pairs and
+                      io::check_child_exists(pt,"exclude_unprotected_pairs")),
+                 "thc: exclude_unprotected_pairs = true is meaningless with nbnd_protected = "
+                 "nbnd = {}, since the unprotected band range [{}, {}) is empty.",
+                 mf->nbnd(), mf->nbnd(), mf->nbnd());
+    exclude_unprotected_pairs = false;
+    app_log(1,"  nbnd_protected = nbnd = {}: all bands protected, so every weight is one and no "
+              "pairs are dropped. This run is identical to plain THC.", mf->nbnd());
+  } else if( nbnd_protected > 0 and not band_weights ) {
+    // band_weights is the master switch: it turns off the energy suppression of the
+    // protected-band tail as well as the augmentation singular values. nbnd_protected
+    // still selects the unprotected tail for exclude_unprotected_pairs.
+    app_log(1,"  band_weights = false: no fit weights are built, so nbnd_protected = {} only "
+              "selects the unprotected band range.", nbnd_protected);
+  } else if( nbnd_protected > 0 or aug_weights ) {
+    long nb = mf->nbnd();
+    long ns = mf->nspin(), nk = mf->nkpts();
+    // Base table: the augmentation singular values (1 on the original bands),
+    // or all ones when there is no augmentation to weight.
+    if( aug_weights ) {
+      band_weight = mf->augmented_band_weights();
+    } else {
+      band_weight = nda::array<double,3>(ns,nk,nb);
+      band_weight() = 1.0;
+    }
+    utils::check(band_weight.extent(0)==ns and band_weight.extent(1)==nk and
+                 band_weight.extent(2)==nb,
+                 "thc: band weight table shape ({},{},{}) does not match (nspin,nkpts,nbnd) = "
+                 "({},{},{}).", band_weight.extent(0), band_weight.extent(1),
+                 band_weight.extent(2), ns, nk, nb);
+    // w(s,k,b) = (E(s,k,N_P-1) - mu)/(E(s,k,b) - mu) on [N_P, nbnd_energy_end),
+    // which is the full tail of an ordinary mean field and the original-band
+    // tail of an augmented one. E(s,k,N_P-1) is the last protected band.
+    if( nbnd_protected > 0 and nbnd_energy_end > nbnd_protected ) {
+      double mu = mf->efermi();
+      auto eig = mf->eigval();
+      for( long is=0; is<ns; ++is )
+        for( long k=0; k<nk; ++k ) {
+          double eP = eig(is,k,nbnd_protected-1) - mu;
+          utils::check(eP > 0.0,
+                       "thc: nbnd_protected = {}: reference band E(s={},k={},b={}) - mu = {} is not "
+                       "positive. The reference band is nbnd_protected-1, so choose nbnd_protected "
+                       "strictly greater than the number of occupied bands (at least one "
+                       "unoccupied band must be protected).",
+                       nbnd_protected, is, k, nbnd_protected-1, eP);
+          for( long b=nbnd_protected; b<nbnd_energy_end; ++b ) {
+            double de = eig(is,k,b) - mu;
+            utils::check(de > 0.0,
+                         "thc: nbnd_protected = {}: E(s={},k={},b={}) - mu = {} is not positive. "
+                         "Choose nbnd_protected strictly greater than the number of occupied bands.",
+                         nbnd_protected, is, k, b, de);
+            band_weight(is,k,b) = eP/de;
+          }
+        }
+      protected_weights = true;
+    }
+  }
+  if( band_weight.size() > 0 ) {
     auto const* w0 = band_weight.data();
     auto const* w1 = w0 + band_weight.size();
     has_band_weights = std::any_of(w0, w1, [](double w) { return std::abs(w-1.0) > 1e-14; });
@@ -142,11 +304,50 @@ thc::thc(mf::MF *mf_,
                    "thc: band weights require npol==1 and nspin_in_basis==nspin.");
       double wmin = *std::min_element(w0, w1);
       utils::check(wmin > 0.0, "thc: non-positive band weight: {}.", wmin);
-      app_log(1,"  Augmented-basis band weights applied to THC pivot search and fit "
-                "(min = {:.3e}). Disable with band_weights = false.", wmin);
+      if(protected_weights) {
+        double wmax = *std::max_element(w0, w1);
+        app_log(1,"  Protected-band weights applied to THC pivot search and fit: "
+                  "nbnd_protected = {} (reference band index {}), mu = {} a.u., "
+                  "energy-weighted band range [{}, {}), weights in [{:.3e}, {:.3e}].",
+                nbnd_protected, nbnd_protected-1, mf->efermi(),
+                nbnd_protected, nbnd_energy_end, wmin, wmax);
+        if(aug_weights) {
+          // Report the range actually present on the augmentation block: an h5 written
+          // before augmented_band_weights existed loads as all ones, which would make a
+          // claim of "singular values" false.
+          auto aug_blk = band_weight(nda::range::all, nda::range::all,
+                                     nda::range(nbnd_orig, mf->nbnd()));
+          double amin = nda::min_element(aug_blk), amax = nda::max_element(aug_blk);
+          app_log(1,"  Augmentation band weights on [{}, {}): [{:.3e}, {:.3e}]{}",
+                  nbnd_orig, mf->nbnd(), amin, amax,
+                  (std::abs(amin-1.0) <= 1e-14 and std::abs(amax-1.0) <= 1e-14) ?
+                    " (all ones: the mean field carries no augmentation singular values)" : "");
+        }
+      } else if(aug_weights) {
+        app_log(1,"  Augmented-basis band weights applied to THC pivot search and fit "
+                  "(min = {:.3e}). Disable with band_weights = false.", wmin);
+      }
     } else {
       band_weight = nda::array<double,3>{};
     }
+  }
+
+  // Research diagnostic (exclude_unprotected_pairs): drop the unprotected-
+  // unprotected pair densities. Defaults on whenever nbnd_protected > 0; the
+  // unprotected set is the band tail [nbnd_protected, nbnd). Off by default
+  // otherwise, in which case nothing below runs and the pivot/fit paths stay
+  // byte-identical.
+  if(exclude_unprotected_pairs) {
+    long nb = mf->nbnd();
+    utils::check(nbnd_protected > 0 and nbnd_protected < nb,
+                 "thc: exclude_unprotected_pairs is on but the number of protected bands is "
+                 "unknown (nbnd_protected = {}, need 0 < nbnd_protected < nbnd = {}).",
+                 nbnd_protected, nb);
+    unprot_band_start = nbnd_protected;
+    bool by_default = not io::check_child_exists(pt,"exclude_unprotected_pairs");
+    app_log(1,"  THC exclude_unprotected_pairs active ({}): dropping unprotected-unprotected "
+              "pair densities; unprotected band range = [{}, {}).",
+            by_default ? "default for nbnd_protected > 0" : "explicit", unprot_band_start, nb);
   }
 
   if (print_metadata_) print_metadata();
@@ -154,7 +355,7 @@ thc::thc(mf::MF *mf_,
   for( auto& v: {"TOTAL","IO_SAVE","IO_ORBS","ALLOC","ip_COMM","COMM","FFT","FFTPLAN","DistOrbs","IpIter",
                  "IntPts","IntVecs","VCoul","LSSolve","ip_SERIAL","SERIAL","TUR","ZUR","EXTRA",
                  "ip_setup_comm","ip_chol","ip_update_res",
-                 "GEMM", "shmX",
+                 "GEMM", "shmX", "VXC",
                  // leaf sub-clocks inside the ZUR loop of get_ZquG_Cquv_fft_shared_memory
                  "ZUR_kR","ZUR_had","ZUR_RQ","ZUR_Cquv","ZUR_pack","ZUR_copy",
                  // leaf sub-clocks splitting the ALLOC total
@@ -208,12 +409,14 @@ auto thc::interpolating_points(int iq, int max, nda::range a_range, nda::range b
   bool gamma = (Q(0)*Q(0)+Q(1)*Q(1)+Q(2)*Q(2) < 1e-8);
   if((a_range==b_range) and gamma and (mf->nkpts()!=mf->nkpts_ibz()) ) {
       auto return_v = chol_metric_impl_ibz<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size);
+      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
       Timer.stop("TOTAL");
       return return_v;
   } else {
       auto return_v = chol_metric_impl<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size, C_skai);
+      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
       Timer.stop("TOTAL");
-      return return_v; 
+      return return_v;
   }
 }
 
@@ -243,6 +446,7 @@ auto thc::interpolating_points(nda::MemoryArrayOfRank<4> auto const& C_skai, int
   nda::range a_range(C_skai.extent(2));
   nda::range b_range(mf->nbnd());
   auto return_v = chol_metric_impl<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size,std::addressof(C_skai));
+  detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
   Timer.stop("TOTAL");
   return return_v;
 }
@@ -321,6 +525,9 @@ auto thc::evaluate(memory::array<MEM,long,1> const& ri,
   utils::check( not has_band_weights,
                 "Error in thc::evaluate: band weights not supported with rotated "
                 "orbitals (C_skai). Set band_weights = false." );
+  utils::check( not exclude_unprotected_pairs,
+                "Error in thc::evaluate: exclude_unprotected_pairs not supported with rotated "
+                "orbitals (C_skai). Set exclude_unprotected_pairs = false." );
   utils::check( C_skai.shape() == std::array<long,4>{nspins,nkpts,Xa.global_shape()[2],nbnd},
                 "Error in thc::evaluate: Shape mismatch of C_skai." );
   utils::check( Xa.global_shape() == std::array<long,4>{nspins,nkpts,Xa.global_shape()[2],nchol}, 
@@ -427,6 +634,13 @@ void thc::save(h5::group& gh5, std::string format, memory::array<MEM,long,1> con
     }
     // V [ q, u, v ]
     math::nda::h5_write(gh5, "coulomb_matrix", V);
+    // Vxc [ q, u, v ]. Separate dataset, never merged into coulomb_matrix: it is
+    // only valid in the direct (Hartree) channel. Vxc_source records which kernel
+    // dump produced it, so a reader can reject a file built from a different one.
+    if(has_Vxc()) {
+      math::nda::h5_write(gh5, "Vxc", get_Vxc());
+      h5::h5_write(gh5, "Vxc_source", vxc_file);
+    }
   } else
     APP_ABORT("Error: Unknown format type: {}",format);
   Timer.stop("IO_SAVE");

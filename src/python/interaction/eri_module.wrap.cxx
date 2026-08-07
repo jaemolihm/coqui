@@ -99,6 +99,15 @@ static auto const fun_12 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::ThcCoulomb const &self) { return self.nspin_in_basis(); },
     "self")};
 
+// has_Vxc
+static auto const fun_thc_has_vxc = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb const &self) { return self.has_Vxc(); }, "self")};
+
+// Vxc
+static auto const fun_thc_vxc = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::ThcCoulomb const &self, int iq) { return self.Vxc(iq); },
+    "self", "iq")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -112,6 +121,8 @@ static const auto doc_d_9 = fun_9.doc(R"DOC()DOC");
 static const auto doc_d_10 = fun_10.doc(R"DOC()DOC");
 static const auto doc_d_11 = fun_11.doc(R"DOC()DOC");
 static const auto doc_d_12 = fun_12.doc(R"DOC()DOC");
+static const auto doc_thc_has_vxc = fun_thc_has_vxc.doc(R"DOC()DOC");
+static const auto doc_thc_vxc = fun_thc_vxc.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -142,6 +153,10 @@ PyMethodDef c2py::tp_methods<coqui_py::ThcCoulomb>[] = {
      doc_d_11.c_str()},
     {"nspin_in_basis", (PyCFunction)c2py::pyfkw<fun_12>,
      METH_VARARGS | METH_KEYWORDS, doc_d_12.c_str()},
+    {"has_Vxc", (PyCFunction)c2py::pyfkw<fun_thc_has_vxc>,
+     METH_VARARGS | METH_KEYWORDS, doc_thc_has_vxc.c_str()},
+    {"Vxc", (PyCFunction)c2py::pyfkw<fun_thc_vxc>, METH_VARARGS | METH_KEYWORDS,
+     doc_thc_vxc.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

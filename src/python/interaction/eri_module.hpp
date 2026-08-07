@@ -80,6 +80,13 @@ namespace coqui_py {
     // create a new Mf from _thc's MF
     auto mf() const { return Mf(_thc.MF()); }
 
+    // Semilocal xc-kernel matrix Vxc(q)_PQ, present when the THC was built with
+    // "Vxc_file" or read from a THC file carrying the "Vxc" dataset. Exposed
+    // separately from the Coulomb matrix on purpose: Vxc is only valid in the
+    // direct (Hartree) channel.
+    auto has_Vxc() const { return _thc.has_Vxc(); }
+    nda::array<ComplexType, 2> Vxc(int iq) const { return _thc.Vxc(iq); }
+
     C2PY_IGNORE
     auto& get_eri() { return _thc; }
 

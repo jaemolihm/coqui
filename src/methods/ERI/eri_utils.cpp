@@ -66,6 +66,32 @@ auto make_thc(std::shared_ptr<mf::MF> mf, ptree const& pt) -> thc_reader_t {
   // only mf with orbitals can be built, otherwise must be read from file
   utils::check(mf->has_orbital_set() or not build_eri, "Error in make_thc: MF types that have no orbital sets (e.g type=model), can not be built, they must be read from file. save file ({}) must be provided or could not be opened.",save);
 
+  // Vxc_file only reaches the builder, so reading a THC file would silently drop the
+  // request (no Vxc dataset) or answer it with a matrix built from a different kernel
+  // dump. Fail on both: the file has to be regenerated (delete it, or source="compute").
+  auto vxc_file = io::get_value_with_default<std::string>(pt,"Vxc_file","");
+  if (vxc_file != "" and not build_eri) {
+    bool has_vxc = false;
+    std::string vxc_source;
+    {
+      h5::file file(save, 'r');
+      h5::group grp(file);
+      has_vxc = grp.has_dataset("Vxc");
+      if (has_vxc and grp.has_dataset("Vxc_source"))
+        h5::h5_read(grp, "Vxc_source", vxc_source);
+    }
+    utils::check(has_vxc,
+                 "Error in make_thc: Vxc_file was requested but the existing THC file "
+                 "({}) has no 'Vxc' dataset, so it predates this setting and would be "
+                 "reused as-is. Delete it, or pass source = \"compute\", to rebuild.",
+                 save);
+    utils::check(vxc_source == "" or vxc_source == vxc_file,
+                 "Error in make_thc: the existing THC file ({}) carries a Vxc built from "
+                 "'{}', but Vxc_file = '{}' was requested. Reusing it would silently apply "
+                 "the wrong xc kernel. Delete the file, or pass source = \"compute\".",
+                 save, vxc_source, vxc_file);
+  }
+
   thc_reader_t eri = (build_eri?
                       thc_reader_t(std::move(mf), pt, false, false, init) :
                       thc_reader_t(std::move(mf), storage, save, false, init));
