@@ -593,4 +593,101 @@ TEST_CASE("test_solve","[math]")
 }
 */
 
+/**
+ * Strong-scaling benchmark for the rank-4 slate_ops::multiply used by the LR W
+ * Dyson (ΔW = W·ΔΠ·W). Fixed global problem (nw tiles of Np x Np); the same
+ * rank count is spent either on the leading (w) axis — every rank then owns
+ * whole Np x Np matrices and multiply_impl takes the local nda::blas::gemm
+ * path — or on the (P, Q) axes, which forces a real SLATE gemm on a p x q
+ * subgrid. Per-rank FLOPs are identical in both, so the ratio is exactly
+ * SLATE's efficiency relative to a local zgemm.
+ *
+ * The block size follows utils::lr_W_proc_grid, so a poor ratio may mean the
+ * production block size is wrong rather than that SLATE is slow.
+ *
+ * Opt-in: the leading '.' in the tag is what keeps it out of the default ctest
+ * run; the env gate makes it a no-op if it is selected anyway. Allocates
+ * ~0.8 GB/rank and runs for seconds.
+ *   COQUI_BENCH_SLATE=1 mpirun -n 4 ./test_math_distributed_nda "[.bench]"
+ * Override the problem with COQUI_BENCH_NP / COQUI_BENCH_NW.
+ */
+TEST_CASE("slate_multiply_bench", "[.bench]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+
+  const char* on = std::getenv("COQUI_BENCH_SLATE");
+  if (on == nullptr || std::string_view(on) == "0") return;
+
+  auto env_long = [](const char* name, long dflt) {
+    const char* v = std::getenv(name);
+    return (v == nullptr) ? dflt : std::stol(v);
+  };
+  const long Np = env_long("COQUI_BENCH_NP", 1160);
+  const long nw = env_long("COQUI_BENCH_NW", 12);
+  const int  nrep = int(env_long("COQUI_BENCH_NREP", 2));
+
+  // 8 flops per complex madd, one gemm over the whole (nw, Np, Np) problem
+  const double gflop = 8.0 * double(nw) * double(Np) * double(Np) * double(Np) * 1e-9;
+
+  app_log(0, "");
+  app_log(0, "slate_multiply_bench: Np = {}, nw = {}, world = {}, {:.1f} GFLOP total",
+          Np, nw, world.size(), gflop);
+  app_log(0, "  {:>10} {:>16} {:>10} {:>10} {:>12}",
+          "ranks", "pgrid(w,q,P,Q)", "bsize", "time[s]", "GF/s/rank");
+
+  auto run = [&](long np_w, long np_P, long np_Q) {
+    long np = np_w * np_P * np_Q;
+    if (np > world.size() || nw % np_w != 0) return;
+    long bs = std::min({1024l, Np/np_P, Np/np_Q});
+    if (bs < 1) return;
+
+    // Sub-communicator of the first np ranks; the rest idle through this case.
+    auto sub = world.split(world.rank() < np ? 0 : 1, world.rank());
+    double t = 0.0;
+    if (world.rank() < np) {
+      auto mk = [&]() {
+        return make_distributed_array<nda::array<ComplexType, 4>>(
+            sub, shape_t<4>{np_w, 1, np_P, np_Q}, shape_t<4>{nw, 1, Np, Np},
+            shape_t<4>{1, 1, bs, bs});
+      };
+      auto dA = mk();
+      auto dB = mk();
+      auto dC = mk();
+      // Deterministic, non-degenerate fill; values are irrelevant to timing but
+      // must not be denormals.
+      auto fill = [](auto&& d, double s) {
+        auto loc = d.local();
+        long n = 0;
+        for (auto& v : loc) { v = ComplexType(s*std::sin(0.001*n), std::cos(0.002*n)); ++n; }
+      };
+      fill(dA, 1.0); fill(dB, 0.5); fill(dC, 0.0);
+
+      math::nda::slate_ops::multiply(dA, dB, dC);  // warmup
+      sub.barrier();
+      t = 1e30;
+      for (int r = 0; r < nrep; ++r) {
+        sub.barrier();
+        double t0 = MPI_Wtime();
+        math::nda::slate_ops::multiply(dA, dB, dC);
+        sub.barrier();
+        t = std::min(t, MPI_Wtime() - t0);
+      }
+    }
+    world.barrier();
+    world.broadcast_n(&t, 1, 0);
+    app_log(0, "  {:>10} {:>16} {:>10} {:>10.3f} {:>12.1f}",
+            np, fmt::format("({},1,{},{})", np_w, np_P, np_Q), bs, t,
+            gflop / t / double(np));
+  };
+
+  for (long np : {1l, 2l, 3l, 4l, 6l, 8l}) {
+    if (np > world.size()) break;
+    run(np, 1, 1);                       // reference: local gemm, w-parallel
+    if (np > 1) run(1, np, 1);           // 1-D SLATE grid over P
+    long nx = utils::find_proc_grid_min_diff(np, Np, Np);
+    if (np > 1 && nx != np) run(1, nx, np/nx);  // 2-D SLATE grid
+  }
+  app_log(0, "");
+}
+
 } // bdft_tests
