@@ -45,9 +45,32 @@ namespace methods {
  * pools cannot absorb go onto the ω axis, which only needs nw >= nwpools (the
  * split may be uneven; chunk_range handles that).
  *
- * Splitting the band axes is the last resort, taken only when the ω axis has no
- * room. It costs every rank the full nbnd^3 product per (ω, s, k) of which it
- * keeps one block, and it leaves ΔΣ unusable, so LR-GW rejects it.
+ * Splitting the band axes is the last resort, taken only when no (ω, k) pool pair
+ * covers all the ranks. It costs every rank the full nbnd^3 product per (ω, s, k)
+ * of which it keeps one block, and it leaves ΔΣ unusable, so LR-GW rejects it.
+ *
+ * Greedy ω-then-k pool filling can leave a remainder that neither axis can absorb
+ * and spill it onto the bands — e.g. nproc=960, nw=40: ω saturates at 40 (nwpools
+ * cannot exceed nw), k takes 12 of the remaining 24, and the last 2 ranks split the
+ * bands. Only in that case do we search the factorisations nwpools*nkpools == nproc
+ * with nwpools <= nw and nkpools <= nkpts_ibz and take the best; rank counts the
+ * greedy fill already handles keep their existing grid, so no working configuration
+ * changes distribution.
+ *
+ * Cost model for the search: a rank owns ceil(nw/nwpools) x ceil(nkpts_ibz/nkpools)
+ * of the (ω, k) plane and the Dyson loop is one nbnd^3 pair of gemms per element, so
+ * that product is the max per-rank work. The ΔΣ tau->omega transform scales with the
+ * same product and reads its input from shared memory, so it does not favour either
+ * axis; the metric alone therefore leaves ties (nw=40, nkpts_ibz=64, nproc=960 admits
+ * both (15, 64) and (40, 24) at max work 3).
+ *
+ * Ties go to more k pools. The ΔG(iω) redistribute that follows the Dyson loop targets
+ * a grid whose k pools are maximised first, so a source grid that splits k the same way
+ * keeps that all-to-all inside one k column; the ω-heavy alternative fans every rank
+ * out across all of them for no gain elsewhere.
+ *
+ * If no factorisation exists either (nproc has a factor exceeding both axes) the
+ * band split stands and LR-GW rejects it downstream with a diagnostic.
  *
  * Kept in one place because lr_driver's distribution report has to agree with
  * what solve_lr_dyson_impl actually allocates.
@@ -69,6 +92,28 @@ lr_dyson_omega_pgrid(long nproc, long nw, long nkpts_ibz, long nbnd) {
     } else {
       np_i = utils::find_proc_grid_min_diff(np, 1, 1);
       np_j = np / np_i;
+    }
+  }
+
+  if (np_i * np_j > 1) {
+    auto ceil_div = [](long a, long b) { return (a + b - 1) / b; };
+    long best_w = 0, best_k = 0, best_work = 0;
+    for (long a = 1; a <= std::min(nproc, nw); ++a) {
+      if (nproc % a != 0) continue;
+      long b = nproc / a;
+      if (b > nkpts_ibz) continue;
+      long work = ceil_div(nw, a) * ceil_div(nkpts_ibz, b);
+      // strict <, ascending a: ties keep the smallest nwpools, i.e. the most k pools
+      if (best_w == 0 or work < best_work) {
+        best_work = work;
+        best_w = a;
+        best_k = b;
+      }
+    }
+    if (best_w > 0) {
+      nwpools = best_w;
+      nkpools = best_k;
+      np_i = np_j = 1;
     }
   }
 
@@ -172,17 +217,6 @@ public:
       const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   /**
-   * @brief Compute LR density matrix from LR Green's function
-   *
-   * Computes: ΔDm(k) = -ΔG(k, τ=β⁻)
-   *
-   * @param sDeltaDm_skij   - [OUTPUT] LR density matrix (ns, nk, nb, nb)
-   * @param sDeltaG_tskij   - [INPUT] LR Green's function (nt, ns, nk, nb, nb)
-   */
-  template<typename DeltaDm_t, typename DeltaG_t>
-  void compute_lr_dm(DeltaDm_t& sDeltaDm_skij, const DeltaG_t& sDeltaG_tskij);
-
-  /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
    *
    * Computes: ΔN = Tr[S · ΔDm] = Σ_k w_k Tr[S(k) · ΔDm(k)]
@@ -251,10 +285,38 @@ public:
     app_log(level, "{0}  - LR Dyson loop:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
     app_log(level, "{0}  - Redistribute ΔG(iω):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
     app_log(level, "{0}  - ΔG(iω)->ΔG(τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
-    app_log(level, "{0}  - Gather:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
-    app_log(level, "{0}  - Compute ΔDm:                {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
+    app_log(level, "{0}  - Skew (barrier pre-gather):   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_SKEW"), _Timer.number_of_calls("LR_DYSON_SKEW"));
+    app_log(level, "{0}  - Gather ΔG(τ):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
+    app_log(level, "{0}      - set_zero:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ZERO"), _Timer.number_of_calls("GATHER_SHM_ZERO"));
+    app_log(level, "{0}      - local assign:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ASSIGN"), _Timer.number_of_calls("GATHER_SHM_ASSIGN"));
+    app_log(level, "{0}      - internode all_reduce:   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_REDUCE"), _Timer.number_of_calls("GATHER_SHM_REDUCE"));
+    app_log(level, "{0}      - trailing barrier:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_BARRIER"), _Timer.number_of_calls("GATHER_SHM_BARRIER"));
+    print_gather_bandwidth(level, indent);
+    app_log(level, "{0}  - Compute ΔDm (incl. gather): {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
     app_log(level, "{0}  - Compute ΔN:                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
     app_log(level, "{0}  - Misc (barrier/reset):       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
+  }
+
+  /// Rate implied by the internode all_reduce of ΔG(τ). An allreduce of a V-byte
+  /// buffer over n nodes puts ~2V(n-1)/n bytes per node on the wire, not V, so that
+  /// is what the rate below is computed from and what is comparable to the fabric's
+  /// per-node bandwidth: if it already sits near line rate there is no headroom left
+  /// in the reduction itself, and the remaining Gather cost is elsewhere.
+  inline void print_gather_bandwidth(int level, const std::string& indent) {
+    int ncalls = _Timer.number_of_calls("GATHER_SHM_REDUCE");
+    if (ncalls == 0 or _gather_bytes == 0) return;
+    double t = _Timer.elapsed("GATHER_SHM_REDUCE") / double(ncalls);
+    double V_MB = double(_gather_bytes) / (1024.0 * 1024.0);
+    long nnodes = _context->internode_comm.size();
+    if (nnodes < 2 or t <= 0.0) {
+      app_log(level, "{0}      [V = {1:.1f} MB/node, {2:.4f} sec/reduce, {3} node(s)]",
+              indent, V_MB, t, nnodes);
+      return;
+    }
+    double wire = 2.0 * double(_gather_bytes) * double(nnodes - 1) / double(nnodes);
+    app_log(level, "{0}      [V = {1:.1f} MB/node, {2:.4f} sec/reduce, {3} nodes "
+                   "-> {4:.2f} GB/s/node on the wire]",
+            indent, V_MB, t, nnodes, wire / t / 1.0e9);
   }
 
   // Accessors
@@ -263,12 +325,17 @@ public:
   bool is_q_gamma() const { return _is_q_gamma; }
 
 private:
-  // Internal implementation of the LR Dyson solve (single pass with given Δμ)
+  // Internal implementation of the LR Dyson solve (single pass with given Δμ).
   // Uses _cached_G_wskij for G(iω); caller must ensure cache is populated.
-  template<typename DeltaG_t, typename DeltaH0_t,
+  // ΔDm = -ΔG(τ=β⁻) is produced here rather than in a separate pass: it is a
+  // contraction over τ alone, and the distributed τ array this builds leaves the
+  // τ and spin axes undivided, so every rank can form its own (k, i, j) block
+  // locally instead of re-reading the gathered replica.
+  template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
   void solve_lr_dyson_impl(
       DeltaG_t& sDeltaG_tskij,
+      DeltaDm_t& sDeltaDm_skij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij,
@@ -295,6 +362,9 @@ private:
   // Cached dN/dμ — populated by first call to compute_dN_dmu()
   double _cached_dN_dmu = 0.0;
   bool _dN_dmu_cached = false;
+
+  // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
+  size_t _gather_bytes = 0;
 
   utils::TimerManager _Timer;
 };

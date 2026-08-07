@@ -118,6 +118,7 @@ namespace math {
         _node_comm = other.node_comm();
         _size = other.size();
         _shape = other.shape();
+        _reduce_nchunks = -1;
         _win = std::move(std::make_unique<mpi3::shared_window<value_type>>(*_node_comm, (_node_comm->root()) ? _size : 0));
         node_sync();
         if (_node_comm->root()) 
@@ -165,6 +166,47 @@ namespace math {
         node_sync();
       }
 
+      /**
+       * Internode all_reduce with the buffer split across the ranks of a node.
+       *
+       * all_reduce() runs the whole reduction on the node root, so a single core moves
+       * the entire array between nodes. Here each node-local rank reduces a disjoint
+       * chunk over its own internode communicator: make_mpi_context splits by
+       * node_comm.rank(), so every rank — not only the root — belongs to a communicator
+       * that spans the nodes, and rank r cooperates with rank r of every other node.
+       *
+       * Post-condition is identical to all_reduce(). It is bit-identical to it whenever
+       * each element is contributed by at most one node (the gather_to_shm case, where
+       * the sum is x + 0 + ... and independent of grouping); with genuinely nonzero
+       * partial sums on several nodes the reduction order differs and last-bit drift is
+       * possible, so prefer all_reduce() there.
+       */
+      void all_reduce_parallel() {
+        utils::check(_internode_comm != nullptr and _gcomm != nullptr,
+                     "shm::shared_array::all_reduce_parallel: array was built without a "
+                     "global/internode communicator; use all_reduce().");
+        // A communicator whose color exceeds some node's rank count does not span every
+        // node, so its chunk would go unreduced. Chunk by the smallest node in the job.
+        // Depends only on the communicators, so it is resolved once per array: every
+        // rank takes this branch on the same call, which keeps the collective matched.
+        if (_reduce_nchunks < 0)
+          _reduce_nchunks = _gcomm->all_reduce_value(long(_node_comm->size()), mpi3::min<>{});
+        long nchunks = _reduce_nchunks;
+        node_sync();
+        if (_node_comm->rank() < nchunks) {
+          auto [origin_i, end_i] =
+              itertools::chunk_range(0, _size, nchunks, _node_comm->rank());
+          // split into <1e9-element messages to avoid mpi count overflow
+          for (size_t shift = size_t(origin_i); shift < size_t(end_i); shift += size_t(1e9)) {
+            value_type *start = (value_type*)_win->base(0) + shift;
+            size_t count = (shift + size_t(1e9) < size_t(end_i)) ? size_t(1e9)
+                                                                 : size_t(end_i) - shift;
+            _internode_comm->all_reduce_in_place_n(start, count, std::plus<>{});
+          }
+        }
+        node_sync();
+      }
+
       void broadcast_to_nodes(int src_node) {
         node_sync();
         if (_node_comm->root()) {
@@ -202,6 +244,9 @@ namespace math {
       mpi3::size_t _size;
       std::array<long, rank> _shape;
       std::unique_ptr<mpi3::shared_window<value_type>> _win;
+      // Chunk count used by all_reduce_parallel; < 0 until resolved. Follows the
+      // communicators, so it must be invalidated whenever those are replaced.
+      long _reduce_nchunks = -1;
 
     };
 

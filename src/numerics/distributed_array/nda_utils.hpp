@@ -25,7 +25,8 @@
 #include <utility>
 #include <tuple>
 #include "configuration.hpp"
-#include "utilities/check.hpp" 
+#include "utilities/check.hpp"
+#include "utilities/Timer.hpp"
 #include "nda/nda.hpp"
 #include "nda/tensor.hpp"
 #include "nda/device.hpp"
@@ -1503,31 +1504,55 @@ void scatter_slow(int p, ::nda::MemoryArray auto const& A, dArrG_t& G)
 
 }
 
+/**
+ * Replicate a distributed array into a shared-memory array, one full copy per node.
+ *
+ * Optional `Timer` splits the call into its four phases under the clock names
+ * GATHER_SHM_{ZERO,ASSIGN,REDUCE,BARRIER}. The internode reduction is the only
+ * phase that touches the fabric, and it is spread over the ranks of a node
+ * (shared_array::all_reduce_parallel), so attributing the cost between it and the
+ * node-local phases is what the breakdown is for.
+ */
 template<DistributedArray dArr_t, math::shm::SharedArray sArr_t>
-void gather_to_shm(const dArr_t &dA, sArr_t &sA)
+void gather_to_shm(const dArr_t &dA, sArr_t &sA, utils::TimerManager* Timer = nullptr)
 requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
 
   static constexpr int rank = get_rank<std::decay_t<dArr_t>>;
   utils::check(dA.global_shape() == sA.shape(), "Shape mismatch.");
 
+  auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
+  auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
+
+  tic("GATHER_SHM_ZERO");
   sA.set_zero();
+  toc("GATHER_SHM_ZERO");
   auto sA_loc = sA.local();
 
   // Gather at the root node
 //  gather(0, dA, &sA_loc);
 
+  tic("GATHER_SHM_ASSIGN");
   std::vector<::nda::range> rng_v(rank,::nda::range(0));
   for(int r=0; r<rank; ++r)
-    rng_v[r] = dA.local_range(r); 
+    rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
+  // The stores above are published to the other node ranks by the node_sync()
+  // (node barrier + win.sync()) that opens all_reduce_parallel below.
   sA.communicator()->barrier();
+  toc("GATHER_SHM_ASSIGN");
 
   // MAM Note: In some MPI implementations/systems, the first call to a collective can be very
-  //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory. 
+  //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory.
   //           If this problem persist, reduce on regular memory and copy to shm locally
-  // All_reduce among all nodes
-  sA.all_reduce();
+  // All_reduce among all nodes. Blocks are disjoint, so each element is summed as
+  // x + 0 + ... and splitting the reduction across node ranks is bit-identical.
+  tic("GATHER_SHM_REDUCE");
+  sA.all_reduce_parallel();
+  toc("GATHER_SHM_REDUCE");
+
+  tic("GATHER_SHM_BARRIER");
   sA.communicator()->barrier();
+  toc("GATHER_SHM_BARRIER");
 }
 
 template<DistributedArray dArr_t, math::shm::SharedArray sArr_t>

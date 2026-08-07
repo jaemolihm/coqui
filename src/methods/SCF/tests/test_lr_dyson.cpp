@@ -378,7 +378,7 @@ namespace lr_dyson_tests {
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
     context->comm.barrier();
 
-    double nonherm = 0.0, max_dDm = 0.0;
+    double nonherm = 0.0, max_dDm = 0.0, dm_err = 0.0;
     if (context->node_comm.root()) {
       auto dDm = DeltaDm.local();
       for (int is = 0; is < ns; ++is) {
@@ -392,15 +392,93 @@ namespace lr_dyson_tests {
           }
         }
       }
+
+      // ΔDm is built from the *distributed* ΔG(τ), on a 4-D processor grid asserted
+      // to reproduce the 5-D grid's rank->(k, i, j) block map. Recompute it from the
+      // gathered ΔG instead, where no such correspondence is involved: a mismatch in
+      // that map would land whole blocks on the wrong rank, which the reduction in
+      // gather_to_shm would silently accept.
+      nda::array<ComplexType, 4> DeltaDm_ref(ns, nk, nb, nb);
+      ft.tau_to_beta(DeltaG.local(), DeltaDm_ref);
+      DeltaDm_ref *= -1.0;
+      auto Abs = nda::map([](ComplexType _x_) { return std::abs(_x_); });
+      nda::array<RealType, 4> res_abs(ns, nk, nb, nb);
+      res_abs = Abs(DeltaDm_ref - dDm);
+      dm_err = nda::max_element(res_abs);
     }
     context->comm.broadcast_value(nonherm, 0);
     context->comm.broadcast_value(max_dDm, 0);
+    context->comm.broadcast_value(dm_err, 0);
 
     INFO("max |ΔDm| = " << max_dDm);
     INFO("max |ΔDm - ΔDm^H| = " << nonherm);
+    INFO("max |ΔDm + ΔG(β⁻)| = " << dm_err);
     CHECK(max_dDm > 1e-12);  // a zero ΔDm would make the check vacuous
     CHECK(nonherm / (max_dDm + 1e-15) < 1e-8);
+    CHECK(dm_err / (max_dDm + 1e-15) < 1e-12);
     context->comm.barrier();
+  }
+
+  TEST_CASE("lr_dyson_omega_pgrid_no_band_split", "[methods_scf]") {
+    /**
+     * lr_dyson_omega_pgrid is a pure function, so the rank counts and system sizes
+     * that matter in production can be checked without running on them — which is
+     * the only way to cover them, since the band-split path is unreachable at
+     * unit-test rank counts (see lr_dyson_dm_hermiticity_q0 above).
+     *
+     * A split band axis makes ΔΣ unusable and LR-GW aborts, so whenever some
+     * nwpools*nkpools == nproc exists with nwpools <= nw and nkpools <= nk, the
+     * grid must use it. nw = 40 at 960 ranks is the case that regressed: ω
+     * saturates at 40, k takes 12 of the remaining 24, and 2 ranks hit the bands.
+     */
+    auto has_factorisation = [](long nproc, long nw, long nk) {
+      for (long a = 1; a <= std::min(nproc, nw); ++a)
+        if (nproc % a == 0 and nproc / a <= nk) return true;
+      return false;
+    };
+
+    for (long nw : {40L, 72L}) {
+      for (long nk : {8L, 64L}) {
+        for (long nproc : {1L, 2L, 8L, 12L, 64L, 192L, 384L, 768L, 960L, 1920L}) {
+          auto [pgrid, bsize] = methods::lr_dyson_omega_pgrid(nproc, nw, nk, 130);
+          INFO("nproc=" << nproc << " nw=" << nw << " nk=" << nk << " -> ("
+               << pgrid[0] << "," << pgrid[1] << "," << pgrid[2] << ","
+               << pgrid[3] << "," << pgrid[4] << ")");
+
+          // The grid must always cover exactly the rank count.
+          CHECK(pgrid[0] * pgrid[1] * pgrid[2] * pgrid[3] * pgrid[4] == nproc);
+          // Pools can never exceed the axis they divide.
+          CHECK(pgrid[0] <= nw);
+          CHECK(pgrid[2] <= nk);
+          CHECK(bsize[3] >= 1);
+          CHECK(bsize[4] >= 1);
+
+          if (has_factorisation(nproc, nw, nk)) {
+            CHECK(pgrid[3] * pgrid[4] == 1);   // bands undivided => LR-GW usable
+          }
+        }
+      }
+    }
+  }
+
+  TEST_CASE("lr_dyson_omega_pgrid_tie_break", "[methods_scf]") {
+    /**
+     * The cost model ceil(nw/nwpools) * ceil(nk/nkpools) cannot separate every
+     * factorisation: nw = 40, nk = 64 at 960 ranks admits both (15, 64) and (40, 24)
+     * at max per-rank work 3. The tie is broken towards more k pools so that the
+     * ΔG(iω) redistribute, whose target grid maximises k pools first, keeps its
+     * all-to-all inside one k column. Pinned here because nothing downstream fails
+     * if it silently flips — it only gets slower.
+     */
+    auto [pgrid, bsize] = methods::lr_dyson_omega_pgrid(960, 40, 64, 130);
+    CHECK(pgrid[0] == 15);
+    CHECK(pgrid[2] == 64);
+    CHECK(pgrid[3] * pgrid[4] == 1);
+
+    auto [pgrid2, bsize2] = methods::lr_dyson_omega_pgrid(1920, 40, 64, 130);
+    CHECK(pgrid2[0] == 30);
+    CHECK(pgrid2[2] == 64);
+    CHECK(pgrid2[3] * pgrid2[4] == 1);
   }
 
 } // lr_dyson_tests

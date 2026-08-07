@@ -54,7 +54,9 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
                   "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
-                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_MISC"}) {
+                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_MISC", "LR_DYSON_SKEW",
+                  "GATHER_SHM_ZERO", "GATHER_SHM_ASSIGN", "GATHER_SHM_REDUCE",
+                  "GATHER_SHM_BARRIER"}) {
     _Timer.add(v);
   }
   _context->comm.barrier();
@@ -91,11 +93,8 @@ double lr_dyson::solve_lr_dyson(
     app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
 
     // First pass: solve with Δμ=0
-    solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
+    solve_lr_dyson_impl(sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
                         sDeltaF_skij, sDeltaSigma_tskij, 0.0, sDeltaVcorr_skij);
-    _Timer.start("LR_DYSON_DM");
-    compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
-    _Timer.stop("LR_DYSON_DM");
 
     // Compute ΔN at Δμ=0
     _Timer.start("LR_DYSON_NELEC");
@@ -116,11 +115,8 @@ double lr_dyson::solve_lr_dyson(
       app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
 
       // Second pass: solve with computed Δμ
-      solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
+      solve_lr_dyson_impl(sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
                           sDeltaF_skij, sDeltaSigma_tskij, Delta_mu, sDeltaVcorr_skij);
-      _Timer.start("LR_DYSON_DM");
-      compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
-      _Timer.stop("LR_DYSON_DM");
 
       // Verify ΔN ≈ 0
       _Timer.start("LR_DYSON_NELEC");
@@ -135,11 +131,8 @@ double lr_dyson::solve_lr_dyson(
     }
     // For q≠0, Δμ is meaningless — force to zero to prevent silent pollution
     if (!_is_q_gamma) Delta_mu = 0.0;
-    solve_lr_dyson_impl(sDeltaG_tskij, sDeltaH0_skij,
+    solve_lr_dyson_impl(sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
                         sDeltaF_skij, sDeltaSigma_tskij, Delta_mu, sDeltaVcorr_skij);
-    _Timer.start("LR_DYSON_DM");
-    compute_lr_dm(sDeltaDm_skij, sDeltaG_tskij);
-    _Timer.stop("LR_DYSON_DM");
   }
 
   _Timer.stop("LR_DYSON");
@@ -149,9 +142,11 @@ double lr_dyson::solve_lr_dyson(
 }
 
 
-template<typename DeltaG_t, typename DeltaH0_t, typename DeltaF_t, typename DeltaSigma_t>
+template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
+         typename DeltaF_t, typename DeltaSigma_t>
 void lr_dyson::solve_lr_dyson_impl(
     DeltaG_t& sDeltaG_tskij,
+    DeltaDm_t& sDeltaDm_skij,
     const DeltaH0_t& sDeltaH0_skij,
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
@@ -160,6 +155,7 @@ void lr_dyson::solve_lr_dyson_impl(
 
   using math::nda::make_distributed_array;
   using Array_5D_t = nda::array<ComplexType, 5>;
+  using Array_4D_t = nda::array<ComplexType, 4>;
 
   // Δμ·S term is only meaningful at q=0; assert no accidental nonzero value at q≠0
   utils::check(_is_q_gamma || std::abs(Delta_mu) < 1e-15,
@@ -313,40 +309,59 @@ void lr_dyson::solve_lr_dyson_impl(
     dDeltaG_wskij_tmp.reset();
     _Timer.stop("LR_DYSON_MISC");
 
+    // Both replications below open with gather_to_shm's set_zero(), whose first
+    // statement is a node barrier, so upstream load skew would be charged to
+    // whichever runs first. Absorb it here to keep all three clocks separable.
+    _Timer.start("LR_DYSON_SKEW");
+    _context->comm.barrier();
+    _Timer.stop("LR_DYSON_SKEW");
+
+    // ΔDm = -ΔG(τ=β⁻), formed on the distributed τ array before it is replicated.
+    // tau_to_beta contracts the leading τ axis only and the pgrid above leaves τ
+    // and spin whole, so each rank evaluates exactly its own (k, i, j) block; the
+    // 4-D pgrid below reproduces the same rank->block map, so the two line up.
+    _Timer.start("LR_DYSON_DM");
+    {
+      auto dDeltaDm_skij = make_distributed_array<Array_4D_t>(_context->comm,
+          {1, nkpools, np_i, np_j}, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+
+      // The rank->block map has to agree on (s, k, i, j) or tau_to_beta writes this
+      // rank's τ contraction into someone else's block: sizes still match, the
+      // gather still reduces disjoint blocks, and ΔDm comes out silently wrong.
+      // Enforced rather than assumed, since it rests on make_distributed_array
+      // treating a leading pgrid axis of 1 as a no-op.
+      {
+        auto g_org = dDeltaG_tskij.origin();
+        auto g_lsh = dDeltaG_tskij.local_shape();
+        auto d_org = dDeltaDm_skij.origin();
+        auto d_lsh = dDeltaDm_skij.local_shape();
+        for (int r = 0; r < 4; ++r)
+          utils::check(g_org[r + 1] == d_org[r] and g_lsh[r + 1] == d_lsh[r],
+                       "solve_lr_dyson_impl: ΔG(τ) and ΔDm disagree on axis {} — "
+                       "origin {} vs {}, local shape {} vs {}. The 5-D grid "
+                       "(1,1,{},{},{}) and the 4-D grid (1,{},{},{}) must map every "
+                       "rank onto the same (s, k, i, j) block.",
+                       r, g_org[r + 1], d_org[r], g_lsh[r + 1], d_lsh[r],
+                       nkpools, np_i, np_j, nkpools, np_i, np_j);
+      }
+
+      _dyson.FT()->tau_to_beta(dDeltaG_tskij.local(), dDeltaDm_skij.local());
+      dDeltaDm_skij.local() *= -1.0;
+
+      math::nda::gather_to_shm(dDeltaDm_skij, sDeltaDm_skij);
+    }
+    _Timer.stop("LR_DYSON_DM");
+
     _Timer.start("LR_DYSON_GATHER");
-    math::nda::gather_to_shm(dDeltaG_tskij, sDeltaG_tskij);
+    math::nda::gather_to_shm(dDeltaG_tskij, sDeltaG_tskij, &_Timer);
     _Timer.stop("LR_DYSON_GATHER");
+
+    _gather_bytes = sizeof(ComplexType) * _nts * _ns * _nkpts_ibz * _nbnd * _nbnd;
   }
 
   _Timer.start("LR_DYSON_MISC");
   _context->comm.barrier();
   _Timer.stop("LR_DYSON_MISC");
-}
-
-
-template<typename DeltaDm_t, typename DeltaG_t>
-void lr_dyson::compute_lr_dm(DeltaDm_t& sDeltaDm_skij, const DeltaG_t& sDeltaG_tskij) {
-  // ΔDm(k) = -ΔG(k, τ=β⁻)
-  // Distribute (s, k) work over _context->comm; each rank writes its slab into
-  // the shared array, then all_reduce across nodes.
-  decltype(nda::range::all) all;
-  sDeltaDm_skij.set_zero();  // ends with fence + node_sync
-
-  int rank = _context->comm.rank();
-  int size = _context->comm.size();
-  nda::array<ComplexType, 3> DeltaG_buf(_nts, _nbnd, _nbnd);
-  nda::array<ComplexType, 2> DeltaDm_buf(_nbnd, _nbnd);
-  auto DeltaG_loc = sDeltaG_tskij.local();
-  auto DeltaDm_loc = sDeltaDm_skij.local();
-  for (int i = rank; i < _ns * _nkpts_ibz; i += size) {
-    int is = i / _nkpts_ibz;
-    int ik = i % _nkpts_ibz;
-    DeltaG_buf = DeltaG_loc(all, is, ik, all, all);
-    _dyson.FT()->tau_to_beta(DeltaG_buf, DeltaDm_buf);
-    DeltaDm_loc(is, ik, all, all) = -DeltaDm_buf;
-  }
-  sDeltaDm_skij.win().fence();
-  sDeltaDm_skij.all_reduce();
 }
 
 
@@ -366,23 +381,25 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
 
   ComplexType DeltaN(0.0);
 
-  if (_context->node_comm.root()) {
-    nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
-    for (int is = 0; is < _ns; ++is) {
-      for (int ik = 0; ik < _nkpts_ibz; ++ik) {
-        auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
-        auto DeltaDm_k = DeltaDm_loc(is, ik, nda::range::all, nda::range::all);
+  // (s, k) is distributed over the whole communicator — ΔDm and S are both shared
+  // per node, so any rank can evaluate any item. Same striding as compute_dN_dmu.
+  int rank = _context->comm.rank();
+  int size = _context->comm.size();
+  nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
+  for (int i = rank; i < _ns * _nkpts_ibz; i += size) {
+    int is = i / _nkpts_ibz;
+    int ik = i % _nkpts_ibz;
+    auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
+    auto DeltaDm_k = DeltaDm_loc(is, ik, nda::range::all, nda::range::all);
 
-        // Tr[S · ΔDm] via matrix multiply and trace
-        nda::blas::gemm(ComplexType(1.0), S_k, DeltaDm_k, ComplexType(0.0), buffer);
-        DeltaN += k_weight(ik) * nda::trace(buffer);
-      }
-    }
-    DeltaN *= spin_factor;
+    // Tr[S · ΔDm] via matrix multiply and trace
+    nda::blas::gemm(ComplexType(1.0), S_k, DeltaDm_k, ComplexType(0.0), buffer);
+    DeltaN += k_weight(ik) * nda::trace(buffer);
   }
 
-  // Broadcast result
-  _context->comm.broadcast_n(&DeltaN, 1, 0);
+  DeltaN = _context->comm.all_reduce_value(DeltaN);
+  // after the reduce, so it multiplies the total exactly once
+  DeltaN *= spin_factor;
 
   if (std::abs(DeltaN.imag()) > 1e-10) {
     app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN) = {:.2e}", DeltaN.imag());
@@ -520,15 +537,12 @@ template double lr_dyson::solve_lr_dyson(
 
 template void lr_dyson::solve_lr_dyson_impl(
     sArray_t<Array_view_5D_t>&,
+    sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     double,
     const sArray_t<Array_view_4D_t>*);
-
-template void lr_dyson::compute_lr_dm(
-    sArray_t<Array_view_4D_t>&,
-    const sArray_t<Array_view_5D_t>&);
 
 template double lr_dyson::compute_lr_Nelec(
     const sArray_t<Array_view_4D_t>&);
