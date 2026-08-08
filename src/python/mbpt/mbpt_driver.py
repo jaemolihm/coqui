@@ -380,7 +380,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            recompute_W=False,
            unperturbed="checkpoint",
            split_sigma_terms=False,
-           div_treatment=None):
+           div_treatment=None,
+           method=None,
+           lr_two_step=False,
+           two_step_sc_method=None,
+           two_step_pert_method=None,
+           two_step_order=1):
     """
     Run unified linear response calculation.
 
@@ -486,6 +491,31 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Divergence treatment for the ε⁻¹ head. For unperturbed="mf_dft" the
         checkpoint holds none, so this selects it (default "gygi" in C++).
         Ignored for unperturbed="checkpoint" (read from the checkpoint).
+    method : str or None, optional
+        Alias on the kernel ladder — "none", "Hartree", "HF", "GW0" or "GW" —
+        that expands to include_hartree / include_exchange / gw_mode. When
+        given it defines all three, so they need not be passed separately.
+    lr_two_step : bool, optional
+        Split the LR kernel into a part resummed by the SCF loop and a
+        remainder expanded to finite order (default False):
+
+            K_sc   = kernel(two_step_sc_method)
+            K_pert = kernel(two_step_pert_method) \\ kernel(two_step_sc_method)
+
+        The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW, so K_sc must be a
+        proper subset of the total kernel. Costs two_step_order evaluations of
+        K_pert instead of one per SCF iteration.
+    two_step_sc_method : str or None, optional
+        Method whose kernel is resummed self-consistently. Required with
+        lr_two_step.
+    two_step_pert_method : str or None, optional
+        The **total** method being approximated — not the remainder. Required
+        with lr_two_step, and it must agree with method / include_hartree /
+        include_exchange / gw_mode.
+    two_step_order : int, optional
+        Truncation order n of the K_pert expansion (default 1). n = 0 runs the
+        self-consistent kernel alone. max_iter counts total inner iterations
+        across all n+1 stages.
 
     Returns
     -------
@@ -562,6 +592,17 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     params_with_div["split_sigma_terms"] = bool(split_sigma_terms)
     if div_treatment is not None:
         params_with_div["div_treatment"] = str(div_treatment)
+    # Kernel ladder alias and the split-kernel (two-step) schedule. Read by C++
+    # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
+    # are overridden by "method" when it is given.
+    if method is not None:
+        params_with_div["method"] = str(method)
+    params_with_div["lr_two_step"] = bool(lr_two_step)
+    if two_step_sc_method is not None:
+        params_with_div["two_step_sc_method"] = str(two_step_sc_method)
+    if two_step_pert_method is not None:
+        params_with_div["two_step_pert_method"] = str(two_step_pert_method)
+    params_with_div["two_step_order"] = int(two_step_order)
 
     return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),

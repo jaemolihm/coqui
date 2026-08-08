@@ -664,7 +664,11 @@ void dump_lr(communicator_t& comm,
              bool include_exchange,
              bool include_gw_sigma,
              Sigma_t const* sDeltaSigma2_tskij,
-             F_t const* sDeltaVcorr_skij) {
+             F_t const* sDeltaVcorr_skij,
+             bool lr_two_step,
+             std::string const& two_step_sc_method,
+             std::string const& two_step_pert_method,
+             int two_step_order) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -714,6 +718,16 @@ void dump_lr(communicator_t& comm,
       h5::h5_write(lr_grp, "qp_static_sigma", 1);
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
+    }
+    // Split-kernel (two-step) schedule. DeltaF_skij / DeltaSigma_tskij above are
+    // then the sums of the two channels, with the perturbative part evaluated at
+    // the ΔG of the previous stage — so neither is a self-consistent response to
+    // the ΔG that was written.
+    if (lr_two_step) {
+      h5::h5_write(lr_grp, "lr_two_step", 1);
+      h5::h5_write(lr_grp, "two_step_sc_method", two_step_sc_method);
+      h5::h5_write(lr_grp, "two_step_pert_method", two_step_pert_method);
+      h5::h5_write(lr_grp, "two_step_order", two_step_order);
     }
 
     app_log(2, "LR results written to \"linear_response/\" in {}", filename);
@@ -814,7 +828,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_5D_t> const*,
                       double, int, bool, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
-                      sArray_t<Array_view_4D_t> const*);
+                      sArray_t<Array_view_4D_t> const*,
+                      bool, std::string const&, std::string const&, int);
 
   } // chkpt
 } // methods

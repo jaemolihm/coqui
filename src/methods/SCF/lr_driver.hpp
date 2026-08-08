@@ -52,6 +52,55 @@ namespace methods {
 enum class lr_gw_update_mode { none, fixed_W, full };
 
 /**
+ * The kernel components K = δ(ΔF + ΔΣ)/δΔG applied by the LR SCF loop.
+ *
+ * The named methods form a nested ladder
+ *
+ *   none ⊂ Hartree {H} ⊂ HF {H,X} ⊂ GW0 {H,X,Σ1} ⊂ GW {H,X,Σ1,Σ2}
+ *
+ * with Σ1 = -ΔG⊙W_c and Σ2 = -G⊙ΔW. A two-step run splits K into a part
+ * resummed to all orders (K_sc) and a remainder expanded to finite order
+ * (K_pert = kernel(total) \ kernel(sc)), and the remainder has no method name
+ * of its own — hence the component mask rather than a method enum.
+ */
+struct lr_kernel_spec {
+  bool hartree = false;
+  bool exchange = false;
+  bool sigma_dG_W = false;   // Σ1 = -ΔG ⊙ W_c
+  bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW
+
+  bool has_sigma() const { return sigma_dG_W || sigma_G_dW; }
+  bool empty()     const { return !hartree && !exchange && !has_sigma(); }
+
+  bool operator==(lr_kernel_spec const&) const = default;
+
+  /// True if every component of `sub` is also in *this.
+  bool contains(lr_kernel_spec const& sub) const {
+    return (hartree    || !sub.hartree)    && (exchange   || !sub.exchange) &&
+           (sigma_dG_W || !sub.sigma_dG_W) && (sigma_G_dW || !sub.sigma_G_dW);
+  }
+
+  /// True if any component appears in both masks.
+  bool overlaps(lr_kernel_spec const& o) const {
+    return (hartree && o.hartree) || (exchange && o.exchange) ||
+           (sigma_dG_W && o.sigma_dG_W) || (sigma_G_dW && o.sigma_G_dW);
+  }
+
+  /// Component list for logging, e.g. "H, X, Σ1" ("-" when empty).
+  std::string to_string() const;
+};
+
+/**
+ * Expand a method name on the ladder ("none", "Hartree", "HF", "GW0", "GW")
+ * into its component mask. Single source of truth for the `method`,
+ * `two_step_sc_method` and `two_step_pert_method` inputs.
+ */
+lr_kernel_spec kernel_spec_from_method(std::string const& name);
+
+/// K_pert = total \ sc, requiring sc ⊆ total.
+lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc);
+
+/**
  * LR-qpGW static-map inputs. When passed to run_lr (non-null), the driver runs
  * in "qp_static_sigma" mode: after the dynamic ΔΣ(iω) is assembled it is
  * statified via lr_qp_approx into a static ΔV_QPGW(k) (frozen orbitals C/ε/μ),
@@ -109,11 +158,18 @@ public:
    * @param sG_tskij           - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @param sDeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb)
    * @param thc                - [INPUT] THC ERI handler
-   * @param include_hartree    - [INPUT] Include ΔJ in SCF loop
-   * @param include_exchange   - [INPUT] Include ΔK in SCF loop
-   * @param gw_mode            - [INPUT] GW self-energy mode (none/fixed_W/full)
-   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if gw_mode != none)
-   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if gw_mode != none)
+   * @param sc_kernel          - [INPUT] Kernel components resummed self-consistently
+   * @param pert_kernel        - [INPUT] Kernel components applied perturbatively
+   *                              (K_pert = kernel(total) \ kernel(sc)). Empty for
+   *                              a plain single-kernel run.
+   * @param pert_order         - [INPUT] Truncation order n of the K_pert expansion.
+   *                              0 (or an empty pert_kernel) runs the sc kernel
+   *                              alone, i.e. exactly the single-kernel path.
+   *                              Costs n K_pert evaluations, each on a converged
+   *                              inner K_sc solve; max_iter counts total inner
+   *                              iterations across all n+1 stages.
+   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if a Σ is active)
+   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if a Σ is active)
    * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
    * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
    * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -146,7 +202,7 @@ public:
       const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
-      bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
+      lr_kernel_spec sc_kernel, lr_kernel_spec pert_kernel, int pert_order,
       dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
       const lr_iter_params& iter_params,
@@ -170,8 +226,12 @@ public:
    * shared band-basis arrays (~ nk·nt·nb²) and the comm-distributed aux-basis
    * arrays (~ nk·nt·NP²), plus the per-iteration transients. Called once at the
    * top of run_lr so the layout can be inspected before the arrays allocate.
+   *
+   * `n_extra_sigma` counts the additional ΔΣ-sized shared arrays a split-kernel
+   * run allocates on top of the standard (total + previous) pair.
    */
-  void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full);
+  void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
+                             long n_extra_sigma);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -187,10 +247,15 @@ public:
    * Each "LR_* (total)" line is followed by the corresponding solver's
    * subclocks (indented). The Pi/W/Sigma solvers live in run_lr's scope, so
    * they are passed in as pointers (null = solver not used, subclocks skipped).
+   *
+   * A split-kernel run has two Σ channels with their own solver and their own
+   * "_PERT" clocks; `gw_solver_pert` non-null adds that second block, so the
+   * cost of the perturbative kernel can be read off separately.
    */
   void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
                     solvers::lr_scr_coulomb_t* scr_solver = nullptr,
-                    solvers::lr_gw* gw_solver = nullptr);
+                    solvers::lr_gw* gw_solver = nullptr,
+                    solvers::lr_gw* gw_solver_pert = nullptr);
 
   // Accessors
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }
