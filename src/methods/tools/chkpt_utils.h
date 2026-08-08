@@ -188,6 +188,11 @@ namespace methods {
    *   one-shot G0W0 output. When non-null, sDeltaSigma_tskij holds the total ΔΣ
    *   and this holds the G0·dW0 piece, written as "DeltaSigma_GdW_tskij".
    *   Nullptr for the standard fused output.
+   * @param lr_two_step        - [INPUT] whether the split-kernel schedule was
+   *   used. When true the stored ΔF/ΔΣ are the sums of the two channels, with
+   *   the perturbative part evaluated at the previous stage's ΔG — NOT a
+   *   self-consistent response to the ΔG that was written — so the schedule is
+   *   persisted alongside them for downstream readers.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -203,7 +208,11 @@ namespace methods {
                bool include_exchange,
                bool include_gw_sigma,
                Sigma_t const* sDeltaSigma2_tskij = nullptr,
-               F_t const* sDeltaVcorr_skij = nullptr);
+               F_t const* sDeltaVcorr_skij = nullptr,
+               bool lr_two_step = false,
+               std::string const& two_step_sc_method = "",
+               std::string const& two_step_pert_method = "",
+               int two_step_order = 0);
 
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint

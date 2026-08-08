@@ -1246,13 +1246,24 @@ auto recompute_W_and_eps_inv_head(
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
- * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
- * @param include_exchange - [INPUT] Include ΔK in SCF loop
- * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
+ * @param include_hartree  - [INPUT] Include ΔJ in SCF loop; overridden by the
+ *                             "method" key when that is given
+ * @param include_exchange - [INPUT] Include ΔK in SCF loop; likewise
+ * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full); likewise
  * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
  * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
  * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
  * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
+ *
+ * Kernel-selection keys read from `pt`:
+ *   method               method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
+ *                        that expands to include_hartree/include_exchange/gw_mode
+ *   lr_two_step          enable the split-kernel schedule (default false)
+ *   two_step_sc_method   method whose kernel is resummed self-consistently
+ *   two_step_pert_method the TOTAL method being approximated; the perturbative
+ *                        kernel is the difference of the two
+ *   two_step_order       truncation order n of the K_pert expansion (default 1)
+ *
  * @return Tuple of (number of iterations, final Δμ)
  */
 template<typename eri_t>
@@ -1298,6 +1309,43 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // One-shot G0W0: store the two ΔΣ terms (dG0·W0, G0·dW0) separately.
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
 
+  // Kernel-component ladder: none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW.
+  //
+  // "method" is an alias that expands to the include_hartree / include_exchange
+  // / gw_mode triple; when given it defines them, so a caller never has to keep
+  // the triple and the method name in sync.
+  //
+  // "lr_two_step" splits the kernel into a part resummed by the SCF loop
+  // (two_step_sc_method) and a remainder applied `two_step_order` times
+  //   K_pert = kernel(two_step_pert_method) \ kernel(two_step_sc_method).
+  // Note that two_step_pert_method names the TOTAL method being approximated,
+  // not the remainder: the remainder ({Σ2} for GW-on-top-of-GW0, say) has no
+  // name on the ladder and can only be expressed as a difference.
+  auto method = io::get_value_with_default<std::string>(pt, "method", "");
+  auto lr_two_step = io::get_value_with_default<bool>(pt, "lr_two_step", false);
+  auto two_step_sc_method = io::get_value_with_default<std::string>(pt, "two_step_sc_method", "");
+  auto two_step_pert_method = io::get_value_with_default<std::string>(pt, "two_step_pert_method", "");
+  auto two_step_order = io::get_value_with_default<long>(pt, "two_step_order", 1);
+
+  auto gw_mode_of = [](lr_kernel_spec const& s) {
+    return s.sigma_G_dW ? lr_gw_update_mode::full
+         : s.sigma_dG_W ? lr_gw_update_mode::fixed_W
+                        : lr_gw_update_mode::none;
+  };
+  auto spec_of_flags = [](bool h, bool x, lr_gw_update_mode m) {
+    return lr_kernel_spec{h, x, m != lr_gw_update_mode::none,
+                          m == lr_gw_update_mode::full};
+  };
+
+  if (!method.empty()) {
+    auto s = kernel_spec_from_method(method);
+    include_hartree = s.hartree;
+    include_exchange = s.exchange;
+    gw_mode = gw_mode_of(s);
+  }
+  const lr_kernel_spec total_kernel =
+      spec_of_flags(include_hartree, include_exchange, gw_mode);
+
   // LR-DFT: add the semilocal xc kernel to the direct channel, i.e. use
   // (V + Vxc)(q) in ΔJ. Deliberately an explicit opt-in rather than keyed off
   // the presence of a Vxc dataset in the THC: otherwise an --mbpt Hartree run
@@ -1311,6 +1359,11 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
   // not do IBC should never pay for them.
   auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
+  // Checked before the include_xc validation below, so that a split-kernel run
+  // is rejected for being a split-kernel run rather than for whichever
+  // include_xc precondition the bed happens to violate first.
+  utils::check(!(lr_two_step && include_xc),
+               "run_lr_calc: lr_two_step is incompatible with include_xc.");
   if (include_xc) {
     utils::check(include_hartree,
                  "run_lr_calc: include_xc = true requires include_hartree = true.");
@@ -1342,6 +1395,50 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     utils::check(!split_sigma_terms,
                  "run_lr_calc: qp_static_sigma is incompatible with split_sigma_terms.");
     recompute_W = true;  // W0 = RPA[G_QP]
+  }
+
+  // Split-kernel schedule: build and validate the two component masks.
+  lr_kernel_spec sc_kernel = total_kernel;
+  lr_kernel_spec pert_kernel;
+  int pert_order = 0;
+  if (lr_two_step) {
+    utils::check(!two_step_sc_method.empty() && !two_step_pert_method.empty(),
+                 "run_lr_calc: lr_two_step = true requires both "
+                 "'two_step_sc_method' and 'two_step_pert_method'.");
+    sc_kernel = kernel_spec_from_method(two_step_sc_method);
+    auto pert_total = kernel_spec_from_method(two_step_pert_method);
+    utils::check(!(sc_kernel == pert_total),
+                 "run_lr_calc: two_step_sc_method and two_step_pert_method are "
+                 "both '{}', so lr_two_step is a no-op. Drop lr_two_step, or "
+                 "name a smaller self-consistent kernel.", two_step_sc_method);
+    pert_kernel = kernel_diff(pert_total, sc_kernel);
+    utils::check(total_kernel == pert_total,
+                 "run_lr_calc: the active kernel ({}) does not match "
+                 "two_step_pert_method = '{}' ({}). two_step_pert_method names "
+                 "the TOTAL method; set 'method' (or include_hartree / "
+                 "include_exchange / gw_mode) to match it.",
+                 total_kernel.to_string(), two_step_pert_method,
+                 pert_total.to_string());
+    utils::check(two_step_order >= 0,
+                 "run_lr_calc: two_step_order must be >= 0, got {}.", two_step_order);
+    utils::check(!split_sigma_terms,
+                 "run_lr_calc: lr_two_step is incompatible with split_sigma_terms.");
+    utils::check(!qp_static_sigma,
+                 "run_lr_calc: lr_two_step is incompatible with qp_static_sigma.");
+    // The IBC / δV perturbations enter every kernel evaluator separately, so a
+    // two-pass schedule would double-count them; reject rather than half-apply.
+    int has_pert_arrays = 0;
+    if (mpi->comm.root())
+      has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                         DeltaV_qPQ_root.has_value()) ? 1 : 0;
+    mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
+    utils::check(!has_pert_arrays,
+                 "run_lr_calc: lr_two_step is incompatible with the DeltaX (IBC) "
+                 "and DeltaV_qPQ perturbations.");
+    pert_order = static_cast<int>(two_step_order);
+    app_log(2, "LR split kernel: K_sc = {} ('{}'), K_pert = {} (order {})",
+            sc_kernel.to_string(), two_step_sc_method,
+            pert_kernel.to_string(), pert_order);
   }
 
   std::string input_file = prefix + ".mbpt.h5";
@@ -1493,8 +1590,17 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   lr_state.sDeltaF_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
+  // The kernel actually applied. With two_step_order = 0 the perturbative half
+  // is never evaluated, so the run is a plain two_step_sc_method run: allocating
+  // and persisting datasets for the total method would advertise components
+  // (a ΔΣ, an exchange ΔF) that stayed identically zero, and would pay for the
+  // W load they need. Everything downstream — allocation, W load, dump_lr — keys
+  // off this, and it matches what run_lr derives internally.
+  const lr_kernel_spec run_kernel = (pert_order > 0) ? total_kernel : sc_kernel;
+  const bool dump_hartree = run_kernel.hartree;
+  const bool dump_exchange = run_kernel.exchange;
   // Only allocate ΔΣ array when GW is active
-  bool include_gw_sigma = (gw_mode != lr_gw_update_mode::none);
+  bool include_gw_sigma = run_kernel.has_sigma();
   if (include_gw_sigma) {
     lr_state.sDeltaSigma_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
@@ -1652,7 +1758,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
       lr_state.sDeltaF_skij.value(), pDeltaSigma,
       sG_tskij, lr_state.sDeltaH0_skij.value(), thc,
-      include_hartree, include_exchange, gw_mode,
+      sc_kernel, pert_kernel, pert_order,
       opt_dW ? &(*opt_dW) : nullptr,
       opt_eps_inv ? &(*opt_eps_inv) : nullptr,
       max_iter, tol, fix_density, iter_params,
@@ -1671,8 +1777,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
                  lr_state.sDeltaF_skij.value(), pDeltaSigma,
                  Delta_mu, niter,
-                 include_hartree, include_exchange, include_gw_sigma,
-                 pDeltaSigma2, pDeltaVcorr);
+                 dump_hartree, dump_exchange, include_gw_sigma,
+                 pDeltaSigma2, pDeltaVcorr,
+                 lr_two_step, two_step_sc_method, two_step_pert_method,
+                 static_cast<int>(two_step_order));
 
   // Persist the IBC aux→primary correction and the aux-basis Fock matrices
   // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
