@@ -762,8 +762,26 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   const double bytes_per = static_cast<double>(sizeof(ComplexType));
   const double to_GB = 1.0 / (1024.0 * 1024.0 * 1024.0);
 
-  // {name, shape string, # elements, is_distributed}
-  struct entry_t { std::string name; std::string shape; double nelem; bool dist; };
+  auto gb = [&](double nelem) { return nelem * bytes_per * to_GB; };
+
+  // Pad to a display width counting UTF-8 code points, not bytes, so rows with
+  // Δ/ω/Σ in the name line up with the ASCII ones.
+  auto pad = [](std::string const& s, size_t w) {
+    size_t n = 0;
+    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
+    return s + std::string(n < w ? w - n : 0, ' ');
+  };
+
+  // Lifetime of an array: resident for the whole run, or scratch allocated and
+  // freed within one iteration in either the Dyson or the ΔW/Σ phase.
+  enum life_t { PERSIST, T_DYSON, T_GWSIG };
+  auto life_str = [](life_t l) {
+    return (l == PERSIST) ? "persistent"
+         : (l == T_DYSON) ? "transient (Dyson)" : "transient (ΔW/Σ)";
+  };
+
+  // {name, shape string, # elements, is_distributed, lifetime}
+  struct entry_t { std::string name; std::string shape; double nelem; bool dist; life_t life; };
   std::vector<entry_t> arrays;
 
   auto band5 = [&](long n0) { return double(n0) * ns * nki * nb * nb; };  // (n0,ns,nk_ibz,nb,nb)
@@ -774,97 +792,88 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   auto shp4a = [&](long n0) { return fmt::format("({},{},{},{})", n0, nq, NP, NP); };
   auto shp5a = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nq, NP, NP); };
 
-  // --- Shared (replicated per node), band basis ~ nk·nt·nb² ---
+  // --- Persistent, shared (replicated per node), band basis ~ nk·nt·nb² ---
   // sG_tskij is caller-owned but resident throughout run_lr, so count it here.
-  arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false});
-  arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false});
-  arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false});
+  arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
+  arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
+  arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
   if (include_gw_sigma) {
-    arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false});
-    arrays.push_back({"sDeltaSigma_prev_tskij", shp5b(nt), band5(nt), false});
+    arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false, PERSIST});
+    arrays.push_back({"sDeltaSigma_prev_tskij", shp5b(nt), band5(nt), false, PERSIST});
   }
 
-  // --- Distributed (over global comm), aux basis ~ nk·nt·NP² ---
+  // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {
-    arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true});
+    arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true, PERSIST});
   }
   if (gw_full) {
-    arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true});
-    arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true});
-    arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true});
+    arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true, PERSIST});
+    arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true, PERSIST});
+    arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true, PERSIST});
     // Solver-owned FT staging buffers: allocated once in compute_W_full_omega,
     // resident for the whole loop (persistent by lifetime, though internal).
-    arrays.push_back({"_ft_buffer_t",  shp4a(nth),  aux4(nth),  true});
-    arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
+    arrays.push_back({"_ft_buffer_t",  shp4a(nth),  aux4(nth),  true, PERSIST});
+    arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true, PERSIST});
     if (!is_q_gamma())
-      arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true});
+      arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true, PERSIST});
   }
-
-  auto gb = [&](double nelem) { return nelem * bytes_per * to_GB; };
-
-  // Persistent totals.
-  double shared_GB = 0.0, dist_GB = 0.0;
-  for (auto const& a : arrays) {
-    if (a.dist) dist_GB += gb(a.nelem); else shared_GB += gb(a.nelem);
-  }
-  double dist_per_node_GB = dist_GB / n_nodes;
-  double total_per_node_GB = shared_GB + dist_per_node_GB;
 
   // --- Per-iteration transients: scratch arrays (~ nk·nt·n²) allocated and
   //     freed within one SCF iteration, on top of the persistent set.
   //     Two mutually-exclusive phases:
-  //       dyson : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
-  //       gwsig : ΔΠ/ΔW(τ) + its (t,q)→(q,t) transpose scratch (gw_full only)
+  //       Dyson : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
+  //       ΔW/Σ  : ΔΠ/ΔW(τ) + its (t,q)→(q,t) transpose scratch (gw_full only)
   //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
-  //     two never coexist — the peak adds only the larger: max(dyson, gwsig).
-  enum phase_t { DYSON, GWSIG };
-  struct tentry_t { std::string name; std::string shape; double nelem; phase_t ph; };
-  std::vector<tentry_t> trans;
-
-  // lr_dyson ω-side band scratch: ΔG(iω) + (ΔΣ(iω) when GW active). Distributed.
-  trans.push_back({include_gw_sigma ? "ΔG(iω)+ΔΣ(iω) (lr_dyson)" : "ΔG(iω) (lr_dyson)",
-                   fmt::format("{}x({},{},{},{},{})", include_gw_sigma ? 2 : 1, nw, ns, nki, nb, nb),
-                   (include_gw_sigma ? 2.0 : 1.0) * band5(nw), DYSON});
+  //     two never coexist — the peak adds only the larger of the two phases.
+  arrays.push_back({"ΔG(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
+  if (include_gw_sigma)
+    arrays.push_back({"ΔΣ(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
   if (gw_full) {
-    trans.push_back({"ΔΠ/ΔW(τ)",          shp4a(nth), aux4(nth), GWSIG});
-    trans.push_back({"ΔW transpose copy", shp4a(nth), aux4(nth), GWSIG});
+    arrays.push_back({"ΔΠ/ΔW(τ)",          shp4a(nth), aux4(nth), true, T_GWSIG});
+    arrays.push_back({"ΔW transpose copy", shp4a(nth), aux4(nth), true, T_GWSIG});
   }
 
-  double t_dyson = 0.0, t_gwsig = 0.0;
-  for (auto const& t : trans)
-    (t.ph == DYSON ? t_dyson : t_gwsig) += t.nelem;
-  bool dyson_dominates = t_dyson >= t_gwsig;
-  double peak_trans_nelem = std::max(t_dyson, t_gwsig);
-  // All transients here are distributed (band ΔG(iω) included).
-  double peak_dist_GB = dist_GB + gb(peak_trans_nelem);
-  double peak_per_node_GB = shared_GB + peak_dist_GB / n_nodes;
+  // Shared / distributed totals, per lifetime.
+  double shared_GB = 0.0, dist_GB = 0.0;          // persistent
+  double dy_sh = 0.0, dy_di = 0.0;                // transient, Dyson phase
+  double gw_sh = 0.0, gw_di = 0.0;                // transient, ΔW/Σ phase
+  for (auto const& a : arrays) {
+    double g = gb(a.nelem);
+    switch (a.life) {
+      case PERSIST: (a.dist ? dist_GB : shared_GB) += g; break;
+      case T_DYSON: (a.dist ? dy_di   : dy_sh)     += g; break;
+      case T_GWSIG: (a.dist ? gw_di   : gw_sh)     += g; break;
+    }
+  }
+  double dist_per_node_GB = dist_GB / n_nodes;
+  double total_per_node_GB = shared_GB + dist_per_node_GB;
 
-  // Level-2 persistent breakdown (printed before the level-1 totals).
-  app_log(2, "\n  LR memory estimate (persistent arrays ~ nk·nt·n², n ∈ {{nbnd={}, NP={}}})", nb, NP);
-  app_log(2, "  {}", std::string(72, '-'));
-  app_log(2, "    {:<26s}{:<26s}{:>8s}   {}", "quantity", "shape", "GB", "location");
+  double dy_per_node = dy_sh + dy_di / n_nodes;
+  double gw_per_node = gw_sh + gw_di / n_nodes;
+  bool dyson_dominates = dy_per_node >= gw_per_node;
+  double pk_sh        = dyson_dominates ? dy_sh : gw_sh;
+  double pk_di        = dyson_dominates ? dy_di : gw_di;
+  double pk_per_node  = dyson_dominates ? dy_per_node : gw_per_node;
+  double peak_per_node_GB = total_per_node_GB + pk_per_node;
+
+  // Level-2 breakdown (printed before the level-1 totals).
+  app_log(2, "\n  LR memory estimate (arrays ~ nk·nt·n², n ∈ {{nbnd={}, NP={}}})", nb, NP);
+  app_log(2, "  {}", std::string(94, '-'));
+  app_log(2, "    {}{}{:>8s}   {}{}", pad("quantity", 26), pad("shape", 26), "GB",
+          pad("location", 14), "lifetime");
   for (auto const& a : arrays)
-    app_log(2, "    {:<26s}{:<26s}{:>8.3f}   {}",
-            a.name, a.shape, gb(a.nelem), a.dist ? "distributed" : "shared");
-  app_log(2, "  {}", std::string(72, '-'));
-  app_log(2, "    shared total:        {:8.3f} GB/node  (replicated on each of {} node(s))",
+    app_log(2, "    {}{}{:>8.3f}   {}{}", pad(a.name, 26), pad(a.shape, 26), gb(a.nelem),
+            pad(a.dist ? "distributed" : "shared", 14), life_str(a.life));
+  app_log(2, "  {}", std::string(94, '-'));
+  app_log(2, "    persistent shared:      {:9.3f} GB/node  (replicated on each of {} node(s))",
           shared_GB, n_nodes);
-  app_log(2, "    distributed total:   {:8.3f} GB        (÷ {} node(s) = {:.3f} GB/node)",
-          dist_GB, n_nodes, dist_per_node_GB);
-
-  // Level-2 per-iteration transient breakdown.
-  app_log(2, "\n  LR memory per-iteration transients (allocated/freed within an iteration):");
-  app_log(2, "  {}", std::string(72, '-'));
-  app_log(2, "    {:<26s}{:<26s}{:>8s}   {}", "quantity", "shape", "GB", "phase");
-  for (auto const& t : trans)
-    app_log(2, "    {:<26s}{:<26s}{:>8.3f}   {}", t.name, t.shape, gb(t.nelem),
-            (t.ph == DYSON) ? "Dyson" : "ΔW/Σ");
-  app_log(2, "  {}", std::string(72, '-'));
-  app_log(2, "    peak transient:      {:8.3f} GB        = max(Dyson {:.3f}, ΔW/Σ {:.3f}) [{} dominates]",
-          gb(peak_trans_nelem), gb(t_dyson), gb(t_gwsig),
-          dyson_dominates ? "Dyson" : "ΔW/Σ");
-  app_log(2, "    (distributed; ÷ {} node(s) = {:.3f} GB/node added)",
-          n_nodes, gb(peak_trans_nelem) / n_nodes);
+  app_log(2, "    persistent distributed: {:9.3f} GB/node  (x {} node(s) = {:.3f} GB)",
+          dist_per_node_GB, n_nodes, dist_GB);
+  app_log(2, "    peak transient:         {:9.3f} GB/node  (x {} node(s) = {:.3f} GB) [{} dominates]",
+          pk_di / n_nodes, n_nodes, pk_di, dyson_dominates ? "Dyson" : "ΔW/Σ");
+  if (pk_sh > 0.0)
+    app_log(2, "                            {:9.3f} GB/node  (replicated on each of {} node(s))",
+            pk_sh, n_nodes);
 
   app_log(1, "  Estimated LR memory (persistent): {:.3f} GB/node", total_per_node_GB);
   app_log(1, "  Estimated LR memory (peak):       {:.3f} GB/node", peak_per_node_GB);
