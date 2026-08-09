@@ -70,7 +70,9 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                    // because both channels call the same evaluators and the cost
                    // argument for the split is exactly the sc/pert breakdown.
                    "LR_HF_PERT", "LR_GW_SIGMA_PERT",
-                   "LR_GW_PI_PERT", "LR_GW_W_PERT"}) {
+                   "LR_GW_PI_PERT", "LR_GW_W_PERT",
+                   // Mixing of the outer (perturbative-source) iteration.
+                   "LR_OUTER_ITER_ALG"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -156,7 +158,9 @@ std::tuple<int, double> lr_driver::run_lr(
     nda::array<ComplexType, 4>* DeltaF_ibc_out,
     nda::array<ComplexType, 4>* F_PQ_out,
     nda::array<ComplexType, 4>* DeltaF_PQ_out,
-    bool include_xc) {
+    bool include_xc,
+    const lr_outer_accel_params* outer_accel,
+    int* n_pert_applied_out) {
 
   _Timer.start("LR_SCF");
 
@@ -199,6 +203,28 @@ std::tuple<int, double> lr_driver::run_lr(
     utils::check(qp_static == nullptr,
                  "lr_driver::run_lr: the split-kernel schedule is incompatible "
                  "with qp_static mode.");
+  }
+
+  // Outer-loop acceleration. The defaults (alg "damping", tol = 0) switch every
+  // flag below off, so nothing is allocated and the outer loop is the plain
+  // Neumann series.
+  const std::string outer_alg = outer_accel ? outer_accel->iter.alg : "damping";
+  const double outer_tol      = outer_accel ? outer_accel->tol : 0.0;
+  const bool outer_diis_on = (outer_alg == "DIIS");
+  // "the outer loop is no longer an order-pert_order truncation": drives the
+  // logging, the ΔDm stage buffer and the checkpoint provenance fields.
+  const bool outer_track = outer_accel && outer_accel->active();
+  if (outer_accel) {
+    utils::check(outer_alg == "damping" || outer_alg == "DIIS",
+                 "lr_driver::run_lr: unknown outer iter_alg '{}'. Must be "
+                 "'damping' or 'DIIS'.", outer_alg);
+    utils::check(outer_tol >= 0.0,
+                 "lr_driver::run_lr: the outer tolerance must be >= 0, got {}.",
+                 outer_tol);
+    utils::check(!outer_track || do_pert,
+                 "lr_driver::run_lr: outer-loop acceleration requires a "
+                 "split-kernel run (pert_order >= 1 with a non-empty K_pert). "
+                 "There is no outer sequence to accelerate otherwise.");
   }
 
   // Per-channel component flags. Every derived quantity below is the union of
@@ -284,16 +310,58 @@ std::tuple<int, double> lr_driver::run_lr(
     app_log(1, "  max_subsp_size = {}", iter_params.max_subsp_size);
     app_log(1, "  diis_warmup = {}", iter_params.diis_warmup);
   }
+  if (outer_track) {
+    app_log(1, "  outer (K_pert source) acceleration:");
+    app_log(1, "    outer_alg = {}", outer_alg);
+    if (outer_diis_on)
+      app_log(1, "    outer_subsp = {}, outer_warmup = {}, outer_min_subsp = {} "
+                 "(first extrapolation at outer step {})",
+              outer_accel->iter.max_subsp_size, outer_accel->iter.diis_warmup,
+              outer_accel->min_subsp,
+              std::max(outer_accel->iter.diis_warmup + 2, outer_accel->min_subsp));
+    app_log(1, "    outer_tol = {:.2e}", outer_tol);
+    if (outer_diis_on) {
+      app_log(1, "    [NOTE] with outer acceleration the source is a combination "
+                 "of previous sources, so the result is NOT an order-{} "
+                 "truncation of K_pert: it is an accelerated iterate toward the "
+                 "FULL K_sc + K_pert fixed point, and pert_order is an iteration "
+                 "cap.", pert_order);
+    }
+    if (outer_tol > 0.0 && tol > 0.1 * outer_tol) {
+      app_log(1, "    [WARNING] the inner tol ({:.2e}) is not at least a decade "
+                 "below outer_tol ({:.2e}); the outer residual then measures "
+                 "inner-solve noise rather than the outer error.", tol, outer_tol);
+    }
+  }
 
   // ΔΣ-sized shared arrays on top of the total ΔΣ the base estimate already
-  // lists: the two per-channel buffers, allocated only when both channels
-  // carry a Σ.
-  const long n_extra_sigma = split_Sigma ? 2 : 0;
+  // lists.
+  std::vector<std::string> extra_sigma;
+  if (split_Sigma) {
+    extra_sigma.push_back("sDeltaSigma (sc channel)");
+    extra_sigma.push_back("sDeltaSigma (pert channel)");
+  }
+  if (outer_diis_on && pert_sigma)
+    extra_sigma.push_back("sDeltaSigma_pert_prev (outer)");
+
+  // DIIS histories, for the memory report. Each subspace entry stores a trial
+  // AND a residual vector of every quantity the accelerator mixes.
+  lr_diis_hist_t inner_hist, outer_hist;
+  if (use_diis && (sc_hf || sc_sigma || has_Vcorr)) {
+    inner_hist.depth = static_cast<long>(iter_params.max_subsp_size);
+    inner_hist.n_F = has_Vcorr ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
+    inner_hist.n_Sigma = has_Sigma_sc ? 1 : 0;
+  }
+  if (outer_diis_on) {
+    outer_hist.depth = static_cast<long>(outer_accel->iter.max_subsp_size);
+    outer_hist.n_F     = pert_hf ? 1 : 0;
+    outer_hist.n_Sigma = pert_sigma ? 1 : 0;
+  }
 
   // Estimate the persistent large-array memory footprint for this path, then
   // summarize the MPI distribution patterns the large arrays use.
-  print_memory_estimate(thc.Np(), include_gw_sigma, gw_full, n_extra_sigma,
-                        use_diis, iter_params.max_subsp_size);
+  print_memory_estimate(thc.Np(), include_gw_sigma, gw_full, extra_sigma,
+                        inner_hist, outer_hist);
   print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
 
   // Force dW_tqPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
@@ -476,6 +544,25 @@ std::tuple<int, double> lr_driver::run_lr(
       !sc_sigma ? nullptr : (split_Sigma ? &(*opt_sDeltaSigma_sc) : sDeltaSigma_tskij);
   sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
       !pert_sigma ? nullptr : (split_Sigma ? &(*opt_sDeltaSigma_pert) : sDeltaSigma_tskij);
+
+  // Outer-loop buffers. The previous-source pair exists only for the
+  // accelerator (it is what the extrapolation and its residual are measured
+  // against); the ΔDm stage buffer only for the tolerance test. A
+  // tolerance-only run therefore never allocates a ΔΣ-sized buffer.
+  std::optional<sArray_t<Array_view_4D_t>> opt_sDeltaF_pert_prev;
+  std::optional<sArray_t<Array_view_5D_t>> opt_sDeltaSigma_pert_prev;
+  std::optional<sArray_t<Array_view_4D_t>> opt_sDeltaDm_stage_prev;
+  if (outer_diis_on) {
+    if (pert_hf)
+      opt_sDeltaF_pert_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+    if (pert_sigma)
+      opt_sDeltaSigma_pert_prev.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+          *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
+  }
+  if (outer_tol > 0.0)
+    opt_sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+        *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
 
   // Flattened views of the current arrays, sliced to this rank's partition —
@@ -493,6 +580,12 @@ std::tuple<int, double> lr_driver::run_lr(
   if (opt_sDeltaF_pert)     opt_sDeltaF_pert->set_zero();
   if (opt_sDeltaSigma_sc)   opt_sDeltaSigma_sc->set_zero();
   if (opt_sDeltaSigma_pert) opt_sDeltaSigma_pert->set_zero();
+  // The outer sequence starts from S_0 = 0, which is a genuine iterate: the
+  // first inner solve is exactly the one with no source. So the first outer
+  // residual S_1 - 0 needs no special casing.
+  if (opt_sDeltaF_pert_prev)     opt_sDeltaF_pert_prev->set_zero();
+  if (opt_sDeltaSigma_pert_prev) opt_sDeltaSigma_pert_prev->set_zero();
+  if (opt_sDeltaDm_stage_prev)   opt_sDeltaDm_stage_prev->set_zero();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -702,6 +795,53 @@ std::tuple<int, double> lr_driver::run_lr(
     _Timer.stop("LR_TOTALS");
   };
 
+  // Outer accelerator. Deliberately function-local and deliberately NOT
+  // _lr_diis: the inner object is rebuilt at every stage boundary and keyed on
+  // stage_iter, while this one lives across the whole run and is keyed on the
+  // outer step index. The two share no history, no subspace and no warmup.
+  std::unique_ptr<lr_diis> outer_diis;
+  if (outer_diis_on) {
+    outer_diis = std::make_unique<lr_diis>(
+        outer_accel->iter.max_subsp_size, outer_accel->iter.diis_warmup,
+        outer_accel->iter.mixing, outer_accel->min_subsp);
+  }
+
+  // Make an in-place outer mixing visible everywhere, exactly as the inner
+  // epilogue does: each rank wrote only its own `pmap` slice, so each node holds
+  // one contiguous element run and an allgatherv among the node roots completes
+  // every replica.
+  auto outer_sync = [&](auto*... arrs) {
+    auto fence = [](auto* p) { if (p) p->win().fence(); };
+    (fence(arrs), ...);
+    _mpi->node_comm.barrier();
+    if (_mpi->node_comm.root()) {
+      auto complete = [&](auto* p) {
+        if (p) utils::lr_complete_node_slices(_mpi->internode_comm, pmap,
+                                              p->local().data(), p->local().size());
+      };
+      (complete(arrs), ...);
+    }
+    (fence(arrs), ...);
+    _mpi->comm.barrier();
+  };
+
+  // dst <- src on the node-replicated shared window.
+  auto outer_save = [&](auto& dst, auto& src) {
+    dst.win().fence();
+    if (_mpi->node_comm.root()) dst.local() = src.local();
+    dst.win().fence();
+    _mpi->node_comm.barrier();
+  };
+
+  // ‖A - A_prev‖ over the node, broadcast so every rank agrees.
+  auto outer_diff_norm = [&](auto& A, auto& A_prev) {
+    auto nrm = utils::lr_distributed_norm(
+        _mpi->node_comm, A.local(), A_prev.local(), true);
+    double d = nrm.second;
+    _mpi->comm.broadcast_n(&d, 1, 0);
+    return d;
+  };
+
   double Delta_mu = 0.0;
   int iter = 0;
   bool converged = false;
@@ -712,6 +852,9 @@ std::tuple<int, double> lr_driver::run_lr(
   int n_applied = 0;
   int stage = 1;
   int stage_iter = 0;
+  // Tolerance-driven outer termination: set once the stage-to-stage change of
+  // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
+  bool outer_converged = false;
 
   const bool log_sigma_col = has_Sigma_sc || has_Vcorr;
 
@@ -719,6 +862,10 @@ std::tuple<int, double> lr_driver::run_lr(
   if (do_pert) {
     app_log(1, "\n  (split kernel: the iter column carries the stage index as "
                "[s<n>]; K_pert is re-evaluated at each stage boundary)");
+    if (outer_diis_on)
+      app_log(1, "  (outer acceleration on: each stage boundary extrapolates the "
+                 "perturbative source and prints the outer residual; the stage "
+                 "count is an iteration count, not a truncation order)");
   }
   if (log_sigma_col) {
     app_log(1, "\n  iter    ||ΔDm||         ||ΔDm-ΔDm_prev||  ||ΔF||          ||ΔF-ΔF_prev||   ||ΔΣ||          ||ΔΣ-ΔΣ_prev||   Δμ");
@@ -931,38 +1078,10 @@ std::tuple<int, double> lr_driver::run_lr(
     bool inner_conv_std = (stage_iter > 1) && dm_converged && f_converged && sigma_converged;
     bool inner_converged = (do_pert && sc_kernel.empty()) ? true : inner_conv_std;
 
-    // Stage boundary: one K_pert evaluation on the converged ΔG of this stage,
-    // overwriting (not accumulating) the perturbative source — ΔG already
-    // carries every lower order.
-    if (do_pert && inner_converged && n_applied < pert_order) {
-      if (pert_hf) {
-        _Timer.start("LR_HF_PERT");
-        _lr_hf->evaluate(sDeltaF_pert_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                         pert.hartree, pert.exchange, nullptr,
-                         nullptr, nullptr, nullptr, false);
-        _Timer.stop("LR_HF_PERT");
-        _mpi->comm.barrier();
-      }
-      if (pert_sigma) {
-        eval_sigma_channel(pert, *lr_gw_solver_pert, *pDeltaSigma_pert, nullptr,
-                           pert_clocks);
-      }
-      ++n_applied;
-      pert_refreshed_this_iter = true;
-      // The next stage solves a different fixed point: the DIIS history from
-      // this one is invalid (lr_diis has no reset) and its warmup keys off the
-      // stage-local iteration index. ΔF_sc/ΔΣ_sc are deliberately kept as the
-      // warm start for the next stage.
-      if (use_diis) {
-        _lr_diis = std::make_unique<lr_diis>(
-            iter_params.max_subsp_size, iter_params.diis_warmup, mixing);
-      }
-    }
-
-    // Refresh the totals the next Dyson solve (and the checkpoint) consume.
-    refresh_totals();
-
-    // Log iteration
+    // Log iteration. This closes the iteration that produced the norms above,
+    // so it comes before the stage-boundary block: K_pert logs of its own
+    // (head extrapolation, outer residual) then follow their iteration's row
+    // instead of splitting it from the previous one.
     _Timer.start("LR_CONVERGENCE");
     std::string iter_lbl = do_pert ? fmt::format("{}[s{}]", iter, stage)
                                    : fmt::format("{}", iter);
@@ -986,11 +1105,142 @@ std::tuple<int, double> lr_driver::run_lr(
     }
     _Timer.stop("LR_CONVERGENCE");
 
+    // Stage boundary: one K_pert evaluation on the converged ΔG of this stage,
+    // overwriting (not accumulating) the perturbative source — ΔG already
+    // carries every lower order.
+    if (do_pert && inner_converged && n_applied < pert_order && !outer_converged) {
+      const int outer_step = n_applied + 1;  // 1-based outer iteration index
+      double outer_dm_diff = -1.0;
+      double outer_res = -1.0;
+
+      // Outer convergence is tested on the stage-to-stage change of ΔDm, and
+      // BEFORE the next K_pert evaluation: the source residual would need the
+      // very evaluation it proves unnecessary, and one such evaluation is the
+      // entire unit of cost here. ΔDm is tiny, so this test is free.
+      if (outer_tol > 0.0 && n_applied >= 1) {
+        outer_dm_diff = outer_diff_norm(sDeltaDm_skij, *opt_sDeltaDm_stage_prev);
+        if (outer_dm_diff < outer_tol) outer_converged = true;
+      }
+
+      if (!outer_converged) {
+        if (outer_tol > 0.0) outer_save(*opt_sDeltaDm_stage_prev, sDeltaDm_skij);
+
+        if (pert_hf) {
+          _Timer.start("LR_HF_PERT");
+          _lr_hf->evaluate(sDeltaF_pert_skij, sDeltaDm_skij, thc, sS_skij.local(),
+                           pert.hartree, pert.exchange, nullptr,
+                           nullptr, nullptr, nullptr, false);
+          _Timer.stop("LR_HF_PERT");
+          _mpi->comm.barrier();
+        }
+        if (pert_sigma) {
+          eval_sigma_channel(pert, *lr_gw_solver_pert, *pDeltaSigma_pert, nullptr,
+                             pert_clocks);
+        }
+
+        // Extrapolate the perturbative source. Only a channel that actually
+        // carries the quantity may be mixed — otherwise the handle aliases the
+        // SELF-CONSISTENT array (see the per-channel write targets above) and
+        // mixing it would extrapolate the sc channel with the outer sequence.
+        //
+        // Extrapolating the source rather than the solution loses nothing:
+        // compute_coefs normalizes Σ c_i = 1 and the inner solve A is affine,
+        // so Σ c_i ΔG_i = A(ΔH0 + Σ c_i S_{i-1}) — the combination of the
+        // stage solutions IS the exact inner solution of the combined source.
+        // The two choices are the same iteration in different inner products.
+        if (outer_diis_on) {
+          double r2 = 0.0;
+          if (pert_hf) {
+            double d = outer_diff_norm(sDeltaF_pert_skij, *opt_sDeltaF_pert_prev);
+            r2 += d * d;
+          }
+          if (pert_sigma) {
+            double d = outer_diff_norm(*pDeltaSigma_pert, *opt_sDeltaSigma_pert_prev);
+            r2 += d * d;
+          }
+          outer_res = std::sqrt(r2);
+
+          _Timer.start("LR_OUTER_ITER_ALG");
+          // The outer accelerator stripes over the same `pmap` partition as the
+          // inner one: each rank mixes its own element slice of the source and
+          // outer_sync completes the node replicas afterwards. The previous
+          // source stays whole (outer_diff_norm reads it as a node array), so
+          // it is sliced here rather than stored striped.
+          const long nSp_flat = _nts * nF_flat;
+          auto [oF0, oF1] = pmap.my_slice(nF_flat);
+          auto [oS0, oS1] = pmap.my_slice(nSp_flat);
+          nda::array<ComplexType, 1> empty_prev;
+          if (pert_hf && pert_sigma) {
+            outer_diis->next_step_combined(
+                _mpi->comm, pmap,
+                sDeltaF_pert_skij.local(),
+                flat_slice(opt_sDeltaF_pert_prev->local(), nF_flat, oF0, oF1),
+                pDeltaSigma_pert->local(),
+                flat_slice(opt_sDeltaSigma_pert_prev->local(), nSp_flat, oS0, oS1),
+                outer_step);
+          } else if (pert_sigma) {
+            // Σ-only source: next_step_combined is generic in both slots, so
+            // the 5D ΔΣ rides the first one with an empty second slot.
+            nda::array<ComplexType, 5> empty_slot;
+            outer_diis->next_step_combined(
+                _mpi->comm, pmap,
+                pDeltaSigma_pert->local(),
+                flat_slice(opt_sDeltaSigma_pert_prev->local(), nSp_flat, oS0, oS1),
+                empty_slot, empty_prev, outer_step);
+          } else {
+            nda::array<ComplexType, 4> empty_slot;
+            outer_diis->next_step_combined(
+                _mpi->comm, pmap,
+                sDeltaF_pert_skij.local(),
+                flat_slice(opt_sDeltaF_pert_prev->local(), nF_flat, oF0, oF1),
+                empty_slot, empty_prev, outer_step);
+          }
+          outer_sync(pert_hf ? &sDeltaF_pert_skij : nullptr,
+                     pert_sigma ? pDeltaSigma_pert : nullptr);
+          // The mixed source is what the next stage uses, hence what the next
+          // outer residual is measured against.
+          if (pert_hf)    outer_save(*opt_sDeltaF_pert_prev, sDeltaF_pert_skij);
+          if (pert_sigma) outer_save(*opt_sDeltaSigma_pert_prev, *pDeltaSigma_pert);
+          _Timer.stop("LR_OUTER_ITER_ALG");
+        }
+
+        ++n_applied;
+        pert_refreshed_this_iter = true;
+        if (outer_track) {
+          // The source residual exists only when the accelerator ran; the ΔDm
+          // change only from the second stage of a tolerance-driven run.
+          app_log(1, "    [outer {}/{}]{}{}", n_applied, pert_order,
+                  outer_res >= 0.0
+                      ? fmt::format("  ||S_new - S_used|| = {:.6e}", outer_res)
+                      : std::string(),
+                  outer_dm_diff >= 0.0
+                      ? fmt::format("  ||ΔDm - ΔDm_stage_prev|| = {:.6e}", outer_dm_diff)
+                      : std::string());
+        }
+        // The next stage solves a different fixed point: the DIIS history from
+        // this one is invalid (lr_diis has no reset) and its warmup keys off the
+        // stage-local iteration index. ΔF_sc/ΔΣ_sc are deliberately kept as the
+        // warm start for the next stage.
+        if (use_diis) {
+          _lr_diis = std::make_unique<lr_diis>(
+              iter_params.max_subsp_size, iter_params.diis_warmup, mixing);
+        }
+      } else {
+        app_log(1, "    [outer] converged after {} K_pert evaluation(s): "
+                   "||ΔDm - ΔDm_stage_prev|| = {:.6e} < {:.2e}",
+                n_applied, outer_dm_diff, outer_tol);
+      }
+    }
+
+    // Refresh the totals the next Dyson solve (and the checkpoint) consume.
+    refresh_totals();
+
     // Step 5: Check convergence (all active quantities must converge, and the
     // perturbative expansion must have been applied to the requested order).
     // An iteration that just refreshed the source is never the converged one:
     // its ΔG has not yet seen the new source.
-    if (inner_converged && n_applied == pert_order && !pert_refreshed_this_iter) {
+    const bool outer_done = outer_converged || (n_applied == pert_order);
+    if (inner_converged && outer_done && !pert_refreshed_this_iter) {
       converged = true;
       break;
     }
@@ -1032,6 +1282,20 @@ std::tuple<int, double> lr_driver::run_lr(
     else
       app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations.", max_iter);
   }
+  if (do_pert && outer_track) {
+    if (outer_converged)
+      app_log(1, "  Outer loop converged: K_pert applied {} of at most {} times.",
+              n_applied, pert_order);
+    else if (outer_tol > 0.0)
+      app_log(1, "  [WARNING] the outer loop hit its cap: K_pert applied {} of {} "
+                 "times without reaching outer_tol = {:.2e}. The result is a "
+                 "non-converged accelerated iterate, NOT an order-{} truncation.",
+              n_applied, pert_order, outer_tol, pert_order);
+    else
+      app_log(1, "  Outer loop ran its full schedule: K_pert applied {} of {} times.",
+              n_applied, pert_order);
+  }
+  if (n_pert_applied_out) *n_pert_applied_out = n_applied;
   app_log(1, "  Final Δμ = {:.6e}", Delta_mu);
 
   // Expose the precomputed IBC aux→primary correction
@@ -1073,8 +1337,9 @@ std::tuple<int, double> lr_driver::run_lr(
 
 
 void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
-                                      long n_extra_sigma, bool use_diis,
-                                      size_t max_subsp_size) {
+                                      std::vector<std::string> const& extra_sigma,
+                                      lr_diis_hist_t inner_hist,
+                                      lr_diis_hist_t outer_hist) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1127,11 +1392,10 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
   if (include_gw_sigma) {
     arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false, PERSIST});
-    // Split-kernel per-channel ΔΣ buffers on top of the total ΔΣ. Present (as a
-    // pair) only when both channels carry a Σ, i.e. pGW_GW0.
-    for (long i = 0; i < n_extra_sigma; ++i)
-      arrays.push_back({fmt::format("sDeltaSigma ({} channel)", i == 0 ? "sc" : "pert"),
-                        shp5b(nt), band5(nt), false, PERSIST});
+    // Split-kernel per-channel ΔΣ buffers and the outer accelerator's previous
+    // source, on top of the total ΔΣ.
+    for (auto const& name : extra_sigma)
+      arrays.push_back({name, shp5b(nt), band5(nt), false, PERSIST});
   }
 
   // --- Persistent, striped over the global comm (each rank keeps one element
@@ -1141,14 +1405,20 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   if (include_gw_sigma) {
     arrays.push_back({"ΔΣ_prev (striped)", shp5b(nt), band5(nt), true, PERSIST});
   }
-  if (use_diis) {
-    // DIIS keeps `max_subsp_size` trial + residual vector pairs for each mixed
-    // quantity, each striped over the global comm.
-    const double per_vec = band5(1) * (include_gw_sigma ? (1.0 + nt) : 1.0);
-    arrays.push_back({fmt::format("DIIS history (subsp {})", max_subsp_size),
-                      fmt::format("2 x {} x |ΔF|+|ΔΣ|", max_subsp_size),
-                      2.0 * double(max_subsp_size) * per_vec, true, PERSIST});
-  }
+
+  // DIIS histories. Each subspace entry keeps a trial AND a residual vector,
+  // and the residual is not reconstructible from the trials once extrapolation
+  // is active, so a depth-d history is 2d arrays. The history is striped over
+  // the global comm, so the whole job stores it once.
+  auto push_hist = [&](lr_diis_hist_t const& h, const char* who) {
+    if (h.depth <= 0 || (h.n_F == 0 && h.n_Sigma == 0)) return;
+    const double nelem = 2.0 * h.depth * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
+    arrays.push_back({fmt::format("{} DIIS history", who),
+                      fmt::format("2x{}x[{}xΔF + {}xΔΣ]", h.depth, h.n_F, h.n_Sigma),
+                      nelem, true, PERSIST});
+  };
+  push_hist(inner_hist, "inner");
+  push_hist(outer_hist, "outer");
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {
@@ -1353,7 +1623,7 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   if (gw_solver) gw_solver->print_subclocks(2, sub_indent, {gw_solver_pert, gw_solver_term2});
   app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
   app_log(2, "      - LR qpGW static (total): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_QPGW_STATIC"), _Timer.number_of_calls("LR_QPGW_STATIC"));
-  app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
+  app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", sec("LR_ITER_ALG", "LR_OUTER_ITER_ALG"), cnt("LR_ITER_ALG", "LR_OUTER_ITER_ALG"));
   app_log(2, "      - LR Totals (ΔF/ΔΣ):      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_TOTALS"), _Timer.number_of_calls("LR_TOTALS"));
   app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
   app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));
@@ -1385,6 +1655,8 @@ template std::tuple<int, double> lr_driver::run_lr(
     nda::array<ComplexType, 4>*,
     nda::array<ComplexType, 4>*,
     nda::array<ComplexType, 4>*,
-    bool);
+    bool,
+    const lr_outer_accel_params*,
+    int*);
 
 } // namespace methods

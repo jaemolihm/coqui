@@ -385,7 +385,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            lr_two_step=False,
            two_step_sc_method=None,
            two_step_pert_method=None,
-           two_step_order=1):
+           two_step_order=1,
+           two_step_outer_iter_alg=None,
+           two_step_outer_tol=0.0):
     """
     Run unified linear response calculation.
 
@@ -515,7 +517,29 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     two_step_order : int, optional
         Truncation order n of the K_pert expansion (default 1). n = 0 runs the
         self-consistent kernel alone. max_iter counts total inner iterations
-        across all n+1 stages.
+        across all n+1 stages. With outer acceleration on it is an iteration
+        cap rather than a truncation order (see two_step_outer_iter_alg).
+    two_step_outer_iter_alg : dict or None, optional
+        DIIS acceleration of the OUTER (perturbative-source) iteration,
+        mirroring iter_alg but as a fully independent accelerator:
+
+            {"alg": "damping"|"DIIS", "mixing": float,
+             "max_subsp_size": int, "diis_warmup": int, "min_subsp_size": int}
+
+        The default ``{"alg": "damping"}`` is no acceleration. ``mixing``
+        damps only the accelerator's warmup steps (there is no damping-only
+        mode). ``min_subsp_size`` (default 2) is the number of history vectors
+        required to extrapolate, so 2 extrapolates from the second outer step.
+
+        With acceleration on the source is a combination of previous sources,
+        so the result is an accelerated iterate toward the FULL
+        two_step_pert_method fixed point, with no truncation-order meaning.
+    two_step_outer_tol : float, optional
+        > 0 turns two_step_order into a cap and stops the outer loop once the
+        stage-to-stage change of ΔDm falls below it (default 0.0 = run exactly
+        two_step_order stages). The number of K_pert evaluations actually made
+        is written to the checkpoint as
+        ``linear_response/two_step_stages_applied``.
 
     Returns
     -------
@@ -603,6 +627,19 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if two_step_pert_method is not None:
         params_with_div["two_step_pert_method"] = str(two_step_pert_method)
     params_with_div["two_step_order"] = int(two_step_order)
+    # Outer-loop acceleration, flattened to the ptree keys C++ reads. Mirrors
+    # the iter_alg dict; type conversion only.
+    outer = dict(two_step_outer_iter_alg or {})
+    outer_alg = str(outer.get("alg", "damping"))
+    if outer_alg not in ("damping", "DIIS"):
+        raise ValueError(
+            f"Unknown two_step_outer_iter_alg '{outer_alg}'. Must be 'damping' or 'DIIS'.")
+    params_with_div["two_step_outer_alg"] = outer_alg
+    params_with_div["two_step_outer_mixing"] = float(outer.get("mixing", 1.0))
+    params_with_div["two_step_outer_subsp"] = int(outer.get("max_subsp_size", 3))
+    params_with_div["two_step_outer_warmup"] = int(outer.get("diis_warmup", 0))
+    params_with_div["two_step_outer_min_subsp"] = int(outer.get("min_subsp_size", 2))
+    params_with_div["two_step_outer_tol"] = float(two_step_outer_tol)
 
     return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),

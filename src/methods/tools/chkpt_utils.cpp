@@ -668,7 +668,11 @@ void dump_lr(communicator_t& comm,
              bool lr_two_step,
              std::string const& two_step_sc_method,
              std::string const& two_step_pert_method,
-             int two_step_order) {
+             int two_step_order,
+             bool two_step_outer_accel,
+             std::string const& two_step_outer_alg,
+             double two_step_outer_tol,
+             int two_step_stages_applied) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -728,6 +732,17 @@ void dump_lr(communicator_t& comm,
       h5::h5_write(lr_grp, "two_step_sc_method", two_step_sc_method);
       h5::h5_write(lr_grp, "two_step_pert_method", two_step_pert_method);
       h5::h5_write(lr_grp, "two_step_order", two_step_order);
+      // Outer-loop acceleration. Written only when it is actually active, so a
+      // plain two-step checkpoint keeps exactly the fields it had before. With
+      // acceleration on, two_step_order is an iteration cap rather than a
+      // truncation order and the result carries no order interpretation, so
+      // two_step_stages_applied — the number of K_pert evaluations actually
+      // made — is the only honest cost/provenance record.
+      if (two_step_outer_accel) {
+        h5::h5_write(lr_grp, "two_step_outer_alg", two_step_outer_alg);
+        h5::h5_write(lr_grp, "two_step_outer_tol", two_step_outer_tol);
+        h5::h5_write(lr_grp, "two_step_stages_applied", two_step_stages_applied);
+      }
     }
 
     app_log(2, "LR results written to \"linear_response/\" in {}", filename);
@@ -829,7 +844,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       double, int, bool, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
-                      bool, std::string const&, std::string const&, int);
+                      bool, std::string const&, std::string const&, int,
+                      bool, std::string const&, double, int);
 
   } // chkpt
 } // methods

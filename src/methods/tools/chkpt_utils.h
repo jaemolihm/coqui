@@ -212,7 +212,11 @@ namespace methods {
                bool lr_two_step = false,
                std::string const& two_step_sc_method = "",
                std::string const& two_step_pert_method = "",
-               int two_step_order = 0);
+               int two_step_order = 0,
+               bool two_step_outer_accel = false,
+               std::string const& two_step_outer_alg = "",
+               double two_step_outer_tol = 0.0,
+               int two_step_stages_applied = 0);
 
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint
