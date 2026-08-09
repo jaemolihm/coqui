@@ -387,7 +387,7 @@ pgto::generate_basis_set(comm_t& comm, mf::MF& mf, bool normalize,
   utils::check(comm.size() == std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{}),
                "MPI size mismatch.");
   auto psir = math::nda::make_distributed_array<larray>(comm,{1,1,1,comm.size()},
-                                                        {1,nkpts,nbnd,nnr},{1});  
+                                                        {1,nkpts,nbnd,nnr},{1,1,1,1});
   // fill psir
   //make_orbital(mf.kpts()(nda::range(nkpts),all),fft_mesh,mf.lattv(),psir);
 

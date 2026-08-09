@@ -1003,7 +1003,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   long nx = utils::find_proc_grid_max_rows(mpi->comm.size(),nqpts_ibz);
   utils::check(mpi->comm.size()/nx <= nIpts, "Incompatible processor grid.");
   auto Z_qur{make_distributed_array<local_uArray_t>(mpi->comm,{nx,mpi->comm.size()/nx,1},
-		{nqpts_ibz,nIpts,rho_g.nnr()},{1})};
+		{nqpts_ibz,nIpts,rho_g.nnr()},{1,1,1})};
   Z_qur.local() = ComplexType(0.0);
   Timer.stop("ALLOC");
 
@@ -1154,7 +1154,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   { 
     Timer.start("ALLOC");
     auto Cq_{make_distributed_array<local_uArray_t>(mpi->comm,Z_qur.grid(),
-                {nqpts_ibz,nIpts,nIpts},{1})};
+                {nqpts_ibz,nIpts,nIpts},{1,1,1})};
     Timer.stop("ALLOC");
     long nab = Cq_.local_shape()[0]*Cq_.local_shape()[1];
     auto Z2D = nda::reshape(Z_qur.local(), shape_t<2>{nab,rho_g.nnr()});
@@ -1204,7 +1204,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
 
     Timer.start("ALLOC");
     auto Z_{make_distributed_array<local_uArray_t>(mpi->comm,Z_qur.grid(),
-              {nqpts_ibz,nIpts,rho_g.size()},{1})};
+              {nqpts_ibz,nIpts,rho_g.size()},{1,1,1})};
     Timer.stop("ALLOC");
     // copy from fft mesh to reduced g-grid
     for( auto [iq,q] : itertools::enumerate(Z_qur.local_range(0)) ) {

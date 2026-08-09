@@ -68,7 +68,12 @@ auto make_slate(DMat& A_)
 
   auto&& A = math::detail::arg(A_);
 
-  // MAM: can add a check for utils::check( A.is_slate_compatible(), "Slate incompatible matrix");
+  // Must precede any use of block_size below: an unblocked array (block size 0)
+  // would divide by zero in the tile arithmetic.
+  utils::check( A.is_slate_compatible(), "Slate incompatible matrix: grid ({},{}), "
+        "global shape ({},{}), block size ({},{}), local shape ({},{})",
+        A.grid()[0],A.grid()[1],A.global_shape()[0],A.global_shape()[1],
+        A.block_size()[0],A.block_size()[1],A.local_shape()[0],A.local_shape()[1]);
   int64_t p = A.grid()[row_index];
   int64_t q = A.grid()[col_index];
   int64_t m = A.global_shape()[row_index];
