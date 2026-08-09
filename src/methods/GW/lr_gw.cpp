@@ -57,7 +57,7 @@ namespace methods {
                       "SIGMA_PRIM_TO_AUX", "SIGMA_FT_R",
                       "SIGMA_HADPROD_R", "SIGMA_AUX_TO_PRIM",
                       "SIGMA_FT_COEFF", "SIGMA_W_COPY",
-                      "SIGMA_ZERO_BUF", "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
+                      "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
                       "SIGMA_DIV_CORR"}) {
         _Timer.add(v);
       }
@@ -454,14 +454,13 @@ namespace methods {
           long it_out = minus_t ? (nt - 1 - it_w) : it_w;
 
           // --- Accumulate Sigma in R-space from active terms ---
-          _Timer.start("SIGMA_ZERO_BUF");
-          dSigma_sRPQ.local() = 0;
-          _Timer.stop("SIGMA_ZERO_BUF");
+          // The first active term assigns, the rest accumulate, so the buffer
+          // needs no separate zeroing pass.
+          bool first_term = true;
 
           // Term 1: ΔG ⊙ W_c
           if (do_term1) {
             _Timer.start("SIGMA_PRIM_TO_AUX");
-            dG_skPQ.local() = 0;
             auto DeltaG_slice = (*DeltaG_tskij)(it_g, nda::ellipsis{});
             if (ibc && ibc->sG_tskij) {
               // DeltaX correction: pass unperturbed G(τ) view as O_unpert (no copy)
@@ -495,8 +494,12 @@ namespace methods {
             for (long s = 0; s < ns; ++s) {
               auto G_RPQ = dG_skPQ.local()(s, nda::ellipsis{});
               auto Sigma_RPQ = dSigma_sRPQ.local()(s, nda::ellipsis{});
-              Sigma_RPQ += neg_prod(G_RPQ, W1_tau_RPQ);
+              if (first_term)
+                Sigma_RPQ = neg_prod(G_RPQ, W1_tau_RPQ);
+              else
+                Sigma_RPQ += neg_prod(G_RPQ, W1_tau_RPQ);
             }
+            first_term = false;
             _Timer.stop("SIGMA_HADPROD_R");
           }
 
@@ -509,8 +512,12 @@ namespace methods {
             for (long s = 0; s < ns; ++s) {
               auto G_RPQ = cache.local()(it_local, s, nda::ellipsis{});
               auto Sigma_RPQ = dSigma_sRPQ.local()(s, nda::ellipsis{});
-              Sigma_RPQ += neg_prod(G_RPQ, W2_tau_RPQ);
+              if (first_term)
+                Sigma_RPQ = neg_prod(G_RPQ, W2_tau_RPQ);
+              else
+                Sigma_RPQ += neg_prod(G_RPQ, W2_tau_RPQ);
             }
+            first_term = false;
             _Timer.stop("SIGMA_HADPROD_R");
           }
 
@@ -555,7 +562,10 @@ namespace methods {
       // Synchronize and distribute across all nodes
       _Timer.start("SIGMA_FINAL_REDUCE");
       sDeltaSigma_tskij.win().fence();
-      sDeltaSigma_tskij.all_reduce();
+      // Every τ block is written by exactly one rank globally (tau_comm root,
+      // disjoint τ ranges across pools), so the node-parallel reduction is
+      // bit-identical to all_reduce() here.
+      sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
 
       _Timer.stop("EVALUATE_SIGMA_R");
