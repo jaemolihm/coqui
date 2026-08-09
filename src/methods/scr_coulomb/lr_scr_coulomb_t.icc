@@ -20,6 +20,8 @@
 
 
 #include <algorithm>
+#include <functional>
+#include <memory>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -335,11 +337,6 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
           pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
   app_log(3, "    - q_pert is Γ: {}", _is_q_gamma ? "yes" : "no");
 
-  // Intermediate buffer for matrix multiplication. Same distribution as ΔΠ.
-  using local_Array_t = std::decay_t<Array_4D_t>;
-  auto dTmp_wqPQ = math::nda::make_distributed_array<local_Array_t>(
-      comm, pgrid, dDeltaPi_wqPQ.global_shape(), bsize);
-
   // SLATE's tileInsert is not const-correct (takes scalar_t*, not const
   // scalar_t*) even though it does not write to the input matrix. Cast away
   // const for the call. This is also the convention in scr_coulomb_t::dyson_W_in_place.
@@ -348,8 +345,67 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
 
   // ΔW = W_full(q+Q) · ΔΠ · W_full(q). For Q=Γ the caller passes the same object
   // for both operands, since W_full(q+Q) = W_full(q).
-  math::nda::slate_ops::multiply(dW_full_qpQ_nc, dDeltaPi_wqPQ, dTmp_wqPQ);
-  math::nda::slate_ops::multiply(dTmp_wqPQ, dW_full_nc, dDeltaPi_wqPQ);
+  //
+  // The tile loop of slate_ops::multiply is inlined here so the intermediate is a
+  // single rank-2 (P,Q) block instead of a distributed array the full size of ΔΠ.
+  // The local-vs-SLATE dispatch stays in slate_ops::detail::multiply_impl, so one
+  // loop covers every processor grid.
+  using local_Array_t = std::decay_t<Array_4D_t>;
+  using value_t = typename local_Array_t::value_type;
+  // Only slate_ops::multiply's C-order body is replicated below (batch axes 0,1,
+  // matrix axes 2,3). Its Fortran-order body inverts both, so a column-major
+  // operand would silently compute the wrong ΔW.
+  static_assert(std::decay_t<decltype(dDeltaPi_wqPQ)>::is_stride_order_C() and
+                std::decay_t<dW_full_t>::is_stride_order_C(),
+                "lr_dyson_W_in_place: operands must be C-stride-ordered");
+  decltype(nda::range::all) all;
+
+  auto gshape = dDeltaPi_wqPQ.global_shape();
+  auto origin = dDeltaPi_wqPQ.origin();
+  auto lshape = dDeltaPi_wqPQ.local_shape();
+  for (auto const* d : {&dW_full_nc, &dW_full_qpQ_nc}) {
+    utils::check(*d->communicator() == comm,
+                 "lr_dyson_W_in_place: communicator mismatch between ΔΠ and W_full operands");
+    utils::check(d->global_shape() == gshape and d->origin() == origin and
+                 d->local_shape() == lshape and d->block_size() == bsize,
+                 "lr_dyson_W_in_place: distribution mismatch between ΔΠ and W_full operands");
+  }
+
+  // Communicator of the (P,Q) subgrid holding one (iw, iq) tile; the color rule
+  // matches slate_ops::multiply. Hoisted out of the loop.
+  long color = origin[0] + gshape[0] * origin[1];
+  auto pq_comm = comm.split(color, comm.rank());
+
+  // Rank-2 scratch for the intermediate, reused by every tile. The address space
+  // follows the operands, as the distributed temporary it replaces did.
+  memory::array<memory::get_memory_space<local_Array_t>(), value_t, 2>
+      Tmp_buf(lshape[2], lshape[3]);
+  auto Tmp_2D = Tmp_buf(all, all);
+  auto pq_view = [&](auto&& A_2D, auto const& darr) {
+    auto g = darr.grid(); auto gs = darr.global_shape();
+    auto o = darr.origin(); auto b = darr.block_size();
+    return math::nda::distributed_array_view<std::decay_t<decltype(A_2D)>, decltype(pq_comm)>(
+        std::addressof(pq_comm),
+        std::array<long, 2>{g[2], g[3]}, std::array<long, 2>{gs[2], gs[3]},
+        std::array<long, 2>{o[2], o[3]}, std::array<long, 2>{b[2], b[3]}, A_2D);
+  };
+  auto dTmp_PQ = pq_view(Tmp_2D, dDeltaPi_wqPQ);
+
+  auto W_qpQ_loc = dW_full_qpQ_nc.local();
+  auto W_loc     = dW_full_nc.local();
+  auto Pi_loc    = dDeltaPi_wqPQ.local();
+  for (long iw = 0; iw < lshape[0]; ++iw) {
+    for (long iq = 0; iq < lshape[1]; ++iq) {
+      auto dW_qpQ_PQ = pq_view(W_qpQ_loc(iw, iq, all, all), dW_full_qpQ_nc);
+      auto dW_PQ     = pq_view(W_loc(iw, iq, all, all),     dW_full_nc);
+      auto dPi_PQ    = pq_view(Pi_loc(iw, iq, all, all),    dDeltaPi_wqPQ);
+
+      math::nda::slate_ops::detail::multiply_impl(value_t{1.0}, dW_qpQ_PQ, dPi_PQ,
+                                                  value_t{0.0}, dTmp_PQ);
+      math::nda::slate_ops::detail::multiply_impl(value_t{1.0}, dTmp_PQ, dW_PQ,
+                                                  value_t{0.0}, dPi_PQ);
+    }
+  }
 
   _Timer.stop("EVALUATE_LR_W");
 }

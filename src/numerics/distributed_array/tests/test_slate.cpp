@@ -465,6 +465,170 @@ TEST_CASE("distributed_inverse", "[math]")
   check(nx, world.size()/nx);
 }
 
+/**
+ * Value check of the rank-4 slate_ops::multiply, i.e. a batch of (P,Q) gemms
+ * over two leading axes — the shape the LR W Dyson (ΔW = W·ΔΠ·W) runs on. Both
+ * branches of multiply_impl are covered: a grid that only splits the leading
+ * axes leaves one whole matrix per rank (local nda::blas::gemm), while a (P,Q)
+ * grid dispatches a SLATE gemm on the subgrid.
+ */
+TEST_CASE("distributed_multiply_rank4", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  const long nw = 12, nq = 2, N = 24;
+
+  nda::array<ComplexType, 4> A(nw, nq, N, N), B(nw, nq, N, N), C(nw, nq, N, N);
+  auto fill = [](auto&& X, double s) {
+    long n = 0;
+    for (auto& v : X) { v = ComplexType(std::sin(s*(n+1)), std::cos(s*(n+2))); ++n; }
+  };
+  fill(A, 0.031);
+  fill(B, 0.017);
+  for (long iw = 0; iw < nw; ++iw)
+    for (long iq = 0; iq < nq; ++iq)
+      nda::blas::gemm(ComplexType(1.0), A(iw, iq, nda::ellipsis{}),
+                      B(iw, iq, nda::ellipsis{}), ComplexType(0.0),
+                      C(iw, iq, nda::ellipsis{}));
+
+  auto check = [&](long np_w, long np_q, long np_P, long np_Q) {
+    if (np_w*np_q*np_P*np_Q != world.size()) return;
+    if (np_w > nw or np_q > nq) return;
+    long bs = std::min({8l, N/np_P, N/np_Q});
+    if (bs < 1) return;
+
+    auto mk = [&]() {
+      return make_distributed_array<nda::array<ComplexType, 4>>(world,
+                 shape_t<4>{np_w, np_q, np_P, np_Q}, shape_t<4>{nw, nq, N, N},
+                 shape_t<4>{1, 1, bs, bs});
+    };
+    auto dA = mk(); auto dB = mk(); auto dC = mk();
+    auto slice = [](auto const& G, auto const& d) {
+      return G(d.local_range(0), d.local_range(1), d.local_range(2), d.local_range(3));
+    };
+    dA.local() = slice(A, dA);
+    dB.local() = slice(B, dB);
+    dC.local() = ComplexType(0.0);  // beta = 0 still reads C on some paths
+
+    math::nda::slate_ops::multiply(dA, dB, dC);
+
+    double err = 0.0;
+    auto Cloc = dC.local();
+    for (auto [i0, w] : itertools::enumerate(dC.local_range(0)))
+      for (auto [i1, q] : itertools::enumerate(dC.local_range(1)))
+        for (auto [i2, p] : itertools::enumerate(dC.local_range(2)))
+          for (auto [i3, r] : itertools::enumerate(dC.local_range(3)))
+            err = std::max(err, std::abs(Cloc(i0, i1, i2, i3) - C(w, q, p, r)));
+    // Identical on every rank after the reduction, so CHECK cannot diverge.
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    app_log(2, "  multiply(rank-4): pgrid = ({}, {}, {}, {}), bsize = {}, max error = {:.3e}",
+            np_w, np_q, np_P, np_Q, bs, err);
+    INFO("pgrid = (" << np_w << ", " << np_q << ", " << np_P << ", " << np_Q << ")");
+    CHECK(err < 1e-10);
+  };
+
+  const long np = world.size();
+  check(np, 1, 1, 1);                 // leading-axis only: local gemm per tile
+  check(1, 1, np, 1);                 // 1-D SLATE grid over P
+  long nx = utils::find_proc_grid_min_diff(np, N, N);
+  check(1, 1, nx, np/nx);             // 2-D SLATE grid
+  if (np % 2 == 0) check(2, 1, np/2, 1);  // batched over w and split over P
+}
+
+/**
+ * The LR W Dyson (lr_scr_coulomb_t::lr_dyson_W_in_place) does not call
+ * slate_ops::multiply: to keep the intermediate down to one (P,Q) block it
+ * inlines that routine's C-order tile loop around a rank-2 scratch. This checks
+ * the inlined form — same split colour, same tile order — against the generic
+ * routine with a full-size distributed temporary, which is what it replaced.
+ *
+ * The grids exercised deliberately split a batch axis *and* (P,Q) at once, the
+ * production shape: with only one tile per rank a wrong colour rule still gives
+ * the right answer.
+ */
+TEST_CASE("lr_dyson_W_inlined_tile_loop", "[math]")
+{
+  decltype(nda::range::all) all;
+  auto world = boost::mpi3::environment::get_world_instance();
+  const long nw = 4, nq = 2, N = 24;
+
+  auto check = [&](long np_w, long np_q, long np_P, long np_Q) {
+    if (np_w*np_q*np_P*np_Q != world.size()) return;
+    if (np_w > nw or np_q > nq) return;
+    long bs = std::min({8l, N/np_P, N/np_Q});
+    if (bs < 1) return;
+
+    auto mk = [&]() {
+      return make_distributed_array<nda::array<ComplexType, 4>>(world,
+                 shape_t<4>{np_w, np_q, np_P, np_Q}, shape_t<4>{nw, nq, N, N},
+                 shape_t<4>{1, 1, bs, bs});
+    };
+    auto dW = mk(), dWq = mk(), dPi = mk();
+    auto fill = [](auto&& d, double s) {
+      long n = 0;
+      for (auto& v : d.local()) { v = ComplexType(std::sin(s*(n+1)), std::cos(s*(n+2))); ++n; }
+    };
+    fill(dW, 0.031); fill(dWq, 0.017); fill(dPi, 0.023);
+
+    // Reference: the two-call form with a full-size distributed temporary.
+    auto dPi_ref = mk(), dTmp = mk();
+    dPi_ref.local() = dPi.local();
+    dTmp.local() = ComplexType(0.0);
+    math::nda::slate_ops::multiply(dWq, dPi_ref, dTmp);
+    math::nda::slate_ops::multiply(dTmp, dW, dPi_ref);
+
+    // Under test: one split, a rank-2 scratch, two multiply_impl per tile.
+    auto gshape = dPi.global_shape();
+    auto origin = dPi.origin();
+    auto lshape = dPi.local_shape();
+    long color = origin[0] + gshape[0] * origin[1];
+    auto pq_comm = world.split(color, world.rank());
+    nda::array<ComplexType, 2> Tmp_buf(lshape[2], lshape[3]);
+    auto Tmp_2D = Tmp_buf(all, all);
+    auto pq_view = [&](auto&& A_2D, auto const& darr) {
+      auto g = darr.grid(); auto gs = darr.global_shape();
+      auto o = darr.origin(); auto b = darr.block_size();
+      return math::nda::distributed_array_view<std::decay_t<decltype(A_2D)>, decltype(pq_comm)>(
+          std::addressof(pq_comm),
+          std::array<long, 2>{g[2], g[3]}, std::array<long, 2>{gs[2], gs[3]},
+          std::array<long, 2>{o[2], o[3]}, std::array<long, 2>{b[2], b[3]}, A_2D);
+    };
+    auto dTmp_PQ = pq_view(Tmp_2D, dPi);
+    auto Wq_loc = dWq.local(), W_loc = dW.local(), Pi_loc = dPi.local();
+    for (long iw = 0; iw < lshape[0]; ++iw)
+      for (long iq = 0; iq < lshape[1]; ++iq) {
+        auto dWq_PQ = pq_view(Wq_loc(iw, iq, all, all), dWq);
+        auto dW_PQ  = pq_view(W_loc(iw, iq, all, all), dW);
+        auto dPi_PQ = pq_view(Pi_loc(iw, iq, all, all), dPi);
+        math::nda::slate_ops::detail::multiply_impl(
+            ComplexType(1.0), dWq_PQ, dPi_PQ, ComplexType(0.0), dTmp_PQ);
+        math::nda::slate_ops::detail::multiply_impl(
+            ComplexType(1.0), dTmp_PQ, dW_PQ, ComplexType(0.0), dPi_PQ);
+      }
+
+    double err = 0.0, ref = 0.0;
+    auto a = dPi.local(), b = dPi_ref.local();
+    for (long i = 0; i < a.size(); ++i) {
+      err = std::max(err, std::abs(a.data()[i] - b.data()[i]));
+      ref = std::max(ref, std::abs(b.data()[i]));
+    }
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    ref = world.all_reduce_value(ref, boost::mpi3::max<>{});
+    app_log(2, "  lr_dyson_W inlined: pgrid = ({}, {}, {}, {}), bsize = {}, max |diff| = {:.3e}"
+               " (max |ref| = {:.3e})", np_w, np_q, np_P, np_Q, bs, err, ref);
+    INFO("pgrid = (" << np_w << ", " << np_q << ", " << np_P << ", " << np_Q << ")");
+    REQUIRE(ref > 0.0);
+    // Same operands, same tile order, only the destination differs: bit-exact.
+    CHECK(err == 0.0);
+  };
+
+  const long np = world.size();
+  check(np, 1, 1, 1);                          // batch only: local gemm path
+  check(1, 1, np, 1);                          // (P,Q) only: SLATE path
+  if (np % 2 == 0) check(2, 1, np/2, 1);       // batch AND P split  <- production shape
+  if (np % 4 == 0) check(2, 2, np/4, 1);       // both batch axes AND P split
+  if (np % 8 == 0) check(2, 2, np/8, 2);       // both batch axes AND 2-D (P,Q)
+}
+
 /*
 TEST_CASE("test_solve","[math]")
 {
