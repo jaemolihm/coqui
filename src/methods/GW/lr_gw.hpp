@@ -208,7 +208,6 @@ namespace methods {
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
       app_log(level, "{0}    - Buffer alloc:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ALLOC"), _Timer.number_of_calls("SIGMA_A2P_ALLOC"));
       app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_GEMM"), _Timer.number_of_calls("SIGMA_A2P_GEMM"));
-      app_log(level, "{0}    - Skew barrier:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SKEW"), _Timer.number_of_calls("SIGMA_A2P_SKEW"));
       app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_REDUCE"), _Timer.number_of_calls("SIGMA_A2P_REDUCE"));
       app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_AXPY"), _Timer.number_of_calls("SIGMA_A2P_AXPY"));
       app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FINAL_REDUCE"), _Timer.number_of_calls("SIGMA_FINAL_REDUCE"));

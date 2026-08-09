@@ -199,11 +199,10 @@ namespace methods {
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        * @param Timer    - [INPUT] optional sub-clock manager. When non-null the call is
-       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,SKEW,
+       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,
        *                   REDUCE,AXPY,SHMREDUCE}; PREDIV and SHMREDUCE are the shared-array
-       *                   bookkeeping this wrapper adds on top of the kernel. SKEW is a
-       *                   barrier that exists only while timing, so that the cost of the
-       *                   reduce is separated from the wait for the slowest tile.
+       *                   bookkeeping this wrapper adds on top of the kernel. REDUCE
+       *                   includes the wait for the slowest tile in dim0_comm.
        *
        * The leading x → x/N pre-divide makes the trailing all_reduce over the N
        * nodes idempotent for content already in the window, so repeated calls
@@ -613,14 +612,6 @@ namespace methods {
           }
         } // i
         toc("SIGMA_A2P_GEMM");
-
-        // Separates the reduce's own cost from the wait for the slowest tile in
-        // dim0_comm; only present while timing, since it is a real synchronization.
-        if (Timer) {
-          tic("SIGMA_A2P_SKEW");
-          dim0_comm.barrier();
-          toc("SIGMA_A2P_SKEW");
-        }
 
         // Accumulate all (t,s,k) slices locally and reduce once.
         // mpi3 narrows the element count to MPI's int, silently, so guard it.

@@ -61,8 +61,7 @@ namespace methods {
                       "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
                       "SIGMA_DIV_CORR",
                       "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM",
-                      "SIGMA_A2P_SKEW", "SIGMA_A2P_REDUCE",
-                      "SIGMA_A2P_AXPY"}) {
+                      "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
         _Timer.add(v);
       }
     }
