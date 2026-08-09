@@ -25,6 +25,7 @@
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/Timer.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -172,6 +173,12 @@ namespace methods {
        * @param thc      - [INPUT] THC-ERI handler
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       * @param Timer    - [INPUT] optional sub-clock manager. When non-null the call is
+       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,SKEW,
+       *                   REDUCE,AXPY,SHMREDUCE}; PREDIV and SHMREDUCE are the shared-array
+       *                   bookkeeping this wrapper adds on top of the kernel. SKEW is a
+       *                   barrier that exists only while timing, so that the cost of the
+       *                   reduce is separated from the wait for the slowest tile.
        */
       template<nda::MemoryArray AF_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq,
@@ -180,7 +187,8 @@ namespace methods {
                                  sArray_t<AF_t>& O_Iab,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_map,
-                                 nda::ArrayOfRank<1> auto const& kpq_map) {
+                                 nda::ArrayOfRank<1> auto const& kpq_map,
+                                 utils::TimerManager* Timer = nullptr) {
         constexpr int rank = nda::get_rank<Array_aux_t>;
         static_assert(nda::get_rank<AF_t> == rank,
                       "lr_thc_comm::aux_to_primary: rank mismatch between darray and sarray");
@@ -188,12 +196,17 @@ namespace methods {
                       "lr_thc_comm::aux_to_primary: rank must be 4 or 5");
         using value_type = typename std::decay_t<AF_t>::value_type;
 
+        auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
+        auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
+
         // to compensate for reduction
+        tic("SIGMA_A2P_PREDIV");
         O_Iab.win().fence();
         O_Iab.communicator()->barrier();
         if(O_Iab.node_comm()->root())
           O_Iab.local() /= value_type(O_Iab.internode_comm()->size());
         O_Iab.node_comm()->barrier();
+        toc("SIGMA_A2P_PREDIV");
 
         if constexpr (rank == 5) {
           auto pgrid = O_IPQ.grid();
@@ -226,7 +239,7 @@ namespace methods {
 
           _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
                                O_IPQ_loc, O_Iab_loc, thc,
-                               kp_map, kpq_map, k_org, P_org, Q_org);
+                               kp_map, kpq_map, k_org, P_org, Q_org, Timer);
         } else if constexpr (rank == 4) {
           auto pgrid = O_IPQ.grid();
           auto s_rng = O_IPQ.local_range(0);
@@ -257,12 +270,14 @@ namespace methods {
 
           _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
                                O_IPQ_loc, O_Iab_loc, thc,
-                               kp_map, kpq_map, k_org, P_org, Q_org);
+                               kp_map, kpq_map, k_org, P_org, Q_org, Timer);
         }
 
         // reduce
+        tic("SIGMA_A2P_SHMREDUCE");
         O_Iab.win().fence();
         O_Iab.all_reduce();
+        toc("SIGMA_A2P_SHMREDUCE");
       }
 
       /**
@@ -548,11 +563,15 @@ namespace methods {
                                        THC_ERI auto& thc,
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       long k_offset, long P_offset, long Q_offset) {
+                                       long k_offset, long P_offset, long Q_offset,
+                                       utils::TimerManager* Timer = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_aux_to_primary_impl: Rank mismatch");
         static_assert(nda::get_rank<Array_primary_t> >= 4,
                       "lr_thc_comm::_aux_to_primary_impl: Rank < 4");
+
+        auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
+        auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
 
         decltype(nda::range::all) all;
 
@@ -577,12 +596,15 @@ namespace methods {
         // for the first gemm plus nbnd² times the extent contracted last, so
         // contract the larger of the two aux extents first.
         const bool q_first = (NP_loc <= NQ_loc);
+        tic("SIGMA_A2P_ALLOC");
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
         // buffer array to hold local (t,s,k) slices of O_iab for reduction
         nda::array<ComplexType, 3> O_buf_iab(dim0, nbnd, nbnd);
+        toc("SIGMA_A2P_ALLOC");
 
+        tic("SIGMA_A2P_GEMM");
         for (size_t i = 0; i < dim0; ++i) {
           // i = (it * ns_loc + is) * nk_loc + ik
           size_t s = (i / nk_loc) % ns_loc;
@@ -603,12 +625,25 @@ namespace methods {
             nda::blas::gemm(Ask_buf, Xsk_Pa_r(Q_rng, all), Oab_i);
           }
         } // i
+        toc("SIGMA_A2P_GEMM");
+
+        // Separates the reduce's own cost from the wait for the slowest tile in
+        // dim0_comm; only present while timing, since it is a real synchronization.
+        if (Timer) {
+          tic("SIGMA_A2P_SKEW");
+          dim0_comm.barrier();
+          toc("SIGMA_A2P_SKEW");
+        }
 
         // Accumulate all (t,s,k) slices locally and reduce once.
+        tic("SIGMA_A2P_REDUCE");
         dim0_comm.reduce_in_place_n(O_buf_iab.data(), O_buf_iab.size(), std::plus<>{}, 0);
+        toc("SIGMA_A2P_REDUCE");
+        tic("SIGMA_A2P_AXPY");
         if (dim0_comm.root()) {
           O_iab_3D += scl*O_buf_iab;
         }
+        toc("SIGMA_A2P_AXPY");
       }
 
     }; // lr_thc_comm
