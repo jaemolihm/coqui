@@ -35,7 +35,8 @@ namespace solvers {
 
     for (auto& v: {"SOLVE_LR_DYSON_W", "EVALUATE_LR_W",
                     "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
-                    "LR_W_COMPUTE_W_FULL", "LR_W_COMM_QPQ"}) {
+                    "LR_W_COMPUTE_W_FULL", "LR_W_COMM_QPQ",
+                    "LR_W_QPOOL_EXCHANGE"}) {
       _Timer.add(v);
     }
   }

@@ -2086,6 +2086,8 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
+  // dW_full_wqPQ may live on lr_scr's permuted communicator member and stores a
+  // raw pointer to it, so it must be declared after lr_scr (destroyed first).
   auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
   lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
   // dDeltaPi_tqPQ now contains ΔW_c(τ)

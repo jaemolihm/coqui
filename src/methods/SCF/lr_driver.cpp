@@ -250,6 +250,10 @@ std::tuple<int, double> lr_driver::run_lr(
   // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_DRIVER_SETUP");
   using local_Array_4D_t = nda::array<ComplexType, 4>;
+  // MUST stay declared *after* lr_scr_solver: under the q-pool-exchange strategy
+  // compute_W_full_omega returns an array on the solver's _comm_perm member, and
+  // memory::darray_t holds a raw communicator pointer. Destruction is reverse
+  // declaration order, so the solver has to outlive this holder.
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
   if (gw_full) {
     _Timer.start("LR_DRIVER_SETUP_W_FULL");
@@ -757,6 +761,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   const long nki  = _nkpts_ibz;                    // IBZ k-points (shared band-basis arrays)
   const long nq   = _nkpts;                        // full-BZ q/R points (distributed aux arrays)
   const long nb   = _nbnd;
+  const long nproc = _mpi->comm.size();
   const int  n_nodes = std::max(1, _mpi->internode_comm.size());
 
   const double bytes_per = static_cast<double>(sizeof(ComplexType));
@@ -788,14 +793,39 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   if (include_gw_sigma) {
     arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true});
   }
+  // ω-side strategy of the ΔW pipeline. Queried from the same predicate the
+  // solver uses (lr_W_omega_layout_for), never re-derived here: the entries below
+  // are conditional on it, and two derivations would drift.
+  // Only meaningful (and only evaluated) for the full-GW W Dyson pipeline.
+  solvers::lr_W_omega_layout w_layout;
   if (gw_full) {
+    w_layout = solvers::lr_W_omega_layout_for(_mpi->comm.size(), nq, nwbh, NP);
     arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true});
     arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true});
     arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true});
     // Solver-owned FT staging buffers: allocated once in compute_W_full_omega,
     // resident for the whole loop (persistent by lifetime, though internal).
     arrays.push_back({"_ft_buffer_t",  shp4a(nth),  aux4(nth),  true});
-    arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
+    // The ω-shaped one only exists when the FT really stages through it, i.e. when
+    // the ω-side grid differs from the FT-buffer one *and* the q-pool exchange is
+    // not used. Otherwise both fused branches fire and acquire_ft_buffer is never
+    // reached for the ω side.
+    if (w_layout.need_ft_buffer_w)
+      arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
+    // Its one-for-one replacement under the q-pool exchange: the ΔΠ/ΔW(iω)
+    // workspace on the permuted communicator, reused every iteration.
+    if (w_layout.use_qpool_exchange) {
+      arrays.push_back({"_dPi_w_perm",   shp4a(nwbh), aux4(nwbh), true});
+      // The exchange's staging temp: one peer-sized block per rank, allocated in
+      // lr_W_qpool_plan::build and never freed, so it is persistent, not a
+      // transient. The m ranks of a q-pool together cover the ω axis, so their
+      // temps sum to one (nwbh, nq, NP, NP)/m slab globally. This is an estimate
+      // (exact when the ω and (P,Q) axes divide evenly); compute_W_full_omega
+      // prints the measured total next to it at the same verbosity.
+      arrays.push_back({"_qpool exchange temp",
+                        shp4a(nwbh) + fmt::format("/{}", w_layout.m),
+                        aux4(nwbh) / double(w_layout.m), true});
+    }
     if (!is_q_gamma())
       arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true});
   }
@@ -812,12 +842,33 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
 
   // --- Per-iteration transients: scratch arrays (~ nk·nt·n²) allocated and
   //     freed within one SCF iteration, on top of the persistent set.
-  //     Two mutually-exclusive phases:
-  //       dyson : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
-  //       gwsig : ΔΠ/ΔW(τ) + its (t,q)→(q,t) transpose scratch (gw_full only)
-  //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
-  //     two never coexist — the peak adds only the larger: max(dyson, gwsig).
-  enum phase_t { DYSON, GWSIG };
+  //     Three mutually-exclusive phases; each frees its scratch before the next
+  //     allocates, so the peak adds only the largest of the three:
+  //       dyson    : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
+  //       gwsig(τ) : ΔΠ/ΔW(τ) alongside the pack/unpack buffers of the τ-side
+  //                  redistribute (gw_full only)
+  //       gwsig(iω): ΔΠ/ΔW(iω), the tau_to_w output that lr_dyson_W_in_place
+  //                  updates in place, alongside the ω-side redistribute buffers
+  //     solve_lr_dyson_W passes reset_input = true to both FTs, so each frees its
+  //     input before allocating its output and the τ and ω arrays never coexist.
+  //     (reset_input is the caller's choice — scr_coulomb_fourier_t honours it at
+  //     :102/:193/:204 — so a future caller passing false would invalidate this.)
+  //
+  //     math::nda::redistribute defaults to redistribute_alltoallv, which holds
+  //     two contiguous pack/unpack buffers sized like the local blocks of its two
+  //     operands (nda_utils.hpp:889-890) live across the all_to_all_v. Both
+  //     operands of every redistribute here are the same global shape, hence the
+  //     2x rows below. They dominate the (t,q)→(q,t) transpose target, which is
+  //     1x and not co-live with them, so the transpose never sets the peak.
+  //     The ω-side redistribute only happens under the four-hop strategy; the
+  //     other two transform straight into/out of the FT-buffer layout.
+  //
+  //     Under the q-pool exchange, the ΔΠ/ΔW(iω) entry is the buffer-grid array;
+  //     solve_lr_dyson_W resets it before re-allocating for the return trip, so it
+  //     stays 1x. The permuted ω workspace it feeds and the exchange's peer-sized
+  //     staging temp are both allocated once and never freed, so they are listed
+  //     in the persistent table above, not here.
+  enum phase_t { DYSON, GWSIG_TAU, GWSIG_W };
   struct tentry_t { std::string name; std::string shape; double nelem; phase_t ph; };
   std::vector<tentry_t> trans;
 
@@ -826,15 +877,34 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
                    fmt::format("{}x({},{},{},{},{})", include_gw_sigma ? 2 : 1, nw, ns, nki, nb, nb),
                    (include_gw_sigma ? 2.0 : 1.0) * band5(nw), DYSON});
   if (gw_full) {
-    trans.push_back({"ΔΠ/ΔW(τ)",          shp4a(nth), aux4(nth), GWSIG});
-    trans.push_back({"ΔW transpose copy", shp4a(nth), aux4(nth), GWSIG});
+    trans.push_back({"ΔΠ/ΔW(τ)",            shp4a(nth),  aux4(nth),  GWSIG_TAU});
+    trans.push_back({"redist pack/unpack (τ)", "2x"+shp4a(nth),  2.0*aux4(nth),  GWSIG_TAU});
+    trans.push_back({"ΔΠ/ΔW(iω)",           shp4a(nwbh), aux4(nwbh), GWSIG_W});
+    if (w_layout.need_ft_buffer_w)
+      trans.push_back({"redist pack/unpack (iω)", "2x"+shp4a(nwbh), 2.0*aux4(nwbh), GWSIG_W});
+    // lr_dyson_W_in_place's rank-2 intermediate: one local (P,Q) block per rank,
+    // allocated for the whole ω Dyson and therefore co-live with ΔΠ/ΔW(iω). With
+    // (P,Q) local (strategies A and C) that is a full NP² per rank.
+    const long Pl = (NP + w_layout.w_pgrid[2] - 1) / std::max(w_layout.w_pgrid[2], 1L);
+    const long Ql = (NP + w_layout.w_pgrid[3] - 1) / std::max(w_layout.w_pgrid[3], 1L);
+    trans.push_back({"ΔW Dyson (P,Q) scratch",
+                     fmt::format("{}x({},{})", nproc, Pl, Ql),
+                     double(nproc) * double(Pl) * double(Ql), GWSIG_W});
   }
 
-  double t_dyson = 0.0, t_gwsig = 0.0;
-  for (auto const& t : trans)
-    (t.ph == DYSON ? t_dyson : t_gwsig) += t.nelem;
-  bool dyson_dominates = t_dyson >= t_gwsig;
-  double peak_trans_nelem = std::max(t_dyson, t_gwsig);
+  auto phase_name = [](phase_t p) {
+    return (p == DYSON) ? "Dyson" : (p == GWSIG_TAU) ? "ΔW/Σ(τ)" : "ΔW/Σ(iω)";
+  };
+  double t_dyson = 0.0, t_gwsig_t = 0.0, t_gwsig_w = 0.0;
+  for (auto const& t : trans) {
+    if (t.ph == DYSON) t_dyson += t.nelem;
+    else if (t.ph == GWSIG_TAU) t_gwsig_t += t.nelem;
+    else t_gwsig_w += t.nelem;
+  }
+  double peak_trans_nelem = std::max({t_dyson, t_gwsig_t, t_gwsig_w});
+  const char* peak_phase = (peak_trans_nelem == t_dyson)   ? phase_name(DYSON)
+                         : (peak_trans_nelem == t_gwsig_t) ? phase_name(GWSIG_TAU)
+                                                           : phase_name(GWSIG_W);
   // All transients here are distributed (band ΔG(iω) included).
   double peak_dist_GB = dist_GB + gb(peak_trans_nelem);
   double peak_per_node_GB = shared_GB + peak_dist_GB / n_nodes;
@@ -858,11 +928,11 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   app_log(2, "    {:<26s}{:<26s}{:>8s}   {}", "quantity", "shape", "GB", "phase");
   for (auto const& t : trans)
     app_log(2, "    {:<26s}{:<26s}{:>8.3f}   {}", t.name, t.shape, gb(t.nelem),
-            (t.ph == DYSON) ? "Dyson" : "ΔW/Σ");
+            phase_name(t.ph));
   app_log(2, "  {}", std::string(72, '-'));
-  app_log(2, "    peak transient:      {:8.3f} GB        = max(Dyson {:.3f}, ΔW/Σ {:.3f}) [{} dominates]",
-          gb(peak_trans_nelem), gb(t_dyson), gb(t_gwsig),
-          dyson_dominates ? "Dyson" : "ΔW/Σ");
+  app_log(2, "    peak transient:      {:8.3f} GB        = max(Dyson {:.3f}, ΔW/Σ(τ) {:.3f}, "
+             "ΔW/Σ(iω) {:.3f}) [{} dominates]",
+          gb(peak_trans_nelem), gb(t_dyson), gb(t_gwsig_t), gb(t_gwsig_w), peak_phase);
   app_log(2, "    (distributed; ÷ {} node(s) = {:.3f} GB/node added)",
           n_nodes, gb(peak_trans_nelem) / n_nodes);
 
@@ -903,21 +973,22 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   // Aux FT-buffer + ω-side — only the full-GW W Dyson pipeline (mirrors the
   // distribution choice in lr_scr_coulomb_t::compute_W_full_omega).
   if (gw_full) {
-    auto [ftb_pg, ftb_bs] =
-        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nth, nq, NP, NP});
-    (void)ftb_bs;
-    std::array<long,4> w_pg, w_bs;
-    if (ftb_pg[2] == 1 && ftb_pg[3] == 1) {
-      w_pg = ftb_pg; w_bs = ftb_bs;
-    } else {
-      std::tie(w_pg, w_bs) = utils::lr_W_proc_grid(nproc, nq, nwbh, NP);
+    auto lay = solvers::lr_W_omega_layout_for(nproc, nq, nwbh, NP);
+    std::string ftb_arrs = lay.need_ft_buffer_w ? "_ft_buffer_t, _ft_buffer_w"
+                                                : "_ft_buffer_t";
+    std::string w_arrs = is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ";
+    if (lay.use_qpool_exchange) {
+      ftb_arrs += ", ΔΠ/ΔW(iω)";
+      w_arrs += ", _dPi_w_perm";
     }
-    (void)w_bs;
     app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer",
-            pg4(ftb_pg, "(·,q,P,Q)"), "_ft_buffer_t, _ft_buffer_w");
+            pg4(lay.b_pgrid, "(·,q,P,Q)"), ftb_arrs);
     app_log(2, "    {:<22s}{:<30s}{}", "aux ω-side",
-            pg4(w_pg, "(w,q,P,Q)"),
-            is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ");
+            pg4(lay.w_pgrid, "(w,q,P,Q)"), w_arrs);
+    if (lay.use_qpool_exchange)
+      app_log(2, "    {:<22s}{:<30s}{}", "  ω-side comm",
+              fmt::format("permuted, q-pools of {}", lay.m),
+              "intra-pool exchange replaces 2 of 4 redistribute hops");
   }
 
   // Band-basis Dyson grids — the ω-side comes from the same helper

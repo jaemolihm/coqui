@@ -38,6 +38,7 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
+#include "methods/scr_coulomb/lr_W_qpool_exchange.hpp"
 
 namespace methods {
 namespace solvers {
@@ -66,6 +67,14 @@ namespace solvers {
                      nda::array<double, 1> q_pert);
 
     ~lr_scr_coulomb_t() {}
+
+    // Pinned in place: every ω-side array built by compute_W_full_omega stores a
+    // raw pointer to the _comm_perm member and _qpool_plan stores one to
+    // _qpool_comm, so copying or relocating the object leaves them dangling.
+    lr_scr_coulomb_t(const lr_scr_coulomb_t&) = delete;
+    lr_scr_coulomb_t(lr_scr_coulomb_t&&) = delete;
+    lr_scr_coulomb_t& operator=(const lr_scr_coulomb_t&) = delete;
+    lr_scr_coulomb_t& operator=(lr_scr_coulomb_t&&) = delete;
 
     /**
      * Compute W_full(iω) = W_c(iω) + V from W_c(τ).
@@ -127,6 +136,11 @@ namespace solvers {
 
     bool is_q_gamma() const { return _is_q_gamma; }
 
+    /// True when the ω side runs on the permuted communicator and the two middle
+    /// redistribute hops are replaced by the intra-q-pool exchange (strategy A).
+    /// Set in compute_W_full_omega; false before it runs.
+    bool uses_qpool_exchange() const { return _layout.use_qpool_exchange; }
+
   /**
    * Print the LR W Dyson timer block (header + total + subclocks) at log
    * level `level` (2: standard, 3: per-step diagnostics).
@@ -152,11 +166,30 @@ namespace solvers {
     app_log(level, "{0}  - LR W FT (τ→ω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
     app_log(level, "{0}  - LR W Dyson (iω):            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
     app_log(level, "{0}  - LR W (q+Q)-operand comm:    {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_COMM_QPQ"), _Timer.number_of_calls("LR_W_COMM_QPQ"));
+    app_log(level, "{0}  - LR W q-pool exchange:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_QPOOL_EXCHANGE"), _Timer.number_of_calls("LR_W_QPOOL_EXCHANGE"));
     app_log(level, "{0}  - LR W FT (ω→τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
     app_log(level, "{0}    - redistribute (τ→ω, ω→τ): {1:8.3f} sec  {2:4d} calls", indent, ftT.elapsed("FT_REDISTRIBUTE"), ftT.number_of_calls("FT_REDISTRIBUTE"));
   }
 
   private:
+    // DESTRUCTION ORDER IS LOAD-BEARING. Members are destroyed in reverse
+    // declaration order, and every ω-side array below stores a *raw* pointer to
+    // _comm_perm / _qpool_comm (memory::darray_t keeps communicator_t*). They
+    // must therefore be declared before _dW_full_qpQ_wqPQ, _dPi_w_perm and
+    // _qpool_plan, and before anything else that can outlive them. The same
+    // applies outside the class: the W_full(iω) returned by compute_W_full_omega
+    // also points here, so the caller's holder must be declared after the solver
+    // (see lr_driver.cpp / MBPT_drivers.cpp).
+    // Both are MPI_COMM_NULL unless strategy A is selected.
+    mpi3::communicator _comm_perm;   // ω-side communicator, permuted by lr_W_qpool_key
+    mpi3::communicator _qpool_comm;  // the m ranks sharing one q-tile
+    // ω-side distribution and strategy; filled in by compute_W_full_omega.
+    lr_W_omega_layout _layout;
+    lr_W_qpool_plan _qpool_plan;     // peer ranges/counts + staging temp; built once
+    // compute_W_full_omega move-assigns the two communicators above, which the
+    // arrays it already handed out point at, so it may run only once per object.
+    bool _W_full_built = false;
+
     const imag_axes_ft::IAFT* _ft;
     utils::TimerManager _Timer;
     // Persistent FT engine: keeps the internal redistribute/gemm/leak-check
@@ -178,7 +211,13 @@ namespace solvers {
     // Default-constructed empty; populated once in compute_W_full_omega (always
     // runs before the SCF loop), so they are live by the time the FTs use them.
     dArr4D_concrete_t _ft_buffer_t;
+    // Only allocated under strategy B: under A and C both fused FT branches fire,
+    // so the ω-side staging buffer is never acquired.
     dArr4D_concrete_t _ft_buffer_w;
+
+    // Strategy A only: the ΔΠ(iω) → ΔW(iω) workspace on _comm_perm, reused every
+    // iteration. Replaces _ft_buffer_w one for one in the persistent footprint.
+    dArr4D_concrete_t _dPi_w_perm;
 
     void _init_kpq_map(THC_ERI auto& thc);
 

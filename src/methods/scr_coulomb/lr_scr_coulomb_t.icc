@@ -45,33 +45,57 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
 {
   _Timer.start("LR_W_COMPUTE_W_FULL");
 
+  // Not re-entrant: _comm_perm / _qpool_comm are move-assigned below, and the
+  // W_full(iω) handed to the caller by an earlier call — plus _dW_full_qpQ_wqPQ,
+  // _dPi_w_perm and _qpool_plan — all hold raw pointers to them. A second call
+  // would leave those pointing at a destroyed communicator. Use a fresh solver.
+  utils::check(not _W_full_built,
+               "compute_W_full_omega: may be called only once per lr_scr_coulomb_t "
+               "instance; construct a new solver for a second W_full(iω).");
+  _W_full_built = true;
+
   auto [nt_half, nqpts, NP, NQ] = dW_c_tqPQ.global_shape();
   long nproc = thc.mpi()->comm.size();
   long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
 
-  // Distribution for W_full(iω).
+  // Distribution for W_full(iω), and which of the three ω-side strategies runs.
   // ft_buffer_dist keeps w local, distributes over q, then P and Q.
   // lr_W_proc_grid distributes over w and q, then P and Q.
-  // If FT buffer has P and Q local, use it for W_full to skip the redundant redistributions.
-  // If not, use a separate lr_W_proc_grid distribution to make P and Q as local as possible.
-  auto [b_pgrid, b_bsize] =
-      scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nw_half, nqpts, NP, NQ});
-  std::array<long, 4> w_pgrid, w_bsize;
-  if (b_pgrid[2] == 1 && b_pgrid[3] == 1) {
-    w_pgrid = b_pgrid;
-    w_bsize = b_bsize;
-  } else {
-    std::tie(w_pgrid, w_bsize) = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
+  //   C: the FT buffer already has P and Q local -> reuse it for W_full and skip
+  //      the redundant redistributions.
+  //   A: the ω side runs on a q-pool-aligned permutation of the communicator, so
+  //      the two middle hops become intra-pool exchanges (lr_W_qpool_exchange.hpp).
+  //   B: neither -> the historical four-hop path.
+  // The predicate lives in lr_W_omega_layout_for so that lr_driver's memory
+  // estimate branches on exactly the same thing the runtime does.
+  utils::check(NP == NQ,
+               "compute_W_full_omega: the two aux axes must have equal length, got {} and {}",
+               NP, NQ);
+  _layout = lr_W_omega_layout_for(nproc, nqpts, nw_half, NP);
+  auto b_pgrid = _layout.b_pgrid, b_bsize = _layout.b_bsize;
+  auto w_pgrid = _layout.w_pgrid, w_bsize = _layout.w_bsize;
+
+  auto& comm = thc.mpi()->comm;
+  if (_layout.use_qpool_exchange) {
+    const long m = _layout.m, nqpools = _layout.nqpools;
+    // key is a bijection of [0, nproc) onto itself, so splitting with it as the
+    // key simply relabels the ranks.
+    const long r = comm.rank();
+    _comm_perm  = comm.split(0, (int)lr_W_qpool_key(r, m, nqpools));
+    _qpool_comm = comm.split((int)(r / m), (int)(r % m));
   }
 
   // Allocate the LR-owned FT staging buffers once (in the FT-buffer dist), then
   // thread them into every per-iteration _scr_fourier.tau_to_w / w_to_tau so they are
   // reused instead of reallocated. τ-shaped and ω-shaped; ft_buffer_dist depends
   // only on (q, P, Q), so both share b_pgrid / b_bsize.
+  // The ω-shaped one exists only under strategy B: under A and C the FT transforms
+  // straight into / out of the buffer layout and never acquires it.
   _ft_buffer_t = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
-      thc.mpi()->comm, b_pgrid, {nt_half, nqpts, NP, NQ}, b_bsize);
-  _ft_buffer_w = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
-      thc.mpi()->comm, b_pgrid, {nw_half, nqpts, NP, NQ}, b_bsize);
+      comm, b_pgrid, {nt_half, nqpts, NP, NQ}, b_bsize);
+  if (_layout.need_ft_buffer_w)
+    _ft_buffer_w = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+        comm, b_pgrid, {nw_half, nqpts, NP, NQ}, b_bsize);
 
   // FT τ → ω directly into the chosen distribution.
   // Deliberately uses a local scr_coulomb_fourier_t (not the member _scr_fourier):
@@ -83,9 +107,28 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   // Rank-uniform leak-check gate (see solve_lr_dyson_W): __app_output_level__
   // is a sentinel on non-root ranks and check_leakage is collective.
   int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
-  thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
+  comm.broadcast_n(&chk_leak, 1, 0);
   setup_ft.set_check_ft_leakage(chk_leak != 0);
-  auto dW_c_wqPQ = setup_ft.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, true);
+
+  // Under A the FT stops at the buffer layout (both fused branches then fire) and
+  // the q-pool exchange carries the data the rest of the way, onto _comm_perm.
+  // The generic redistribute cannot do this even here, one-time: its destination
+  // would live on a communicator that is only *similar* to comm.
+  auto dW_c_bqPQ = setup_ft.tau_to_w(dW_c_tqPQ,
+                                     _layout.use_qpool_exchange ? b_pgrid : w_pgrid,
+                                     _layout.use_qpool_exchange ? b_bsize : w_bsize, true);
+  memory::darray_t<local_Array_t, mpi3::communicator> dW_c_wqPQ;
+  if (_layout.use_qpool_exchange) {
+    dW_c_wqPQ = math::nda::make_distributed_array<local_Array_t>(
+        _comm_perm, w_pgrid, {nw_half, nqpts, NP, NQ}, w_bsize);
+    _Timer.start("LR_W_QPOOL_EXCHANGE");
+    _qpool_plan.build(comm, _qpool_comm, dW_c_bqPQ, dW_c_wqPQ);
+    _qpool_plan.forward(dW_c_bqPQ, dW_c_wqPQ);
+    _Timer.stop("LR_W_QPOOL_EXCHANGE");
+    dW_c_bqPQ.reset();
+  } else {
+    dW_c_wqPQ = std::move(dW_c_bqPQ);
+  }
 
   // Add bare interaction Z(q) at each (w, q) slice. PQ may be split across the
   // wq_intra subgroup, so use the sub-block version of thc.Z.
@@ -96,18 +139,25 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
 
   // q_intra_comm groups ranks that share the same q-tile (varying w, P, Q).
   // thc.Z's sub-block API uses this to allreduce the full Z across the
-  // wq subgrid before slicing to (P_rng, Q_rng).
-  mpi3::communicator q_intra_comm =
-      thc.mpi()->comm.split(q_origin, thc.mpi()->comm.rank());
+  // wq subgrid before slicing to (P_rng, Q_rng). Split off the *unpermuted* comm:
+  // thc.Z runs global collectives, and under strategy A the ranks sharing a q-tile
+  // are the contiguous block {q·m … q·m+m−1} of that communicator by construction.
+  mpi3::communicator q_intra_comm = comm.split(q_origin, comm.rank());
   utils::check(
       (long)q_intra_comm.size() == w_pgrid[0] * w_pgrid[2] * w_pgrid[3],
       "compute_W_full_omega: q_intra_comm size {} != pgrid[0]*pgrid[2]*pgrid[3] = {}",
       (long)q_intra_comm.size(), w_pgrid[0] * w_pgrid[2] * w_pgrid[3]);
 
   // q-pool id matches the convention in scr_coulomb_t::dyson_W_in_place:
-  // when q tiles are uneven, the leftover q-points sit on the trailing tiles.
+  // when q tiles are uneven, the leftover q-points sit on the leading tiles
+  // (itertools::chunk_range), so the trailing ones are the short ones.
+  // A max-reduce rather than a broadcast from rank 0: the padding loop below must
+  // run the same number of times on every rank or thc.Z's global collectives
+  // deadlock, and "rank 0 owns a maximal q-tile" holds only for a particular
+  // rank↔tile map. Under the strategy-A permutation that is no longer something
+  // to rely on, and the failure mode would be a silent hang.
   long nq_loc_max = nq_loc;
-  thc.mpi()->comm.broadcast_n(&nq_loc_max, 1, 0);
+  comm.all_reduce_in_place_n(&nq_loc_max, 1, mpi3::max<>{});
   long qpool_id = (nq_loc == nq_loc_max)
                   ? q_origin / std::max(nq_loc, 1L)
                   : (q_origin - nqpts % w_pgrid[1]) / std::max(nq_loc, 1L);
@@ -133,10 +183,35 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   app_log(2, "    - ω-side pgrid: ({}, {}, {}, {})",
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
+  if (_layout.use_qpool_exchange) {
+    app_log(2, "    - ω-side transfer: q-pool exchange on a permuted communicator (m = {})",
+            _layout.m);
+    // The exchange's whole memory price, measured rather than estimated: one
+    // peer-sized staging temp per rank, allocated in build() and never freed.
+    // lr_driver::print_memory_estimate carries the same quantity as an analytic
+    // persistent entry ((nw,nq,NP,NQ)/m); printing the real total here is what
+    // keeps the two honest.
+    long tmp_tot = _qpool_plan.temp_size();
+    comm.all_reduce_in_place_n(&tmp_tot, 1, std::plus<>{});
+    app_log(2, "    - q-pool exchange temp: {:.3f} GB ({} elements/rank)",
+            double(tmp_tot) * sizeof(ComplexType) / (1024.0*1024.0*1024.0),
+            _qpool_plan.temp_size());
+  } else {
+    app_log(2, "    - ω-side transfer: generic redistribute");
+  }
 
   // Eagerly build the Q≠Γ left operand _dW_full_qpQ_wqPQ = W_full(q+Q).
   // This is used for the Dyson equation for DeltaW at Q≠Γ.
+  // Under strategy A this runs on _comm_perm: its q-pool subgroup is then the
+  // strided set {w, w+m, …} instead of a contiguous block, which costs a little
+  // more for this one-time Alltoallv. It is a no-op at Q=Γ.
   _build_W_full_qpQ(dW_c_wqPQ, thc);
+
+  // ΔΠ(iω)/ΔW(iω) workspace on the permuted communicator, allocated once and
+  // reused by every solve_lr_dyson_W. Same shape as the _ft_buffer_w it replaces.
+  if (_layout.use_qpool_exchange)
+    _dPi_w_perm = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+        _comm_perm, w_pgrid, {nw_half, nqpts, NP, NQ}, w_bsize);
 
   _Timer.stop("LR_W_COMPUTE_W_FULL");
   return dW_c_wqPQ;
@@ -444,40 +519,86 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // --- Validate input: q-local dist ---
   utils::check_W_q_local_dist(dDeltaPi_tqPQ, "solve_lr_dyson_W(DeltaPi)");
 
-  // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
-  // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
-  // so just adopt W_full's distribution. compute_W_full_omega already chose it
-  // (fused FT-buffer layout when nproc ≤ nq, else the LR ω-side grid); tau_to_w
-  // / w_to_tau then fuse away the matching redistribute automatically whenever
-  // that layout is the FT-buffer one.
-  auto w_pgrid = dW_full_wqPQ.grid();
-  auto w_bsize = dW_full_wqPQ.block_size();
+  // The Dyson in ω space needs ΔΠ(iω) co-distributed with W_full, so the FT must
+  // land in W_full's layout. Two routes, fixed once by compute_W_full_omega:
+  //
+  //  B/C: ask the FT directly for W_full's grid. Under C that grid *is* the FT
+  //       buffer layout and both fused branches fire (2 hops); under B it is not
+  //       and the FT adds an ω-side staging buffer plus a redistribute (4 hops).
+  //  A:   ask the FT for the *buffer* layout — so both fused branches fire — and
+  //       cross to the ω-side layout with the intra-q-pool exchange, which only
+  //       moves (m−1)/m of the local block among m ranks of one node instead of
+  //       everything through the bisection.
+  const bool qpool = _layout.use_qpool_exchange;
+  auto ft_pgrid = qpool ? _layout.b_pgrid : dW_full_wqPQ.grid();
+  auto ft_bsize = qpool ? _layout.b_bsize : dW_full_wqPQ.block_size();
+  if (qpool) {
+    // The whole point of A is that the grid asked for below *is* the FT's own
+    // internal buffer grid, so both fused branches fire and no ω-side buffer or
+    // redistribute is needed. Should ft_buffer_dist ever return something else
+    // here, the FT would silently fall back to allocating a full ω-sized buffer
+    // per call plus a redistribute: slower, larger, and completely unreported.
+    auto [ft_pg, ft_bs] = scr_coulomb_fourier_t::ft_buffer_dist(
+        nproc, {nt_half, dDeltaPi_tqPQ.global_shape()[1], NP, NP});
+    utils::check(ft_pg == _layout.b_pgrid and ft_bs == _layout.b_bsize,
+                 "solve_lr_dyson_W: the FT buffer distribution ({},{},{},{}) no longer "
+                 "matches the cached strategy-A layout ({},{},{},{}); the fused FT path "
+                 "is lost.",
+                 ft_pg[0], ft_pg[1], ft_pg[2], ft_pg[3],
+                 _layout.b_pgrid[0], _layout.b_pgrid[1], _layout.b_pgrid[2], _layout.b_pgrid[3]);
+  }
+  // The ω-side staging buffer only exists under B; passing it under A/C would hand
+  // acquire_ft_buffer an unallocated array (it is never reached there, but keep the
+  // invariant that a provided buffer is a valid one).
+  auto* buffer_w = _layout.need_ft_buffer_w ? &_ft_buffer_w : nullptr;
 
-  // FT ΔΠ: τ → ω, output in LR ω-side distribution. Reuse the LR-owned staging
-  // buffers (built in compute_W_full_omega) across iterations.
+  // FT ΔΠ: τ → ω. Reuse the LR-owned staging buffers (built in
+  // compute_W_full_omega) across iterations.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true,
-                                           &_ft_buffer_t, &_ft_buffer_w);
+  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, ft_pgrid, ft_bsize, true,
+                                           &_ft_buffer_t, buffer_w);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
-  // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
+  // LR Dyson in ω-space (overwrites its argument with ΔW_c(iω)). The (q+Q)
   // operand is built once in compute_W_full_omega; thread the member cache into
   // the (stateless) Dyson. For Q=Γ, W_full(q+Q) = W_full(q) → pass dW_full_wqPQ
   // for both operands.
-  if (_is_q_gamma) {
-    lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ, dW_full_wqPQ);
+  auto run_dyson = [&](auto& dPi_wqPQ) {
+    if (_is_q_gamma) {
+      lr_dyson_W_in_place(dPi_wqPQ, dW_full_wqPQ, dW_full_wqPQ);
+    } else {
+      utils::check(_dW_full_qpQ_wqPQ.has_value(),
+                   "solve_lr_dyson_W: W_full(q+Q) not prepared for Q≠Γ "
+                   "(compute_W_full_omega must run before the SCF loop)");
+      lr_dyson_W_in_place(dPi_wqPQ, dW_full_wqPQ, *_dW_full_qpQ_wqPQ);
+    }
+  };
+
+  if (qpool) {
+    _Timer.start("LR_W_QPOOL_EXCHANGE");
+    _qpool_plan.forward(dDeltaPi_wqPQ, _dPi_w_perm);
+    _Timer.stop("LR_W_QPOOL_EXCHANGE");
+    // Free before the ΔW buffer-grid array is re-allocated below: at most one
+    // buffer-grid ω array may be live at a time, or the ω-phase transient doubles
+    // (and lr_driver::print_memory_estimate stops being true).
+    dDeltaPi_wqPQ.reset();
+
+    run_dyson(_dPi_w_perm);
+
+    dDeltaPi_wqPQ = math::nda::make_distributed_array<local_Array_t>(
+        thc.mpi()->comm, ft_pgrid, _dPi_w_perm.global_shape(), ft_bsize);
+    _Timer.start("LR_W_QPOOL_EXCHANGE");
+    _qpool_plan.backward(_dPi_w_perm, dDeltaPi_wqPQ);
+    _Timer.stop("LR_W_QPOOL_EXCHANGE");
   } else {
-    utils::check(_dW_full_qpQ_wqPQ.has_value(),
-                 "solve_lr_dyson_W: W_full(q+Q) not prepared for Q≠Γ "
-                 "(compute_W_full_omega must run before the SCF loop)");
-    lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ, *_dW_full_qpQ_wqPQ);
+    run_dyson(dDeltaPi_wqPQ);
   }
 
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
   dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true,
-                                      &_ft_buffer_t, &_ft_buffer_w);
+                                      &_ft_buffer_t, buffer_w);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");
