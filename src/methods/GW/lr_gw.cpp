@@ -19,6 +19,7 @@
  */
 
 
+#include <memory>
 #include <optional>
 
 #include "mpi3/communicator.hpp"
@@ -59,11 +60,9 @@ namespace methods {
                       "SIGMA_FT_COEFF", "SIGMA_W_COPY",
                       "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
                       "SIGMA_DIV_CORR",
-                      "SIGMA_A2P_SETZERO", "SIGMA_A2P_PREDIV",
                       "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM",
                       "SIGMA_A2P_SKEW", "SIGMA_A2P_REDUCE",
-                      "SIGMA_A2P_AXPY", "SIGMA_A2P_SHMREDUCE",
-                      "SIGMA_A2P_ACCUM"}) {
+                      "SIGMA_A2P_AXPY"}) {
         _Timer.add(v);
       }
     }
@@ -219,7 +218,6 @@ namespace methods {
       }
       using local_Array_4D_t = memory::array<HOST_MEMORY, ComplexType, 4>;
       using math::nda::make_distributed_array;
-      using Arrv_4D_t = nda::array_view<ComplexType, 4>;
 
       auto mpi = thc.mpi();
       auto MF = thc.MF();
@@ -246,8 +244,11 @@ namespace methods {
       _dSigma_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
           *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
           {1, 1, P_bs, Q_bs}));
-      _sSigma_skij.emplace(math::shm::make_shared_array<Arrv_4D_t>(
-          *_tau_mpi, std::array<long, 4>{ns, nk_ibz, nbnd, nbnd}));
+
+      // aux_to_primary_accumulate flattens (s,k) of the aux and primary operands
+      // onto a common leading index, so the two k-axes must have equal extent.
+      utils::check(nk_ibz == nkpts,
+                   "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
@@ -401,7 +402,6 @@ namespace methods {
       auto& tau_comm = *_tau_comm;
       auto& dG_skPQ = *_dG_skPQ;
       auto& dSigma_sRPQ = *_dSigma_skPQ;
-      auto& sSigma_skij = *_sSigma_skij;
       auto& ft_buffer = _ft_buffer;
       auto& W2_tau_RPQ = _W2_tau_RPQ;
       // gemm-path coefficients; engaged only when the FFT optionals are empty
@@ -409,6 +409,17 @@ namespace methods {
       auto& opt_sf_kR = _sf_kR;
       auto& opt_sf_qR = _sf_qR;
       _Timer.stop("SIGMA_ALLOC");
+
+      // aux_to_primary_accumulate reduces onto the root of the sub-communicator
+      // sharing an (s,k) block. With Σ undivided along (s,k) on _tau_comm that
+      // sub-communicator is _tau_comm itself, so the single writer of each τ slab
+      // of ΔΣ is _tau_comm rank 0 — the premise of the final all_reduce_parallel.
+      utils::check(dSigma_sRPQ.grid()[0] == 1 and dSigma_sRPQ.grid()[1] == 1 and
+                   dSigma_sRPQ.communicator() == std::addressof(tau_comm),
+                   "lr_gw::_eval_sigma_Rspace: Σ must be undivided along (s,k) on _tau_comm "
+                   "(pgrid = ({},{},{},{})).",
+                   dSigma_sRPQ.grid()[0], dSigma_sRPQ.grid()[1],
+                   dSigma_sRPQ.grid()[2], dSigma_sRPQ.grid()[3]);
 
       // Hadamard product lambda
       auto neg_prod = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
@@ -544,27 +555,31 @@ namespace methods {
           auto& dSigma_skPQ = dSigma_sRPQ;  // now in k-space after the R→k FT
 
           // --- aux_to_primary on accumulated Sigma (once) ---
+          auto DeltaSigma_slab = sDeltaSigma_tskij.local()(it_out, nda::ellipsis{});
+          const bool add_ibc = (ibc && ibc->sDeltaSigma_ibc_tskij.has_value());
+
+          // The IBC term lands on the destination after the transform, so the two
+          // accumulations regroup as (dest + Σ) + ibc; that reproduces
+          // dest + (Σ + ibc) only for dest == 0.
+          if (add_ibc && tau_comm.rank() == 0) {
+            ComplexType const* dest_p = DeltaSigma_slab.data();
+            bool dest_is_zero = true;
+            for (long i = 0; i < DeltaSigma_slab.size(); ++i)
+              if (dest_p[i] != ComplexType(0.0)) { dest_is_zero = false; break; }
+            utils::check(dest_is_zero,
+                         "lr_gw::_eval_sigma_Rspace: ΔΣ(it={}) must be zero before the IBC "
+                         "accumulation.", it_out);
+          }
+
           _Timer.start("SIGMA_AUX_TO_PRIM");
-          _Timer.start("SIGMA_A2P_SETZERO");
-          sSigma_skij.set_zero();
-          _Timer.stop("SIGMA_A2P_SETZERO");
-          lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
-                                      sSigma_skij, thc, MF->ks_to_k(0), _kpq_map,
-                                      &_Timer);
+          lr_thc_comm::aux_to_primary_accumulate(0, 0, ComplexType(1.0), dSigma_skPQ,
+                                                 DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
+                                                 nullptr, &_Timer);
 
           // Add precomputed IBC correction for this τ-point
-          if (ibc && ibc->sDeltaSigma_ibc_tskij.has_value()) {
-            if (sSigma_skij.node_comm()->root()) {
-              sSigma_skij.local() += ibc->sDeltaSigma_ibc_tskij->local()(it_out, nda::ellipsis{});
-            }
-            sSigma_skij.win().fence();
+          if (add_ibc && tau_comm.rank() == 0) {
+            DeltaSigma_slab += ibc->sDeltaSigma_ibc_tskij->local()(it_out, nda::ellipsis{});
           }
-
-          _Timer.start("SIGMA_A2P_ACCUM");
-          if (tau_comm.rank() == 0) {
-            sDeltaSigma_tskij.local()(it_out, nda::ellipsis{}) += sSigma_skij.local();
-          }
-          _Timer.stop("SIGMA_A2P_ACCUM");
           _Timer.stop("SIGMA_AUX_TO_PRIM");
         } // pass
       } // it_local
@@ -572,9 +587,10 @@ namespace methods {
       // Synchronize and distribute across all nodes
       _Timer.start("SIGMA_FINAL_REDUCE");
       sDeltaSigma_tskij.win().fence();
-      // Every τ block is written by exactly one rank globally (tau_comm root,
-      // disjoint τ ranges across pools), so the node-parallel reduction is
-      // bit-identical to all_reduce() here.
+      // Every τ block is written by exactly one rank globally — the reduction root
+      // of aux_to_primary_accumulate, which is _tau_comm rank 0 (checked above),
+      // and τ ranges are disjoint across pools. The node-parallel reduction is
+      // therefore bit-identical to all_reduce() here.
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
 
