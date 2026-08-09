@@ -193,7 +193,9 @@ namespace methods {
     /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
     /// The R-space total leads; transpose/div-correction siblings live outside
     /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
-    /// to the driver's "LR GW Sigma (total)".
+    /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
+    /// Aux->Primary breaks that one line down and is already counted in it —
+    /// never add those lines to the sum.
     inline void print_subclocks(int level, const std::string& indent) {
       app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
@@ -204,6 +206,15 @@ namespace methods {
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
       app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
+      app_log(level, "{0}    - Set zero (Σ):             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SETZERO"), _Timer.number_of_calls("SIGMA_A2P_SETZERO"));
+      app_log(level, "{0}    - Pre-divide:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_PREDIV"), _Timer.number_of_calls("SIGMA_A2P_PREDIV"));
+      app_log(level, "{0}    - Buffer alloc:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ALLOC"), _Timer.number_of_calls("SIGMA_A2P_ALLOC"));
+      app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_GEMM"), _Timer.number_of_calls("SIGMA_A2P_GEMM"));
+      app_log(level, "{0}    - Skew barrier:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SKEW"), _Timer.number_of_calls("SIGMA_A2P_SKEW"));
+      app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_REDUCE"), _Timer.number_of_calls("SIGMA_A2P_REDUCE"));
+      app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_AXPY"), _Timer.number_of_calls("SIGMA_A2P_AXPY"));
+      app_log(level, "{0}    - Shm reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SHMREDUCE"), _Timer.number_of_calls("SIGMA_A2P_SHMREDUCE"));
+      app_log(level, "{0}    - Accum into ΔΣ:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ACCUM"), _Timer.number_of_calls("SIGMA_A2P_ACCUM"));
       app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FINAL_REDUCE"), _Timer.number_of_calls("SIGMA_FINAL_REDUCE"));
       app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_DIV_CORR"), _Timer.number_of_calls("SIGMA_DIV_CORR"));
     }

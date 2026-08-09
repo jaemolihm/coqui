@@ -58,7 +58,12 @@ namespace methods {
                       "SIGMA_HADPROD_R", "SIGMA_AUX_TO_PRIM",
                       "SIGMA_FT_COEFF", "SIGMA_W_COPY",
                       "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
-                      "SIGMA_DIV_CORR"}) {
+                      "SIGMA_DIV_CORR",
+                      "SIGMA_A2P_SETZERO", "SIGMA_A2P_PREDIV",
+                      "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM",
+                      "SIGMA_A2P_SKEW", "SIGMA_A2P_REDUCE",
+                      "SIGMA_A2P_AXPY", "SIGMA_A2P_SHMREDUCE",
+                      "SIGMA_A2P_ACCUM"}) {
         _Timer.add(v);
       }
     }
@@ -533,9 +538,12 @@ namespace methods {
 
           // --- aux_to_primary on accumulated Sigma (once) ---
           _Timer.start("SIGMA_AUX_TO_PRIM");
+          _Timer.start("SIGMA_A2P_SETZERO");
           sSigma_skij.set_zero();
+          _Timer.stop("SIGMA_A2P_SETZERO");
           lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
-                                      sSigma_skij, thc, MF->ks_to_k(0), _kpq_map);
+                                      sSigma_skij, thc, MF->ks_to_k(0), _kpq_map,
+                                      &_Timer);
 
           // Add precomputed IBC correction for this τ-point
           if (ibc && ibc->sDeltaSigma_ibc_tskij.has_value()) {
@@ -545,9 +553,11 @@ namespace methods {
             sSigma_skij.win().fence();
           }
 
+          _Timer.start("SIGMA_A2P_ACCUM");
           if (tau_comm.rank() == 0) {
             sDeltaSigma_tskij.local()(it_out, nda::ellipsis{}) += sSigma_skij.local();
           }
+          _Timer.stop("SIGMA_A2P_ACCUM");
           _Timer.stop("SIGMA_AUX_TO_PRIM");
         } // pass
       } // it_local
