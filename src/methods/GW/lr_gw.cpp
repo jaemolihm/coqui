@@ -249,6 +249,7 @@ namespace methods {
       // onto a common leading index, so the two k-axes must have equal extent.
       utils::check(nk_ibz == nkpts,
                    "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
+      _a2p_buf.resize(ns * nkpts, nbnd, nbnd);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
@@ -574,7 +575,7 @@ namespace methods {
           _Timer.start("SIGMA_AUX_TO_PRIM");
           lr_thc_comm::aux_to_primary_accumulate(0, 0, ComplexType(1.0), dSigma_skPQ,
                                                  DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
-                                                 nullptr, &_Timer);
+                                                 &_a2p_buf, &_Timer);
 
           // Add precomputed IBC correction for this τ-point
           if (add_ibc && tau_comm.rank() == 0) {

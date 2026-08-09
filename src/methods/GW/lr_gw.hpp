@@ -247,6 +247,14 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
+      // Reduction buffer handed to aux_to_primary_accumulate. nda::array
+      // zero-initializes, so leaving it to the kernel costs a fresh
+      // (ns·nk, nbnd, nbnd) mapping and its first-touch page faults on every one
+      // of the 2·nt_loc calls per Σ evaluation. A function-static buffer would
+      // hide the lifetime, never free, and not show in print_memory_estimate;
+      // making lr_thc_comm an instantiated object would touch all of its call
+      // sites for one buffer.
+      nda::array<ComplexType, 3> _a2p_buf;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(thc_reader_t& thc);

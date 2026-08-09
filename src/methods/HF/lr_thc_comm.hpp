@@ -575,7 +575,10 @@ namespace methods {
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
-        // buffer array to hold local (t,s,k) slices of O_iab for reduction
+        // Buffer array to hold local (t,s,k) slices of O_iab for reduction. It
+        // needs no zeroing and may be a caller-owned buffer reused across calls:
+        // the loop below closes every (i,·,·) block with a 3-argument gemm, i.e.
+        // β = 0, so the whole buffer is assigned before it is read.
         nda::array<ComplexType, 3> O_buf_owned;
         if (scratch) {
           utils::check(scratch->shape() == shape_t<3>{(long)dim0, (long)nbnd, (long)nbnd},
