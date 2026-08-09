@@ -209,11 +209,18 @@ namespace methods {
           auto O_Iab_loc = O_Iab.local()(t_rng, s_rng, k_rng, nda::ellipsis{});
           auto O_IPQ_loc = O_IPQ.local();
 
-          // Setup wq_intra_comm
+          // Setup wq_intra_comm. The split groups the ranks sharing a (t,s,k)
+          // block; when the leading axes are undivided every rank carries the
+          // same color and the split just reproduces gcomm, so skip it.
           communicator_t *gcomm = O_IPQ.communicator();
-          int color = t_org * ns * nkpts + s_org * nkpts + k_org;
-          int key = gcomm->rank();
-          communicator_t dim0_intra_comm = gcomm->split(color, key);
+          const bool trivial_split = (pgrid[0] * pgrid[1] * pgrid[2] == 1);
+          communicator_t split_comm;
+          if (not trivial_split) {
+            int color = t_org * ns * nkpts + s_org * nkpts + k_org;
+            int key = gcomm->rank();
+            split_comm = gcomm->split(color, key);
+          }
+          communicator_t &dim0_intra_comm = trivial_split ? *gcomm : split_comm;
           utils::check(dim0_intra_comm.size() == pgrid[3] * pgrid[4],
                        "dim0_intra_comm.size() != pgrid[3]*pgrid[4]");
 
@@ -233,11 +240,18 @@ namespace methods {
           auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
           auto O_IPQ_loc = O_IPQ.local();
 
-          // Setup q_intra_comm
+          // Setup q_intra_comm. The split groups the ranks sharing an (s,k)
+          // block; when the leading axes are undivided every rank carries the
+          // same color and the split just reproduces gcomm, so skip it.
           communicator_t *gcomm = O_IPQ.communicator();
-          int color = s_org * nkpts + k_org;
-          int key = gcomm->rank();
-          communicator_t dim0_intra_comm = gcomm->split(color, key);
+          const bool trivial_split = (pgrid[0] * pgrid[1] == 1);
+          communicator_t split_comm;
+          if (not trivial_split) {
+            int color = s_org * nkpts + k_org;
+            int key = gcomm->rank();
+            split_comm = gcomm->split(color, key);
+          }
+          communicator_t &dim0_intra_comm = trivial_split ? *gcomm : split_comm;
           utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
                        "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
 
@@ -559,7 +573,12 @@ namespace methods {
         auto O_iPQ_3D = nda::reshape(O_tskPQ, shape_t<3>{dim0, NP_loc, NQ_loc});
         auto O_iab_3D = nda::reshape(O_tskab, shape_t<3>{dim0, nbnd, nbnd});
 
-        nda::array<ComplexType, 2> Ask_aQ(nbnd, NQ_loc);
+        // X† · O_PQ · X can be associated either way. Both cost nbnd·NP_loc·NQ_loc
+        // for the first gemm plus nbnd² times the extent contracted last, so
+        // contract the larger of the two aux extents first.
+        const bool q_first = (NP_loc <= NQ_loc);
+        nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
+                                           q_first ? nbnd : NQ_loc);
 
         // buffer array to hold local (t,s,k) slices of O_iab for reduction
         nda::array<ComplexType, 3> O_buf_iab(dim0, nbnd, nbnd);
@@ -572,11 +591,17 @@ namespace methods {
           // === LR change: left X uses kp_map(k)+q, right X uses kp_map(k) ===
           auto Xsk_Pa_l = thc.X(s, ip, kpq_map(kp_map(k)));
           auto Xsk_Pa_r = thc.X(s, iq, kp_map(k));
-          nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_aQ);
 
-          // Osk_ab = Ask_aQ * Xsk_Qb
           auto Oab_i = O_buf_iab(i, all, all);
-          nda::blas::gemm(Ask_aQ, Xsk_Pa_r(Q_rng, all), Oab_i);
+          if (q_first) {
+            // Ask_Pb = Osk_PQ * Xsk_Qb;  Osk_ab = conj(Xsk_Pa) * Ask_Pb
+            nda::blas::gemm(O_iPQ_3D(i, all, all), Xsk_Pa_r(Q_rng, all), Ask_buf);
+            nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), Ask_buf, Oab_i);
+          } else {
+            // Ask_aQ = conj(Xsk_Pa) * Osk_PQ;  Osk_ab = Ask_aQ * Xsk_Qb
+            nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_buf);
+            nda::blas::gemm(Ask_buf, Xsk_Pa_r(Q_rng, all), Oab_i);
+          }
         } // i
 
         // Accumulate all (t,s,k) slices locally and reduce once.
