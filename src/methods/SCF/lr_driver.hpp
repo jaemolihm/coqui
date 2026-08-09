@@ -248,14 +248,17 @@ public:
    * subclocks (indented). The Pi/W/Sigma solvers live in run_lr's scope, so
    * they are passed in as pointers (null = solver not used, subclocks skipped).
    *
-   * A split-kernel run has two Σ channels with their own solver and their own
-   * "_PERT" clocks; `gw_solver_pert` non-null adds that second block, so the
-   * cost of the perturbative kernel can be read off separately.
+   * The report has the same lines for every kernel. A split kernel evaluates ΔΣ
+   * on several lr_gw instances (`gw_solver_pert` for the perturbative channel,
+   * `gw_solver_term2` for a split G·ΔW term) against their own clock keys; all
+   * of them are summed into the single Σ line and Σ table, so a split run's
+   * report stays comparable line by line with a one-step run's.
    */
   void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
                     solvers::lr_scr_coulomb_t* scr_solver = nullptr,
                     solvers::lr_gw* gw_solver = nullptr,
-                    solvers::lr_gw* gw_solver_pert = nullptr);
+                    solvers::lr_gw* gw_solver_pert = nullptr,
+                    solvers::lr_gw* gw_solver_term2 = nullptr);
 
   // Accessors
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }

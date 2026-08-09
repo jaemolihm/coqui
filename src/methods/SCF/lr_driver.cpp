@@ -1040,7 +1040,7 @@ std::tuple<int, double> lr_driver::run_lr(
   // Final hierarchical timer report (printed once, at verbosity >= 2).
   // Per-step solver prints inside the loop are gated to verbosity >= 3.
   print_timers(lr_pi_solver.get(), lr_scr_solver.get(),
-               lr_gw_solver.get(), lr_gw_solver_pert.get());
+               lr_gw_solver.get(), lr_gw_solver_pert.get(), lr_gw_solver2.get());
 
   return std::make_tuple(iter, Delta_mu);
 }
@@ -1278,52 +1278,46 @@ void lr_driver::print_setup_timers() {
 void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
                              solvers::lr_scr_coulomb_t* scr_solver,
                              solvers::lr_gw* gw_solver,
-                             solvers::lr_gw* gw_solver_pert) {
+                             solvers::lr_gw* gw_solver_pert,
+                             solvers::lr_gw* gw_solver_term2) {
   // Driver totals in execution order, each followed by the corresponding
   // solver's subclocks (deeper indent). Solver pointers may be null when the
   // step was not active; subclocks are then skipped.
+  //
+  // The report has the same shape for every kernel. Splitting the kernel splits
+  // an evaluator across several instances and clock keys, but that is an
+  // implementation detail of how ΔF/ΔΣ is assembled, not a different
+  // measurement: every line below sums over all of a step's channels. Lines a
+  // given run never exercises print as 0.000 sec / 0 calls rather than
+  // disappearing, so two runs' reports stay directly comparable line by line.
   const std::string sub_indent = "        ";
+  auto sec = [&](const char* a, const char* b) {
+    return _Timer.elapsed(a) + _Timer.elapsed(b);
+  };
+  auto cnt = [&](const char* a, const char* b) {
+    return _Timer.number_of_calls(a) + _Timer.number_of_calls(b);
+  };
   app_log(2, "\n  LR_DRIVER timers");
   app_log(2, "  -----------------");
   app_log(2, "    Total LR SCF:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SCF"), _Timer.number_of_calls("LR_SCF"));
   app_log(2, "      - LR Driver Setup:        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP"), _Timer.number_of_calls("LR_DRIVER_SETUP"));
   app_log(2, "      - LR Dyson (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
   _lr_dyson.print_subclocks(2, sub_indent);
-  app_log(2, "      - LR HF (total):          {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF"), _Timer.number_of_calls("LR_HF"));
+  app_log(2, "      - LR HF (total):          {0:8.3f} sec  {1:4d} calls", sec("LR_HF", "LR_HF_PERT"), cnt("LR_HF", "LR_HF_PERT"));
   if (_lr_hf) _lr_hf->print_subclocks(2, sub_indent);
-  app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_PI"), _Timer.number_of_calls("LR_GW_PI"));
+  app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", sec("LR_GW_PI", "LR_GW_PI_PERT"), cnt("LR_GW_PI", "LR_GW_PI_PERT"));
   if (pi_solver) pi_solver->print_subclocks(2, sub_indent);
-  app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W"), _Timer.number_of_calls("LR_GW_W"));
+  app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", sec("LR_GW_W", "LR_GW_W_PERT"), cnt("LR_GW_W", "LR_GW_W_PERT"));
   if (scr_solver) scr_solver->print_subclocks(2, sub_indent);
-  app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA"), _Timer.number_of_calls("LR_GW_SIGMA"));
-  app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_DW_TRANSPOSE"), _Timer.number_of_calls("LR_GW_DW_TRANSPOSE"));
-  if (gw_solver) gw_solver->print_subclocks(2, sub_indent);
+  app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", sec("LR_GW_SIGMA", "LR_GW_SIGMA_PERT"), cnt("LR_GW_SIGMA", "LR_GW_SIGMA_PERT"));
+  app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", sec("LR_GW_DW_TRANSPOSE", "LR_GW_DW_TRANSPOSE_PERT"), cnt("LR_GW_DW_TRANSPOSE", "LR_GW_DW_TRANSPOSE_PERT"));
+  if (gw_solver) gw_solver->print_subclocks(2, sub_indent, {gw_solver_pert, gw_solver_term2});
   app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
   app_log(2, "      - LR qpGW static (total): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_QPGW_STATIC"), _Timer.number_of_calls("LR_QPGW_STATIC"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_ITER_ALG"), _Timer.number_of_calls("LR_ITER_ALG"));
+  app_log(2, "      - LR Totals (ΔF/ΔΣ):      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_TOTALS"), _Timer.number_of_calls("LR_TOTALS"));
   app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
   app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));
-
-  // Perturbative channel of a split-kernel run. Its evaluators are the same
-  // ones, on their own clocks: the block above is then the per-iteration cost
-  // of K_sc, this one the once-per-stage cost of K_pert, and their ratio is the
-  // cost argument for the split. LR_TOTALS is the ΔF/ΔΣ = sc + pert rebuild.
-  const bool has_pert_clocks =
-      _Timer.number_of_calls("LR_HF_PERT") > 0 ||
-      _Timer.number_of_calls("LR_GW_SIGMA_PERT") > 0;
-  if (has_pert_clocks) {
-    app_log(2, "      -- perturbative channel (K_pert) --");
-    app_log(2, "      - LR HF pert (total):     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_HF_PERT"), _Timer.number_of_calls("LR_HF_PERT"));
-    // The Π and W solvers are single instances shared by both channels, so
-    // their subclocks are printed once, above; only the driver-level Π/W totals
-    // separate here.
-    app_log(2, "      - LR GW Pi pert:          {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_PI_PERT"), _Timer.number_of_calls("LR_GW_PI_PERT"));
-    app_log(2, "      - LR GW W pert:           {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W_PERT"), _Timer.number_of_calls("LR_GW_W_PERT"));
-    app_log(2, "      - LR GW Sigma pert:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_PERT"), _Timer.number_of_calls("LR_GW_SIGMA_PERT"));
-    app_log(2, "          - ΔW transpose (t,q)->(q,t):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_DW_TRANSPOSE_PERT"), _Timer.number_of_calls("LR_GW_DW_TRANSPOSE_PERT"));
-    if (gw_solver_pert) gw_solver_pert->print_subclocks(2, sub_indent);
-    app_log(2, "      - LR totals (sc + pert):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_TOTALS"), _Timer.number_of_calls("LR_TOTALS"));
-  }
   app_log(2, "");
 }
 
