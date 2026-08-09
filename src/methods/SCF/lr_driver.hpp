@@ -115,6 +115,51 @@ struct lr_qp_static_params {
 };
 
 /**
+ * Acceleration of the OUTER (perturbative-source) iteration of a split-kernel
+ * run. The outer sequence is a Picard iteration on an affine map,
+ *
+ *   S_0 = 0,   S_{m+1} = K_pert[ (1 - χ₀K_sc)⁻¹ χ₀ (ΔH0 + S_m) ],
+ *
+ * so the same accelerator the inner SCF uses applies to it verbatim. The outer
+ * accelerator is a separate object with its own subspace, history and warmup —
+ * nothing is shared with the inner `lr_diis`.
+ *
+ * With the defaults (alg "damping", tol = 0) nothing is allocated and no new
+ * code runs: the outer loop is a plain Neumann series and `two_step_order`
+ * counts truncation orders.
+ *
+ * With acceleration on, ORDER COUNTING IS ABANDONED: the source is a
+ * combination of previous sources, so the result is an accelerated iterate
+ * toward the FULL two_step_pert_method fixed point and `two_step_order` is an
+ * iteration cap, not a truncation order.
+ */
+struct lr_outer_accel_params {
+  /// alg, subspace depth and warmup of the OUTER accelerator. "damping" means
+  /// no acceleration; `mixing` only damps the accelerator's own warmup steps.
+  lr_iter_params iter;
+  /// > 0 switches the outer loop from "run exactly pert_order stages" to
+  /// "iterate until the stage-to-stage ‖ΔDm‖ change is below tol, capped at
+  /// pert_order stages".
+  double tol = 0.0;
+  /// History vectors required before the outer DIIS extrapolates (see lr_diis).
+  /// 2 puts the first extrapolation at the second outer step.
+  size_t min_subsp = 2;
+
+  /// True when the outer loop is accelerated or tolerance-driven, i.e. when the
+  /// run is no longer an order-`pert_order` truncation. Single source of truth
+  /// for the buffers, the logging and the checkpoint provenance fields.
+  bool active() const { return iter.alg == "DIIS" || tol > 0.0; }
+};
+
+/// Per-node footprint of one lr_diis history: 2 vectors (trial + residual) per
+/// subspace entry, of the quantities the accelerator actually stores.
+struct lr_diis_hist_t {
+  long depth = 0;     ///< max_subsp_size; 0 = no history (accelerator off)
+  long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities stored per entry
+  long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per entry
+};
+
+/**
  * @class lr_driver
  * @brief Driver for self-consistent Linear Response calculations
  *
@@ -191,6 +236,13 @@ public:
    *                              direct channel, i.e. use (V + Vxc)(q) in ΔJ.
    *                              Requires include_hartree and a THC carrying Vxc;
    *                              rejected together with include_exchange.
+   * @param outer_accel        - [INPUT] Acceleration of the outer (perturbative
+   *                              source) iteration; null or default-valued
+   *                              leaves the plain Neumann series untouched.
+   *                              Requires a split-kernel run.
+   * @param n_pert_applied_out - [OUTPUT] If non-null, the number of K_pert
+   *                              evaluations actually made. With an outer
+   *                              tolerance this is not pert_order.
    * @return Tuple of (number of iterations, final Δμ)
    */
   template<THC_ERI THC_t, typename dW_t>
@@ -218,7 +270,9 @@ public:
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
       nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      bool include_xc = false);
+      bool include_xc = false,
+      const lr_outer_accel_params* outer_accel = nullptr,
+      int* n_pert_applied_out = nullptr);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -227,11 +281,20 @@ public:
    * arrays (~ nk·nt·NP²), plus the per-iteration transients. Called once at the
    * top of run_lr so the layout can be inspected before the arrays allocate.
    *
-   * `n_extra_sigma` counts the additional ΔΣ-sized shared arrays a split-kernel
-   * run allocates on top of the standard (total + previous) pair.
+   * `extra_sigma` names the additional ΔΣ-sized shared arrays a split-kernel
+   * run allocates on top of the standard (total + previous) pair: the
+   * per-channel buffers and the outer accelerator's previous-source buffer.
+   *
+   * `inner_hist` / `outer_hist` are the DIIS histories of the inner SCF and of
+   * the outer (split-kernel source) loop. Each subspace entry holds a trial AND
+   * a residual vector, so a depth-d history is 2d arrays per node — at the
+   * default inner depth this dominates every other LR array at production
+   * sizes, which is why it is listed rather than left implicit.
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
-                             long n_extra_sigma);
+                             std::vector<std::string> const& extra_sigma = {},
+                             lr_diis_hist_t inner_hist = {},
+                             lr_diis_hist_t outer_hist = {});
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large

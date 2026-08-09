@@ -83,10 +83,22 @@ public:
   using Array_5D = nda::array<ComplexType, 5>;
   using Vec1D    = nda::array<ComplexType, 1>;
 
-  lr_diis(size_t max_subsp_size, size_t warmup_iter, double mixing)
+  /**
+   * @param max_subsp_size - maximum number of history vectors kept
+   * @param warmup_iter    - damping-only steps before extrapolation is allowed
+   * @param mixing         - damping factor used while in warmup (>= 1 is a no-op)
+   * @param min_subsp      - history vectors required before extrapolating,
+   *                         counted AFTER the current step is stored. 3 (the
+   *                         default) puts the first extrapolation on the third
+   *                         call; 2 enables a two-term (secant / Aitken) step
+   *                         at the second call.
+   */
+  lr_diis(size_t max_subsp_size, size_t warmup_iter, double mixing,
+          size_t min_subsp = 3)
       : _max_subsp_size(max_subsp_size),
         _warmup_iter(warmup_iter),
         _mixing(mixing),
+        _min_subsp(min_subsp),
         _B(0, 0) {}
 
   /**
@@ -152,9 +164,6 @@ public:
       resS = Vec1D{S_loc - S_prev_loc};
     }
 
-    // Decide warmup BEFORE storing (need >= 2 prior vectors to extrapolate).
-    const bool warmup = (iter <= static_cast<int>(_warmup_iter) + 1 || _xF.size() < 2);
-
     // Store this rank's slices, then update B (one all_reduce over comm).
     _xF.push_back(std::move(xF));
     _resF.push_back(std::move(resF));
@@ -162,6 +171,10 @@ public:
       _xS.push_back(std::move(xS));
       _resS.push_back(std::move(resS));
     }
+
+    // Warmup gate, evaluated on the subspace INCLUDING the step just stored.
+    const bool warmup =
+        (iter <= static_cast<int>(_warmup_iter) + 1 || _xF.size() < _min_subsp);
 
     update_B(comm, has_sigma);
 
@@ -178,6 +191,11 @@ public:
 
     double c_norm = 0.0;
     for (long i = 0; i < C.size(); ++i) c_norm += std::abs(C(i));
+
+    // Σ|c_i| bounds how much the extrapolation amplifies the error of the
+    // vectors it combines; it is the diagnostic for an accelerator that is
+    // fed noisy (e.g. only loosely converged) iterates.
+    app_log(3, "    DIIS: sum|c_i| = {:.3e}", c_norm);
 
     if (c_norm < 1e-14) {
       app_log(2, "    DIIS: extrapolation failed (ill-conditioned B) -> fallback to damping");
@@ -199,6 +217,7 @@ private:
   size_t _max_subsp_size;
   size_t _warmup_iter;
   double _mixing;
+  size_t _min_subsp;
   // History stores only THIS rank's contiguous element-slice of each flattened
   // trial / residual vector (distributed across comm), not the full arrays.
   std::vector<Vec1D> _xF, _resF;   // ΔF trial / residual slices

@@ -1314,6 +1314,26 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   auto two_step_pert_method = io::get_value_with_default<std::string>(pt, "two_step_pert_method", "");
   auto two_step_order = io::get_value_with_default<long>(pt, "two_step_order", 1);
 
+  // Acceleration of the OUTER (perturbative-source) iteration. The outer
+  // sequence is a Picard iteration on an affine map, so the same accelerator
+  // the inner SCF uses applies to it — as a second, fully independent instance.
+  // Defaults reproduce the plain Neumann series exactly.
+  auto two_step_outer_alg =
+      io::get_value_with_default<std::string>(pt, "two_step_outer_alg", "damping");
+  auto two_step_outer_mixing =
+      io::get_value_with_default<double>(pt, "two_step_outer_mixing", 1.0);
+  auto two_step_outer_subsp =
+      io::get_value_with_default<long>(pt, "two_step_outer_subsp", 3);
+  auto two_step_outer_warmup =
+      io::get_value_with_default<long>(pt, "two_step_outer_warmup", 0);
+  auto two_step_outer_tol =
+      io::get_value_with_default<double>(pt, "two_step_outer_tol", 0.0);
+  // History vectors required before the outer DIIS extrapolates. 2 puts the
+  // first extrapolation at the second outer step, which on a short sequence
+  // saves a whole expensive kernel evaluation.
+  auto two_step_outer_min_subsp =
+      io::get_value_with_default<long>(pt, "two_step_outer_min_subsp", 2);
+
   auto gw_mode_of = [](lr_kernel_spec const& s) {
     return s.sigma_G_dW ? lr_gw_update_mode::full
          : s.sigma_dG_W ? lr_gw_update_mode::fixed_W
@@ -1427,6 +1447,45 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
             sc_kernel.to_string(), two_step_sc_method,
             pert_kernel.to_string(), pert_order);
   }
+
+  // Outer-loop acceleration: validate, and reject a non-default outer key on a
+  // run that has no outer loop rather than silently ignoring it.
+  const bool outer_is_default =
+      two_step_outer_alg == "damping" && two_step_outer_mixing >= 1.0 &&
+      two_step_outer_subsp == 3 && two_step_outer_warmup == 0 &&
+      two_step_outer_tol == 0.0 && two_step_outer_min_subsp == 2;
+  utils::check(lr_two_step || outer_is_default,
+               "run_lr_calc: the two_step_outer_* keys require lr_two_step = true; "
+               "there is no outer (perturbative-source) loop to accelerate otherwise.");
+  utils::check(two_step_outer_subsp >= 2,
+               "run_lr_calc: two_step_outer_subsp must be >= 2, got {}.",
+               two_step_outer_subsp);
+  utils::check(two_step_outer_min_subsp >= 2 &&
+               two_step_outer_min_subsp <= two_step_outer_subsp,
+               "run_lr_calc: two_step_outer_min_subsp must be in [2, "
+               "two_step_outer_subsp = {}], got {}.",
+               two_step_outer_subsp, two_step_outer_min_subsp);
+  utils::check(two_step_outer_warmup >= 0,
+               "run_lr_calc: two_step_outer_warmup must be >= 0, got {}.",
+               two_step_outer_warmup);
+  utils::check(two_step_outer_tol >= 0.0,
+               "run_lr_calc: two_step_outer_tol must be >= 0, got {}.",
+               two_step_outer_tol);
+  // The outer accelerator does not damp: `mixing` only affects its warmup
+  // steps, so a damping-only request would silently do nothing.
+  utils::check(two_step_outer_alg == "DIIS" || two_step_outer_mixing >= 1.0,
+               "run_lr_calc: two_step_outer_mixing = {} < 1 requires "
+               "two_step_outer_alg = 'DIIS'; the outer loop has no damping-only "
+               "mode.", two_step_outer_mixing);
+
+  lr_outer_accel_params outer_params;
+  outer_params.iter.alg = two_step_outer_alg;
+  outer_params.iter.mixing = two_step_outer_mixing;
+  outer_params.iter.max_subsp_size = static_cast<size_t>(two_step_outer_subsp);
+  outer_params.iter.diis_warmup = static_cast<size_t>(two_step_outer_warmup);
+  outer_params.tol = two_step_outer_tol;
+  outer_params.min_subsp = static_cast<size_t>(two_step_outer_min_subsp);
+  const bool outer_active = lr_two_step && outer_params.active();
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1741,6 +1800,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
+  // K_pert evaluations actually made. With an outer tolerance this is not
+  // two_step_order, and it is the cost figure a downstream reader needs.
+  int n_pert_applied = 0;
+
   auto [niter, Delta_mu] = driver.run_lr(
       lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
       lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -1753,7 +1816,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr,
       output_aux_fock ? &DeltaF_ibc_skij : nullptr,
       output_aux_fock ? &F_PQ_skij : nullptr,
-      output_aux_fock ? &DeltaF_PQ_skij : nullptr, include_xc);
+      output_aux_fock ? &DeltaF_PQ_skij : nullptr, include_xc,
+      lr_two_step ? &outer_params : nullptr, &n_pert_applied);
   lr_state.Delta_mu.emplace(Delta_mu);
   mpi->comm.barrier();
 
@@ -1767,7 +1831,9 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  dump_hartree, dump_exchange, include_gw_sigma,
                  pDeltaSigma2, pDeltaVcorr,
                  lr_two_step, two_step_sc_method, two_step_pert_method,
-                 static_cast<int>(two_step_order));
+                 static_cast<int>(two_step_order),
+                 outer_active, two_step_outer_alg, two_step_outer_tol,
+                 n_pert_applied);
 
   // Persist the IBC aux→primary correction and the aux-basis Fock matrices
   // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
