@@ -281,22 +281,33 @@ private:
    * @brief Compute DIIS coefficients via eigendecomposition pseudoinverse
    *
    * Algorithm from diis_alg.hpp::compute_coefs_c1():
-   * 1. Eigendecompose B (real part)
-   * 2. Pseudoinverse with threshold
-   * 3. Solve B^{-1} * 1 and normalize to sum=1
+   * 1. Jacobi-scale B (real part) to unit diagonal
+   * 2. Eigendecompose and pseudoinvert with threshold
+   * 3. Solve for B^{-1} * 1, undo the scaling, normalize to sum=1
    */
   nda::array<double, 1> compute_coefs() const {
     auto B_real = nda::make_regular(nda::real(_B));
+    const long n = B_real.shape()[0];
 
-    nda::array<double, 1> bb(B_real.shape()[1]);
-    bb() = 1.0;
+    // Solve with the Jacobi-scaled Bt = D^(-1/2) B D^(-1/2), D = diag(B), so that
+    // Bt_ii = 1 and Bt_ij = cos<(r_i, r_j). Exact change of variables, but it is
+    // what makes the cut below meaningful: B_ii = ||r_i||^2 and DIIS residual
+    // norms decay geometrically, so cond(B) is dominated by that decay while
+    // cond(Bt) sees only genuine linear dependence. The scaling is undone on x.
+    nda::array<double, 1> d(n), bb(n);
+    for (long i = 0; i < n; ++i) {
+      d(i)  = (B_real(i, i) > 0.0) ? std::sqrt(B_real(i, i)) : 1.0;
+      bb(i) = 1.0 / d(i);  // rhs D^(-1/2) 1
+    }
+    for (long i = 0; i < n; ++i)
+      for (long j = 0; j < n; ++j) B_real(i, j) /= d(i) * d(j);
 
     auto [eig, evecs] = nda::linalg::eigenelements(B_real);
     auto evecs_tr = nda::make_regular(nda::transpose(evecs));
 
-    nda::matrix<double> Binv(B_real.shape()[0], B_real.shape()[1]);
-    nda::matrix<double> eig_inv(B_real.shape()[0], B_real.shape()[1]);
-    nda::matrix<double> I_tmp(B_real.shape()[0], B_real.shape()[1]);
+    nda::matrix<double> Binv(n, n);
+    nda::matrix<double> eig_inv(n, n);
+    nda::matrix<double> I_tmp(n, n);
     Binv() = 0;
     eig_inv() = 0;
 
@@ -304,9 +315,9 @@ private:
     double eig_max = nda::max_element(eig);
     double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
 
-    const double eig_thresh = 1E-12;
+    const double eig_thresh = 1E-14;
 
-    app_log(3, "    DIIS: B condition number = {:.2e}", cond);
+    app_log(3, "    DIIS: Jacobi-scaled B condition number = {:.2e}", cond);
 
     // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
     for (long i = 0; i < eig.size(); ++i) {
@@ -318,8 +329,9 @@ private:
     nda::blas::gemm(evecs, eig_inv, I_tmp);
     nda::blas::gemm(I_tmp, evecs_tr, Binv);
 
-    nda::array<double, 1> x(B_real.shape()[1]);
+    nda::array<double, 1> x(n);
     nda::blas::gemv(1.0, Binv, bb, 0.0, x);
+    for (long i = 0; i < n; ++i) x(i) /= d(i);
 
     double sum = std::accumulate(x.begin(), x.end(), 0.0);
     if (std::abs(sum) < 1e-14) {

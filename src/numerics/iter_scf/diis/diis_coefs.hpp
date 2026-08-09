@@ -21,6 +21,7 @@
 #ifndef COQUI_DIIS_COEFS_HPP
 #define COQUI_DIIS_COEFS_HPP
 
+#include <cmath>
 #include <numeric>
 
 #include "configuration.hpp"
@@ -46,16 +47,27 @@ namespace iter_scf {
  */
 inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B) {
   auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
+  const long n = B.shape()[0];
 
-  nda::array<double, 1> bb(B.shape()[1]);
-  bb() = 1.0;
+  // Solve with the Jacobi-scaled Bt = D^(-1/2) B D^(-1/2), D = diag(B), so that
+  // Bt_ii = 1 and Bt_ij = cos<(r_i, r_j). Exact change of variables, but it is
+  // what makes the cut below meaningful: B_ii = ||r_i||^2 and DIIS residual
+  // norms decay geometrically, so cond(B) is dominated by that decay while
+  // cond(Bt) sees only genuine linear dependence. The scaling is undone on x.
+  nda::array<double, 1> d(n), bb(n);
+  for (long i = 0; i < n; ++i) {
+    d(i)  = (B(i, i) > 0.0) ? std::sqrt(B(i, i)) : 1.0;
+    bb(i) = 1.0 / d(i);  // rhs D^(-1/2) 1
+  }
+  for (long i = 0; i < n; ++i)
+    for (long j = 0; j < n; ++j) B(i, j) /= d(i) * d(j);
 
   auto [eig, evecs] = nda::linalg::eigenelements(B);
   auto evecs_tr = nda::make_regular(nda::transpose(evecs));
 
-  nda::matrix<double> Binv(B.shape()[0], B.shape()[1]); // Inverse or pseudoinverse
-  nda::matrix<double> eig_inv(B.shape()[0], B.shape()[1]);
-  nda::matrix<double> I(B.shape()[0], B.shape()[1]);
+  nda::matrix<double> Binv(n, n); // Inverse or pseudoinverse
+  nda::matrix<double> eig_inv(n, n);
+  nda::matrix<double> I(n, n);
   Binv() = 0;
   eig_inv() = 0;
 
@@ -63,9 +75,9 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   double eig_max = nda::max_element(eig);
   double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
 
-  const double eig_thresh = 1E-12;
+  const double eig_thresh = 1E-14;
 
-  app_log(2, "DIIS: Condition number of B: {}", cond);
+  app_log(2, "DIIS: Condition number of Jacobi-scaled B: {}", cond);
 
   // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
   for (auto i : nda::range(0, eig.size())) {
@@ -77,8 +89,9 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   nda::blas::gemm(evecs, eig_inv, I);
   nda::blas::gemm(I, evecs_tr, Binv);
 
-  nda::array<double, 1> x(B.shape()[1]);
+  nda::array<double, 1> x(n);
   nda::blas::gemv(1.0, Binv, bb, 0.0, x);
+  for (long i = 0; i < n; ++i) x(i) /= d(i);
 
   double sum = std::accumulate(x.begin(), x.end(), 0.0);
   return nda::make_regular(x / sum);
