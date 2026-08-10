@@ -163,9 +163,6 @@ namespace math {
             _internode_comm->all_reduce_in_place_n(start, count, std::plus<>{});
           }
         }
-        // Release the root's stores; node_sync() is barrier-then-sync, i.e. the acquire
-        // half, so on its own it does not publish what this rank just wrote.
-        _win->sync();
         node_sync();
       }
 
@@ -218,9 +215,6 @@ namespace math {
             _internode_comm->all_reduce_in_place_n(start, count, std::plus<>{});
           }
         }
-        // Release the reducing ranks' stores; node_sync() is barrier-then-sync, i.e. the
-        // acquire half. Up to nchunks ranks write here, not just the root.
-        _win->sync();
         node_sync();
       }
 
@@ -233,13 +227,14 @@ namespace math {
             _internode_comm->broadcast_n(start, count, src_node);
           }
         }
-        // Release the root's stores; node_sync() is barrier-then-sync, i.e. the acquire
-        // half, so on its own it does not publish what this rank just wrote.
-        _win->sync();
         node_sync();
       }
 
+      /// Makes this rank's writes to the window visible to the node and picks up
+      /// everyone else's, so callers that wrote into it need no fence of their own.
+      /// Both syncs are needed: a bare barrier orders the ranks but publishes nothing.
       void node_sync() {
+        _win->sync();
         _node_comm->barrier();
         _win->sync();
       }

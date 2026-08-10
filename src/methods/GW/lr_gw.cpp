@@ -559,12 +559,10 @@ namespace methods {
         } // pass
       } // it_local
 
-      // Synchronize and distribute across all nodes
+      // Synchronize and distribute across all nodes. Every τ block is written by
+      // exactly one rank globally (tau_comm root, disjoint τ ranges across pools),
+      // so all_reduce_parallel is bit-identical to all_reduce here.
       _Timer.start("SIGMA_FINAL_REDUCE");
-      sDeltaSigma_tskij.win().fence();
-      // Every τ block is written by exactly one rank globally (tau_comm root,
-      // disjoint τ ranges across pools), so the node-parallel reduction is
-      // bit-identical to all_reduce() here.
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
 
