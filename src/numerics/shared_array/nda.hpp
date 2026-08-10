@@ -168,18 +168,25 @@ namespace math {
 
       /**
        * Internode all_reduce with the buffer split across the ranks of a node.
+       * Interchangeable with all_reduce(): same post-condition, same requirements
+       * on the caller.
        *
        * all_reduce() runs the whole reduction on the node root, so a single core moves
        * the entire array between nodes. Here each node-local rank reduces a disjoint
        * chunk over its own internode communicator: make_mpi_context splits by
        * node_comm.rank(), so every rank — not only the root — belongs to a communicator
        * that spans the nodes, and rank r cooperates with rank r of every other node.
+       * Prefer this one; all_reduce() is the fallback for arrays built without a
+       * global/internode communicator, which the check below rejects.
        *
-       * Post-condition is identical to all_reduce(). It is bit-identical to it whenever
-       * each element is contributed by at most one node (the gather_to_shm case, where
-       * the sum is x + 0 + ... and independent of grouping); with genuinely nonzero
-       * partial sums on several nodes the reduction order differs and last-bit drift is
-       * possible, so prefer all_reduce() there.
+       * Performance: the win grows with node count and buffer size, since it is the
+       * node root that is the bottleneck in all_reduce(). It can also lose — the
+       * chunks are smaller, so a small buffer split many ways pays per-message
+       * latency on every chunk, and the split is capped at the smallest node's rank
+       * count, so one small node throttles the whole job. Measured on the LR-GW ΔΣ
+       * buffer (683 MB/node, 2 nodes, 192 ranks): the single-root reduce already
+       * runs at ~23 GB/s/node on the wire, so there is little left for extra cores
+       * to recover at this node count.
        */
       void all_reduce_parallel() {
         utils::check(_internode_comm != nullptr and _gcomm != nullptr,

@@ -584,8 +584,8 @@ namespace methods {
         } // pass
       } // it_local
 
-      // Synchronize and distribute across all nodes. One writer per τ block
-      // globally, so all_reduce_parallel is bit-identical to all_reduce here.
+      // Synchronize and distribute across all nodes, with the reduction split over
+      // the node's ranks for performance.
       _Timer.start("SIGMA_FINAL_REDUCE");
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");

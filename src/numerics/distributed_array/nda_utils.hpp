@@ -1536,9 +1536,10 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   for(int r=0; r<rank; ++r)
     rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
-  // Release the stores above before the barrier: every node rank reads the whole
-  // window in the reduce below, and all_reduce_parallel's opening node_sync() is
-  // barrier-then-sync, which acquires but does not publish what this rank wrote.
+  // The barrier is over the whole communicator, not just the node: the reduce below
+  // reads every node's window, so all nodes must have finished assigning. The sync
+  // publishes this rank's stores; node_sync() inside all_reduce_parallel would also
+  // do that, so this one is belt-and-braces.
   sA.win().sync();
   sA.communicator()->barrier();
   toc("GATHER_SHM_ASSIGN");
@@ -1546,8 +1547,8 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   // MAM Note: In some MPI implementations/systems, the first call to a collective can be very
   //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory.
   //           If this problem persist, reduce on regular memory and copy to shm locally
-  // All_reduce among all nodes. Blocks are disjoint, so each element is summed as
-  // x + 0 + ... and splitting the reduction across node ranks is bit-identical.
+  // All_reduce among all nodes, with the reduction split over the node's ranks for
+  // performance.
   tic("GATHER_SHM_REDUCE");
   sA.all_reduce_parallel();
   toc("GATHER_SHM_REDUCE");
