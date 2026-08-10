@@ -237,12 +237,9 @@ namespace math {
         node_sync();
       }
 
-      /// Full sync-barrier-sync of the shared window: the leading sync releases this
-      /// rank's stores, the trailing one acquires everyone else's. Both halves are
-      /// needed — a barrier alone orders the ranks but publishes nothing — so callers
-      /// that wrote into the window need no fence of their own before calling any
-      /// method that starts with this. MPI_Win_sync is a local memory barrier, so the
-      /// leading half costs no communication.
+      /// Makes this rank's writes to the window visible to the node and picks up
+      /// everyone else's, so callers that wrote into it need no fence of their own.
+      /// Both syncs are needed: a bare barrier orders the ranks but publishes nothing.
       void node_sync() {
         _win->sync();
         _node_comm->barrier();
