@@ -124,11 +124,22 @@ namespace methods {
        *
        * The reduction over the (P,Q) tile grid lands on the root of the
        * sub-communicator that shares an (s,k) block, so **only that rank's**
-       * destination is modified. Callers whose destination is a shared array and
-       * whose contributions must be visible on every node use the aux_to_primary
-       * wrapper below instead; callers that already own the final destination and
-       * read it back on exactly that root rank call this directly and skip the
-       * shared-memory round trip entirely.
+       * destination is modified.
+       *
+       * Which of the two to call: aux_to_primary (below) is this kernel plus a
+       * shared-array round trip — pre-divide, window fence, all_reduce over the nodes
+       * — so on return every rank sees the result. Call that one when the destination
+       * is a shared array read collectively right after the call, as lr_hf does for ΔF
+       * (lr_hf.cpp:410).
+       *
+       * Call this kernel directly when that round trip would be wasted: the
+       * destination is not shared, or only the sub-communicator root reads it, or a
+       * later reduction over another axis subsumes it. lr_gw takes this path for ΔΣ
+       * (lr_gw.cpp:575) — the destination is one τ-slab owned by the τ-pool root and
+       * the τ axis is reduced once at the end, so a per-τ shared round trip would be
+       * redundant. The flip side of "only that rank's destination is modified" is that
+       * whatever the caller accumulates afterwards has to be guarded on the same rank
+       * (lr_gw.cpp:580).
        *
        * @param ip        - [INPUT] left polarization index
        * @param iq        - [INPUT] right polarization index
