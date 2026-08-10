@@ -69,8 +69,8 @@ namespace solvers {
     ~lr_scr_coulomb_t() {}
 
     // Pinned in place: every ω-side array built by compute_W_full_omega stores a
-    // raw pointer to the _comm_perm member and _qpool_plan stores one to
-    // _qpool_comm, so copying or relocating the object leaves them dangling.
+    // raw pointer to the _comm_perm member, so copying or relocating the object
+    // leaves them dangling.
     lr_scr_coulomb_t(const lr_scr_coulomb_t&) = delete;
     lr_scr_coulomb_t(lr_scr_coulomb_t&&) = delete;
     lr_scr_coulomb_t& operator=(const lr_scr_coulomb_t&) = delete;
@@ -170,8 +170,8 @@ namespace solvers {
     // DESTRUCTION ORDER IS LOAD-BEARING. Members are destroyed in reverse
     // declaration order, and every ω-side array below stores a *raw* pointer to
     // _comm_perm / _qpool_comm (memory::darray_t keeps communicator_t*). They
-    // must therefore be declared before _dW_full_qpQ_wqPQ, _dPi_w_perm and
-    // _qpool_plan, and before anything else that can outlive them. The same
+    // must therefore be declared before _dW_full_qpQ_wqPQ and _dPi_w_perm, and
+    // before anything else that can outlive them. The same
     // applies outside the class: the W_full(iω) returned by compute_W_full_omega
     // also points here, so the caller's holder must be declared after the solver
     // (see lr_driver.cpp / MBPT_drivers.cpp).
@@ -180,7 +180,6 @@ namespace solvers {
     mpi3::communicator _qpool_comm;  // the m ranks sharing one q-tile
     // ω-side distribution and strategy; filled in by compute_W_full_omega.
     lr_W_omega_layout _layout;
-    lr_W_qpool_plan _qpool_plan;     // peer ranges/counts + staging temp; built once
     // compute_W_full_omega move-assigns the two communicators above, which the
     // arrays it already handed out point at, so it may run only once per object.
     bool _W_full_built = false;

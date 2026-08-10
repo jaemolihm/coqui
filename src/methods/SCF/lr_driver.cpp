@@ -814,18 +814,8 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
       arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
     // Its one-for-one replacement under the q-pool exchange: the ΔΠ/ΔW(iω)
     // workspace on the permuted communicator, reused every iteration.
-    if (w_layout.use_qpool_exchange) {
+    if (w_layout.use_qpool_exchange)
       arrays.push_back({"_dPi_w_perm",   shp4a(nwbh), aux4(nwbh), true});
-      // The exchange's staging temp: one peer-sized block per rank, allocated in
-      // lr_W_qpool_plan::build and never freed, so it is persistent, not a
-      // transient. The m ranks of a q-pool together cover the ω axis, so their
-      // temps sum to one (nwbh, nq, NP, NP)/m slab globally. This is an estimate
-      // (exact when the ω and (P,Q) axes divide evenly); compute_W_full_omega
-      // prints the measured total next to it at the same verbosity.
-      arrays.push_back({"_qpool exchange temp",
-                        shp4a(nwbh) + fmt::format("/{}", w_layout.m),
-                        aux4(nwbh) / double(w_layout.m), true});
-    }
     if (!is_q_gamma())
       arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true});
   }
@@ -865,9 +855,11 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   //
   //     Under the q-pool exchange, the ΔΠ/ΔW(iω) entry is the buffer-grid array;
   //     solve_lr_dyson_W resets it before re-allocating for the return trip, so it
-  //     stays 1x. The permuted ω workspace it feeds and the exchange's peer-sized
-  //     staging temp are both allocated once and never freed, so they are listed
-  //     in the persistent table above, not here.
+  //     stays 1x. The permuted ω workspace it feeds is allocated once and never
+  //     freed, so it is listed in the persistent table above. The exchange itself
+  //     is a redistribute on the q-pool sub-communicator, whose pack/unpack pair
+  //     is sized by the two operands' local blocks exactly as the world-comm one
+  //     is — hence the same 2x row.
   enum phase_t { DYSON, GWSIG_TAU, GWSIG_W };
   struct tentry_t { std::string name; std::string shape; double nelem; phase_t ph; };
   std::vector<tentry_t> trans;
@@ -882,6 +874,8 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     trans.push_back({"ΔΠ/ΔW(iω)",           shp4a(nwbh), aux4(nwbh), GWSIG_W});
     if (w_layout.need_ft_buffer_w)
       trans.push_back({"redist pack/unpack (iω)", "2x"+shp4a(nwbh), 2.0*aux4(nwbh), GWSIG_W});
+    if (w_layout.use_qpool_exchange)
+      trans.push_back({"qpool pack/unpack (iω)", "2x"+shp4a(nwbh), 2.0*aux4(nwbh), GWSIG_W});
     // lr_dyson_W_in_place's rank-2 intermediate: one local (P,Q) block per rank,
     // allocated for the whole ω Dyson and therefore co-live with ΔΠ/ΔW(iω). With
     // (P,Q) local (strategies A and C) that is a full NP² per rank.
