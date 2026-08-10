@@ -21,6 +21,21 @@
 
 #undef NDEBUG
 
+/**
+ * Tests methods/scr_coulomb/lr_W_qpool_exchange.hpp, the ω-side transfer of the
+ * ΔW pipeline: the layout predicate lr_W_omega_layout_for and the intra-q-pool
+ * exchange that crosses between the FT-buffer distribution (ω local, q and (P,Q)
+ * split) and the ω-side one (ω and q split, (P,Q) local).
+ *
+ * The exchange is a pure permutation of data, so each element is filled with an
+ * exact integer encoding of its own global (w, q, P, Q) index. A round trip must
+ * then reproduce the encoding element-for-element, which makes the check bitwise
+ * rather than a tolerance — a misdirected block shows up as a wrong index, not as
+ * a small residual. Covered: even and ragged ω tiles, ragged (P,Q) panels, and
+ * m_Q > 1; plus the layout predicate rejecting the cases that must not select the
+ * exchange.
+ */
+
 #include "catch2/catch.hpp"
 
 #include "mpi3/environment.hpp"

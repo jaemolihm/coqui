@@ -249,6 +249,16 @@ namespace methods {
           *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
           {1, 1, P_bs, Q_bs}));
 
+      // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
+      // of ΔΣ has exactly one writer, _tau_comm rank 0 — the premise of the
+      // all_reduce_parallel that closes _eval_sigma_Rspace.
+      utils::check(_dSigma_skPQ->grid()[0] == 1 and _dSigma_skPQ->grid()[1] == 1 and
+                   _dSigma_skPQ->communicator() == std::addressof(*_tau_comm),
+                   "lr_gw::_setup_workspace: Σ must be undivided along (s,k) on _tau_comm "
+                   "(pgrid = ({},{},{},{})).",
+                   _dSigma_skPQ->grid()[0], _dSigma_skPQ->grid()[1],
+                   _dSigma_skPQ->grid()[2], _dSigma_skPQ->grid()[3]);
+
       _a2p_buf.resize(ns * nkpts, nbnd, nbnd);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
@@ -410,17 +420,6 @@ namespace methods {
       auto& opt_sf_kR = _sf_kR;
       auto& opt_sf_qR = _sf_qR;
       _Timer.stop("SIGMA_ALLOC");
-
-      // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
-      // of ΔΣ has exactly one writer, _tau_comm rank 0. Established by
-      // _setup_workspace, which builds dSigma_skPQ with pgrid {1,1,np_P,np_Q} on
-      // *_tau_comm.
-      utils::check(dSigma_sRPQ.grid()[0] == 1 and dSigma_sRPQ.grid()[1] == 1 and
-                   dSigma_sRPQ.communicator() == std::addressof(tau_comm),
-                   "lr_gw::_eval_sigma_Rspace: Σ must be undivided along (s,k) on _tau_comm "
-                   "(pgrid = ({},{},{},{})).",
-                   dSigma_sRPQ.grid()[0], dSigma_sRPQ.grid()[1],
-                   dSigma_sRPQ.grid()[2], dSigma_sRPQ.grid()[3]);
 
       // Hadamard product lambda
       auto neg_prod = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
