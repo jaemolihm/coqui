@@ -234,6 +234,11 @@ namespace methods {
       long nkpts   = do_term1 ? gshape[1]      : gshape[0];
       long t_origin = do_term1 ? dW_ref.origin()[0] : dW_ref.origin()[1];
 
+      // aux_to_primary_accumulate flattens (s,k) of the aux and primary operands
+      // onto a common leading index, so the two k-axes must have equal extent.
+      utils::check(nk_ibz == nkpts,
+                   "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
+
       _tau_comm.emplace(mpi->comm.split(t_origin, mpi->comm.rank()));
       _tau_mpi.emplace(utils::make_mpi_context(*_tau_comm));
 
@@ -244,10 +249,6 @@ namespace methods {
           *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
           {1, 1, P_bs, Q_bs}));
 
-      // aux_to_primary_accumulate flattens (s,k) of the aux and primary operands
-      // onto a common leading index, so the two k-axes must have equal extent.
-      utils::check(nk_ibz == nkpts,
-                   "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
       _a2p_buf.resize(ns * nkpts, nbnd, nbnd);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
@@ -410,10 +411,10 @@ namespace methods {
       auto& opt_sf_qR = _sf_qR;
       _Timer.stop("SIGMA_ALLOC");
 
-      // aux_to_primary_accumulate reduces onto the root of the sub-communicator
-      // sharing an (s,k) block. With Σ undivided along (s,k) on _tau_comm that
-      // sub-communicator is _tau_comm itself, so the single writer of each τ slab
-      // of ΔΣ is _tau_comm rank 0 — the premise of the final all_reduce_parallel.
+      // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
+      // of ΔΣ has exactly one writer, _tau_comm rank 0. Established by
+      // _setup_workspace, which builds dSigma_skPQ with pgrid {1,1,np_P,np_Q} on
+      // *_tau_comm.
       utils::check(dSigma_sRPQ.grid()[0] == 1 and dSigma_sRPQ.grid()[1] == 1 and
                    dSigma_sRPQ.communicator() == std::addressof(tau_comm),
                    "lr_gw::_eval_sigma_Rspace: Σ must be undivided along (s,k) on _tau_comm "
@@ -584,13 +585,12 @@ namespace methods {
         } // pass
       } // it_local
 
-      // Synchronize and distribute across all nodes
+      // Synchronize and distribute across all nodes.
+      // One writer per τ block globally, so all_reduce_parallel is bit-identical
+      // to all_reduce here. The fence publishes that writer's stores; the
+      // node_sync inside all_reduce_parallel only acquires.
       _Timer.start("SIGMA_FINAL_REDUCE");
       sDeltaSigma_tskij.win().fence();
-      // Every τ block is written by exactly one rank globally — the reduction root
-      // of aux_to_primary_accumulate, which is _tau_comm rank 0 (checked above),
-      // and τ ranges are disjoint across pools. The node-parallel reduction is
-      // therefore bit-identical to all_reduce() here.
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
 

@@ -191,11 +191,6 @@ namespace methods {
 
     /// Print only the component clocks, each line prefixed by `indent`.
     /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
-    /// The R-space total leads; transpose/div-correction siblings live outside
-    /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
-    /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
-    /// Aux->Primary breaks that one line down and is already counted in it —
-    /// never add those lines to the sum.
     inline void print_subclocks(int level, const std::string& indent) {
       app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
@@ -246,13 +241,8 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
-      // Reduction buffer handed to aux_to_primary_accumulate. nda::array
-      // zero-initializes, so leaving it to the kernel costs a fresh
-      // (ns·nk, nbnd, nbnd) mapping and its first-touch page faults on every one
-      // of the 2·nt_loc calls per Σ evaluation. A function-static buffer would
-      // hide the lifetime, never free, and not show in print_memory_estimate;
-      // making lr_thc_comm an instantiated object would touch all of its call
-      // sites for one buffer.
+      // Reduction buffer for aux_to_primary_accumulate, reused across the
+      // 2·nt_loc calls per Σ evaluation instead of reallocated in each.
       nda::array<ComplexType, 3> _a2p_buf;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
