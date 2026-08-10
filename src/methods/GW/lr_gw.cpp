@@ -81,7 +81,7 @@ namespace methods {
         const nda::array_view<ComplexType, 5>& DeltaG_tskij,
         dArr_4D_t& dW_tRPQ,
         const nda::array_view<ComplexType, 5>& G_tskij,
-        dArr_4D_t& dDeltaW_qtPQ,
+        dArr_4D_t& dDeltaW_tqPQ,
         thc_reader_t& thc,
         const dArr_5D_t& dG_tsRPQ,
         const dArr_5D_t& dG_mtau_tsRPQ,
@@ -93,7 +93,7 @@ namespace methods {
       app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
-      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_qtPQ,
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_tqPQ,
                          ibc, &dG_tsRPQ, &dG_mtau_tsRPQ);
 
       app_log(3, "  LR-GW self-energy (fused) done.\n");
@@ -131,7 +131,7 @@ namespace methods {
     void lr_gw::evaluate_sigma_DeltaW(
         sArrv_5D_t& sDeltaSigma_tskij,
         const nda::array_view<ComplexType, 5>& G_tskij,
-        dArr_4D_t& dDeltaW_qtPQ,
+        dArr_4D_t& dDeltaW_tqPQ,
         thc_reader_t& thc,
         const dArr_5D_t& dG_tsRPQ,
         const dArr_5D_t& dG_mtau_tsRPQ) {
@@ -142,7 +142,7 @@ namespace methods {
       app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
-      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_qtPQ,
+      _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_tqPQ,
                          nullptr, &dG_tsRPQ, &dG_mtau_tsRPQ);
 
       app_log(3, "  LR-GW self-energy (term 2) done.\n");
@@ -219,8 +219,8 @@ namespace methods {
       auto mpi = thc.mpi();
       auto MF = thc.MF();
 
-      // PQ grid/block from dW_ref (axes 2,3, layout-independent); t_origin and
-      // nkpts depend on the layout (term1: t,R,P,Q; term2: q,t,P,Q).
+      // PQ grid/block from dW_ref (axes 2,3). Both layouts (term1: t,R,P,Q;
+      // term2: t,q,P,Q) put τ on axis 0 and the lattice axis on axis 1.
       auto gshape = dW_ref.global_shape();
       auto grid   = dW_ref.grid();
       auto bsize  = dW_ref.block_size();
@@ -229,8 +229,8 @@ namespace methods {
       long NP_loc = lshape[2], NQ_loc = lshape[3];
       long np_P = grid[2], np_Q = grid[3];
       long P_bs = bsize[2], Q_bs = bsize[3];
-      long nkpts   = do_term1 ? gshape[1]      : gshape[0];
-      long t_origin = do_term1 ? dW_ref.origin()[0] : dW_ref.origin()[1];
+      long nkpts   = gshape[1];
+      long t_origin = dW_ref.origin()[0];
 
       _tau_comm.emplace(mpi->comm.split(t_origin, mpi->comm.rank()));
       _tau_mpi.emplace(utils::make_mpi_context(*_tau_comm));
@@ -289,7 +289,7 @@ namespace methods {
         const nda::array_view<ComplexType, 5>* DeltaG_tskij,
         dArr_4D_t* dW_tRPQ,
         const nda::array_view<ComplexType, 5>* G_tskij,
-        dArr_4D_t* dDeltaW_qtPQ,
+        dArr_4D_t* dDeltaW_tqPQ,
         const lr_ibc_DeltaX* ibc,
         const dArr_5D_t* dG_tsRPQ,
         const dArr_5D_t* dG_mtau_tsRPQ) {
@@ -301,8 +301,8 @@ namespace methods {
                    "lr_gw::_eval_sigma_Rspace: at least one term must be active");
       utils::check(!do_term1 || dW_tRPQ != nullptr,
                    "lr_gw::_eval_sigma_Rspace: DeltaG requires dW_tRPQ");
-      utils::check(!do_term2 || dDeltaW_qtPQ != nullptr,
-                   "lr_gw::_eval_sigma_Rspace: G requires dDeltaW_qtPQ");
+      utils::check(!do_term2 || dDeltaW_tqPQ != nullptr,
+                   "lr_gw::_eval_sigma_Rspace: G requires dDeltaW_tqPQ");
       // Term 2 always reads the unperturbed G^R from the precomputed cache.
       utils::check(!do_term2 || (dG_tsRPQ != nullptr && dG_mtau_tsRPQ != nullptr),
                    "lr_gw::_eval_sigma_Rspace: term 2 (G ⊙ ΔW) requires the G^R cache");
@@ -321,49 +321,42 @@ namespace methods {
       auto nbnd = G_ref.shape(3);
 
       // Extract tau distribution and array dimensions from whichever W is available.
-      // Term 1: dW_tRPQ has (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
-      // Term 2: dDeltaW_qtPQ has (q,t,P,Q) layout, pgrid (1,tpools,np_P,np_Q).
+      // Term 1: dW_tRPQ     has (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+      // Term 2: dDeltaW_tqPQ has (t,q,P,Q) layout, same pgrid — so a τ-slice of
+      // either is one contiguous local block.
       // The PQ grid/block parameters are re-derived from dW_ref inside
       // _setup_workspace; here we only need the local PQ shape for the loop.
-      dArr_4D_t& dW_ref = do_term1 ? *dW_tRPQ : *dDeltaW_qtPQ;
+      dArr_4D_t& dW_ref = do_term1 ? *dW_tRPQ : *dDeltaW_tqPQ;
       auto dW_lshape = dW_ref.local_shape();
       auto NP_loc = dW_lshape[2], NQ_loc = dW_lshape[3];
 
-      // Term 1's W: axis 0 = t (distributed), axis 1 = R (undivided)
-      long nt_loc, nkpts, t_origin;
-      if (do_term1) {
-        nt_loc = dW_tRPQ->local_shape()[0];
-        nkpts = dW_tRPQ->global_shape()[1];
-        t_origin = dW_tRPQ->origin()[0];
-        utils::check(dW_tRPQ->local_shape()[1] == nkpts,
-                     "lr_gw: R-axis must be undivided, nR_loc={} != nkpts={}", dW_tRPQ->local_shape()[1], nkpts);
-        utils::check(dW_tRPQ->grid()[1] == 1,
-                     "lr_gw: R-axis must be undivided, pgrid[1]={}", dW_tRPQ->grid()[1]);
-      } else {
-        // Term 2 only: axis 0 = q (undivided), axis 1 = t (distributed)
-        nkpts = dDeltaW_qtPQ->local_shape()[0];
-        nt_loc = dDeltaW_qtPQ->local_shape()[1];
-        t_origin = dDeltaW_qtPQ->origin()[1];
-        utils::check(dDeltaW_qtPQ->local_shape()[0] == nkpts,
-                     "lr_gw: q-axis must be undivided, nq_loc={} != nkpts={}", dDeltaW_qtPQ->local_shape()[0], nkpts);
-        utils::check(dDeltaW_qtPQ->grid()[0] == 1,
-                     "lr_gw: q-axis must be undivided, pgrid[0]={}", dDeltaW_qtPQ->grid()[0]);
-      }
+      // Both layouts: axis 0 = t (distributed), axis 1 = R or q (undivided)
+      long nt_loc = dW_ref.local_shape()[0];
+      long nkpts = dW_ref.global_shape()[1];
+      long t_origin = dW_ref.origin()[0];
+      utils::check(dW_ref.local_shape()[1] == nkpts,
+                   "lr_gw: R/q-axis must be undivided, n_loc={} != nkpts={}",
+                   dW_ref.local_shape()[1], nkpts);
+      utils::check(dW_ref.grid()[1] == 1,
+                   "lr_gw: R/q-axis must be undivided, pgrid[1]={}", dW_ref.grid()[1]);
 
       // Cross-check term 2 tau distribution and PQ tiling if both terms active
       if (do_term1 && do_term2) {
-        utils::check(dDeltaW_qtPQ->local_shape()[1] == nt_loc,
-                     "lr_gw: term1 nt_loc={} != term2 nt_loc={}", nt_loc, dDeltaW_qtPQ->local_shape()[1]);
-        utils::check(dDeltaW_qtPQ->origin()[1] == t_origin,
-                     "lr_gw: term1 t_origin={} != term2 t_origin={}", t_origin, dDeltaW_qtPQ->origin()[1]);
-        utils::check(dDeltaW_qtPQ->local_shape()[2] == NP_loc &&
-                     dDeltaW_qtPQ->local_shape()[3] == NQ_loc &&
-                     dDeltaW_qtPQ->origin()[2] == dW_tRPQ->origin()[2] &&
-                     dDeltaW_qtPQ->origin()[3] == dW_tRPQ->origin()[3],
+        utils::check(dDeltaW_tqPQ->local_shape()[0] == nt_loc,
+                     "lr_gw: term1 nt_loc={} != term2 nt_loc={}", nt_loc, dDeltaW_tqPQ->local_shape()[0]);
+        utils::check(dDeltaW_tqPQ->origin()[0] == t_origin,
+                     "lr_gw: term1 t_origin={} != term2 t_origin={}", t_origin, dDeltaW_tqPQ->origin()[0]);
+        utils::check(dDeltaW_tqPQ->local_shape()[1] == nkpts,
+                     "lr_gw: term2 q-axis must be undivided, nq_loc={} != nkpts={}",
+                     dDeltaW_tqPQ->local_shape()[1], nkpts);
+        utils::check(dDeltaW_tqPQ->local_shape()[2] == NP_loc &&
+                     dDeltaW_tqPQ->local_shape()[3] == NQ_loc &&
+                     dDeltaW_tqPQ->origin()[2] == dW_tRPQ->origin()[2] &&
+                     dDeltaW_tqPQ->origin()[3] == dW_tRPQ->origin()[3],
                      "lr_gw: term2 PQ tiling mismatch vs term1 "
                      "(local ({},{}) origin ({},{}) vs local ({},{}) origin ({},{}))",
-                     dDeltaW_qtPQ->local_shape()[2], dDeltaW_qtPQ->local_shape()[3],
-                     dDeltaW_qtPQ->origin()[2], dDeltaW_qtPQ->origin()[3],
+                     dDeltaW_tqPQ->local_shape()[2], dDeltaW_tqPQ->local_shape()[3],
+                     dDeltaW_tqPQ->origin()[2], dDeltaW_tqPQ->origin()[3],
                      NP_loc, NQ_loc, dW_tRPQ->origin()[2], dW_tRPQ->origin()[3]);
       }
 
@@ -420,12 +413,12 @@ namespace methods {
 
         // --- W slices once per tau (reused for both minus_t passes) ---
         // Term 1's W (dW_tRPQ, (t,R,P,Q)) is a contiguous leading-index slice,
-        // taken as a view inside the pass loop. Term 2's ΔW (dDeltaW_qtPQ,
-        // (q,t,P,Q)) has strided t, so copy this τ-slice then q→R FT it.
+        // taken as a view inside the pass loop. Term 2's ΔW (dDeltaW_tqPQ,
+        // (t,q,P,Q)) is copied out of its equally contiguous τ-slice because the
+        // q→R FT below overwrites it.
         if (do_term2) {
           _Timer.start("SIGMA_W_COPY");
-          for (long iq = 0; iq < nkpts; ++iq)
-            W2_tau_RPQ(iq, nda::ellipsis{}) = dDeltaW_qtPQ->local()(iq, it_local, nda::ellipsis{});
+          W2_tau_RPQ() = dDeltaW_tqPQ->local()(it_local, nda::ellipsis{});
           _Timer.stop("SIGMA_W_COPY");
 
           if (nkpts != 1) {

@@ -172,14 +172,6 @@ namespace solvers {
     // LR iterations. Empty for Q=Γ (the operand is then W_full itself).
     std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
 
-    // τ- and ω-shaped FT staging buffers (in the ft_buffer_dist distribution),
-    // owned by the LR solver and threaded into every _scr_fourier.tau_to_w / w_to_tau
-    // call so they are reused across SCF iterations instead of reallocated.
-    // Default-constructed empty; populated once in compute_W_full_omega (always
-    // runs before the SCF loop), so they are live by the time the FTs use them.
-    dArr4D_concrete_t _ft_buffer_t;
-    dArr4D_concrete_t _ft_buffer_w;
-
     void _init_kpq_map(THC_ERI auto& thc);
 
     /**

@@ -168,10 +168,12 @@ public:
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
    * per-node memory footprint of the large LR arrays: the node-replicated
    * shared band-basis arrays (~ nk·nt·nb²) and the comm-distributed aux-basis
-   * arrays (~ nk·nt·NP²), plus the per-iteration transients. Called once at the
-   * top of run_lr so the layout can be inspected before the arrays allocate.
+   * arrays (~ nk·nt·NP²), the striped previous-iterate/DIIS history, and the
+   * per-iteration transients. Called once at the top of run_lr so the layout
+   * can be inspected before the arrays allocate.
    */
-  void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full);
+  void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
+                             bool use_diis, size_t max_subsp_size);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large

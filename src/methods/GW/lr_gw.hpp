@@ -98,9 +98,9 @@ namespace methods {
        *   Pre-transformed to R-space by lr_precompute_W_tRPQ.
        *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
        * @param G_tskij           - [INPUT] Unperturbed Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dDeltaW_qtPQ      - [INPUT] ΔW in THC+q-space (nkpts, nt_half, NP, NP)
-       *   Axis order: (q, t, P, Q).
-       *   Distribution: pgrid = (1, tpools, np_P, np_Q).
+       * @param dDeltaW_tqPQ      - [INPUT] ΔW in THC+q-space (nt_half, nkpts, NP, NP)
+       *   Axis order: (t, q, P, Q) — same τ-dist as dW_tRPQ.
+       *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
        * @param dG_tsRPQ          - [INPUT] cached G^R(τ) in aux basis from
        *   lr_precompute_G_R_pair (it, s, R, P, Q). Term 2 reads G^R from the
@@ -113,7 +113,7 @@ namespace methods {
           const nda::array_view<ComplexType, 5>& DeltaG_tskij,
           dArr_4D_t& dW_tRPQ,
           const nda::array_view<ComplexType, 5>& G_tskij,
-          dArr_4D_t& dDeltaW_qtPQ,
+          dArr_4D_t& dDeltaW_tqPQ,
           thc_reader_t& thc,
           const dArr_5D_t& dG_tsRPQ,
           const dArr_5D_t& dG_mtau_tsRPQ,
@@ -141,9 +141,9 @@ namespace methods {
        *
        * @param sDeltaSigma_tskij - [OUTPUT] LR self-energy (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param G_tskij           - [INPUT] Unperturbed Green's function (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dDeltaW_qtPQ      - [INPUT] ΔW in THC+q-space (nkpts, nt_half, NP, NP)
-       *   Axis order: (q, t, P, Q).
-       *   Distribution: pgrid = (1, tpools, np_P, np_Q).
+       * @param dDeltaW_tqPQ      - [INPUT] ΔW in THC+q-space (nt_half, nkpts, NP, NP)
+       *   Axis order: (t, q, P, Q).
+       *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
        * @param dG_tsRPQ          - [INPUT] cached G^R(τ) in aux basis (it,s,R,P,Q)
        * @param dG_mtau_tsRPQ     - [INPUT] cached G^R(β−τ), same layout
@@ -151,7 +151,7 @@ namespace methods {
       void evaluate_sigma_DeltaW(
           sArrv_5D_t& sDeltaSigma_tskij,
           const nda::array_view<ComplexType, 5>& G_tskij,
-          dArr_4D_t& dDeltaW_qtPQ,
+          dArr_4D_t& dDeltaW_tqPQ,
           thc_reader_t& thc,
           const dArr_5D_t& dG_tsRPQ,
           const dArr_5D_t& dG_mtau_tsRPQ);
@@ -266,12 +266,13 @@ namespace methods {
        *
        * Merges both τ halves (forward + backward) in a single call.
        * Term 1's W is always R-space (t,R,P,Q); term 2's ΔW is always
-       * q-space (q,t,P,Q) with per-tau q→R FT.
+       * q-space (t,q,P,Q) with per-tau q→R FT. Both share one τ-dist, so a
+       * τ-slice of either is one contiguous local block.
        *
        * @param DeltaG_tskij   - [INPUT] LR Green's function (term 1), or nullptr
        * @param dW_tRPQ        - [INPUT] W_c in R-space (t,R,P,Q), or nullptr
        * @param G_tskij        - [INPUT] Unperturbed Green's function (term 2), or nullptr
-       * @param dDeltaW_qtPQ   - [INPUT] ΔW in q-space (q,t,P,Q), or nullptr
+       * @param dDeltaW_tqPQ   - [INPUT] ΔW in q-space (t,q,P,Q), or nullptr
        */
       void _eval_sigma_Rspace(
           sArrv_5D_t& sDeltaSigma_tskij,
@@ -279,7 +280,7 @@ namespace methods {
           const nda::array_view<ComplexType, 5>* DeltaG_tskij,
           dArr_4D_t* dW_tRPQ,
           const nda::array_view<ComplexType, 5>* G_tskij,
-          dArr_4D_t* dDeltaW_qtPQ,
+          dArr_4D_t* dDeltaW_tqPQ,
           const lr_ibc_DeltaX* ibc = nullptr,
           const dArr_5D_t* dG_tsRPQ = nullptr,
           const dArr_5D_t* dG_mtau_tsRPQ = nullptr);

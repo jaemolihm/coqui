@@ -2234,24 +2234,23 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
       *mpi, std::array<long, 4>{nkpts, nt_half_dw, NP, NP},
       DeltaW_qtPQ_root);
 
-  // Scatter into distributed array (τ-dist with axes swapped for (q,t)).
+  // Scatter into a distributed array in the τ-dist (t,q,P,Q) layout the Σ
+  // evaluator consumes, transposing the (q,t) input on the fly.
   auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP);
-  std::array<long,4> qt_pgrid_dw = {tq_pgrid_dw[1], tq_pgrid_dw[0], tq_pgrid_dw[2], tq_pgrid_dw[3]};
-  std::array<long,4> qt_bsize_dw = {tq_bsize_dw[1], tq_bsize_dw[0], tq_bsize_dw[2], tq_bsize_dw[3]};
   using local_Array_4D_t = nda::array<ComplexType, 4>;
-  auto dDeltaW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi->comm, qt_pgrid_dw,
-      {nkpts, nt_half_dw, NP, NP}, qt_bsize_dw);
+  auto dDeltaW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, tq_pgrid_dw,
+      {nt_half_dw, nkpts, NP, NP}, tq_bsize_dw);
   {
     auto dw_src = sDeltaW_qtPQ_in.local();
-    auto dw_loc = dDeltaW_qtPQ.local();
-    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_qtPQ.origin();
-    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_qtPQ.local_shape();
+    auto dw_loc = dDeltaW_tqPQ.local();
+    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_tqPQ.origin();
+    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_tqPQ.local_shape();
     for (long i0 = 0; i0 < dwn0; ++i0)
       for (long i1 = 0; i1 < dwn1; ++i1)
         for (long i2 = 0; i2 < dwn2; ++i2)
           for (long i3 = 0; i3 < dwn3; ++i3)
-            dw_loc(i0, i1, i2, i3) = dw_src(i0+dwo0, i1+dwo1, i2+dwo2, i3+dwo3);
+            dw_loc(i0, i1, i2, i3) = dw_src(i1+dwo1, i0+dwo0, i2+dwo2, i3+dwo3);
     mpi->comm.barrier();
   }
 
@@ -2275,13 +2274,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // Precompute G^R(τ) and G^R(β−τ) used in evaluate_sigma_DeltaW.
   auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
 
-  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc,
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
                            dG_tsRPQ, dG_mtau_tsRPQ);
 
   // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
   if (div_corr && utils::is_q_gamma(q_pert)) {
-    // Transpose (q,t,P,Q) → (t,q,P,Q) for eps_inv_head_t
-    auto dDeltaW_tqPQ = utils::transpose_axes_01(dDeltaW_qtPQ, mpi->comm);
     auto [delta_eps_inv_q, delta_eps_inv_head] =
         solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment);
     lr.apply_div_correction_G(sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);

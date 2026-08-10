@@ -62,15 +62,6 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
     std::tie(w_pgrid, w_bsize) = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
   }
 
-  // Allocate the LR-owned FT staging buffers once (in the FT-buffer dist), then
-  // thread them into every per-iteration _scr_fourier.tau_to_w / w_to_tau so they are
-  // reused instead of reallocated. τ-shaped and ω-shaped; ft_buffer_dist depends
-  // only on (q, P, Q), so both share b_pgrid / b_bsize.
-  _ft_buffer_t = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
-      thc.mpi()->comm, b_pgrid, {nt_half, nqpts, NP, NQ}, b_bsize);
-  _ft_buffer_w = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
-      thc.mpi()->comm, b_pgrid, {nw_half, nqpts, NP, NQ}, b_bsize);
-
   // FT τ → ω directly into the chosen distribution.
   // Deliberately uses a local scr_coulomb_fourier_t (not the member _scr_fourier):
   // this is one-time setup, and keeping it separate leaves _scr_fourier's FT
@@ -397,11 +388,12 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
 
-  // FT ΔΠ: τ → ω, output in LR ω-side distribution. Reuse the LR-owned staging
-  // buffers (built in compute_W_full_omega) across iterations.
+  // FT ΔΠ: τ → ω, output in LR ω-side distribution. The FT staging buffers are
+  // allocated and released inside each tau_to_w / w_to_tau call: they are dead
+  // weight (~1 F(τ) + 1 F(ω) grid) through the Dyson, HF and Σ phases, which is
+  // far more memory than the per-call allocation costs in time.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true,
-                                           &_ft_buffer_t, &_ft_buffer_w);
+  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
@@ -420,8 +412,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true,
-                                      &_ft_buffer_t, &_ft_buffer_w);
+  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");

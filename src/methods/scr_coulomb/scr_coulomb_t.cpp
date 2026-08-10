@@ -411,26 +411,20 @@ namespace solvers {
   auto scr_coulomb_t::tau_to_w(
       memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
       std::array<long, 4> w_pgrid_out, std::array<long, 4> w_bsize_out,
-      bool reset_input,
-      memory::darray_t<local_Array_t, communicator_t>* buffer_t,
-      memory::darray_t<local_Array_t, communicator_t>* buffer_w)
+      bool reset_input)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    return _scr_fourier.tau_to_w(dPi_tqPQ_pos, w_pgrid_out, w_bsize_out,
-                               reset_input, buffer_t, buffer_w);
+    return _scr_fourier.tau_to_w(dPi_tqPQ_pos, w_pgrid_out, w_bsize_out, reset_input);
   }
 
   template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
   auto scr_coulomb_t::w_to_tau(
       memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
       std::array<long, 4> t_pgrid_out, std::array<long, 4> t_bsize_out,
-      bool reset_input,
-      memory::darray_t<local_Array_t, communicator_t>* buffer_t,
-      memory::darray_t<local_Array_t, communicator_t>* buffer_w)
+      bool reset_input)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    return _scr_fourier.w_to_tau(dW_wqPQ_pos, t_pgrid_out, t_bsize_out,
-                               reset_input, buffer_t, buffer_w);
+    return _scr_fourier.w_to_tau(dW_wqPQ_pos, t_pgrid_out, t_bsize_out, reset_input);
   }
 
   template<typename comm_t>
@@ -503,15 +497,11 @@ namespace solvers {
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_t::w_to_tau(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool,
-                 memory::darray_t<Arr4D, mpi3::communicator>*,
-                 memory::darray_t<Arr4D, mpi3::communicator>*);
+                 std::array<long, 4>, std::array<long, 4>, bool);
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_t::tau_to_w(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool,
-                 memory::darray_t<Arr4D, mpi3::communicator>*,
-                 memory::darray_t<Arr4D, mpi3::communicator>*);
+                 std::array<long, 4>, std::array<long, 4>, bool);
 
   // instantiate templates
   template void scr_coulomb_t::dump_eps_inv_head(

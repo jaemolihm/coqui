@@ -67,26 +67,23 @@ namespace solvers {
     /**
      * Specialized FT function for a distributed array along the (τ, ω) axes.
      *
-     * buffer_t / buffer_w: optional caller-owned τ- and ω-shaped staging buffers
-     * (in the ft_buffer_dist distribution). When provided they are reused across
-     * calls. If not set, allocate per-call buffers.
+     * The τ-/ω-shaped staging buffers (in the ft_buffer_dist distribution) are
+     * allocated and released within the call. They are a full aux grid each, so
+     * holding them across calls would keep that memory resident through every
+     * other phase of the SCF loop.
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto tau_to_w(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
                   std::array<long, 4> w_pgrid_out,
                   std::array<long, 4> w_bsize_out = {},
-                  bool reset_input = false,
-                  memory::darray_t<local_Array_t, communicator_t>* buffer_t = nullptr,
-                  memory::darray_t<local_Array_t, communicator_t>* buffer_w = nullptr)
+                  bool reset_input = false)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto w_to_tau(memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
                   std::array<long, 4> t_pgrid_out,
                   std::array<long, 4> t_bsize_out = {},
-                  bool reset_input = false,
-                  memory::darray_t<local_Array_t, communicator_t>* buffer_t = nullptr,
-                  memory::darray_t<local_Array_t, communicator_t>* buffer_w = nullptr)
+                  bool reset_input = false)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
