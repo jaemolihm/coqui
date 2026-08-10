@@ -585,12 +585,9 @@ namespace methods {
         } // pass
       } // it_local
 
-      // Synchronize and distribute across all nodes.
-      // One writer per τ block globally, so all_reduce_parallel is bit-identical
-      // to all_reduce here. The fence publishes that writer's stores; the
-      // node_sync inside all_reduce_parallel only acquires.
+      // Synchronize and distribute across all nodes. One writer per τ block
+      // globally, so all_reduce_parallel is bit-identical to all_reduce here.
       _Timer.start("SIGMA_FINAL_REDUCE");
-      sDeltaSigma_tskij.win().fence();
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
 
