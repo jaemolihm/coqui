@@ -136,11 +136,6 @@ namespace solvers {
 
     bool is_q_gamma() const { return _is_q_gamma; }
 
-    /// True when the ω side runs on the permuted communicator and the two middle
-    /// redistribute hops are replaced by the intra-q-pool exchange (strategy A).
-    /// Set in compute_W_full_omega; false before it runs.
-    bool uses_qpool_exchange() const { return _layout.use_qpool_exchange; }
-
   /**
    * Print the LR W Dyson timer block (header + total + subclocks) at log
    * level `level` (2: standard, 3: per-step diagnostics).
