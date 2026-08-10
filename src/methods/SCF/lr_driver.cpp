@@ -250,8 +250,8 @@ std::tuple<int, double> lr_driver::run_lr(
   // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_DRIVER_SETUP");
   using local_Array_4D_t = nda::array<ComplexType, 4>;
-  // MUST stay declared *after* lr_scr_solver: under the q-pool-redistribute strategy
-  // compute_W_full_omega returns an array on the solver's _comm_perm member, and
+  // MUST stay declared *after* lr_scr_solver: whenever a q-pool holds more than one
+  // rank compute_W_full_omega returns an array on the solver's _comm_perm member, and
   // memory::darray_t holds a raw communicator pointer. Destruction is reverse
   // declaration order, so the solver has to outlive this holder.
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
@@ -793,9 +793,9 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   if (include_gw_sigma) {
     arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true});
   }
-  // ω-side strategy of the ΔW pipeline. Queried from the same predicate the
-  // solver uses (lr_W_omega_layout_for), never re-derived here: the entries below
-  // are conditional on it, and two derivations would drift.
+  // ω-side layout of the ΔW pipeline. Queried from the same helper the solver uses
+  // (lr_W_omega_layout_for), never re-derived here: the entries below are conditional
+  // on it, and two derivations would drift.
   // Only meaningful (and only evaluated) for the full-GW W Dyson pipeline.
   solvers::lr_W_omega_layout w_layout;
   if (gw_full) {
@@ -803,18 +803,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true});
     arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true});
     arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true});
-    // Solver-owned FT staging buffers: allocated once in compute_W_full_omega,
-    // resident for the whole loop (persistent by lifetime, though internal).
+    // Solver-owned τ-shaped FT staging buffer: allocated once in compute_W_full_omega,
+    // resident for the whole loop (persistent by lifetime, though internal). There is
+    // no ω-shaped one — the FT always transforms into/out of the buffer distribution,
+    // so acquire_ft_buffer is never reached for the ω side.
     arrays.push_back({"_ft_buffer_t",  shp4a(nth),  aux4(nth),  true});
-    // The ω-shaped one only exists when the FT really stages through it, i.e. when
-    // the ω-side grid differs from the FT-buffer one *and* the q-pool redistribute is
-    // not used. Otherwise both fused branches fire and acquire_ft_buffer is never
-    // reached for the ω side.
-    if (w_layout.need_ft_buffer_w)
-      arrays.push_back({"_ft_buffer_w",  shp4a(nwbh), aux4(nwbh), true});
-    // Its one-for-one replacement under the q-pool redistribute: the ΔΠ/ΔW(iω)
-    // workspace on the permuted communicator, reused every iteration.
-    if (w_layout.use_qpool_redistribute)
+    // The ΔΠ/ΔW(iω) workspace on the permuted communicator, reused every iteration.
+    // At m == 1 the ω side aliases the FT output and no workspace is allocated.
+    if (w_layout.m > 1)
       arrays.push_back({"_dPi_w_perm",   shp4a(nwbh), aux4(nwbh), true});
     if (!is_q_gamma())
       arrays.push_back({"_dW_full_qpQ (W(q+Q))", shp4a(nwbh), aux4(nwbh), true});
@@ -850,16 +846,12 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   //     operands of every redistribute here are the same global shape, hence the
   //     2x rows below. They dominate the (t,q)→(q,t) transpose target, which is
   //     1x and not co-live with them, so the transpose never sets the peak.
-  //     The ω-side redistribute only happens under the four-hop strategy; the
-  //     other two transform straight into/out of the FT-buffer layout.
   //
-  //     Under the q-pool redistribute, the ΔΠ/ΔW(iω) entry is the buffer-grid array;
-  //     solve_lr_dyson_W resets it before re-allocating for the return trip, so it
-  //     stays 1x. The permuted ω workspace it feeds is allocated once and never
-  //     freed, so it is listed in the persistent table above. The redistribute itself
-  //     is a redistribute on the q-pool sub-communicator, whose pack/unpack pair
-  //     is sized by the two operands' local blocks exactly as the world-comm one
-  //     is — hence the same 2x row.
+  //     The ω-side ΔΠ/ΔW(iω) entry is the buffer-grid array; solve_lr_dyson_W resets it
+  //     before re-allocating for the return trip, so it stays 1x, and the permuted ω
+  //     workspace it feeds is persistent (listed above). Its pack/unpack pair is sized
+  //     by the two operands' local blocks exactly as a world-comm redistribute's is,
+  //     hence the same 2x row; at m == 1 nothing crosses and there is no such pair.
   enum phase_t { DYSON, GWSIG_TAU, GWSIG_W };
   struct tentry_t { std::string name; std::string shape; double nelem; phase_t ph; };
   std::vector<tentry_t> trans;
@@ -872,13 +864,11 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     trans.push_back({"ΔΠ/ΔW(τ)",            shp4a(nth),  aux4(nth),  GWSIG_TAU});
     trans.push_back({"redist pack/unpack (τ)", "2x"+shp4a(nth),  2.0*aux4(nth),  GWSIG_TAU});
     trans.push_back({"ΔΠ/ΔW(iω)",           shp4a(nwbh), aux4(nwbh), GWSIG_W});
-    if (w_layout.need_ft_buffer_w)
-      trans.push_back({"redist pack/unpack (iω)", "2x"+shp4a(nwbh), 2.0*aux4(nwbh), GWSIG_W});
-    if (w_layout.use_qpool_redistribute)
+    if (w_layout.m > 1)
       trans.push_back({"qpool pack/unpack (iω)", "2x"+shp4a(nwbh), 2.0*aux4(nwbh), GWSIG_W});
     // lr_dyson_W_in_place's rank-2 intermediate: one local (P,Q) block per rank,
     // allocated for the whole ω Dyson and therefore co-live with ΔΠ/ΔW(iω). With
-    // (P,Q) local (strategies A and C) that is a full NP² per rank.
+    // (P,Q) local (u == 1) that is a full NP² per rank.
     const long Pl = (NP + w_layout.w_pgrid[2] - 1) / std::max(w_layout.w_pgrid[2], 1L);
     const long Ql = (NP + w_layout.w_pgrid[3] - 1) / std::max(w_layout.w_pgrid[3], 1L);
     trans.push_back({"ΔW Dyson (P,Q) scratch",
@@ -968,10 +958,9 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   // distribution choice in lr_scr_coulomb_t::compute_W_full_omega).
   if (gw_full) {
     auto lay = solvers::lr_W_omega_layout_for(nproc, nq, nwbh, NP);
-    std::string ftb_arrs = lay.need_ft_buffer_w ? "_ft_buffer_t, _ft_buffer_w"
-                                                : "_ft_buffer_t";
+    std::string ftb_arrs = "_ft_buffer_t";
     std::string w_arrs = is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ";
-    if (lay.use_qpool_redistribute) {
+    if (lay.m > 1) {
       ftb_arrs += ", ΔΠ/ΔW(iω)";
       w_arrs += ", _dPi_w_perm";
     }
@@ -979,10 +968,12 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
             pg4(lay.b_pgrid, "(·,q,P,Q)"), ftb_arrs);
     app_log(2, "    {:<22s}{:<30s}{}", "aux ω-side",
             pg4(lay.w_pgrid, "(w,q,P,Q)"), w_arrs);
-    if (lay.use_qpool_redistribute)
-      app_log(2, "    {:<22s}{:<30s}{}", "  ω-side comm",
-              fmt::format("permuted, q-pools of {}", lay.m),
-              "intra-pool redistribute replaces 2 of 4 global hops");
+    app_log(2, "    {:<22s}{:<30s}{}", "  ω-side comm",
+            fmt::format("permuted, q-pools of {}", lay.m),
+            (lay.m > 1)
+                ? fmt::format("intra-pool redistribute replaces 2 of 4 global hops "
+                              "(nwpools = {}, u = {})", lay.nwpools, lay.u)
+                : std::string("ω side aliases the FT buffer, nothing crosses"));
   }
 
   // Band-basis Dyson grids — the ω-side comes from the same helper

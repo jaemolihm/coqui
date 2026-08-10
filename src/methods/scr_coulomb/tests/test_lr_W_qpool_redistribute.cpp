@@ -23,9 +23,13 @@
 
 /**
  * Tests methods/scr_coulomb/lr_W_qpool_redistribute.hpp, the ω-side transfer of the
- * ΔW pipeline: the layout predicate lr_W_omega_layout_for and the intra-q-pool
+ * ΔW pipeline: the layout helper lr_W_omega_layout_for and the intra-q-pool
  * redistribute that crosses between the FT-buffer distribution (ω local, q and (P,Q)
- * split) and the ω-side one (ω and q split, (P,Q) local).
+ * split) and the ω-side one (ω and q split, (P,Q) split u ways).
+ *
+ * This is the only automated coverage of the permutation key at u > 1: no production
+ * configuration reaches it (the 192-rank benchmark has u == 1), so the {6,2,5} case
+ * below is what exercises the general digit swap.
  *
  * The redistribute is a pure permutation of data, so each element is filled with an
  * exact integer encoding of its own global (w, q, P, Q) index. A round trip must
@@ -65,7 +69,8 @@ static ComplexType qpool_ref(long iw, long iq, long iP, long iQ,
 }
 
 /**
- * Round trip through the q-pool redistribute for one shape whose layout selects it:
+ * Round trip through the q-pool redistribute for one shape whose q-pools hold more
+ * than one rank:
  *   1. fill the FT-buffer-layout array from the global-index function,
  *   2. lr_W_qpool_redistribute_forward and check every ω-side element against the function
  *      evaluated at *its own* global indices (the ω-side origin/local_range come
@@ -73,17 +78,17 @@ static ComplexType qpool_ref(long iw, long iq, long iP, long iQ,
  *      the global map, not just self-consistency),
  *   3. lr_W_qpool_redistribute_backward into a fresh buffer-layout array and demand
  *      bit-identity with 1.
- * Returns true if the guard fired and the case ran.
+ * Returns true if the case has m > 1 and therefore really moved data.
  */
 static bool run_roundtrip(boost::mpi3::communicator& world,
                           long nw, long nq, long NP) {
   const long nproc = world.size();
   auto layout = lr_W_omega_layout_for(nproc, nq, nw, NP);
-  if (not layout.use_qpool_redistribute) return false;
+  if (layout.m == 1) return false;   // the two layouts coincide; nothing crosses
 
-  const long m = layout.m, nqpools = layout.nqpools;
+  const long m = layout.m, nqpools = layout.nqpools, u = layout.u;
   const long r = world.rank();
-  auto comm_perm  = world.split(0, (int)lr_W_qpool_key(r, m, nqpools));
+  auto comm_perm  = world.split(0, (int)lr_W_qpool_key(r, m, nqpools, u));
   auto qpool_comm = world.split((int)(r / m), (int)(r % m));
 
   shape_t<4> gshape = {nw, nq, NP, NP};
@@ -133,6 +138,7 @@ static bool run_roundtrip(boost::mpi3::communicator& world,
   long bad[2] = {bad_fwd, bad_bwd};
   world.all_reduce_in_place_n(bad, 2, std::plus<>{});
   INFO("nw=" << nw << " nq=" << nq << " NP=" << NP << " m=" << m
+       << " nwpools=" << layout.nwpools << " u=" << u
        << " b_pgrid=(" << layout.b_pgrid[0] << "," << layout.b_pgrid[1] << ","
        << layout.b_pgrid[2] << "," << layout.b_pgrid[3] << ")"
        << " w_pgrid=(" << layout.w_pgrid[0] << "," << layout.w_pgrid[1] << ","
@@ -146,20 +152,24 @@ TEST_CASE("lr_W_qpool_redistribute", "[methods][lr]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
 
-  // Shapes chosen so that, at the configured CTEST_NPROC (8), the guard fires:
+  // Shapes chosen so that, at the configured CTEST_NPROC (8), m > 1 and data really
+  // crosses:
   //   {6,4,5}   : m=2, m_Q=1, ω tiles 3/3, P panels 2/3 (ragged P)
   //   {11,4,5}  : m=2, ragged ω tiles 6/5 on top of ragged P
-  //   {12,2,5}  : m=4 with both P and Q split (2x2), ragged in both
+  //   {12,2,5}  : m=4 with both P and Q split (2x2) on the buffer side, ragged in both
   //   {6,12,5}  : m=2 with 3 q-points per pool (nq_loc > 1)
   //   {12,13,5} : m=4 with *ragged* q pools (7 and 6) — the q axis is a bystander
   //               of the redistribute, so a wrong nq_loc silently misroutes everything
   //   {22,13,5} : ragged ω tiles (6,6,5,5) *and* m_Q > 1 (2x2) at the same time —
   //               the only case where a peer's ω extent and its Q panel both
-  //               differ from ours, so every pairwise overlap has a different
-  //               shape. (nw must stay ≥ 5·m or lr_W_proc_grid drops nwpools
-  //               below m and the guard selects strategy B instead.)
-  // The guard is pure arithmetic in (nproc, nq, nw, NP), so at other rank counts
-  // some or all of these simply select another strategy.
+  //               differ from ours, so every pairwise overlap has a different shape
+  //   {6,2,5}   : u > 1 (m=4, nwpools=2, u=2; W=(2,2,2,1)), i.e. the ω side keeps
+  //               only 2 of its 4 pool ranks on the ω axis and splits P over the
+  //               other 2. The key is then the general digit swap
+  //               [0,1,4,5,2,3,6,7] rather than its u == 1 reduction, and a peer
+  //               differs from us on the ω axis *and* on P.
+  // The layout is pure arithmetic in (nproc, nq, nw, NP), so at other rank counts
+  // some of these come out with m == 1 and nothing to cross.
   long fired = 0;
   fired += run_roundtrip(world,  6,  4, 5) ? 1 : 0;
   fired += run_roundtrip(world, 11,  4, 5) ? 1 : 0;
@@ -167,50 +177,66 @@ TEST_CASE("lr_W_qpool_redistribute", "[methods][lr]")
   fired += run_roundtrip(world,  6, 12, 5) ? 1 : 0;
   fired += run_roundtrip(world, 12, 13, 5) ? 1 : 0;
   fired += run_roundtrip(world, 22, 13, 5) ? 1 : 0;
+  fired += run_roundtrip(world,  6,  2, 5) ? 1 : 0;
 
-  // A test that silently takes the fallback everywhere is vacuous: pin the exact
-  // count at the rank count the suite is configured for, and demand at least one
-  // round trip at every other multi-rank count. At one rank the strategy can
-  // never be selected (guard g1), so there is nothing to exercise — say so rather
-  // than reporting a pass.
+  // A test whose every case degenerates to the alias is vacuous: pin the exact count
+  // at the rank count the suite is configured for, and demand at least one round trip
+  // at every other multi-rank count. At one rank every layout has m == 1, so there is
+  // nothing to exercise — say so rather than reporting a pass.
   if (world.size() == 8) {
-    INFO("cases that selected the q-pool redistribute: " << fired);
-    REQUIRE(fired == 6);
+    INFO("cases with m > 1: " << fired);
+    REQUIRE(fired == 7);
   } else if (world.size() > 1) {
-    INFO("cases that selected the q-pool redistribute: " << fired);
+    INFO("cases with m > 1: " << fired);
     REQUIRE(fired > 0);
   } else {
-    WARN("lr_W_qpool_redistribute: single rank — it cannot be selected, "
-         "only the key() bijection is covered. Run with 8 ranks for the round trips.");
+    WARN("lr_W_qpool_redistribute: single rank — every layout has m == 1, so only the "
+         "key() bijection is covered. Run with 8 ranks for the round trips.");
   }
 
-  // Guard-fails cases: the layout must classify, not crash, and must not claim
-  // the redistribute.
-  //   nq == nproc  -> the FT buffer already has (P,Q) local (strategy C, m == 1)
-  //   {6,2,5}      -> lr_W_proc_grid returns a PQ-split ω grid (strategy B)
+  // The degenerate case: at nq == nproc every q-pool holds one rank, so the ω side is
+  // the FT buffer itself and its block size is the buffer's (not lr_W_proc_grid's).
   {
-    auto lay_c = lr_W_omega_layout_for(world.size(), world.size(), 6, 5);
-    REQUIRE_FALSE(lay_c.use_qpool_redistribute);
-    REQUIRE(lay_c.m == 1);
-    REQUIRE_FALSE(lay_c.need_ft_buffer_w);
+    auto lay = lr_W_omega_layout_for(world.size(), world.size(), 6, 5);
+    REQUIRE(lay.m == 1);
+    REQUIRE(lay.nwpools == 1);
+    REQUIRE(lay.u == 1);
+    REQUIRE(lay.w_pgrid == lay.b_pgrid);
+    REQUIRE(lay.w_bsize == lay.b_bsize);
   }
+  // The u > 1 case really is one, and the key is the exact permutation derived for it.
   if (world.size() == 8) {
-    auto lay_b = lr_W_omega_layout_for(8, 2, 6, 5);
-    REQUIRE_FALSE(lay_b.use_qpool_redistribute);
-    REQUIRE(lay_b.need_ft_buffer_w);
+    auto lay = lr_W_omega_layout_for(8, 2, 6, 5);
+    REQUIRE(lay.m == 4);
+    REQUIRE(lay.nwpools == 2);
+    REQUIRE(lay.u == 2);
+    REQUIRE((lay.w_pgrid == shape_t<4>{2, 2, 2, 1}));
+    std::vector<long> expect = {0, 1, 4, 5, 2, 3, 6, 7};
+    for (long r = 0; r < 8; ++r)
+      REQUIRE(lr_W_qpool_key(r, lay.m, lay.nqpools, lay.u) == expect[r]);
   }
 
-  // key() is a bijection with the documented inverse, for every (m, nqpools).
-  for (long m : {1L, 2L, 3L, 4L}) {
+  // key() is a bijection with the documented inverse, for every (m, nqpools, u) with
+  // u | m, and it reduces to the 3-argument form at u == 1.
+  for (long m : {1L, 2L, 3L, 4L, 6L, 8L}) {
     for (long nqp : {1L, 2L, 5L, 7L}) {
-      std::vector<int> seen(m * nqp, 0);
-      for (long r = 0; r < m * nqp; ++r) {
-        long s = lr_W_qpool_key(r, m, nqp);
-        REQUIRE(s >= 0);
-        REQUIRE(s < m * nqp);
-        REQUIRE(seen[s] == 0);
-        seen[s] = 1;
-        REQUIRE((s % nqp) * m + s / nqp == r);   // key^-1
+      for (long u = 1; u <= m; ++u) {
+        if (m % u != 0) continue;
+        const long nwp = m / u;
+        std::vector<int> seen(m * nqp, 0);
+        REQUIRE(lr_W_qpool_key(0, m, nqp, u) == 0);
+        for (long r = 0; r < m * nqp; ++r) {
+          long s = lr_W_qpool_key(r, m, nqp, u);
+          REQUIRE(s >= 0);
+          REQUIRE(s < m * nqp);
+          REQUIRE(seen[s] == 0);
+          seen[s] = 1;
+          // key^-1: read the digits (w, qB, c) back off s in radices (nwpools, nqpools, u).
+          long w = s / (nqp * u), qB = (s / u) % nqp, c = s % u;
+          REQUIRE(w < nwp);
+          REQUIRE(qB * m + w * u + c == r);
+          if (u == 1) REQUIRE(s == (r % m) * nqp + r / m);
+        }
       }
     }
   }

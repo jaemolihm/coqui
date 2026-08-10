@@ -175,10 +175,11 @@ namespace solvers {
     // applies outside the class: the W_full(iω) returned by compute_W_full_omega
     // also points here, so the caller's holder must be declared after the solver
     // (see lr_driver.cpp / MBPT_drivers.cpp).
-    // Both are MPI_COMM_NULL unless strategy A is selected.
+    // Both are set in every configuration; at m == 1 the permutation is the identity
+    // and the ω arrays stay on the unpermuted communicator.
     mpi3::communicator _comm_perm;   // ω-side communicator, permuted by lr_W_qpool_key
     mpi3::communicator _qpool_comm;  // the m ranks sharing one q-tile
-    // ω-side distribution and strategy; filled in by compute_W_full_omega.
+    // The two ω-side distributions; filled in by compute_W_full_omega.
     lr_W_omega_layout _layout;
     // compute_W_full_omega move-assigns the two communicators above, which the
     // arrays it already handed out point at, so it may run only once per object.
@@ -199,18 +200,16 @@ namespace solvers {
     // LR iterations. Empty for Q=Γ (the operand is then W_full itself).
     std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
 
-    // τ- and ω-shaped FT staging buffers (in the ft_buffer_dist distribution),
-    // owned by the LR solver and threaded into every _scr_fourier.tau_to_w / w_to_tau
-    // call so they are reused across SCF iterations instead of reallocated.
-    // Default-constructed empty; populated once in compute_W_full_omega (always
-    // runs before the SCF loop), so they are live by the time the FTs use them.
+    // τ-shaped FT staging buffer (in the ft_buffer_dist distribution), owned by the
+    // LR solver and threaded into every _scr_fourier.tau_to_w / w_to_tau call so it is
+    // reused across SCF iterations instead of reallocated. Default-constructed empty;
+    // populated once in compute_W_full_omega (always runs before the SCF loop), so it
+    // is live by the time the FTs use it. There is no ω-shaped counterpart: the FT is
+    // always asked for the buffer distribution, so both fused branches fire and
+    // acquire_ft_buffer is never reached for the ω side.
     dArr4D_concrete_t _ft_buffer_t;
-    // Only allocated under strategy B: under A and C both fused FT branches fire,
-    // so the ω-side staging buffer is never acquired.
-    dArr4D_concrete_t _ft_buffer_w;
 
-    // Strategy A only: the ΔΠ(iω) → ΔW(iω) workspace on _comm_perm, reused every
-    // iteration. Replaces _ft_buffer_w one for one in the persistent footprint.
+    // m > 1 only: the ΔΠ(iω) → ΔW(iω) workspace on _comm_perm, reused every iteration.
     dArr4D_concrete_t _dPi_w_perm;
 
     void _init_kpq_map(THC_ERI auto& thc);
