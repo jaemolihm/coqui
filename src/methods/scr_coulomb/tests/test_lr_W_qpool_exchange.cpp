@@ -51,14 +51,14 @@ static ComplexType qpool_ref(long iw, long iq, long iP, long iQ,
 }
 
 /**
- * Round trip through lr_W_qpool_plan for one shape whose layout selects the
- * q-pool exchange:
+ * Round trip through the q-pool exchange for one shape whose layout selects it:
  *   1. fill the FT-buffer-layout array from the global-index function,
- *   2. forward() and check every ω-side element against the function evaluated at
- *      *its own* global indices (the ω-side origin/local_range come from
- *      make_distributed_array on the permuted communicator, so this validates the
- *      global map, not just self-consistency),
- *   3. backward() into a fresh buffer-layout array and demand bit-identity with 1.
+ *   2. lr_W_qpool_forward and check every ω-side element against the function
+ *      evaluated at *its own* global indices (the ω-side origin/local_range come
+ *      from make_distributed_array on the permuted communicator, so this validates
+ *      the global map, not just self-consistency),
+ *   3. lr_W_qpool_backward into a fresh buffer-layout array and demand
+ *      bit-identity with 1.
  * Returns true if the guard fired and the case ran.
  */
 static bool run_roundtrip(boost::mpi3::communicator& world,
@@ -110,12 +110,10 @@ static bool run_roundtrip(boost::mpi3::communicator& world,
   fill(omg, true);
   fill(buf2, true);
 
-  lr_W_qpool_plan plan;
-  plan.build(world, qpool_comm, buf, omg);
-  plan.forward(buf, omg);
+  lr_W_qpool_forward(world, qpool_comm, buf, omg);
   long bad_fwd = count_mismatch(omg);
 
-  plan.backward(omg, buf2);
+  lr_W_qpool_backward(world, qpool_comm, omg, buf2);
   long bad_bwd = count_mismatch(buf2);
 
   long bad[2] = {bad_fwd, bad_bwd};
@@ -143,8 +141,8 @@ TEST_CASE("lr_W_qpool_exchange", "[methods][lr]")
   //               of the exchange, so a wrong nq_loc silently misroutes everything
   //   {22,13,5} : ragged ω tiles (6,6,5,5) *and* m_Q > 1 (2x2) at the same time —
   //               the only case where a peer's ω extent and its Q panel both
-  //               differ from ours, which is where the two send/receive counts
-  //               diverge. (nw must stay ≥ 5·m or lr_W_proc_grid drops nwpools
+  //               differ from ours, so every pairwise overlap has a different
+  //               shape. (nw must stay ≥ 5·m or lr_W_proc_grid drops nwpools
   //               below m and the guard selects strategy B instead.)
   // The guard is pure arithmetic in (nproc, nq, nw, NP), so at other rank counts
   // some or all of these simply select another strategy.
