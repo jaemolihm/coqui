@@ -46,9 +46,9 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   _Timer.start("LR_W_COMPUTE_W_FULL");
 
   // Not re-entrant: _comm_perm / _qpool_comm are move-assigned below, and the
-  // W_full(iω) handed to the caller by an earlier call — plus _dW_full_qpQ_wqPQ
-  // and _dPi_w_perm — all hold raw pointers to them. A second call would leave
-  // those pointing at a destroyed communicator. Use a fresh solver.
+  // W_full(iω) handed to the caller by an earlier call — plus _dW_full_qpQ_wqPQ,
+  // _dPi_w_perm and _qpool_plan — all hold raw pointers to them. A second call
+  // would leave those pointing at a destroyed communicator. Use a fresh solver.
   utils::check(not _W_full_built,
                "compute_W_full_omega: may be called only once per lr_scr_coulomb_t "
                "instance; construct a new solver for a second W_full(iω).");
@@ -118,17 +118,13 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
                                      _layout.use_qpool_exchange ? b_pgrid : w_pgrid,
                                      _layout.use_qpool_exchange ? b_bsize : w_bsize, true);
   memory::darray_t<local_Array_t, mpi3::communicator> dW_c_wqPQ;
-  // Pack/unpack buffers redistribute_alltoallv holds live across the all-to-all,
-  // one per operand and sized like that operand's local block. Captured here so
-  // the report below can print the measured figure.
-  long qpool_pack_elems = 0;
   if (_layout.use_qpool_exchange) {
     dW_c_wqPQ = math::nda::make_distributed_array<local_Array_t>(
         _comm_perm, w_pgrid, {nw_half, nqpts, NP, NQ}, w_bsize);
     _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_forward(comm, _qpool_comm, dW_c_bqPQ, dW_c_wqPQ);
+    _qpool_plan.build(comm, _qpool_comm, dW_c_bqPQ, dW_c_wqPQ);
+    _qpool_plan.forward(dW_c_bqPQ, dW_c_wqPQ);
     _Timer.stop("LR_W_QPOOL_EXCHANGE");
-    qpool_pack_elems = (long)dW_c_bqPQ.local().size() + (long)dW_c_wqPQ.local().size();
     dW_c_bqPQ.reset();
   } else {
     dW_c_wqPQ = std::move(dW_c_bqPQ);
@@ -190,16 +186,16 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   if (_layout.use_qpool_exchange) {
     app_log(2, "    - ω-side transfer: q-pool exchange on a permuted communicator (m = {})",
             _layout.m);
-    // The exchange's whole memory price, measured rather than estimated: the two
-    // transient pack/unpack buffers of redistribute_alltoallv, which together
-    // hold one copy of each side's local block. lr_driver::print_memory_estimate
-    // carries the same quantity as an analytic ω-phase transient entry
-    // (2x(nw,nq,NP,NQ)); printing the real total here is what keeps the two honest.
-    long pack_tot = qpool_pack_elems;
-    comm.all_reduce_in_place_n(&pack_tot, 1, std::plus<>{});
-    app_log(2, "    - q-pool exchange pack/unpack: {:.3f} GB ({} elements/rank)",
-            double(pack_tot) * sizeof(ComplexType) / (1024.0*1024.0*1024.0),
-            qpool_pack_elems);
+    // The exchange's whole memory price, measured rather than estimated: one
+    // peer-sized staging temp per rank, allocated in build() and never freed.
+    // lr_driver::print_memory_estimate carries the same quantity as an analytic
+    // persistent entry ((nw,nq,NP,NQ)/m); printing the real total here is what
+    // keeps the two honest.
+    long tmp_tot = _qpool_plan.temp_size();
+    comm.all_reduce_in_place_n(&tmp_tot, 1, std::plus<>{});
+    app_log(2, "    - q-pool exchange temp: {:.3f} GB ({} elements/rank)",
+            double(tmp_tot) * sizeof(ComplexType) / (1024.0*1024.0*1024.0),
+            _qpool_plan.temp_size());
   } else {
     app_log(2, "    - ω-side transfer: generic redistribute");
   }
@@ -580,7 +576,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   if (qpool) {
     _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_forward(thc.mpi()->comm, _qpool_comm, dDeltaPi_wqPQ, _dPi_w_perm);
+    _qpool_plan.forward(dDeltaPi_wqPQ, _dPi_w_perm);
     _Timer.stop("LR_W_QPOOL_EXCHANGE");
     // Free before the ΔW buffer-grid array is re-allocated below: at most one
     // buffer-grid ω array may be live at a time, or the ω-phase transient doubles
@@ -592,7 +588,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
     dDeltaPi_wqPQ = math::nda::make_distributed_array<local_Array_t>(
         thc.mpi()->comm, ft_pgrid, _dPi_w_perm.global_shape(), ft_bsize);
     _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_backward(thc.mpi()->comm, _qpool_comm, _dPi_w_perm, dDeltaPi_wqPQ);
+    _qpool_plan.backward(_dPi_w_perm, dDeltaPi_wqPQ);
     _Timer.stop("LR_W_QPOOL_EXCHANGE");
   } else {
     run_dyson(dDeltaPi_wqPQ);
