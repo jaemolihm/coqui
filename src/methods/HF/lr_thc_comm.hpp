@@ -209,18 +209,12 @@ namespace methods {
           auto O_Iab_loc = O_Iab.local()(t_rng, s_rng, k_rng, nda::ellipsis{});
           auto O_IPQ_loc = O_IPQ.local();
 
-          // Setup wq_intra_comm. The split groups the ranks sharing a (t,s,k)
-          // block; when the leading axes are undivided every rank carries the
-          // same color and the split just reproduces gcomm, so skip it.
-          communicator_t *gcomm = O_IPQ.communicator();
-          const bool trivial_split = (pgrid[0] * pgrid[1] * pgrid[2] == 1);
-          communicator_t split_comm;
-          if (not trivial_split) {
-            int color = t_org * ns * nkpts + s_org * nkpts + k_org;
-            int key = gcomm->rank();
-            split_comm = gcomm->split(color, key);
-          }
-          communicator_t &dim0_intra_comm = trivial_split ? *gcomm : split_comm;
+          // The ranks sharing a (t,s,k) block are all of gcomm: (t,s,k) is undivided,
+          // so a split on that block would only reproduce its parent.
+          utils::check(pgrid[0] == 1 and pgrid[1] == 1 and pgrid[2] == 1,
+                       "lr_thc_comm::aux_to_primary(rank-5): expected (t,s,k) undivided, "
+                       "got pgrid ({},{},{})", pgrid[0], pgrid[1], pgrid[2]);
+          communicator_t &dim0_intra_comm = *O_IPQ.communicator();
           utils::check(dim0_intra_comm.size() == pgrid[3] * pgrid[4],
                        "dim0_intra_comm.size() != pgrid[3]*pgrid[4]");
 
@@ -240,18 +234,12 @@ namespace methods {
           auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
           auto O_IPQ_loc = O_IPQ.local();
 
-          // Setup q_intra_comm. The split groups the ranks sharing an (s,k)
-          // block; when the leading axes are undivided every rank carries the
-          // same color and the split just reproduces gcomm, so skip it.
-          communicator_t *gcomm = O_IPQ.communicator();
-          const bool trivial_split = (pgrid[0] * pgrid[1] == 1);
-          communicator_t split_comm;
-          if (not trivial_split) {
-            int color = s_org * nkpts + k_org;
-            int key = gcomm->rank();
-            split_comm = gcomm->split(color, key);
-          }
-          communicator_t &dim0_intra_comm = trivial_split ? *gcomm : split_comm;
+          // The ranks sharing an (s,k) block are all of gcomm: (s,k) is undivided,
+          // so a split on that block would only reproduce its parent.
+          utils::check(pgrid[0] == 1 and pgrid[1] == 1,
+                       "lr_thc_comm::aux_to_primary: expected (s,k) undivided, got pgrid "
+                       "({},{})", pgrid[0], pgrid[1]);
+          communicator_t &dim0_intra_comm = *O_IPQ.communicator();
           utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
                        "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
 
