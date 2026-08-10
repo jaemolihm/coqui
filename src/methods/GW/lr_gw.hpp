@@ -199,7 +199,6 @@ namespace methods {
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
       app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_COEFF"), _Timer.number_of_calls("SIGMA_FT_COEFF"));
       app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_W_COPY"), _Timer.number_of_calls("SIGMA_W_COPY"));
-      app_log(level, "{0}  - Zero Sigma buffer:          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ZERO_BUF"), _Timer.number_of_calls("SIGMA_ZERO_BUF"));
       app_log(level, "{0}  - Pre-loop fence (sync):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRE_FENCE"), _Timer.number_of_calls("SIGMA_PRE_FENCE"));
       app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
