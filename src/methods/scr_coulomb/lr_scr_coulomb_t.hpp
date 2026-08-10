@@ -38,7 +38,7 @@
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
-#include "methods/scr_coulomb/lr_W_qpool_exchange.hpp"
+#include "methods/scr_coulomb/lr_W_qpool_redistribute.hpp"
 
 namespace methods {
 namespace solvers {
@@ -161,7 +161,7 @@ namespace solvers {
     app_log(level, "{0}  - LR W FT (τ→ω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_TAU_TO_W"), _Timer.number_of_calls("LR_W_FT_TAU_TO_W"));
     app_log(level, "{0}  - LR W Dyson (iω):            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_LR_W"), _Timer.number_of_calls("EVALUATE_LR_W"));
     app_log(level, "{0}  - LR W (q+Q)-operand comm:    {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_COMM_QPQ"), _Timer.number_of_calls("LR_W_COMM_QPQ"));
-    app_log(level, "{0}  - LR W q-pool exchange:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_QPOOL_EXCHANGE"), _Timer.number_of_calls("LR_W_QPOOL_EXCHANGE"));
+    app_log(level, "{0}  - LR W q-pool redistribute:   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_QPOOL_REDISTRIBUTE"), _Timer.number_of_calls("LR_W_QPOOL_REDISTRIBUTE"));
     app_log(level, "{0}  - LR W FT (ω→τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_W_FT_W_TO_TAU"), _Timer.number_of_calls("LR_W_FT_W_TO_TAU"));
     app_log(level, "{0}    - redistribute (τ→ω, ω→τ): {1:8.3f} sec  {2:4d} calls", indent, ftT.elapsed("FT_REDISTRIBUTE"), ftT.number_of_calls("FT_REDISTRIBUTE"));
   }

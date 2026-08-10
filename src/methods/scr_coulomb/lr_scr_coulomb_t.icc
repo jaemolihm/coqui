@@ -64,7 +64,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   //   C: the FT buffer already has P and Q local -> reuse it for W_full and skip
   //      the redundant redistributions.
   //   A: the ω side runs on a q-pool-aligned permutation of the communicator, so
-  //      the two middle hops become intra-pool exchanges (lr_W_qpool_exchange.hpp).
+  //      the two middle hops become intra-pool redistributes (lr_W_qpool_redistribute.hpp).
   //   B: neither -> the historical four-hop path.
   // The predicate lives in lr_W_omega_layout_for so that lr_driver's memory
   // estimate branches on exactly the same thing the runtime does.
@@ -76,7 +76,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   auto w_pgrid = _layout.w_pgrid, w_bsize = _layout.w_bsize;
 
   auto& comm = thc.mpi()->comm;
-  if (_layout.use_qpool_exchange) {
+  if (_layout.use_qpool_redistribute) {
     const long m = _layout.m, nqpools = _layout.nqpools;
     // key is a bijection of [0, nproc) onto itself, so splitting with it as the
     // key simply relabels the ranks.
@@ -111,23 +111,23 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   setup_ft.set_check_ft_leakage(chk_leak != 0);
 
   // Under A the FT stops at the buffer layout (both fused branches then fire) and
-  // the q-pool exchange carries the data the rest of the way, onto _comm_perm.
+  // the q-pool redistribute carries the data the rest of the way, onto _comm_perm.
   // The generic redistribute cannot do this even here, one-time: its destination
   // would live on a communicator that is only *similar* to comm.
   auto dW_c_bqPQ = setup_ft.tau_to_w(dW_c_tqPQ,
-                                     _layout.use_qpool_exchange ? b_pgrid : w_pgrid,
-                                     _layout.use_qpool_exchange ? b_bsize : w_bsize, true);
+                                     _layout.use_qpool_redistribute ? b_pgrid : w_pgrid,
+                                     _layout.use_qpool_redistribute ? b_bsize : w_bsize, true);
   memory::darray_t<local_Array_t, mpi3::communicator> dW_c_wqPQ;
   // Pack/unpack buffers redistribute_alltoallv holds live across the all-to-all,
   // one per operand and sized like that operand's local block. Captured here so
   // the report below can print the measured figure.
   long qpool_pack_elems = 0;
-  if (_layout.use_qpool_exchange) {
+  if (_layout.use_qpool_redistribute) {
     dW_c_wqPQ = math::nda::make_distributed_array<local_Array_t>(
         _comm_perm, w_pgrid, {nw_half, nqpts, NP, NQ}, w_bsize);
-    _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_forward(comm, _qpool_comm, dW_c_bqPQ, dW_c_wqPQ);
-    _Timer.stop("LR_W_QPOOL_EXCHANGE");
+    _Timer.start("LR_W_QPOOL_REDISTRIBUTE");
+    lr_W_qpool_redistribute_forward(comm, _qpool_comm, dW_c_bqPQ, dW_c_wqPQ);
+    _Timer.stop("LR_W_QPOOL_REDISTRIBUTE");
     qpool_pack_elems = (long)dW_c_bqPQ.local().size() + (long)dW_c_wqPQ.local().size();
     dW_c_bqPQ.reset();
   } else {
@@ -187,17 +187,17 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   app_log(2, "    - ω-side pgrid: ({}, {}, {}, {})",
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
-  if (_layout.use_qpool_exchange) {
-    app_log(2, "    - ω-side transfer: q-pool exchange on a permuted communicator (m = {})",
+  if (_layout.use_qpool_redistribute) {
+    app_log(2, "    - ω-side transfer: q-pool redistribute on a permuted communicator (m = {})",
             _layout.m);
-    // The exchange's whole memory price, measured rather than estimated: the two
+    // The redistribute's whole memory price, measured rather than estimated: the two
     // transient pack/unpack buffers of redistribute_alltoallv, which together
     // hold one copy of each side's local block. lr_driver::print_memory_estimate
     // carries the same quantity as an analytic ω-phase transient entry
     // (2x(nw,nq,NP,NQ)); printing the real total here is what keeps the two honest.
     long pack_tot = qpool_pack_elems;
     comm.all_reduce_in_place_n(&pack_tot, 1, std::plus<>{});
-    app_log(2, "    - q-pool exchange pack/unpack: {:.3f} GB ({} elements/rank)",
+    app_log(2, "    - q-pool redistribute pack/unpack: {:.3f} GB ({} elements/rank)",
             double(pack_tot) * sizeof(ComplexType) / (1024.0*1024.0*1024.0),
             qpool_pack_elems);
   } else {
@@ -213,7 +213,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
 
   // ΔΠ(iω)/ΔW(iω) workspace on the permuted communicator, allocated once and
   // reused by every solve_lr_dyson_W. Same shape as the _ft_buffer_w it replaces.
-  if (_layout.use_qpool_exchange)
+  if (_layout.use_qpool_redistribute)
     _dPi_w_perm = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
         _comm_perm, w_pgrid, {nw_half, nqpts, NP, NQ}, w_bsize);
 
@@ -530,10 +530,10 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   //       buffer layout and both fused branches fire (2 hops); under B it is not
   //       and the FT adds an ω-side staging buffer plus a redistribute (4 hops).
   //  A:   ask the FT for the *buffer* layout — so both fused branches fire — and
-  //       cross to the ω-side layout with the intra-q-pool exchange, which only
+  //       cross to the ω-side layout with the intra-q-pool redistribute, which only
   //       moves (m−1)/m of the local block among m ranks of one node instead of
   //       everything through the bisection.
-  const bool qpool = _layout.use_qpool_exchange;
+  const bool qpool = _layout.use_qpool_redistribute;
   auto ft_pgrid = qpool ? _layout.b_pgrid : dW_full_wqPQ.grid();
   auto ft_bsize = qpool ? _layout.b_bsize : dW_full_wqPQ.block_size();
   if (qpool) {
@@ -579,9 +579,9 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   };
 
   if (qpool) {
-    _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_forward(thc.mpi()->comm, _qpool_comm, dDeltaPi_wqPQ, _dPi_w_perm);
-    _Timer.stop("LR_W_QPOOL_EXCHANGE");
+    _Timer.start("LR_W_QPOOL_REDISTRIBUTE");
+    lr_W_qpool_redistribute_forward(thc.mpi()->comm, _qpool_comm, dDeltaPi_wqPQ, _dPi_w_perm);
+    _Timer.stop("LR_W_QPOOL_REDISTRIBUTE");
     // Free before the ΔW buffer-grid array is re-allocated below: at most one
     // buffer-grid ω array may be live at a time, or the ω-phase transient doubles
     // (and lr_driver::print_memory_estimate stops being true).
@@ -591,9 +591,9 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
     dDeltaPi_wqPQ = math::nda::make_distributed_array<local_Array_t>(
         thc.mpi()->comm, ft_pgrid, _dPi_w_perm.global_shape(), ft_bsize);
-    _Timer.start("LR_W_QPOOL_EXCHANGE");
-    lr_W_qpool_backward(thc.mpi()->comm, _qpool_comm, _dPi_w_perm, dDeltaPi_wqPQ);
-    _Timer.stop("LR_W_QPOOL_EXCHANGE");
+    _Timer.start("LR_W_QPOOL_REDISTRIBUTE");
+    lr_W_qpool_redistribute_backward(thc.mpi()->comm, _qpool_comm, _dPi_w_perm, dDeltaPi_wqPQ);
+    _Timer.stop("LR_W_QPOOL_REDISTRIBUTE");
   } else {
     run_dyson(dDeltaPi_wqPQ);
   }

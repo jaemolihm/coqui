@@ -19,8 +19,8 @@
  */
 
 
-#ifndef COQUI_LR_W_QPOOL_EXCHANGE_HPP
-#define COQUI_LR_W_QPOOL_EXCHANGE_HPP
+#ifndef COQUI_LR_W_QPOOL_REDISTRIBUTE_HPP
+#define COQUI_LR_W_QPOOL_REDISTRIBUTE_HPP
 
 #include <algorithm>
 #include <array>
@@ -42,7 +42,7 @@ namespace methods {
 namespace solvers {
 
 /**
- * q-pool-aligned exchange between the FT-buffer distribution and the LR ω-side
+ * q-pool-aligned redistribute between the FT-buffer distribution and the LR ω-side
  * distribution of the ΔW pipeline.
  *
  * The two distributions of the W Dyson path,
@@ -57,7 +57,7 @@ namespace solvers {
  *   key(r) = (r % m)·nq + r / m
  *
  * then a rank keeps its q-tile across the two layouts, and the whole
- * redistribution collapses to an exchange *inside* the m-rank q-pool
+ * redistribution collapses to a redistribute *inside* the m-rank q-pool
  * {q·m … q·m+m−1} instead of a global one.
  *
  * The move is math::nda::redistribute, but issued on the q-pool sub-communicator
@@ -74,7 +74,7 @@ namespace solvers {
  *      arrays outright -- there is no per-call fallback to it, which is why the
  *      strategy is picked once, up front, by lr_W_omega_layout_for().
  *  (ii) even if it accepted them it would issue an MPI_Alltoallv over the whole
- *      communicator, where an m-rank (single-node) exchange suffices.
+ *      communicator, where an m-rank (single-node) redistribute suffices.
  */
 
 /// Rank permutation aligning the ω-side q-tiles with the FT-buffer ones:
@@ -94,11 +94,11 @@ inline long lr_W_qpool_key(long r, long m, long nqpools) {
  *
  *   C : m == 1. The FT buffer already has (P, Q) local, so the ω side simply
  *       adopts it. Both fused FT branches fire; 2 redistribute hops per iteration.
- *   A : the q-pool exchange (this header). 2 hops + 2 intra-pool exchanges.
+ *   A : the q-pool redistribute (this header). 2 hops + 2 intra-pool redistributes.
  *   B : anything else. 4 hops, and the ω-side FT staging buffer is really used.
  */
 struct lr_W_omega_layout {
-  bool use_qpool_exchange = false;  // strategy A
+  bool use_qpool_redistribute = false;  // strategy A
   bool need_ft_buffer_w   = false;  // strategy B: the ω-side FT buffer is acquired
   long m       = 1;                 // ranks per q-pool on the buffer side
   long nqpools = 1;
@@ -137,8 +137,8 @@ lr_W_omega_layout_for(long nproc, long nq, long nw_half, long NP) {
   const bool g4 = L.w_pgrid == std::array<long, 4>{L.m, L.nqpools, 1, 1};
   const bool g5 = L.b_bsize[0] == 1 && L.b_bsize[1] == 1 &&
                   L.w_bsize[0] == 1 && L.w_bsize[1] == 1;   // ω/q block quantum 1
-  L.use_qpool_exchange = g1 && g2 && g3 && g4 && g5;
-  L.need_ft_buffer_w   = not L.use_qpool_exchange;
+  L.use_qpool_redistribute = g1 && g2 && g3 && g4 && g5;
+  L.need_ft_buffer_w   = not L.use_qpool_redistribute;
   return L;
 }
 
@@ -185,7 +185,7 @@ auto lr_W_qpool_views(mpi3::communicator& comm_world, mpi3::communicator& qpool_
                "(ω {} of {}, (P,Q) {}x{} of {}x{})",
                bl[0], bs[0], wl[2], wl[3], ws[2], ws[3]);
   // Both layouts must hand this rank the same q-tile: the q axis is a bystander
-  // of the exchange and becomes the views' second (undivided) axis.
+  // of the redistribute and becomes the views' second (undivided) axis.
   utils::check(bo[1] == wo[1] && bl[1] == wl[1],
                "lr_W_qpool_views: q ranges differ between the two layouts "
                "(buffer [{},{}), ω [{},{}))", bo[1], bo[1] + bl[1], wo[1], wo[1] + wl[1]);
@@ -244,15 +244,15 @@ auto lr_W_qpool_views(mpi3::communicator& comm_world, mpi3::communicator& qpool_
  * @param omg         - [OUT] an array in the (permuted) ω-side distribution
  */
 template<class dBuf, class dOmg>
-void lr_W_qpool_forward(mpi3::communicator& comm_world, mpi3::communicator& qpool_comm,
+void lr_W_qpool_redistribute_forward(mpi3::communicator& comm_world, mpi3::communicator& qpool_comm,
                         dBuf& buf, dOmg& omg) {
   auto [bv, ov] = detail::lr_W_qpool_views(comm_world, qpool_comm, buf, omg);
   math::nda::redistribute(bv, ov);
 }
 
-/// ω-side layout → FT-buffer layout (the exact transpose of lr_W_qpool_forward).
+/// ω-side layout → FT-buffer layout (the exact transpose of lr_W_qpool_redistribute_forward).
 template<class dOmg, class dBuf>
-void lr_W_qpool_backward(mpi3::communicator& comm_world, mpi3::communicator& qpool_comm,
+void lr_W_qpool_redistribute_backward(mpi3::communicator& comm_world, mpi3::communicator& qpool_comm,
                          dOmg& omg, dBuf& buf) {
   auto [bv, ov] = detail::lr_W_qpool_views(comm_world, qpool_comm, buf, omg);
   math::nda::redistribute(ov, bv);
@@ -261,4 +261,4 @@ void lr_W_qpool_backward(mpi3::communicator& comm_world, mpi3::communicator& qpo
 } // solvers
 } // methods
 
-#endif // COQUI_LR_W_QPOOL_EXCHANGE_HPP
+#endif // COQUI_LR_W_QPOOL_REDISTRIBUTE_HPP

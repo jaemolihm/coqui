@@ -22,18 +22,17 @@
 #undef NDEBUG
 
 /**
- * Tests methods/scr_coulomb/lr_W_qpool_exchange.hpp, the ω-side transfer of the
+ * Tests methods/scr_coulomb/lr_W_qpool_redistribute.hpp, the ω-side transfer of the
  * ΔW pipeline: the layout predicate lr_W_omega_layout_for and the intra-q-pool
- * exchange that crosses between the FT-buffer distribution (ω local, q and (P,Q)
+ * redistribute that crosses between the FT-buffer distribution (ω local, q and (P,Q)
  * split) and the ω-side one (ω and q split, (P,Q) local).
  *
- * The exchange is a pure permutation of data, so each element is filled with an
+ * The redistribute is a pure permutation of data, so each element is filled with an
  * exact integer encoding of its own global (w, q, P, Q) index. A round trip must
  * then reproduce the encoding element-for-element, which makes the check bitwise
  * rather than a tolerance — a misdirected block shows up as a wrong index, not as
  * a small residual. Covered: even and ragged ω tiles, ragged (P,Q) panels, and
- * m_Q > 1; plus the layout predicate rejecting the cases that must not select the
- * exchange.
+ * m_Q > 1; plus the layout predicate rejecting the cases that must not select it.
  */
 
 #include "catch2/catch.hpp"
@@ -47,7 +46,7 @@
 
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
-#include "methods/scr_coulomb/lr_W_qpool_exchange.hpp"
+#include "methods/scr_coulomb/lr_W_qpool_redistribute.hpp"
 
 namespace bdft_tests {
 
@@ -66,13 +65,13 @@ static ComplexType qpool_ref(long iw, long iq, long iP, long iQ,
 }
 
 /**
- * Round trip through the q-pool exchange for one shape whose layout selects it:
+ * Round trip through the q-pool redistribute for one shape whose layout selects it:
  *   1. fill the FT-buffer-layout array from the global-index function,
- *   2. lr_W_qpool_forward and check every ω-side element against the function
+ *   2. lr_W_qpool_redistribute_forward and check every ω-side element against the function
  *      evaluated at *its own* global indices (the ω-side origin/local_range come
  *      from make_distributed_array on the permuted communicator, so this validates
  *      the global map, not just self-consistency),
- *   3. lr_W_qpool_backward into a fresh buffer-layout array and demand
+ *   3. lr_W_qpool_redistribute_backward into a fresh buffer-layout array and demand
  *      bit-identity with 1.
  * Returns true if the guard fired and the case ran.
  */
@@ -80,7 +79,7 @@ static bool run_roundtrip(boost::mpi3::communicator& world,
                           long nw, long nq, long NP) {
   const long nproc = world.size();
   auto layout = lr_W_omega_layout_for(nproc, nq, nw, NP);
-  if (not layout.use_qpool_exchange) return false;
+  if (not layout.use_qpool_redistribute) return false;
 
   const long m = layout.m, nqpools = layout.nqpools;
   const long r = world.rank();
@@ -125,10 +124,10 @@ static bool run_roundtrip(boost::mpi3::communicator& world,
   fill(omg, true);
   fill(buf2, true);
 
-  lr_W_qpool_forward(world, qpool_comm, buf, omg);
+  lr_W_qpool_redistribute_forward(world, qpool_comm, buf, omg);
   long bad_fwd = count_mismatch(omg);
 
-  lr_W_qpool_backward(world, qpool_comm, omg, buf2);
+  lr_W_qpool_redistribute_backward(world, qpool_comm, omg, buf2);
   long bad_bwd = count_mismatch(buf2);
 
   long bad[2] = {bad_fwd, bad_bwd};
@@ -143,7 +142,7 @@ static bool run_roundtrip(boost::mpi3::communicator& world,
   return true;
 }
 
-TEST_CASE("lr_W_qpool_exchange", "[methods][lr]")
+TEST_CASE("lr_W_qpool_redistribute", "[methods][lr]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
 
@@ -153,7 +152,7 @@ TEST_CASE("lr_W_qpool_exchange", "[methods][lr]")
   //   {12,2,5}  : m=4 with both P and Q split (2x2), ragged in both
   //   {6,12,5}  : m=2 with 3 q-points per pool (nq_loc > 1)
   //   {12,13,5} : m=4 with *ragged* q pools (7 and 6) — the q axis is a bystander
-  //               of the exchange, so a wrong nq_loc silently misroutes everything
+  //               of the redistribute, so a wrong nq_loc silently misroutes everything
   //   {22,13,5} : ragged ω tiles (6,6,5,5) *and* m_Q > 1 (2x2) at the same time —
   //               the only case where a peer's ω extent and its Q panel both
   //               differ from ours, so every pairwise overlap has a different
@@ -175,29 +174,29 @@ TEST_CASE("lr_W_qpool_exchange", "[methods][lr]")
   // never be selected (guard g1), so there is nothing to exercise — say so rather
   // than reporting a pass.
   if (world.size() == 8) {
-    INFO("cases that selected the q-pool exchange: " << fired);
+    INFO("cases that selected the q-pool redistribute: " << fired);
     REQUIRE(fired == 6);
   } else if (world.size() > 1) {
-    INFO("cases that selected the q-pool exchange: " << fired);
+    INFO("cases that selected the q-pool redistribute: " << fired);
     REQUIRE(fired > 0);
   } else {
-    WARN("lr_W_qpool_exchange: single rank — the exchange cannot be selected, "
+    WARN("lr_W_qpool_redistribute: single rank — it cannot be selected, "
          "only the key() bijection is covered. Run with 8 ranks for the round trips.");
   }
 
   // Guard-fails cases: the layout must classify, not crash, and must not claim
-  // the exchange.
+  // the redistribute.
   //   nq == nproc  -> the FT buffer already has (P,Q) local (strategy C, m == 1)
   //   {6,2,5}      -> lr_W_proc_grid returns a PQ-split ω grid (strategy B)
   {
     auto lay_c = lr_W_omega_layout_for(world.size(), world.size(), 6, 5);
-    REQUIRE_FALSE(lay_c.use_qpool_exchange);
+    REQUIRE_FALSE(lay_c.use_qpool_redistribute);
     REQUIRE(lay_c.m == 1);
     REQUIRE_FALSE(lay_c.need_ft_buffer_w);
   }
   if (world.size() == 8) {
     auto lay_b = lr_W_omega_layout_for(8, 2, 6, 5);
-    REQUIRE_FALSE(lay_b.use_qpool_exchange);
+    REQUIRE_FALSE(lay_b.use_qpool_redistribute);
     REQUIRE(lay_b.need_ft_buffer_w);
   }
 

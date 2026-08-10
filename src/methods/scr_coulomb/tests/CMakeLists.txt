@@ -4,7 +4,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
 set(TEST_ID methods_scr_coulomb)
 
 set( TEST_SRCS
-     test_lr_W_qpool_exchange.cpp
+     test_lr_W_qpool_redistribute.cpp
    )
 
 if(USE_DEVICE_COMPILER)
