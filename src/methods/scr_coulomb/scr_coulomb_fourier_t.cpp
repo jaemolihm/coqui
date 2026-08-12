@@ -60,7 +60,8 @@ namespace solvers {
     // Buffer distributes over q AND PQ (tau/omega axis 0 stays undivided for FT).
     auto [b_pgrid, b_bsize] = ft_buffer_dist(comm->size(), t_gshape);
 
-    // τ-side staging buffer, released as soon as the FT has consumed it.
+    // τ-side staging buffer: the input keeps τ distributed, the local FT needs it
+    // rank-local. Released as soon as the FT has consumed it.
     auto buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
 
     _Timer.start("FT_REDISTRIBUTE");
@@ -140,7 +141,9 @@ namespace solvers {
     // Buffer distributes over q AND PQ (tau/omega axis 0 stays undivided for FT).
     auto [b_pgrid, b_bsize] = ft_buffer_dist(comm->size(), t_gshape);
 
-    // τ-side staging buffer, released as soon as the FT output has been copied out.
+    // τ-side staging buffer: the FT needs τ rank-local, while t_pgrid_out keeps τ
+    // distributed, so the result cannot be written straight into dW_tqPQ. Released
+    // as soon as the FT output has been copied out.
     auto buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
 
     if (dW_wqPQ_pos.grid() == b_pgrid && dW_wqPQ_pos.block_size() == b_bsize) {

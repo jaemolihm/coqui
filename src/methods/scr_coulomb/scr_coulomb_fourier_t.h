@@ -67,10 +67,11 @@ namespace solvers {
     /**
      * Specialized FT function for a distributed array along the (τ, ω) axes.
      *
-     * The τ-/ω-shaped staging buffers (in the ft_buffer_dist distribution) are
-     * allocated and released within the call. They are a full aux grid each, so
-     * holding them across calls would keep that memory resident through every
-     * other phase of the SCF loop.
+     * The staging buffers are allocated and released within the call. Each holds
+     * a full aux grid — the whole (τ/ω, q, P, Q) array in the ft_buffer_dist
+     * layout, so ~1/nproc of it per rank — not one τ slice: the local IAFT kernel
+     * consumes the entire τ/ω axis at once. A buffer is skipped when the caller's
+     * distribution already matches ft_buffer_dist.
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto tau_to_w(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,

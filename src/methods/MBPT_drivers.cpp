@@ -2242,15 +2242,15 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
       mpi->comm, tq_pgrid_dw,
       {nt_half_dw, nkpts, NP, NP}, tq_bsize_dw);
   {
-    auto dw_src = sDeltaW_qtPQ_in.local();
-    auto dw_loc = dDeltaW_tqPQ.local();
-    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_tqPQ.origin();
-    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_tqPQ.local_shape();
-    for (long i0 = 0; i0 < dwn0; ++i0)
-      for (long i1 = 0; i1 < dwn1; ++i1)
-        for (long i2 = 0; i2 < dwn2; ++i2)
-          for (long i3 = 0; i3 < dwn3; ++i3)
-            dw_loc(i0, i1, i2, i3) = dw_src(i1+dwo1, i0+dwo0, i2+dwo2, i3+dwo3);
+    auto dw_src = sDeltaW_qtPQ_in.local();   // (q, t, P, Q), shared, full
+    auto dw_loc = dDeltaW_tqPQ.local();      // (t, q, P, Q), this rank's block
+    auto [t_org, q_org, P_org, Q_org] = dDeltaW_tqPQ.origin();
+    auto [nt_loc, nq_loc, nP_loc, nQ_loc] = dDeltaW_tqPQ.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < nP_loc; ++iP)
+          for (long iQ = 0; iQ < nQ_loc; ++iQ)
+            dw_loc(it, iq, iP, iQ) = dw_src(iq+q_org, it+t_org, iP+P_org, iQ+Q_org);
     mpi->comm.barrier();
   }
 
