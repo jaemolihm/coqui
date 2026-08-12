@@ -389,10 +389,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
 
-  // FT ΔΠ: τ → ω, output in LR ω-side distribution. The FT staging buffers are
-  // allocated and released inside each tau_to_w / w_to_tau call: they are dead
-  // weight (~1 F(τ) + 1 F(ω) grid) through the Dyson, HF and Σ phases, which is
-  // far more memory than the per-call allocation costs in time.
+  // FT ΔΠ: τ → ω, output in the LR ω-side distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
   auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
   _Timer.stop("LR_W_FT_TAU_TO_W");
