@@ -33,6 +33,7 @@
 #include "nda/blas.hpp"
 #include "nda/linalg/eigenelements.hpp"
 #include "IO/app_loggers.h"
+#include "utilities/lr_utils.hpp"
 
 namespace methods {
 
@@ -71,9 +72,11 @@ struct lr_iter_params {
  *   SPMD / distributed: next_step_combined is called on every rank of the
  *   supplied communicator. Each rank stores and operates on only its own
  *   contiguous element-slice of every trial/residual vector (std::vector<Vec1D>),
- *   so the DIIS history is partitioned across the node rather than replicated.
- *   The B-matrix overlaps are formed from per-rank partial dot products combined
- *   with a single all_reduce, so every rank computes identical coefficients.
+ *   the slice being the one named by the lr_part_map it is handed. Striped over
+ *   the global communicator, the whole history is stored exactly once across the
+ *   job rather than once per node. The B-matrix overlaps are formed from
+ *   per-rank partial dot products combined with a single all_reduce, so every
+ *   rank computes identical coefficients.
  *
  * Uses difference residual: res = ΔF_new - ΔF_prev
  */
@@ -90,43 +93,54 @@ public:
         _B(0, 0) {}
 
   /**
-   * @brief One combined DIIS step on (ΔF, ΔΣ), distributed over `comm`.
+   * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
    *
-   * SPMD: called on every rank of `comm`. Each rank owns a contiguous element
-   * slice of the flattened ΔF/ΔΣ and stores only that slice of every trial /
-   * residual vector, so the DIIS history is partitioned across the node (no
-   * per-rank full-array replication). The B-matrix overlaps are formed from
-   * per-rank partial dot products combined with a single all_reduce, so every
-   * rank holds the identical B and computes identical coefficients. The mixed
-   * result is written in place into each rank's slice of DeltaF / DeltaSigma.
+   * SPMD: called on every rank of `comm`. Each rank owns the contiguous element
+   * slice of the flattened ΔF/ΔΣ named by `pmap` and stores only that slice of
+   * every trial / residual vector, so the DIIS history is partitioned across
+   * `comm` (no per-rank and, with the global comm, no per-node replication).
+   * The B-matrix overlaps are formed from per-rank partial dot products combined
+   * with a single all_reduce, so every rank holds the identical B and computes
+   * identical coefficients. The mixed result is written in place into each
+   * rank's slice of DeltaF / DeltaSigma; completing the (node-replicated)
+   * arrays afterwards is the caller's job.
    *
    * Combined residual: B(i,j) = <res_F_i, res_F_j> + <res_Sigma_i, res_Sigma_j>.
    *
    * @param comm             - [INPUT] communicator the array work is striped over
-   * @param DeltaF           - [IN/OUT] ΔF (new on entry, mixed on exit); pass .local()
-   * @param DeltaF_prev      - [INPUT]  ΔF from previous iteration
-   * @param DeltaSigma       - [IN/OUT] ΔΣ (new on entry, mixed on exit); empty if no GW
-   * @param DeltaSigma_prev  - [INPUT]  ΔΣ from previous iteration (empty if no GW)
+   * @param pmap             - [INPUT] element partition over `comm`
+   * @param DeltaF           - [IN/OUT] full ΔF (new on entry, this rank's slice
+   *                                    mixed on exit); pass .local()
+   * @param DeltaF_prev      - [INPUT]  this rank's slice of the previous ΔF
+   * @param DeltaSigma       - [IN/OUT] full ΔΣ (as DeltaF); empty if no GW
+   * @param DeltaSigma_prev  - [INPUT]  this rank's slice of the previous ΔΣ
    * @param iter             - [INPUT]  current iteration number (1-based)
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
-  void next_step_combined(Comm& comm,
+  void next_step_combined(Comm& comm, utils::lr_part_map const& pmap,
                           FView DeltaF, FPrev const& DeltaF_prev,
                           SView DeltaSigma, SPrev const& DeltaSigma_prev,
                           int iter) {
     const bool has_sigma = (DeltaSigma.size() > 0);
-    const long nr = comm.size();
-    const long r  = comm.rank();
 
-    // This rank's contiguous slice of the flattened ΔF.
+    // This rank's contiguous slice of the flattened ΔF. The "prev" arrays are
+    // already stored as exactly this slice.
     const long nF = DeltaF.size();
-    auto [fF0, fF1] = rank_slice(nF, nr, r);
-    auto F_loc      = nda::reshape(DeltaF,      std::array<long, 1>{nF})(nda::range(fF0, fF1));
-    auto F_prev_loc = nda::reshape(DeltaF_prev, std::array<long, 1>{nF})(nda::range(fF0, fF1));
+    auto [fF0, fF1] = pmap.my_slice(nF);
+    auto F_loc      = nda::reshape(DeltaF, std::array<long, 1>{nF})(nda::range(fF0, fF1));
+    auto const& F_prev_loc = DeltaF_prev;
+    utils::check(static_cast<long>(F_prev_loc.size()) == fF1 - fF0,
+                 "lr_diis: ΔF_prev slice size {} != partition slice size {}",
+                 F_prev_loc.size(), fF1 - fF0);
 
     long sS0 = 0, sS1 = 0;
     const long nS = has_sigma ? static_cast<long>(DeltaSigma.size()) : 0;
-    if (has_sigma) std::tie(sS0, sS1) = rank_slice(nS, nr, r);
+    if (has_sigma) {
+      std::tie(sS0, sS1) = pmap.my_slice(nS);
+      utils::check(static_cast<long>(DeltaSigma_prev.size()) == sS1 - sS0,
+                   "lr_diis: ΔΣ_prev slice size {} != partition slice size {}",
+                   DeltaSigma_prev.size(), sS1 - sS0);
+    }
 
     // Damping write (warmup / ill-conditioned fallback): out_slice <- mixing*new +
     // (1-mixing)*prev. mixing >= 1 leaves the arrays unchanged (out == new).
@@ -134,9 +148,8 @@ public:
       if (_mixing < 1.0) {
         F_loc = _mixing * F_loc + (1.0 - _mixing) * F_prev_loc;
         if (has_sigma) {
-          auto S_loc      = nda::reshape(DeltaSigma,      std::array<long, 1>{nS})(nda::range(sS0, sS1));
-          auto S_prev_loc = nda::reshape(DeltaSigma_prev, std::array<long, 1>{nS})(nda::range(sS0, sS1));
-          S_loc = _mixing * S_loc + (1.0 - _mixing) * S_prev_loc;
+          auto S_loc = nda::reshape(DeltaSigma, std::array<long, 1>{nS})(nda::range(sS0, sS1));
+          S_loc = _mixing * S_loc + (1.0 - _mixing) * DeltaSigma_prev;
         }
       }
     };
@@ -146,10 +159,9 @@ public:
     Vec1D resF{F_loc - F_prev_loc};
     Vec1D xS, resS;
     if (has_sigma) {
-      auto S_loc      = nda::reshape(DeltaSigma,      std::array<long, 1>{nS})(nda::range(sS0, sS1));
-      auto S_prev_loc = nda::reshape(DeltaSigma_prev, std::array<long, 1>{nS})(nda::range(sS0, sS1));
+      auto S_loc = nda::reshape(DeltaSigma, std::array<long, 1>{nS})(nda::range(sS0, sS1));
       xS   = Vec1D{S_loc};
-      resS = Vec1D{S_loc - S_prev_loc};
+      resS = Vec1D{S_loc - DeltaSigma_prev};
     }
 
     // Decide warmup BEFORE storing (need >= 2 prior vectors to extrapolate).
@@ -200,18 +212,10 @@ private:
   size_t _warmup_iter;
   double _mixing;
   // History stores only THIS rank's contiguous element-slice of each flattened
-  // trial / residual vector (distributed across comm), not the full arrays.
+  // trial / residual vector (striped across comm), not the full arrays.
   std::vector<Vec1D> _xF, _resF;   // ΔF trial / residual slices
   std::vector<Vec1D> _xS, _resS;   // ΔΣ trial / residual slices
   nda::matrix<ComplexType> _B;
-
-  /// Contiguous [i0, i1) slice of [0, n) owned by rank r of nr.
-  static std::pair<long, long> rank_slice(long n, long nr, long r) {
-    const long chunk = (n + nr - 1) / nr;
-    const long i0 = std::min(r * chunk, n);
-    const long i1 = std::min(i0 + chunk, n);
-    return {i0, i1};
-  }
 
   /// Local (this rank's slice) contribution to the combined overlap
   /// <res_F_i, res_F_j> + <res_Sigma_i, res_Sigma_j>.

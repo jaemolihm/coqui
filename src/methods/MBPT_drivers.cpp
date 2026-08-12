@@ -1097,7 +1097,13 @@ std::string read_div_treatment(mpi_context_t& mpi,
  * @param screened_interaction_file - Explicit path to the W_qtPQ HDF5 file.
  *                      If empty, falls back to thc_screened_interaction.h5 in
  *                      the input checkpoint's directory.
- * @return (dW_qtPQ, eps_inv_head, div_treatment) tuple
+ * @return (dW_tqPQ, eps_inv_head, div_treatment) tuple. W is returned as
+ *         (t,q,P,Q): the dataset on disk is (q,t), but eps_inv_head_t needs (t,q)
+ *         so that copy is made here regardless — handing it back costs nothing,
+ *         while returning (q,t) would make every LR caller transpose it again.
+ *         The one caller that wants (q,t) (the standalone scGW Σ path, whose
+ *         eval_Sigma_all does q→R as a single gemm with q leading) transposes at
+ *         its own call site.
  */
 template<typename mpi_context_t, typename THC_t>
 auto load_W_and_eps_inv_head(
@@ -1121,6 +1127,9 @@ auto load_W_and_eps_inv_head(
       : screened_interaction_file;
   app_log(2, "Reading W from {}...", w_file);
 
+  // The dataset on disk is (q,t,P,Q), so the distributed read must target that
+  // axis order: h5_read maps the array's index space onto
+  // the dataset's and cannot permute axes.
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
   auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
   std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
@@ -1158,13 +1167,16 @@ auto load_W_and_eps_inv_head(
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
+  // eps_inv_head_t needs (t,q), and that copy is what we return, so the (q,t)
+  // source is released here rather than the transposed copy being discarded.
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
   auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
+  dW_qtPQ.reset();
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   mpi.comm.barrier();
 
-  return std::make_tuple(std::move(dW_qtPQ), std::move(eps_inv_head),
+  return std::make_tuple(std::move(dW_tqPQ), std::move(eps_inv_head),
                          std::move(div_treatment));
 }
 
@@ -1178,9 +1190,10 @@ auto load_W_and_eps_inv_head(
  * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
  * the no-symmetry requirement below + the RPA screen_type.
  *
- * Returns the same (dW_qtPQ, eps_inv_head) as load_W_and_eps_inv_head (sans
- * div_treatment, which the caller already holds), so it is a drop-in at the
- * call site.
+ * Returns the same (dW_tqPQ, eps_inv_head) as load_W_and_eps_inv_head
+ * (sans div_treatment, which the caller already holds), so it is
+ * a drop-in at the call site. dyson_W_from_Pi_tau already produces (t,q), so no
+ * transpose is needed here.
  *
  * @param mpi           - MPI context
  * @param thc           - THC ERI
@@ -1216,11 +1229,7 @@ auto recompute_W_and_eps_inv_head(
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
 
-  // Transpose (t,q,P,Q) → (q,t,P,Q) to match load_W_and_eps_inv_head layout.
-  auto dW_qtPQ = utils::transpose_axes_01(dW_tqPQ, mpi.comm);
-  mpi.comm.barrier();
-
-  return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
+  return std::make_pair(std::move(dW_tqPQ), std::move(eps_inv_head));
 }
 
 /**
@@ -1746,8 +1755,9 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, DeltaG_tskij_root);
 
-  // Load W and eps_inv_head using helper
-  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  // Load W and eps_inv_head using helper, in the (t,q) layout lr_precompute_W_tRPQ wants
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      *mpi, thc, input_file, input_grp, input_iter, nt);
 
   // Divergence correction flag (default true)
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
@@ -1760,8 +1770,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   }
 
   // Pre-transform W to R-space: transpose (q,t)→(t,R), with q→R FT
-  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_qtPQ, thc);
-  dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
+  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_tqPQ, thc);
 
   // Create lr_gw solver and compute ΔΣ
   solvers::lr_gw lr(&ft, q_pert, div_treatment);
@@ -1824,7 +1833,12 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
       *mpi, G_tskij_root);
 
   // Load W and eps_inv_head using helper
-  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+
+  // eval_Sigma_all wants (q,t,P,Q): it reshapes the local block to (nkpts, nt*P*Q)
+  // and does q→R as one gemm with q leading. Sole caller needing that layout.
+  auto dW_qtPQ = utils::transpose_axes_01(dW_tqPQ, mpi->comm);
+  dW_tqPQ.reset();
 
   // Read overlap matrix from checkpoint for divergence correction
   auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -2058,14 +2072,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
 
-  // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
+  // Load W_c(τ) from thc_screened_interaction.h5 in (t, q, P, Q), the layout the FT wants
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      *mpi, thc, input_file, input_grp, input_iter, nt);
   (void)div_treatment;
-
-  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
-  dW_qtPQ.reset();
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
   auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
@@ -2086,7 +2097,9 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
-  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc);
+  // Sole consumer of W_c here, so release it inside the FT — before ΔW's own
+  // staging buffer and ΔΠ(iω) go live in solve_lr_dyson_W below.
+  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc, /*reset_input=*/true);
   lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
   // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
@@ -2234,24 +2247,23 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
       *mpi, std::array<long, 4>{nkpts, nt_half_dw, NP, NP},
       DeltaW_qtPQ_root);
 
-  // Scatter into distributed array (τ-dist with axes swapped for (q,t)).
+  // Scatter into a distributed array in the τ-dist (t,q,P,Q) layout the Σ
+  // evaluator consumes, transposing the (q,t) input on the fly.
   auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP);
-  std::array<long,4> qt_pgrid_dw = {tq_pgrid_dw[1], tq_pgrid_dw[0], tq_pgrid_dw[2], tq_pgrid_dw[3]};
-  std::array<long,4> qt_bsize_dw = {tq_bsize_dw[1], tq_bsize_dw[0], tq_bsize_dw[2], tq_bsize_dw[3]};
   using local_Array_4D_t = nda::array<ComplexType, 4>;
-  auto dDeltaW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi->comm, qt_pgrid_dw,
-      {nkpts, nt_half_dw, NP, NP}, qt_bsize_dw);
+  auto dDeltaW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, tq_pgrid_dw,
+      {nt_half_dw, nkpts, NP, NP}, tq_bsize_dw);
   {
-    auto dw_src = sDeltaW_qtPQ_in.local();
-    auto dw_loc = dDeltaW_qtPQ.local();
-    auto [dwo0, dwo1, dwo2, dwo3] = dDeltaW_qtPQ.origin();
-    auto [dwn0, dwn1, dwn2, dwn3] = dDeltaW_qtPQ.local_shape();
-    for (long i0 = 0; i0 < dwn0; ++i0)
-      for (long i1 = 0; i1 < dwn1; ++i1)
-        for (long i2 = 0; i2 < dwn2; ++i2)
-          for (long i3 = 0; i3 < dwn3; ++i3)
-            dw_loc(i0, i1, i2, i3) = dw_src(i0+dwo0, i1+dwo1, i2+dwo2, i3+dwo3);
+    auto dw_src = sDeltaW_qtPQ_in.local();   // (q, t, P, Q), shared, full
+    auto dw_loc = dDeltaW_tqPQ.local();      // (t, q, P, Q), this rank's block
+    auto [t_org, q_org, P_org, Q_org] = dDeltaW_tqPQ.origin();
+    auto [nt_loc, nq_loc, nP_loc, nQ_loc] = dDeltaW_tqPQ.local_shape();
+    for (long it = 0; it < nt_loc; ++it)
+      for (long iq = 0; iq < nq_loc; ++iq)
+        for (long iP = 0; iP < nP_loc; ++iP)
+          for (long iQ = 0; iQ < nQ_loc; ++iQ)
+            dw_loc(it, iq, iP, iQ) = dw_src(iq+q_org, it+t_org, iP+P_org, iQ+Q_org);
     mpi->comm.barrier();
   }
 
@@ -2275,13 +2287,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // Precompute G^R(τ) and G^R(β−τ) used in evaluate_sigma_DeltaW.
   auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
 
-  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_qtPQ, thc,
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
                            dG_tsRPQ, dG_mtau_tsRPQ);
 
   // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
   if (div_corr && utils::is_q_gamma(q_pert)) {
-    // Transpose (q,t,P,Q) → (t,q,P,Q) for eps_inv_head_t
-    auto dDeltaW_tqPQ = utils::transpose_axes_01(dDeltaW_qtPQ, mpi->comm);
     auto [delta_eps_inv_q, delta_eps_inv_head] =
         solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment);
     lr.apply_div_correction_G(sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);

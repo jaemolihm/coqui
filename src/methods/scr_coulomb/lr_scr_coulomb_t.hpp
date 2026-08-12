@@ -70,17 +70,27 @@ namespace solvers {
     /**
      * Compute W_full(iω) = W_c(iω) + V from W_c(τ).
      *
-     * Input: dW_c_tqPQ in q-local (τ-dist) distribution, consumed (reset after FT).
+     * Input: dW_c_tqPQ in q-local (τ-dist) distribution.
      * Output: dW_full_wqPQ in PQ-local distribution (ready for lr_dyson_W_in_place).
      *
-     * @param dW_c_tqPQ - [IN] W_c(τ) in τ-dist, consumed (reset after use)
-     * @param thc       - [IN] THC-ERI handler
+     * @param dW_c_tqPQ   - [IN] W_c(τ) in τ-dist
+     * @param thc         - [IN] THC-ERI handler
+     * @param reset_input - [IN] release dW_c_tqPQ once the FT has consumed it.
+     *                      True whenever this is W_c's only consumer: the release
+     *                      happens inside the FT, before the ω-side output is
+     *                      allocated, so it lowers the peak in a way a caller-side
+     *                      reset after the call cannot. Pass false only to keep the
+     *                      array for a second consumer (the driver hands the same
+     *                      (t,q) copy on to lr_precompute_W_tRPQ).
+     *                      Deliberately has no default — releasing a caller's array
+     *                      is not something a call site should inherit silently.
      * @return W_full(iω) = W_c(iω) + V in PQ-local distribution
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto compute_W_full_omega(
         memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
-        THC_ERI auto& thc)
+        THC_ERI auto& thc,
+        bool reset_input)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
@@ -171,14 +181,6 @@ namespace solvers {
     // q-shifted W_full(q+Q) for the Q≠Γ Dyson. Built once during setup and reused during
     // LR iterations. Empty for Q=Γ (the operand is then W_full itself).
     std::optional<dArr4D_concrete_t> _dW_full_qpQ_wqPQ;
-
-    // τ- and ω-shaped FT staging buffers (in the ft_buffer_dist distribution),
-    // owned by the LR solver and threaded into every _scr_fourier.tau_to_w / w_to_tau
-    // call so they are reused across SCF iterations instead of reallocated.
-    // Default-constructed empty; populated once in compute_W_full_omega (always
-    // runs before the SCF loop), so they are live by the time the FTs use them.
-    dArr4D_concrete_t _ft_buffer_t;
-    dArr4D_concrete_t _ft_buffer_w;
 
     void _init_kpq_map(THC_ERI auto& thc);
 
