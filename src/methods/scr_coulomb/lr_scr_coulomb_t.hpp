@@ -76,15 +76,21 @@ namespace solvers {
      * @param dW_c_tqPQ   - [IN] W_c(τ) in τ-dist
      * @param thc         - [IN] THC-ERI handler
      * @param reset_input - [IN] release dW_c_tqPQ once the FT has consumed it.
-     *                      Pass false to keep it for a second consumer (the driver
-     *                      hands the same (t,q) copy to lr_precompute_W_tRPQ).
+     *                      True whenever this is W_c's only consumer: the release
+     *                      happens inside the FT, before the ω-side output is
+     *                      allocated, so it lowers the peak in a way a caller-side
+     *                      reset after the call cannot. Pass false only to keep the
+     *                      array for a second consumer (the driver hands the same
+     *                      (t,q) copy on to lr_precompute_W_tRPQ).
+     *                      Deliberately has no default — releasing a caller's array
+     *                      is not something a call site should inherit silently.
      * @return W_full(iω) = W_c(iω) + V in PQ-local distribution
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto compute_W_full_omega(
         memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
         THC_ERI auto& thc,
-        bool reset_input = true)
+        bool reset_input)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
