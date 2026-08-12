@@ -286,8 +286,10 @@ public:
    * can be inspected before the arrays allocate.
    *
    * `extra_sigma` names the additional ΔΣ-sized shared arrays a split-kernel
-   * run allocates on top of the total ΔΣ: the per-channel buffers and the outer
-   * accelerator's previous-source buffer.
+   * run allocates on top of the total ΔΣ: the per-channel buffers.
+   *
+   * `n_sigma_prev` counts the ΔΣ-sized striped previous iterates — the inner
+   * loop's tracked ΔΣ and the outer accelerator's previous source.
    *
    * `inner_hist` / `outer_hist` are the DIIS histories of the inner SCF and of
    * the outer (split-kernel source) loop. Each subspace entry holds a trial AND
@@ -298,6 +300,7 @@ public:
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                              std::vector<std::string> const& extra_sigma = {},
+                             long n_sigma_prev = 0,
                              lr_diis_hist_t inner_hist = {},
                              lr_diis_hist_t outer_hist = {});
 

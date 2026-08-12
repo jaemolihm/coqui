@@ -341,8 +341,11 @@ std::tuple<int, double> lr_driver::run_lr(
     extra_sigma.push_back("sDeltaSigma (sc channel)");
     extra_sigma.push_back("sDeltaSigma (pert channel)");
   }
-  if (outer_diis_on && pert_sigma)
-    extra_sigma.push_back("sDeltaSigma_pert_prev (outer)");
+
+  // ΔΣ-sized striped previous iterates: the inner loop's tracked ΔΣ, plus the
+  // outer accelerator's previous source when it mixes one.
+  const long n_sigma_prev = (has_Sigma_sc ? 1 : 0)
+                          + ((outer_diis_on && pert_sigma) ? 1 : 0);
 
   // DIIS histories, for the memory report. Each subspace entry stores a trial
   // AND a residual vector of every quantity the accelerator mixes.
@@ -361,7 +364,7 @@ std::tuple<int, double> lr_driver::run_lr(
   // Estimate the persistent large-array memory footprint for this path, then
   // summarize the MPI distribution patterns the large arrays use.
   print_memory_estimate(thc.Np(), include_gw_sigma, gw_full, extra_sigma,
-                        inner_hist, outer_hist);
+                        n_sigma_prev, inner_hist, outer_hist);
   print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
 
   // Force dW_tqPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
@@ -504,12 +507,9 @@ std::tuple<int, double> lr_driver::run_lr(
   const long nF_flat = _ns * _nkpts_ibz * _nbnd * _nbnd;
   const long nS_flat = has_Sigma_sc ? _nts * nF_flat : 0;
   const long nV_flat = has_Vcorr ? nF_flat : 0;
-  auto [iF0, iF1] = pmap.my_slice(nF_flat);
-  auto [iS0, iS1] = pmap.my_slice(nS_flat);
-  auto [iV0, iV1] = pmap.my_slice(nV_flat);
-  nda::array<ComplexType, 1> DeltaF_prev(iF1 - iF0);
-  nda::array<ComplexType, 1> DeltaSigma_prev(iS1 - iS0);
-  nda::array<ComplexType, 1> DeltaVcorr_prev(iV1 - iV0);
+  utils::striped_prev DeltaF_prev(pmap, nF_flat);
+  utils::striped_prev DeltaSigma_prev(pmap, nS_flat);
+  utils::striped_prev DeltaVcorr_prev(pmap, nV_flat);
 
   // Static ΔV_QPGW tracked in qp mode.
   auto sDeltaVcorr_skij = has_Vcorr
@@ -547,29 +547,22 @@ std::tuple<int, double> lr_driver::run_lr(
 
   // Outer-loop buffers. The previous-source pair exists only for the
   // accelerator (it is what the extrapolation and its residual are measured
-  // against); the ΔDm stage buffer only for the tolerance test. A
-  // tolerance-only run therefore never allocates a ΔΣ-sized buffer.
-  std::optional<sArray_t<Array_view_4D_t>> opt_sDeltaF_pert_prev;
-  std::optional<sArray_t<Array_view_5D_t>> opt_sDeltaSigma_pert_prev;
+  // against) and is striped exactly like the inner loop's; the ΔDm stage buffer
+  // only for the tolerance test, and it stays whole because its norm is the
+  // termination criterion and is taken on the node_comm path. A tolerance-only
+  // run therefore never allocates a ΔΣ-sized buffer.
+  utils::striped_prev DeltaF_pert_prev, DeltaSigma_pert_prev;
   std::optional<sArray_t<Array_view_4D_t>> opt_sDeltaDm_stage_prev;
   if (outer_diis_on) {
     if (pert_hf)
-      opt_sDeltaF_pert_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+      DeltaF_pert_prev = utils::striped_prev(pmap, nF_flat);
     if (pert_sigma)
-      opt_sDeltaSigma_pert_prev.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-          *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
+      DeltaSigma_pert_prev = utils::striped_prev(pmap, _nts * nF_flat);
   }
   if (outer_tol > 0.0)
     opt_sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
-
-  // Flattened views of the current arrays, sliced to this rank's partition —
-  // the save step, the mixing and the norms all work on these.
-  auto flat_slice = [](auto&& A, long n, long i0, long i1) {
-    return nda::reshape(A, std::array<long, 1>{n})(nda::range(i0, i1));
-  };
 
   _Timer.start("LR_DRIVER_SETUP_MISC");
   // Initialize ΔF = 0 (and ΔΣ = 0 if GW active); set_zero ends with fence + node_sync
@@ -582,10 +575,8 @@ std::tuple<int, double> lr_driver::run_lr(
   if (opt_sDeltaSigma_pert) opt_sDeltaSigma_pert->set_zero();
   // The outer sequence starts from S_0 = 0, which is a genuine iterate: the
   // first inner solve is exactly the one with no source. So the first outer
-  // residual S_1 - 0 needs no special casing.
-  if (opt_sDeltaF_pert_prev)     opt_sDeltaF_pert_prev->set_zero();
-  if (opt_sDeltaSigma_pert_prev) opt_sDeltaSigma_pert_prev->set_zero();
-  if (opt_sDeltaDm_stage_prev)   opt_sDeltaDm_stage_prev->set_zero();
+  // residual S_1 - 0 needs no special casing — striped_prev starts zeroed.
+  if (opt_sDeltaDm_stage_prev) opt_sDeltaDm_stage_prev->set_zero();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -816,7 +807,7 @@ std::tuple<int, double> lr_driver::run_lr(
     _mpi->node_comm.barrier();
     if (_mpi->node_comm.root()) {
       auto complete = [&](auto* p) {
-        if (p) utils::lr_complete_node_slices(_mpi->internode_comm, pmap,
+        if (p) utils::complete_node_slices(_mpi->internode_comm, pmap,
                                               p->local().data(), p->local().size());
       };
       (complete(arrs), ...);
@@ -825,7 +816,8 @@ std::tuple<int, double> lr_driver::run_lr(
     _mpi->comm.barrier();
   };
 
-  // dst <- src on the node-replicated shared window.
+  // dst <- src on the node-replicated shared window. Only the ΔDm stage buffer
+  // still needs this: the mixed sources are stored striped (striped_prev).
   auto outer_save = [&](auto& dst, auto& src) {
     dst.win().fence();
     if (_mpi->node_comm.root()) dst.local() = src.local();
@@ -833,7 +825,8 @@ std::tuple<int, double> lr_driver::run_lr(
     _mpi->node_comm.barrier();
   };
 
-  // ‖A - A_prev‖ over the node, broadcast so every rank agrees.
+  // ‖A - A_prev‖ over the node, broadcast so every rank agrees. Serves the ΔDm
+  // stage buffer, whose norm is the outer termination criterion.
   auto outer_diff_norm = [&](auto& A, auto& A_prev) {
     auto nrm = utils::lr_distributed_norm(
         _mpi->node_comm, A.local(), A_prev.local(), true);
@@ -888,11 +881,11 @@ std::tuple<int, double> lr_driver::run_lr(
     if (stage_iter > 1) {
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
-      DeltaF_prev = flat_slice(sDeltaF_sc_skij.local(), nF_flat, iF0, iF1);
+      DeltaF_prev.save(sDeltaF_sc_skij.local());
       if (has_Vcorr) {
-        DeltaVcorr_prev = flat_slice(sDeltaVcorr_skij.local(), nV_flat, iV0, iV1);
+        DeltaVcorr_prev.save(sDeltaVcorr_skij.local());
       } else if (has_Sigma_sc) {
-        DeltaSigma_prev = flat_slice(pDeltaSigma_sc->local(), nS_flat, iS0, iS1);
+        DeltaSigma_prev.save(pDeltaSigma_sc->local());
       }
     }
     _mpi->comm.barrier();
@@ -974,32 +967,29 @@ std::tuple<int, double> lr_driver::run_lr(
         if (has_Vcorr) {
           _lr_diis->next_step_combined(
               _mpi->comm, pmap,
-              sDeltaF_sc_skij.local(), DeltaF_prev,
-              sDeltaVcorr_skij.local(), DeltaVcorr_prev, stage_iter);
+              sDeltaF_sc_skij.local(), DeltaF_prev.data(),
+              sDeltaVcorr_skij.local(), DeltaVcorr_prev.data(), stage_iter);
         } else if (has_Sigma_sc) {
           _lr_diis->next_step_combined(
               _mpi->comm, pmap,
-              sDeltaF_sc_skij.local(), DeltaF_prev,
-              pDeltaSigma_sc->local(), DeltaSigma_prev, stage_iter);
+              sDeltaF_sc_skij.local(), DeltaF_prev.data(),
+              pDeltaSigma_sc->local(), DeltaSigma_prev.data(), stage_iter);
         } else {
           nda::array<ComplexType, 5> empty_sigma;
           nda::array<ComplexType, 1> empty_prev;
           _lr_diis->next_step_combined(
               _mpi->comm, pmap,
-              sDeltaF_sc_skij.local(), DeltaF_prev,
+              sDeltaF_sc_skij.local(), DeltaF_prev.data(),
               empty_sigma, empty_prev, stage_iter);
         }
       } else if (mixing < 1.0) {
         // Damping is elementwise too, so stripe it over the same partition —
         // one completion path then covers both algorithms.
-        auto F_loc = flat_slice(sDeltaF_sc_skij.local(), nF_flat, iF0, iF1);
-        F_loc = mixing * F_loc + (1.0 - mixing) * DeltaF_prev;
+        DeltaF_prev.damp_into(sDeltaF_sc_skij.local(), mixing);
         if (has_Vcorr) {
-          auto V_loc = flat_slice(sDeltaVcorr_skij.local(), nV_flat, iV0, iV1);
-          V_loc = mixing * V_loc + (1.0 - mixing) * DeltaVcorr_prev;
+          DeltaVcorr_prev.damp_into(sDeltaVcorr_skij.local(), mixing);
         } else if (has_Sigma_sc) {
-          auto S_loc = flat_slice(pDeltaSigma_sc->local(), nS_flat, iS0, iS1);
-          S_loc = mixing * S_loc + (1.0 - mixing) * DeltaSigma_prev;
+          DeltaSigma_prev.damp_into(pDeltaSigma_sc->local(), mixing);
         }
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
@@ -1038,9 +1028,8 @@ std::tuple<int, double> lr_driver::run_lr(
     // stored striped, so the norms are reduced over the global comm from the
     // same slices.
     _Timer.start("LR_CONVERGENCE");
-    auto norms_F = utils::striped_norm(
-        _mpi->comm, flat_slice(sDeltaF_sc_skij.local(), nF_flat, iF0, iF1),
-        DeltaF_prev, stage_iter > 1);
+    auto norms_F = DeltaF_prev.norms(
+        _mpi->comm, sDeltaF_sc_skij.local(), stage_iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
     _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
@@ -1051,17 +1040,15 @@ std::tuple<int, double> lr_driver::run_lr(
     double norm_DeltaSigma = 0.0;
     double norm_DeltaSigma_diff = 0.0;
     if (has_Vcorr) {
-      auto norms_V = utils::striped_norm(
-          _mpi->comm, flat_slice(sDeltaVcorr_skij.local(), nV_flat, iV0, iV1),
-          DeltaVcorr_prev, stage_iter > 1);
+      auto norms_V = DeltaVcorr_prev.norms(
+          _mpi->comm, sDeltaVcorr_skij.local(), stage_iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
       _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
       _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     } else if (has_Sigma_sc) {
-      auto norms_Sigma = utils::striped_norm(
-          _mpi->comm, flat_slice(pDeltaSigma_sc->local(), nS_flat, iS0, iS1),
-          DeltaSigma_prev, stage_iter > 1);
+      auto norms_Sigma = DeltaSigma_prev.norms(
+          _mpi->comm, pDeltaSigma_sc->local(), stage_iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
       norm_DeltaSigma_diff = norms_Sigma.second;
       _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
@@ -1151,11 +1138,13 @@ std::tuple<int, double> lr_driver::run_lr(
         if (outer_diis_on) {
           double r2 = 0.0;
           if (pert_hf) {
-            double d = outer_diff_norm(sDeltaF_pert_skij, *opt_sDeltaF_pert_prev);
+            double d = DeltaF_pert_prev.norms(
+                _mpi->comm, sDeltaF_pert_skij.local(), true).second;
             r2 += d * d;
           }
           if (pert_sigma) {
-            double d = outer_diff_norm(*pDeltaSigma_pert, *opt_sDeltaSigma_pert_prev);
+            double d = DeltaSigma_pert_prev.norms(
+                _mpi->comm, pDeltaSigma_pert->local(), true).second;
             r2 += d * d;
           }
           outer_res = std::sqrt(r2);
@@ -1163,20 +1152,13 @@ std::tuple<int, double> lr_driver::run_lr(
           _Timer.start("LR_OUTER_ITER_ALG");
           // The outer accelerator stripes over the same `pmap` partition as the
           // inner one: each rank mixes its own element slice of the source and
-          // outer_sync completes the node replicas afterwards. The previous
-          // source stays whole (outer_diff_norm reads it as a node array), so
-          // it is sliced here rather than stored striped.
-          const long nSp_flat = _nts * nF_flat;
-          auto [oF0, oF1] = pmap.my_slice(nF_flat);
-          auto [oS0, oS1] = pmap.my_slice(nSp_flat);
+          // outer_sync completes the node replicas afterwards.
           nda::array<ComplexType, 1> empty_prev;
           if (pert_hf && pert_sigma) {
             outer_diis->next_step_combined(
                 _mpi->comm, pmap,
-                sDeltaF_pert_skij.local(),
-                flat_slice(opt_sDeltaF_pert_prev->local(), nF_flat, oF0, oF1),
-                pDeltaSigma_pert->local(),
-                flat_slice(opt_sDeltaSigma_pert_prev->local(), nSp_flat, oS0, oS1),
+                sDeltaF_pert_skij.local(), DeltaF_pert_prev.data(),
+                pDeltaSigma_pert->local(), DeltaSigma_pert_prev.data(),
                 outer_step);
           } else if (pert_sigma) {
             // Σ-only source: next_step_combined is generic in both slots, so
@@ -1184,23 +1166,21 @@ std::tuple<int, double> lr_driver::run_lr(
             nda::array<ComplexType, 5> empty_slot;
             outer_diis->next_step_combined(
                 _mpi->comm, pmap,
-                pDeltaSigma_pert->local(),
-                flat_slice(opt_sDeltaSigma_pert_prev->local(), nSp_flat, oS0, oS1),
+                pDeltaSigma_pert->local(), DeltaSigma_pert_prev.data(),
                 empty_slot, empty_prev, outer_step);
           } else {
             nda::array<ComplexType, 4> empty_slot;
             outer_diis->next_step_combined(
                 _mpi->comm, pmap,
-                sDeltaF_pert_skij.local(),
-                flat_slice(opt_sDeltaF_pert_prev->local(), nF_flat, oF0, oF1),
+                sDeltaF_pert_skij.local(), DeltaF_pert_prev.data(),
                 empty_slot, empty_prev, outer_step);
           }
           outer_sync(pert_hf ? &sDeltaF_pert_skij : nullptr,
                      pert_sigma ? pDeltaSigma_pert : nullptr);
           // The mixed source is what the next stage uses, hence what the next
           // outer residual is measured against.
-          if (pert_hf)    outer_save(*opt_sDeltaF_pert_prev, sDeltaF_pert_skij);
-          if (pert_sigma) outer_save(*opt_sDeltaSigma_pert_prev, *pDeltaSigma_pert);
+          if (pert_hf)    DeltaF_pert_prev.save(sDeltaF_pert_skij.local());
+          if (pert_sigma) DeltaSigma_pert_prev.save(pDeltaSigma_pert->local());
           _Timer.stop("LR_OUTER_ITER_ALG");
         }
 
@@ -1338,6 +1318,7 @@ std::tuple<int, double> lr_driver::run_lr(
 
 void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                                       std::vector<std::string> const& extra_sigma,
+                                      long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
                                       lr_diis_hist_t outer_hist) {
   // Dimensions of the large arrays.
@@ -1400,9 +1381,10 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
 
   // --- Persistent, striped over the global comm (each rank keeps one element
   //     slice of a node-replicated band array) ---
-  // Previous iterates for damping/DIIS. ΔF_prev / ΔV_QPGW_prev are ~nb²·nk and
-  // negligible next to these; only the ΔΣ history is worth a row.
-  if (include_gw_sigma) {
+  // Previous iterates for damping/DIIS, inner and outer alike. ΔF_prev /
+  // ΔV_QPGW_prev are ~nb²·nk and negligible next to these; only the ΔΣ-sized
+  // ones are worth a row.
+  for (long i = 0; i < n_sigma_prev; ++i) {
     arrays.push_back({"ΔΣ_prev (striped)", shp5b(nt), band5(nt), true, PERSIST});
   }
 

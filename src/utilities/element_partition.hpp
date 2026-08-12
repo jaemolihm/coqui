@@ -198,6 +198,73 @@ std::pair<double, double> striped_norm(Comm& comm, ArrA const& a, ArrB const& b,
   return {std::sqrt(acc[0]), std::sqrt(acc[1])};
 }
 
+/**
+ * @brief The previous iterate of one mixed quantity, kept as this rank's
+ *        part_map slice instead of a whole node-replicated copy.
+ *
+ * Every accelerated loop needs, for each quantity it mixes, the value from the
+ * step before: to form the DIIS residual, to damp, and to report
+ * ||X - X_prev||. All three are elementwise, so none of them needs an element
+ * another rank owns — holding only this rank's slice stores the quantity once
+ * across the whole job rather than once per node, which for a ΔΣ-sized array is
+ * the difference between GB per node and MB per rank.
+ *
+ * The current value stays a whole node-replicated shared array; `slice_of` cuts
+ * it down at each use. After mixing writes each rank's slice in place, the
+ * caller completes the replicas with complete_node_slices.
+ *
+ * A default-constructed instance is inactive (`size_full() == 0`) — the natural
+ * state for a quantity this run does not mix.
+ */
+struct striped_prev {
+  striped_prev() = default;
+
+  /// Starts at zero, so a loop whose first iterate is "no previous value" can
+  /// read it as a genuine X_prev = 0 rather than special-casing the first step.
+  ///
+  /// @param pmap   - element partition the slice is taken from
+  /// @param n_flat - element count of the FULL array (0 leaves it inactive)
+  striped_prev(part_map const& pmap, long n_flat) : _n(n_flat) {
+    std::tie(_i0, _i1) = pmap.my_slice(_n);
+    _data = nda::array<ComplexType, 1>(_i1 - _i0);
+    _data() = ComplexType(0.0);
+  }
+
+  long size_full() const { return _n; }
+
+  /// This rank's slice of `A`, which must be a contiguous view of the full
+  /// array (e.g. a shared array's `.local()`).
+  template<typename Arr>
+  auto slice_of(Arr&& A) const {
+    return nda::reshape(A, std::array<long, 1>{_n})(nda::range(_i0, _i1));
+  }
+
+  /// prev <- this rank's slice of `A`.
+  template<typename Arr>
+  void save(Arr&& A) { _data = slice_of(A); }
+
+  /// {||A||_F, ||A - prev||_F}, reduced over `comm` from this rank's slice.
+  /// MPI guarantees every rank of `comm` gets the identical value.
+  template<typename Comm, typename Arr>
+  std::pair<double, double> norms(Comm& comm, Arr&& A, bool compute_diff) const {
+    return striped_norm(comm, slice_of(A), _data, compute_diff);
+  }
+
+  /// A <- mixing*A + (1-mixing)*prev, on this rank's slice only.
+  template<typename Arr>
+  void damp_into(Arr&& A, double mixing) const {
+    auto loc = slice_of(A);
+    loc = mixing * loc + (1.0 - mixing) * _data;
+  }
+
+  /// The stored slice, as the DIIS accelerators want their `prev` argument.
+  nda::array<ComplexType, 1> const& data() const { return _data; }
+
+private:
+  long _n = 0, _i0 = 0, _i1 = 0;
+  nda::array<ComplexType, 1> _data;
+};
+
 } // namespace utils
 
 #endif // UTILITIES_ELEMENT_PARTITION_HPP
