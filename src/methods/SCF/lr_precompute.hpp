@@ -88,26 +88,24 @@ auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
 }
 
 /**
- * @brief Transpose W from (q,t,P,Q) to (t,R,P,Q) with in-place q→R Fourier transform.
+ * @brief In-place q→R Fourier transform of W, (t,q,P,Q) → (t,R,P,Q).
  *
- * Input: dW_qtPQ with (q,t,P,Q) layout, pgrid (1,tpools,np_P,np_Q).
- * Returns: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+ * Input/output: dW_tqPQ with (t,q,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
+ * The transform is done in place and the same array is returned, so the caller's
+ * (t,q) copy is consumed. For nkpts == 1 (Gamma-only), q-space == R-space and
+ * there is nothing to do.
  *
- * Performs (q,t)→(t,q) transpose via transpose_axes_01, then in-place q→R FT.
- * For nkpts == 1 (Gamma-only), no FT is needed (q-space == R-space).
- *
- * @param dW_qtPQ  - [INPUT] W_c in THC basis, shape (nkpts, nt_half, NP, NQ).
+ * @param dW_tqPQ  - [INPUT/OUTPUT] W_c in THC basis, shape (nt_half, nkpts, NP, NQ).
  * @param thc      - [INPUT] THC-ERI handler (provides MF for Qpts, lattv, kp_grid)
  * @return dW_tRPQ with (t,R,P,Q) layout
  */
 template<nda::MemoryArray Array_4D_t, typename communicator_t>
-auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
+auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_tqPQ_in,
                           THC_ERI auto& thc) {
   auto MF = thc.MF();
   auto mpi = thc.mpi();
 
-  // Transpose (q,t) → (t,q)
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
+  auto dW_tqPQ = std::move(dW_tqPQ_in);
 
   auto [nt_half, nkpts, NP, NQ] = dW_tqPQ.global_shape();
   auto [nt_loc, nk_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
@@ -117,7 +115,7 @@ auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_qtPQ,
     return dW_tqPQ;
   }
 
-  app_log(2, "lr_precompute_W_tRPQ: transpose (q,t)->(t,q) + in-place q->R transform on W");
+  app_log(2, "lr_precompute_W_tRPQ: in-place q->R transform on W");
   app_log(2, "  global: ({}, {}, {}, {}), local: ({}, {}, {}, {})",
           nt_half, nkpts, NP, NQ, nt_loc, nk_loc, NP_loc, NQ_loc);
 

@@ -1097,7 +1097,12 @@ std::string read_div_treatment(mpi_context_t& mpi,
  * @param screened_interaction_file - Explicit path to the W_qtPQ HDF5 file.
  *                      If empty, falls back to thc_screened_interaction.h5 in
  *                      the input checkpoint's directory.
- * @return (dW_qtPQ, eps_inv_head, div_treatment) tuple
+ * @param tq_layout   - Return W as (t,q,P,Q) instead of the on-disk (q,t,P,Q).
+ *                      The LR entry points want (t,q); the standalone scGW Σ
+ *                      path wants (q,t), which eval_Sigma_all needs to do q→R
+ *                      as a single gemm with q leading.
+ * @return (dW, eps_inv_head, div_treatment) tuple; dW is (t,q,P,Q) if tq_layout
+ *         else (q,t,P,Q)
  */
 template<typename mpi_context_t, typename THC_t>
 auto load_W_and_eps_inv_head(
@@ -1107,7 +1112,8 @@ auto load_W_and_eps_inv_head(
     const std::string& input_grp,
     long input_iter,
     long nt,
-    const std::string& screened_interaction_file = "")
+    const std::string& screened_interaction_file = "",
+    bool tq_layout = false)
 {
   auto mf = thc.MF();
   long nkpts = mf->nkpts();
@@ -1121,6 +1127,9 @@ auto load_W_and_eps_inv_head(
       : screened_interaction_file;
   app_log(2, "Reading W from {}...", w_file);
 
+  // The dataset on disk is (q,t,P,Q), so the distributed read must target that
+  // axis order regardless of tq_layout: h5_read maps the array's index space onto
+  // the dataset's and cannot permute axes.
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
   auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
   std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
@@ -1158,12 +1167,19 @@ auto load_W_and_eps_inv_head(
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
+  // eps_inv_head_t needs (t,q); under tq_layout that copy is what we return, so the
+  // (q,t) source is released here rather than the transposed copy being discarded.
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
   auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
+  if (tq_layout) dW_qtPQ.reset();
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   mpi.comm.barrier();
 
+  if (tq_layout)
+    return std::make_tuple(std::move(dW_tqPQ), std::move(eps_inv_head),
+                           std::move(div_treatment));
+  dW_tqPQ.reset();
   return std::make_tuple(std::move(dW_qtPQ), std::move(eps_inv_head),
                          std::move(div_treatment));
 }
@@ -1178,9 +1194,10 @@ auto load_W_and_eps_inv_head(
  * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
  * the no-symmetry requirement below + the RPA screen_type.
  *
- * Returns the same (dW_qtPQ, eps_inv_head) as load_W_and_eps_inv_head (sans
- * div_treatment, which the caller already holds), so it is a drop-in at the
- * call site.
+ * Returns the same (dW_tqPQ, eps_inv_head) as load_W_and_eps_inv_head with
+ * tq_layout=true (sans div_treatment, which the caller already holds), so it is
+ * a drop-in at the call site. dyson_W_from_Pi_tau already produces (t,q), so no
+ * transpose is needed here.
  *
  * @param mpi           - MPI context
  * @param thc           - THC ERI
@@ -1216,11 +1233,7 @@ auto recompute_W_and_eps_inv_head(
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
 
-  // Transpose (t,q,P,Q) → (q,t,P,Q) to match load_W_and_eps_inv_head layout.
-  auto dW_qtPQ = utils::transpose_axes_01(dW_tqPQ, mpi.comm);
-  mpi.comm.barrier();
-
-  return std::make_pair(std::move(dW_qtPQ), std::move(eps_inv_head));
+  return std::make_pair(std::move(dW_tqPQ), std::move(eps_inv_head));
 }
 
 /**
@@ -1532,7 +1545,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
     } else {
       auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(
           *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f(),
-          screened_interaction_file);
+          screened_interaction_file, /*tq_layout=*/true);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
       div_treatment = div_str;
@@ -1746,8 +1759,9 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, DeltaG_tskij_root);
 
-  // Load W and eps_inv_head using helper
-  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  // Load W and eps_inv_head using helper, in the (t,q) layout lr_precompute_W_tRPQ wants
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      *mpi, thc, input_file, input_grp, input_iter, nt, "", /*tq_layout=*/true);
 
   // Divergence correction flag (default true)
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
@@ -1760,8 +1774,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   }
 
   // Pre-transform W to R-space: transpose (q,t)→(t,R), with q→R FT
-  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_qtPQ, thc);
-  dW_qtPQ.reset();  // free (q,t,P,Q) memory; no longer needed
+  auto dW_tRPQ = lr_precompute_W_tRPQ(dW_tqPQ, thc);
 
   // Create lr_gw solver and compute ΔΣ
   solvers::lr_gw lr(&ft, q_pert, div_treatment);
@@ -2058,14 +2071,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
 
-  // Load W_c(τ) from thc_screened_interaction.h5 — stored as (q, t, P, Q)
+  // Load W_c(τ) from thc_screened_interaction.h5 in (t, q, P, Q), the layout the FT wants
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_qtPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      *mpi, thc, input_file, input_grp, input_iter, nt, "", /*tq_layout=*/true);
   (void)div_treatment;
-
-  // Transpose W_c from (q, t, P, Q) → (t, q, P, Q) for FT
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi->comm);
-  dW_qtPQ.reset();
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
   auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);

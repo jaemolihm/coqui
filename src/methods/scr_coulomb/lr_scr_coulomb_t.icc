@@ -38,7 +38,8 @@ namespace solvers {
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
 auto lr_scr_coulomb_t::compute_W_full_omega(
     memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
-    THC_ERI auto& thc)
+    THC_ERI auto& thc,
+    bool reset_input)
 -> memory::darray_t<local_Array_t, mpi3::communicator>
 {
   _Timer.start("LR_W_COMPUTE_W_FULL");
@@ -74,7 +75,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
   thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
   setup_ft.set_check_ft_leakage(chk_leak != 0);
-  auto dW_c_wqPQ = setup_ft.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, true);
+  auto dW_c_wqPQ = setup_ft.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, reset_input);
 
   // Add bare interaction Z(q) at each (w, q) slice. PQ may be split across the
   // wq_intra subgroup, so use the sub-block version of thc.Z.

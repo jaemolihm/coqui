@@ -112,7 +112,10 @@ public:
    * @param include_hartree    - [INPUT] Include ΔJ in SCF loop
    * @param include_exchange   - [INPUT] Include ΔK in SCF loop
    * @param gw_mode            - [INPUT] GW self-energy mode (none/fixed_W/full)
-   * @param dW_qtPQ            - [INPUT] Screened interaction (nullable, required if gw_mode != none)
+   * @param dW_tqPQ_in         - [INPUT] Screened interaction W_c(τ) in (t,q,P,Q)
+   *                              (nullable, required if gw_mode != none). Consumed:
+   *                              it becomes dW_tRPQ in place, so the caller must not
+   *                              use it after the call.
    * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if gw_mode != none)
    * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
    * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
@@ -147,7 +150,7 @@ public:
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
       bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
-      dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
+      dW_t* dW_tqPQ_in, const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
       const lr_iter_params& iter_params,
       const sArray_t<Array_view_4D_t>* sDeltaX_left = nullptr,

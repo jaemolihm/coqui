@@ -100,7 +100,7 @@ std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
     THC_t& thc,
     bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
-    dW_t* dW_qtPQ, const nda::array<ComplexType, 1>* eps_inv_head,
+    dW_t* dW_tqPQ_in, const nda::array<ComplexType, 1>* eps_inv_head,
     int max_iter, double tol, bool fix_density,
     const lr_iter_params& iter_params,
     const sArray_t<Array_view_4D_t>* sDeltaX_left,
@@ -143,8 +143,8 @@ std::tuple<int, double> lr_driver::run_lr(
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
                  "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
-    utils::check(dW_qtPQ != nullptr && eps_inv_head != nullptr,
-                 "lr_driver::run_lr: gw_mode != none but dW_qtPQ or eps_inv_head is null.");
+    utils::check(dW_tqPQ_in != nullptr && eps_inv_head != nullptr,
+                 "lr_driver::run_lr: gw_mode != none but dW_tqPQ or eps_inv_head is null.");
   }
   if (split_sigma_terms) {
     utils::check(gw_full,
@@ -197,28 +197,26 @@ std::tuple<int, double> lr_driver::run_lr(
                         use_diis, iter_params.max_subsp_size);
   print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
 
-  // Force dW_qtPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
-  // pairs the P/Q tile of W_c (from dW_qtPQ → dW_tRPQ) with that of ΔW and the
-  // G^R cache, both built via lr_W_q_local_dist. When dW_qtPQ arrives on a
-  // different tiling — e.g. mb_state.dW_qtPQ from full-scGW inherits the scGW
-  // polarizability's block_size={1,1,1,1} — the contiguous PQ split disagrees
+  // Force dW_tqPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
+  // pairs the P/Q tile of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the
+  // G^R cache, both built via lr_W_q_local_dist. When dW_tqPQ arrives on a
+  // different tiling — e.g. a W_c recomputed through the scGW pipeline inherits
+  // the polarizability's block_size={1,1,1,1} — the contiguous PQ split disagrees
   // whenever Np % np_P != 0 (bsize=1 vs bsize=Np/np_P round differently), and
   // the fused pairing aborts. Redistributing here makes all operands share one
-  // tiling by construction. (The from-file G0W0 path already builds dW_qtPQ on
+  // tiling by construction. (The from-file G0W0 path already builds dW_tqPQ on
   // this distribution, so the redistribute is a no-op there.)
   if (include_gw_sigma) {
     long nt_f = sG_tskij.shape()[0];
     long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
     auto [tq_pgrid, tq_bsize] =
         utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
-    std::array<long, 4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
-    std::array<long, 4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
-    if (dW_qtPQ->grid() != qt_pgrid || dW_qtPQ->block_size() != qt_bsize) {
-      app_log(2, "lr_driver::run_lr: redistributing dW_qtPQ onto canonical "
+    if (dW_tqPQ_in->grid() != tq_pgrid || dW_tqPQ_in->block_size() != tq_bsize) {
+      app_log(2, "lr_driver::run_lr: redistributing dW_tqPQ onto canonical "
                  "LR q-local tiling (pgrid ({},{},{},{}), bsize ({},{},{},{}))",
-              qt_pgrid[0], qt_pgrid[1], qt_pgrid[2], qt_pgrid[3],
-              qt_bsize[0], qt_bsize[1], qt_bsize[2], qt_bsize[3]);
-      math::nda::redistribute_in_place(*dW_qtPQ, qt_pgrid, qt_bsize);
+              tq_pgrid[0], tq_pgrid[1], tq_pgrid[2], tq_pgrid[3],
+              tq_bsize[0], tq_bsize[1], tq_bsize[2], tq_bsize[3]);
+      math::nda::redistribute_in_place(*dW_tqPQ_in, tq_pgrid, tq_bsize);
     }
   }
 
@@ -251,26 +249,23 @@ std::tuple<int, double> lr_driver::run_lr(
   _Timer.start("LR_DRIVER_SETUP");
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
+  // Both W_c consumers below read the same (t,q,P,Q) array the caller handed in:
+  // compute_W_full_omega FTs it τ→ω, then lr_precompute_W_tRPQ turns it
+  // into (t,R,P,Q). So the FT must not release it — hence reset_input=false — and
+  // the R-space step needs no copy of its own.
   if (gw_full) {
     _Timer.start("LR_DRIVER_SETUP_W_FULL");
-    // Transpose dW_qtPQ from (q,t,P,Q) → (t,q,P,Q), then compute W_full(iω).
-    // This transpose and the one inside lr_precompute_W_tRPQ below cannot be
-    // merged into one: compute_W_full_omega and lr_precompute_W_tRPQ each
-    // *consume* their (t,q) input, so two copies of W_c genuinely have to exist.
-    auto dW_tqPQ = utils::transpose_axes_01(*dW_qtPQ, _mpi->comm);
     opt_dW_full_wqPQ.emplace(
-        lr_scr_solver->compute_W_full_omega(dW_tqPQ, thc));
-    // dW_tqPQ is consumed (reset) by compute_W_full_omega
+        lr_scr_solver->compute_W_full_omega(*dW_tqPQ_in, thc, /*reset_input=*/false));
     _Timer.stop("LR_DRIVER_SETUP_W_FULL");
   }
 
-  // Precompute W in R-space: transpose (q,t)→(t,R), with q→R FT.
+  // Precompute W in R-space: q→R FT in place on the (t,q) input.
   // Result: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
   std::optional<dW_t> opt_dW_tRPQ;
   if (include_gw_sigma) {
     _Timer.start("LR_DRIVER_SETUP_W_TRPQ");
-    opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_qtPQ, thc));
-    dW_qtPQ->reset();  // free (q,t,P,Q) memory; no longer needed
+    opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_tqPQ_in, thc));
     _Timer.stop("LR_DRIVER_SETUP_W_TRPQ");
   }
 
