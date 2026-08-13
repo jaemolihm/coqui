@@ -31,6 +31,7 @@
 #include "simple_dyson.h"
 #include "dca_dyson.h"
 #include "scf_driver.hpp"
+#include "scf_mem_report.hpp"
 
 namespace methods {
 
@@ -68,6 +69,12 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   app_log(1, "  Number of processors     = {} cores per node, {} nodes\n",
           mpi->node_comm.size(), mpi->internode_comm.size());
   FT.metadata_log();
+
+  // Predicted footprint and layout of the large arrays, before anything is allocated.
+  auto mem_params = make_scf_mem_params(mf, FT, mb_eri, mb_solver, iter_solver,
+                                        keep_w, dump_exchange, eval_thermodynamics);
+  print_scf_memory_estimate(*mpi, mem_params);
+  print_scf_distribution_summary(*mpi, mem_params);
 
   Timer.start("SCF_TOTAL");
   // Initialize MBState
