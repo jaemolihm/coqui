@@ -22,6 +22,10 @@
 #ifndef COQUI_SCF_COMMON_HPP
 #define COQUI_SCF_COMMON_HPP
 
+#include <algorithm>
+#include <array>
+#include <tuple>
+
 #include "configuration.hpp"
 #include "utilities/mpi_context.h"
 #include "nda/nda.hpp"
@@ -167,6 +171,49 @@ using Array_view_3D_t = nda::array_view<ComplexType, 3>;
 using Array_view_4D_t = nda::array_view<ComplexType, 4>;
 using Array_view_5D_t = nda::array_view<ComplexType, 5>;
 
+/**
+ * Processor grid and block size for the ω-side band-basis arrays of the Dyson
+ * equation, Sigma(iw) and G(iw), over the (w, s, k, i, j) axes. Note the pool
+ * tolerance is 0.4 here, not the 0.2 used on the tau side.
+ *
+ * Kept in one place because the up-front SCF distribution report has to agree
+ * with what simple_dyson::solve_dyson actually allocates.
+ * @return {pgrid, bsize}
+ */
+inline auto dyson_omega_proc_grid(long nproc, long nw, long nkpts_ibz, int nbnd)
+-> std::tuple<std::array<long, 5>, std::array<long, 5>> {
+  int np = nproc;
+  int nwpools = utils::find_proc_grid_max_npools(np, nw, 0.4);
+  np /= nwpools;
+  int nkpools = utils::find_proc_grid_max_npools(np, nkpts_ibz, 0.4);
+  np /= nkpools;
+  int np_i = utils::find_proc_grid_min_diff(np, 1, 1);
+  int np_j = np / np_i;
+
+  std::array<long, 5> w_pgrid = {nwpools, 1, nkpools, np_i, np_j};
+  long ibsize = std::min({1024, nbnd/np_i, nbnd/np_j});
+  std::array<long, 5> w_bsize = {1, 1, 1, ibsize, ibsize};
+
+  return std::make_tuple(w_pgrid, w_bsize);
+}
+
+/**
+ * Processor grid for the tau-side band-basis arrays over the (w/t, s, k, i, j)
+ * axes: the G(iw) redistribute target and G(tau) in simple_dyson::solve_dyson,
+ * and the tau->w input array of distributed_tau_to_w below. The redistribute in
+ * solve_dyson depends on the two grids agreeing, so both sites derive it here.
+ */
+inline auto dyson_tau_proc_grid(long nproc, long nkpts_ibz)
+-> std::array<long, 5> {
+  int np = nproc;
+  long nkpools = utils::find_proc_grid_max_npools(np, nkpts_ibz, 0.2);
+  np /= nkpools;
+  long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
+  long np_j = np / np_i;
+
+  return std::array<long, 5>{1, 1, nkpools, np_i, np_j};
+}
+
 // check_leakage gates the IAFT leakage diagnostic (small but non-negligible cost).
 template<math::shm::SharedArray sArr_t>
 auto distributed_tau_to_w(mpi3::communicator& comm,
@@ -184,13 +231,9 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   if (check_leakage and nda::sum(X_tau_shm.local()) != ComplexType(0.0))
     FT.check_leakage(X_tau_shm, imag_axes_ft::fermion, "self-energy");
 
-  int np = comm.size();
-  long nkpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
-  np /= nkpools;
-  long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-  long np_j = np / np_i;
+  auto t_pgrid = dyson_tau_proc_grid(comm.size(), nkpts);
 
-  auto dX_wskij = make_distributed_array<Array_5D_t>(comm, {1, 1, nkpools, np_i, np_j},
+  auto dX_wskij = make_distributed_array<Array_5D_t>(comm, t_pgrid,
                                                      {nw, ns, nkpts, nbnd, nbnd});
   auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dX_wskij.local_shape();
   auto k_rng = dX_wskij.local_range(2);

@@ -55,23 +55,17 @@ namespace {
     std::array<long, 5> w_pgrid;
     std::array<long, 5> w_bsize;
     {
-      int np = _context->comm.size();
-      int nwpools = utils::find_proc_grid_max_npools(np, _nw, 0.4);
-      np /= nwpools;
-      int nkpools = utils::find_proc_grid_max_npools(np, _nkpts_ibz, 0.4);
-      np /= nkpools;
-      int np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-      int np_j = np / np_i;
+      std::tie(w_pgrid, w_bsize) =
+          dyson_omega_proc_grid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
 
-      w_pgrid = {nwpools, 1, nkpools, np_i, np_j};
-      long ibsize = std::min({1024, _nbnd/np_i, _nbnd/np_j});
-      w_bsize = {1, 1, 1, ibsize, ibsize};
-
-      utils::check(nwpools*nkpools*np_i*np_j == _context->comm.size(), "solve_dyson: pgrid mismatches!");
+      utils::check(w_pgrid[0]*w_pgrid[2]*w_pgrid[3]*w_pgrid[4] == _context->comm.size(),
+                   "solve_dyson: pgrid mismatches!");
 
       app_log(2, "Dyson equation for Green's function:");
-      app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})", nwpools, nkpools, np_i, np_j);
-      app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})", 1, 1, ibsize, ibsize);
+      app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})",
+              w_pgrid[0], w_pgrid[2], w_pgrid[3], w_pgrid[4]);
+      app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})",
+              w_bsize[0], w_bsize[2], w_bsize[3], w_bsize[4]);
     }
 
     _Timer.start("SIGMA_TAU_TO_W");
@@ -124,20 +118,16 @@ namespace {
 
     // G(w) -> G(tau)
     {
-      int np = _context->comm.size();
-      long nkpools = utils::find_proc_grid_max_npools(np, _nkpts_ibz, 0.2);
-      np /= nkpools;
-      long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-      long np_j = np / np_i;
+      auto t_pgrid = dyson_tau_proc_grid(_context->comm.size(), _nkpts_ibz);
 
-      auto dG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm, {1, 1, nkpools, np_i, np_j},
+      auto dG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
                                                              {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
       _Timer.start("REDISTRIBUTE");
       math::nda::redistribute(dG_wskij, dG_wskij_tmp);
       _Timer.stop("REDISTRIBUTE");
       dG_wskij.reset(); 
 
-      auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, {1, 1, nkpools, np_i, np_j},
+      auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
                                                          {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
       auto Gt_loc = dG_tskij.local();
       auto Gw_loc = dG_wskij_tmp.local();

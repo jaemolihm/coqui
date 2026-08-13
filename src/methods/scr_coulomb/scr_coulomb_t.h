@@ -153,6 +153,30 @@ namespace solvers {
     }
 
     /**
+     * Processor grid and block size for the τ-side auxiliary arrays: Π(t,q,P,Q) as
+     * allocated in eval_Pi_rpa_Rspace, and by inheritance W(τ) (same grid) and the
+     * (q,t) transpose W(q,t,P,Q) (axes 0↔1 swapped). The whole τ-side family, plus
+     * the t-pool sub-communicator size np_P*np_Q, comes from here, so the SCF
+     * memory/distribution report predicts exactly what the allocator builds.
+     * @return {pgrid, bsize} over the (t, q, P, Q) axes.
+     */
+    static auto Pi_tau_proc_grid(long nproc, long nt_half, long nqpts_ibz, long ns, long nkpts)
+    -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
+      // CNY: Memory for intermediate objects scales with ntpools.
+      // Therefore, we restrict ntpools*ns*nkpts*Np*Np*2 < nt_half*nqpts_ibz*Np*Np
+      long ntpools_max = std::max(long(nt_half * nqpts_ibz / (ns * nkpts * 2)), 1L);
+      while (nproc % ntpools_max != 0) ntpools_max -= 1;
+      long ntpools = utils::find_proc_grid_max_npools(nproc, nt_half, 0.2);
+      if (ntpools > ntpools_max) ntpools = ntpools_max;
+      long np_PQ = nproc / ntpools;
+      long np_P = utils::find_proc_grid_min_diff(np_PQ, 1, 1);
+      long np_Q = np_PQ / np_P;
+
+      return std::make_tuple(std::array<long, 4>{ntpools, 1, np_P, np_Q},
+                             std::array<long, 4>{1, 1, 1, 1});
+    }
+
+    /**
      * Evaluate the screened interaction W in place from a Matsubara polarizability
      * @param dPi_wqPQ - [INPUT/OUTPUT] polarizability / screened interaction: (nw, nqpts_ibz, Np, Np)
      * @param thc      - [INTPUT] THC ERI object

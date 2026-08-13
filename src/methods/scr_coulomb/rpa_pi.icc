@@ -45,15 +45,11 @@ namespace solvers {
     size_t nt_half = (nt_f % 2 == 0)? nt_f / 2 : nt_f / 2 + 1;
     double sp_factor = (ns == 2)? -1.0 : -2.0;
 
-    // CNY: Memory for intermediate objects scales with ntpools.
-    // Therefore, we restrict ntpools*ns*nkpts*Np*Np*2 < nt_half*nqpts_ibz*Np*Np
-    long ntpools_max = std::max(long(nt_half * nqpts_ibz / (ns * nkpts * 2)), 1L);
-    while (mpi->comm.size()%ntpools_max !=0) ntpools_max -= 1;
-    long ntpools = utils::find_proc_grid_max_npools(mpi->comm.size(), nt_half, 0.2);
-    if (ntpools > ntpools_max) ntpools = ntpools_max;
-    int np_PQ = mpi->comm.size() / ntpools;
-    int np_P = utils::find_proc_grid_min_diff(np_PQ, 1, 1);
-    int np_Q = np_PQ / np_P;
+    auto [t_pgrid, t_bsize] = scr_coulomb_t::Pi_tau_proc_grid(
+        mpi->comm.size(), nt_half, nqpts_ibz, ns, nkpts);
+    long ntpools = t_pgrid[0];
+    long np_P = t_pgrid[2];
+    long np_Q = t_pgrid[3];
     utils::check(ntpools > 0 and ntpools <= nt_half, "scr_coulomb_t::eval_Pi_rpa_Rspace: ntpools <= 0 or ntpools > nt_half");
     utils::check(mpi->comm.size() % ntpools == 0,
                  "scr_coulomb_t::eval_Pi_rpa_Rspace: gcomm.size() % ntpools({}) != 0", ntpools);
@@ -64,7 +60,7 @@ namespace solvers {
 
     _Timer.start("PI_ALLOC_R");
     auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-        mpi->comm, {ntpools, 1, np_P, np_Q}, {nt_half, nqpts_ibz, Np, Np}, {1, 1, 1, 1});
+        mpi->comm, t_pgrid, {nt_half, nqpts_ibz, Np, Np}, t_bsize);
     auto [t_origin, q_origin, P_origin, Q_origin] = dPi_tqPQ.origin();
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
 
