@@ -245,9 +245,6 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
-      // Reduction buffer for aux_to_primary_accumulate, reused across the
-      // 2·nt_loc calls per Σ evaluation instead of reallocated in each.
-      nda::array<ComplexType, 3> _a2p_buf;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(thc_reader_t& thc);
@@ -260,7 +257,7 @@ namespace methods {
        */
       void _setup_workspace(thc_reader_t& thc, dArr_4D_t const& dW_ref,
                             bool do_term1, bool do_term2,
-                            long ns, long nk_ibz, long nbnd);
+                            long ns, long nk_ibz);
 
       /**
        * R-space convolution workhorse: ΔΣ = -ΔG⊙W - G⊙ΔW.

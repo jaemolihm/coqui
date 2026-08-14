@@ -204,7 +204,7 @@ namespace methods {
     // =========================================================================
     void lr_gw::_setup_workspace(thc_reader_t& thc, dArr_4D_t const& dW_ref,
                                   bool do_term1, bool do_term2,
-                                  long ns, long nk_ibz, long nbnd) {
+                                  long ns, long nk_ibz) {
       if (_setup_done) {
         // The cached workspace is specific to the term combination it was built
         // for (term2-only buffers are conditionally allocated); reusing it under
@@ -234,7 +234,7 @@ namespace methods {
       long nkpts   = gshape[1];
       long t_origin = dW_ref.origin()[0];
 
-      // aux_to_primary_accumulate flattens (s,k) of the aux and primary operands
+      // aux_to_primary_local flattens (s,k) of the aux and primary operands
       // onto a common leading index, so the two k-axes must have equal extent.
       utils::check(nk_ibz == nkpts,
                    "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
@@ -258,8 +258,6 @@ namespace methods {
                    "(pgrid = ({},{},{},{})).",
                    _dSigma_skPQ->grid()[0], _dSigma_skPQ->grid()[1],
                    _dSigma_skPQ->grid()[2], _dSigma_skPQ->grid()[3]);
-
-      _a2p_buf.resize(ns * nkpts, nbnd, nbnd);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
@@ -335,7 +333,6 @@ namespace methods {
       auto ns = G_ref.shape(1);
       auto nt = G_ref.shape(0);
       auto nk_ibz = G_ref.shape(2);
-      auto nbnd = G_ref.shape(3);
 
       // Extract tau distribution and array dimensions from whichever W is available.
       // Term 1: dW_tRPQ     has (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
@@ -398,7 +395,7 @@ namespace methods {
       // collective; shm windows and distributed buffers are expensive to
       // recreate). Kept out of the kernel for readability.
       _Timer.start("SIGMA_ALLOC");
-      _setup_workspace(thc, dW_ref, do_term1, do_term2, ns, nk_ibz, nbnd);
+      _setup_workspace(thc, dW_ref, do_term1, do_term2, ns, nk_ibz);
 
       // Local aliases so the loop body below reads as before.
       // The Σ buffer is accumulated in R-space (dSigma_sRPQ) and FT'd in place
@@ -565,9 +562,9 @@ namespace methods {
           }
 
           _Timer.start("SIGMA_AUX_TO_PRIM");
-          lr_thc_comm::aux_to_primary_accumulate(0, 0, ComplexType(1.0), dSigma_skPQ,
-                                                 DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
-                                                 &_a2p_buf, &_Timer);
+          lr_thc_comm::aux_to_primary_local(0, 0, ComplexType(1.0), dSigma_skPQ,
+                                            DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
+                                            &_Timer);
 
           // Add precomputed IBC correction for this τ-point
           if (add_ibc && tau_comm.rank() == 0) {
