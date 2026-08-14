@@ -665,6 +665,7 @@ void dump_lr(communicator_t& comm,
              bool include_gw_sigma,
              Sigma_t const* sDeltaSigma2_tskij,
              F_t const* sDeltaVcorr_skij,
+             std::optional<long> imode,
              bool save_DeltaG,
              std::optional<long> nbnd_save) {
   if (comm.root()) {
@@ -675,6 +676,12 @@ void dump_lr(communicator_t& comm,
     auto lr_grp = grp.has_subgroup("linear_response") ?
                   grp.open_group("linear_response") :
                   grp.create_group("linear_response");
+    // A multi-perturbation run gives each one its own subgroup; a single one
+    // keeps writing straight into "linear_response/", as before.
+    if (imode) {
+      std::string m = "mode" + std::to_string(*imode);
+      lr_grp = lr_grp.has_subgroup(m) ? lr_grp.open_group(m) : lr_grp.create_group(m);
+    }
 
     // Write an imaginary-time array, trimmed to the leading nbnd_save x nbnd_save
     // band block when asked. A trimmed dataset is the protected-band block of the
@@ -733,7 +740,9 @@ void dump_lr(communicator_t& comm,
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
     }
 
-    app_log(2, "LR results written to \"linear_response/\" in {}", filename);
+    app_log(2, "LR results written to \"{}\" in {}",
+            imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
+            filename);
     app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
   }
   comm.barrier();
@@ -832,7 +841,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       double, int, bool, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
-                      bool, std::optional<long>);
+                      std::optional<long>, bool, std::optional<long>);
 
   } // chkpt
 } // methods
