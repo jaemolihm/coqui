@@ -507,4 +507,79 @@ TEST_CASE("redistribute_nda", "[math]")
   }
 }
 
+/**
+ * redistribute_alltoallv chunks its pack/unpack staging buffers to a per-rank
+ * byte budget. Chunking changes only the blocking of the exchange -- every
+ * element keeps its destination and its position -- so the result must be
+ * bit-identical to the unchunked transfer for any nchunk.
+ *
+ * Cases: a ragged global shape (so the block boundaries do not divide the rank
+ * count), a block size of 1 on the split axis, and caps from "one element per
+ * chunk" (nchunk saturates at comm.size()) up to "no chunking at all".
+ */
+TEST_CASE("redistribute_chunked_equivalence", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  const long size = world.size();
+  if (size < 2) return;
+
+  using larray = nda::array<ComplexType, 3>;
+  // Ragged in every axis, so no chunk boundary lands where a block does.
+  shape_t<3> gshape = {7*size + 3, 5, 3*size + 1};
+
+  auto fill = [&](auto& A) {
+    auto Aloc = A.local();
+    auto o = A.origin();
+    for (long i = 0; i < Aloc.shape(0); ++i)
+      for (long j = 0; j < Aloc.shape(1); ++j)
+        for (long k = 0; k < Aloc.shape(2); ++k) {
+          double v = double((o[0]+i)*gshape[1]*gshape[2] + (o[1]+j)*gshape[2] + (o[2]+k));
+          // An irrational-ish scaling, so a wrongly placed element cannot
+          // coincide with the right one.
+          Aloc(i,j,k) = ComplexType(v * 0.3141592653589793, -v * 0.2718281828459045);
+        }
+  };
+
+  auto A = make_distributed_array<larray>(world, {size,1,1}, gshape);
+  fill(A);
+
+  // Reference: no chunking (a cap far above any local block).
+  auto B_ref = make_distributed_array<larray>(world, {1,1,size}, gshape);
+  redistribute_alltoallv(A, B_ref, ComplexType(1.0), ComplexType(0.0),
+                         size_t(1) << 40);
+
+  for (size_t cap : {size_t(1), size_t(16), size_t(1024), size_t(1) << 20}) {
+    auto B = make_distributed_array<larray>(world, {1,1,size}, gshape);
+    redistribute_alltoallv(A, B, ComplexType(1.0), ComplexType(0.0), cap);
+    auto Bloc = B.local();
+    auto Rloc = B_ref.local();
+    double err = 0.0;
+    for (long i = 0; i < Bloc.shape(0); ++i)
+      for (long j = 0; j < Bloc.shape(1); ++j)
+        for (long k = 0; k < Bloc.shape(2); ++k)
+          err = std::max(err, std::abs(Bloc(i,j,k) - Rloc(i,j,k)));
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    REQUIRE(err == 0.0);  // pure data movement: bit-identical, not "close"
+  }
+
+  // The reverse direction, with a block size of 1 on the split axis.
+  auto C = make_distributed_array<larray>(world, {1,1,size}, gshape, {1,1,1});
+  fill(C);
+  auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape, {1,1,1});
+  redistribute_alltoallv(C, D_ref, ComplexType(1.0), ComplexType(0.0), size_t(1) << 40);
+  auto D = make_distributed_array<larray>(world, {size,1,1}, gshape, {1,1,1});
+  redistribute_alltoallv(C, D, ComplexType(1.0), ComplexType(0.0), size_t(8));
+  {
+    auto Dloc = D.local();
+    auto Rloc = D_ref.local();
+    double err = 0.0;
+    for (long i = 0; i < Dloc.shape(0); ++i)
+      for (long j = 0; j < Dloc.shape(1); ++j)
+        for (long k = 0; k < Dloc.shape(2); ++k)
+          err = std::max(err, std::abs(Dloc(i,j,k) - Rloc(i,j,k)));
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    REQUIRE(err == 0.0);
+  }
+}
+
 } // bdft_tests

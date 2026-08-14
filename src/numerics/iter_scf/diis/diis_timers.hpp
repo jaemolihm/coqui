@@ -90,7 +90,6 @@ namespace iter_scf::diis_timers {
   inline utils::Watch spmd_conv       {"spmd_conv_maxdiff"};
   inline utils::Watch spmd_writeback  {"spmd_writeback_slices"};
   inline utils::Watch spmd_damp_mix   {"spmd_damp_mix"};
-  inline utils::Watch spmd_damp_stage {"spmd_damp_stage_slice"};
   inline utils::Watch spmd_prev_store {"spmd_prev_state_store"};
 
   inline void log() {
@@ -134,7 +133,6 @@ namespace iter_scf::diis_timers {
     row(spmd_conv);
     row(spmd_writeback);
     row(spmd_damp_mix);
-    row(spmd_damp_stage);
     row(spmd_prev_store);
     app_log(2, "");
   }

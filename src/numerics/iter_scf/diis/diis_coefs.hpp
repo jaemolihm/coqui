@@ -27,6 +27,7 @@
 #include "configuration.hpp"
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "numerics/nda_functions.hpp"  // nda::blas 3-argument gemm/gemv
 #include "nda/linalg/eigenelements.hpp"
 #include "IO/app_loggers.h"
 

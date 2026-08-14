@@ -31,6 +31,7 @@
 #include "methods/SCF/scf_mem_report.hpp"
 #include "methods/scr_coulomb/scr_coulomb_t.h"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
+#include "numerics/distributed_array/nda_utils.hpp"
 
 namespace methods {
 
@@ -43,45 +44,58 @@ namespace {
 // dSigma_wskij / dG_wskij / dG_wskij_tmp are explicit reset() calls, while the
 // Pi scratch and the whole k-space Sigma set rely on function-scope destruction
 // in eval_Pi_rpa_Rspace / eval_Sigma_all_kspace.
+// The W Fourier transforms are split into one group per *moment* (the two
+// redistributes and the FT in between), not one per call: within a call the
+// staging buffers are allocated and released around each step, so summing the
+// whole call would double-count. Groups are combined with a max, which is
+// exactly the max-over-moments the peak needs.
 enum : uint32_t {
   G_PI      = 1u << 0,
-  G_W_FT    = 1u << 1,
-  G_W_TR    = 1u << 2,
-  G_SIGMA   = 1u << 3,
-  G_MIX     = 1u << 4,
-  G_DYSON_W = 1u << 5,
-  G_DYSON_T = 1u << 6,
-  G_THERMO  = 1u << 7,
+  G_T2W_IN  = 1u << 1,
+  G_T2W_FT  = 1u << 2,
+  G_T2W_OUT = 1u << 3,
+  G_W2T_IN  = 1u << 4,
+  G_W2T_FT  = 1u << 5,
+  G_W2T_OUT = 1u << 6,
+  G_W_TR    = 1u << 7,
+  G_SIGMA   = 1u << 8,
+  G_MIX     = 1u << 9,
+  G_DYSON_W = 1u << 10,
+  G_DYSON_T = 1u << 11,
+  G_THERMO  = 1u << 12,
   PERSIST   = 0u
 };
-constexpr int N_GROUPS = 8;
+constexpr int N_GROUPS = 13;
 
 const char* group_tag(int g) {
   switch (g) {
-    case 0: return "Π";
-    case 1: return "W ω-FT";
-    case 2: return "W transpose";
-    case 3: return "Σ";
-    case 4: return "mix";
-    case 5: return "Dyson ω";
-    case 6: return "Dyson τ";
+    case 0:  return "Π";
+    case 1:  return "W τ→ω in";
+    case 2:  return "W τ→ω FT";
+    case 3:  return "W τ→ω out";
+    case 4:  return "W ω→τ in";
+    case 5:  return "W ω→τ FT";
+    case 6:  return "W ω→τ out";
+    case 7:  return "W transpose";
+    case 8:  return "Σ";
+    case 9:  return "mix";
+    case 10: return "Dyson ω";
+    case 11: return "Dyson τ";
     default: return "thermo";
   }
 }
 
 // How many ranks share one copy of an array: a node-shared window is one copy per
 // node, a globally distributed array one copy per comm, a t-pool array one copy per
-// (nproc/ntpools) sub-comm, and a plain local array one copy per rank. The DIIS
-// in-memory history is sliced across node_comm, i.e. one copy per node.
-enum loc_t { SHARED, DIST, TPOOL, PERRANK, NODESUM };
+// (nproc/ntpools) sub-comm, and a plain local array one copy per rank.
+enum loc_t { SHARED, DIST, TPOOL, PERRANK };
 
 const char* loc_str(loc_t l) {
   switch (l) {
     case SHARED:  return "shared";
     case DIST:    return "distributed";
     case TPOOL:   return "t-pool";
-    case PERRANK: return "per-rank";
-    default:      return "node-summed";
+    default:      return "per-rank";
   }
 }
 
@@ -97,7 +111,7 @@ long ceil_div(long a, long b) { return (b > 0) ? (a + b - 1) / b : a; }
 
 } // anonymous namespace
 
-void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
+double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
                                const scf_mem_params& p) {
   const long nproc   = std::max(1, mpi.comm.size());
   const long rpn     = std::max(1, mpi.node_comm.size());
@@ -132,8 +146,7 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
       case SHARED:  return rpn;
       case DIST:    return nproc;
       case TPOOL:   return np_tpool;
-      case PERRANK: return 1;
-      default:      return rpn;   // NODESUM
+      default:      return 1;     // PERRANK
     }
   };
 
@@ -196,17 +209,53 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
   }
 
   // In-memory DIIS history: max_subsp trial (F, Sigma) pairs plus max_subsp Sigma
-  // residuals, each sliced across node_comm, i.e. one whole copy per node.
-  if (p.iter_alg == "DIIS" and p.diis_storage == "memory" and p.max_subsp > 0)
+  // residuals, each element-sliced across the global comm (utils::part_map), i.e.
+  // one whole copy per run. The engine also keeps the previous accepted state as
+  // one more sliced (F, Sigma) pair.
+  if (p.iter_alg == "DIIS" and p.diis_storage == "memory" and p.max_subsp > 0) {
     arrays.push_back({"DIIS history (memory)",
                       fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
                       double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
-                      NODESUM, PERSIST});
+                      DIST, PERSIST});
+    arrays.push_back({"DIIS prev state (striped)", "|F| + |Sigma|",
+                      band4() + band5(p.nt_f), DIST, PERSIST});
+  }
 
   // ---------------- transient: RPA polarizability ----------------
+  // Only the THC path builds the auxiliary-basis grids; ft_buffer_dist and
+  // W_omega_proc_grid have no meaning (and reject NP = 0) without them.
   const bool aux_path = p.thc_eri and p.have_scr;
   if (aux_path) {
-    arrays.push_back({"dPi_tqPQ",  shp4a(p.nth), aux4(p.nth), DIST,    G_PI});
+    // redistribute_alltoallv stages the local block of both endpoints and chunks
+    // those buffers to a per-rank byte budget; nchunk follows the largest local
+    // block of either endpoint, exactly as nda_utils.hpp computes it.
+    const std::array<long, 4> t_gshape = {p.nth, p.nqi, p.NP, p.NP};
+    const std::array<long, 4> w_gshape = {p.nwh, p.nqi, p.NP, p.NP};
+    auto [ftb_pgrid, ftb_bsize] =
+        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, t_gshape);
+    auto [wo_pgrid, wo_bsize] =
+        solvers::scr_coulomb_t::W_omega_proc_grid(nproc, p.nqi, p.nw_b, p.NP);
+    // When the W(iw) distribution is already the FT buffer distribution, both
+    // Fourier calls take their fast branch: tau_to_w transforms straight into
+    // W(iw) and w_to_tau straight out of it, so there is no omega-side staging
+    // buffer and one redistribute each instead of two.
+    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and wo_bsize == ftb_bsize);
+    auto max_local = [&](std::array<long, 4> const& gs, std::array<long, 4> const& pg) {
+      double n = 1.0;
+      for (int i = 0; i < 4; ++i) n *= double(ceil_div(gs[i], std::max(1L, pg[i])));
+      return n;
+    };
+    auto nchunk_of = [&](double m1, double m2) {
+      const double cap_elem =
+          std::max(1.0, double(math::nda::redistribute_chunk_cap_bytes()) / bytes_per);
+      return long(std::min(double(nproc), std::max(1.0, std::ceil(std::max(m1, m2) / cap_elem))));
+    };
+    const long nchunk_t = nchunk_of(max_local(t_gshape, pi_pgrid),
+                                    max_local(t_gshape, ftb_pgrid));
+    const long nchunk_w = nchunk_of(max_local(w_gshape, wo_pgrid),
+                                    max_local(w_gshape, ftb_pgrid));
+
+    arrays.push_back({"dPi_tqPQ",  shp4a(p.nth), aux4(p.nth), DIST, G_PI | G_T2W_IN});
     arrays.push_back({"dGp_sRPQ",  shp4k(p.nk),  auxk4(p.nk), TPOOL,   G_PI});
     arrays.push_back({"dGn_sRPQ",  shp4k(p.nk),  auxk4(p.nk), TPOOL,   G_PI});
     arrays.push_back({"dbuf_skPQ", shp4k(p.nk - p.nk_trev), auxk4(p.nk - p.nk_trev),
@@ -222,12 +271,32 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
                       double(p.nqi) * p.nk, SHARED, G_PI});
 
     // ---------------- transient: W tau<->omega FT + W Dyson ----------------
-    arrays.push_back({"buffer_ti (FT τ)", shp4a(p.nth), aux4(p.nth), DIST, G_W_FT});
-    arrays.push_back({"W(iω) (dPi_wqPQ)", shp4a(p.nwh), aux4(p.nwh), DIST, G_W_FT});
-    arrays.push_back({"buffer_wi (FT ω)", shp4a(p.nwh), aux4(p.nwh), DIST, G_W_FT});
+    // Each FT is redistribute -> FT -> redistribute; a staging buffer pair lives
+    // only inside a redistribute, and the τ- and ω-side arrays only overlap
+    // during the FT itself, so every array carries the moments it is alive in.
+    arrays.push_back({"buffer_ti (FT τ)", shp4a(p.nth), aux4(p.nth), DIST,
+                      G_T2W_IN | G_T2W_FT | G_W2T_FT | G_W2T_OUT});
+    if (!w_ft_fast)
+      arrays.push_back({"buffer_wi (FT ω)", shp4a(p.nwh), aux4(p.nwh), DIST,
+                        G_T2W_FT | G_T2W_OUT | G_W2T_IN | G_W2T_FT});
+    arrays.push_back({"W(iω) (dPi_wqPQ)", shp4a(p.nwh), aux4(p.nwh), DIST,
+                      w_ft_fast ? (G_T2W_FT | G_W2T_FT) : (G_T2W_OUT | G_W2T_IN)});
+    // redistribute_alltoallv stages the local block of *both* endpoints in
+    // contiguous buffers, chunked to a per-rank byte budget. Both endpoints of
+    // the τ-side redistributes are aux τ grids and of the ω-side ones aux ω
+    // grids, so each pair is 2 x that grid / nchunk.
+    arrays.push_back({"redistribute bufs (τ)",
+                      fmt::format("2 x {} / {}", shp4a(p.nth), nchunk_t),
+                      2.0 * aux4(p.nth) / double(nchunk_t), DIST,
+                      G_T2W_IN | G_W2T_OUT});
+    if (!w_ft_fast)
+      arrays.push_back({"redistribute bufs (ω)",
+                        fmt::format("2 x {} / {}", shp4a(p.nwh), nchunk_w),
+                        2.0 * aux4(p.nwh) / double(nchunk_w), DIST,
+                        G_T2W_OUT | G_W2T_IN});
 
     // ---------------- transient: (t,q) -> (q,t) transpose of W ----------------
-    arrays.push_back({"dW_tqPQ", shp4a(p.nth), aux4(p.nth), DIST, G_W_TR});
+    arrays.push_back({"dW_tqPQ", shp4a(p.nth), aux4(p.nth), DIST, G_W2T_OUT | G_W_TR});
     // dW_qtPQ outlives the transpose: it is the Sigma solver's input, freed at
     // scf_driver.cpp:192 -- or kept to the end of the run under keep_w.
     uint32_t w_mask = G_W_TR | G_SIGMA;
@@ -240,10 +309,9 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
   // ---------------- transient: self-energy ----------------
   if (p.thc_eri and p.have_corr) {
     if (p.sigma_alg == "R") {
-      // Upper bound, not an exact high-water mark: the four sub-steps of the R-space
-      // build never all coexist, but dW + dG + dSigma + sG_ttskij bounds each of them.
-      arrays.push_back({"dG_tskPQ",     shp5a(p.nth), aux5(p.nth), DIST,   G_SIGMA});
-      arrays.push_back({"dSigma_tskPQ", shp5a(p.nth), aux5(p.nth), DIST,   G_SIGMA});
+      // Exact: Sigma is written over G in place, and sG_ttskij (the tau-reversed
+      // copy that feeds primary_to_aux) is alive while dG_tskPQ already exists.
+      arrays.push_back({"dG_tskPQ (= dSigma)", shp5a(p.nth), aux5(p.nth), DIST, G_SIGMA});
       arrays.push_back({"sG_ttskij",    shp5b(p.nt_f), band5(p.nt_f), SHARED, G_SIGMA});
     } else {
       // Exact: none of the four is reset inside eval_Sigma_all_kspace.
@@ -311,8 +379,8 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
               (i == peak_grp) ? "  <- peak" : "");
   app_log(2, "    ranks/node = {}, nodes = {}, t-pools = {} (t-pool comm = {} ranks)",
           rpn, n_nodes, ntpools, np_tpool);
-  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; sF_prev/sSigma_prev on"
-             " a restart; disk-backed DIIS history");
+  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; the W Dyson scratch;"
+             " disk-backed DIIS history");
   if (p.n_thc_readers > 1)
     app_log(2, "    the {} THC readers are assumed to share the correlated reader's NP/nbnd/"
                "x_range shapes", p.n_thc_readers);
@@ -327,6 +395,7 @@ void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& m
   app_log(1, "  Estimated SCF memory (peak):       {:.3f} GB/node  [{} dominates]",
           peak_pn, group_tag(peak_grp));
   app_log(2, "");
+  return peak_pn;
 }
 
 void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicator>& mpi,

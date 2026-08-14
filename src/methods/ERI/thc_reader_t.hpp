@@ -22,6 +22,7 @@
 #ifndef COQUI_THC_READER_T_HPP
 #define COQUI_THC_READER_T_HPP
 
+#include <atomic>
 #include <string>
 #include <optional>
 
@@ -59,6 +60,25 @@ namespace methods {
    *   auto Yk = thc.Y(is, ik); // return nda::array_view
    *   auto Zq = thc.Z(iq);
    */
+  namespace detail {
+  /// Monotonic identity token. A fresh value on construction *and* on copy, so
+  /// a consumer that caches data derived from its owner cannot mistake a
+  /// different object -- or a new object at a recycled address -- for the one
+  /// it cached from.
+  struct instance_id_t {
+    long value = next();
+    instance_id_t() = default;
+    instance_id_t(instance_id_t const&) : value(next()) {}
+    instance_id_t& operator=(instance_id_t const&) { value = next(); return *this; }
+    instance_id_t(instance_id_t&&) = default;
+    instance_id_t& operator=(instance_id_t&&) = default;
+    static long next() {
+      static std::atomic<long> counter{0};
+      return ++counter;
+    }
+  };
+  } // namespace detail
+
   class thc_reader_t {
     template<MEMORY_SPACE MEM = HOST_MEMORY, long R = 1>
     using Array_t = memory::array<MEM, ComplexType, R>;
@@ -1045,6 +1065,11 @@ namespace methods {
     // in dZ() reuses resident data rather than re-reading from disk. Lets callers decide
     // whether caching a redistributed copy is worthwhile (it is only for incore).
     bool dZ_incore() const { return _storage == eri_storage_e::incore; }
+    // Identity of this reader instance, for consumers that cache data derived from
+    // it (hf_t::_dZ_cache). Not the object's address: the allocator recycles
+    // addresses, so a destroyed reader replaced at the same address with matching
+    // dimensions would silently validate a stale cache.
+    long instance_id() const { return _instance_id.value; }
     std::string filename() const { return _eri_file; }
     //mpi3::communicator* comm() const { return std::addressof(_mpi->comm); }
     auto& MF() const { return _MF; }
@@ -1211,6 +1236,8 @@ namespace methods {
     memory::array<HOST_MEMORY, long, 1> _rp;
 
     mutable utils::TimerManager _Timer;
+
+    detail::instance_id_t _instance_id;
   };
 
 } // methods

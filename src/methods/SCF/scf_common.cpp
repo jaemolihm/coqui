@@ -27,6 +27,8 @@
 #include "hamiltonian/one_body_hamiltonian.hpp"
 #include "mean_field/MF.hpp"
 #include "utilities/mpi_context.h"
+#include "utilities/element_partition.hpp"
+#include "utilities/h5_flat_slice.hpp"
 #include "methods/tools/chkpt_utils.h"
 #include "simple_dyson.h"
 
@@ -527,7 +529,7 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       // becomes x0. There is no in-memory previous accepted state, so the
       // first damping stages it from the checkpoint below.
       dspmd->spmd.configure(dspmd->mixing, dspmd->max_subsp_size, dspmd->warmup_iter);
-      dspmd->spmd.init_x0(context.node_comm, sF_skij.local(), sSigma_tskij.local(),
+      dspmd->spmd.init_x0(context, sF_skij.local(), sSigma_tskij.local(),
                           /*capture_prev=*/false);
     }
     // The SPMD state is replicated, so all ranks agree on whether the next
@@ -558,57 +560,52 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 
     if (dspmd) {
       // === A12: SPMD in-memory DIIS solve over context.comm ===
+      const long nF_flat = sF_skij.local().size();
+      const long nS_flat = sSigma_tskij.local().size();
+      auto const& pmap = dspmd->spmd.pmap();
       // Stage the previous accepted state from the checkpoint when there is no
-      // in-memory copy (first damping after a restart). Node roots read into
-      // node-shared temporaries; each rank slices them. A missing dataset
-      // means the previous state was exactly zero (slim HF checkpoints).
-      std::optional<sArray_t<Array_view_4D_t>> sF_prev;
-      std::optional<sArray_t<Array_view_5D_t>> sSigma_prev;
+      // in-memory copy (first damping after a restart). Every rank reads exactly
+      // the element slice it owns as an h5 hyperslab, so no full copy of F or
+      // Sigma is materialized. A missing dataset means the previous state was
+      // exactly zero (slim HF checkpoints). Every rank opening the checkpoint
+      // read-only is affordable because this runs at most once per run: after
+      // the first solve the previous state is in memory.
+      nda::array<ComplexType, 1> F_prev_loc, S_prev_loc;
+      bool have_prev = false;
       if (dspmd->spmd.needs_prev_state()) {
-        sF_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-            context.comm, context.internode_comm, context.node_comm, sF_skij.shape()));
-        sSigma_prev.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-            context.comm, context.internode_comm, context.node_comm, sSigma_tskij.shape()));
-        sF_prev->win().fence();
-        sSigma_prev->win().fence();
-        if (context.node_comm.root()) {
-          std::string filename = h5_prefix + ".mbpt.h5";
-          h5::file file(filename, 'r');
-          h5::group grp(file);
-          std::string grp_name = datasets[0]+"/iter"+std::to_string(iteration-1);
-          utils::check(grp.has_subgroup(grp_name),
-                       "diis_impl: {} does not exist in {}.", grp_name, filename);
-          auto it_grp = grp.open_group(grp_name);
-          auto F_loc = sF_prev->local();
-          if (it_grp.has_dataset(datasets[1])) nda::h5_read(it_grp, datasets[1], F_loc);
-          auto S_loc = sSigma_prev->local();
-          if (it_grp.has_dataset(datasets[2])) nda::h5_read(it_grp, datasets[2], S_loc);
-        }
-        sF_prev->win().fence();
-        sSigma_prev->win().fence();
+        auto [f0, f1] = pmap.my_slice(nF_flat);
+        auto [s0, s1] = pmap.my_slice(nS_flat);
+        F_prev_loc = nda::array<ComplexType, 1>(f1 - f0);
+        S_prev_loc = nda::array<ComplexType, 1>(s1 - s0);
+        F_prev_loc() = ComplexType(0.0);
+        S_prev_loc() = ComplexType(0.0);
+        std::string filename = h5_prefix + ".mbpt.h5";
+        h5::file file(filename, 'r');
+        h5::group grp(file);
+        std::string grp_name = datasets[0]+"/iter"+std::to_string(iteration-1);
+        utils::check(grp.has_subgroup(grp_name),
+                     "diis_impl: {} does not exist in {}.", grp_name, filename);
+        auto it_grp = grp.open_group(grp_name);
+        if (it_grp.has_dataset(datasets[1]))
+          utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(),
+                                       f0, f1, F_prev_loc.data());
+        if (it_grp.has_dataset(datasets[2]))
+          utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij.shape(),
+                                       s0, s1, S_prev_loc.data());
+        have_prev = true;
       }
-      // The node hosting the global root reduces the B-row partials (its ranks
-      // cover the full vector exactly once); rank 0 then broadcasts the row.
-      int on_node0 = (context.comm.rank() == 0) ? 1 : 0;
-      context.node_comm.all_reduce_in_place_n(&on_node0, 1, std::plus<>{});
 
       std::optional<Array_view_5D_t> C_loc;
       if (sC_t_dist) C_loc.emplace(sC_t_dist->local());
-      std::optional<Array_view_4D_t> Fp_loc;
-      std::optional<Array_view_5D_t> Sp_loc;
-      if (sF_prev) {
-        Fp_loc.emplace(sF_prev->local());
-        Sp_loc.emplace(sSigma_prev->local());
-      }
-      const Array_view_5D_t* Cp  = C_loc  ? &*C_loc  : nullptr;
-      const Array_view_4D_t* Fpp = Fp_loc ? &*Fp_loc : nullptr;
-      const Array_view_5D_t* Spp = Sp_loc ? &*Sp_loc : nullptr;
+      const Array_view_5D_t* Cp = C_loc ? &*C_loc : nullptr;
+      const auto* Fpp = have_prev ? &F_prev_loc : nullptr;
+      const auto* Spp = have_prev ? &S_prev_loc : nullptr;
 
       // Each rank reads/writes only its own slice of the node-shared F/Sigma
       // windows (disjoint), so a fence pair around the solve suffices.
       sF_skij.win().fence();
       sSigma_tskij.win().fence();
-      auto pconv = dspmd->spmd.solve(context.comm, context.node_comm, on_node0 > 0,
+      auto pconv = dspmd->spmd.solve(context.comm,
                                      sF_skij.local(), sSigma_tskij.local(),
                                      Cp, Fpp, Spp, iteration);
       sF_skij.win().fence();
@@ -618,15 +615,30 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       conv_Sigma = pconv[1];
       context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
       context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
-      // Re-sync the accepted state across nodes from node 0 (whose ranks also
-      // form B, so all consumed state originates there). The coefficients are
-      // provably identical everywhere, but the per-node slice histories are only
-      // identical if the MBPT solvers left F/Sigma bit-identical on every node —
-      // an invariant the serial path never relied on. This broadcast restores
-      // the serial-path guarantee; on a single node it is a no-op.
-      if (context.internode_comm.size() > 1) {
-        sF_skij.broadcast_to_nodes(0);
-        sSigma_tskij.broadcast_to_nodes(0);
+      // The slices are cut over the global comm, so a node holds valid data
+      // only for its own contiguous element run; parts are numbered node-major,
+      // so one allgatherv over the node roots completes every node's window.
+      // The completed array is a mosaic of per-node contributions, which is
+      // exact on two invariants: the coefficients are identical on every rank
+      // (one all_reduce forms B) and the mixing is elementwise, and every
+      // producer of these windows ends in an internode all_reduce
+      // (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for the GW
+      // Sigma, thc_gf2.icc for GF2), so no node holds a private variant of the
+      // input to begin with.
+      // comm.size() != node_comm.size() exactly when the job spans more than one
+      // node, and unlike internode_comm.size() it is the same on every rank:
+      // internode_comm is split by node_comm.rank(), so on a ragged node layout
+      // the ranks above the smallest node's size sit in a size-1 internode comm
+      // and would skip a node-collective the rest of their node enters.
+      if (context.comm.size() != context.node_comm.size()) {
+        if (context.node_comm.root()) {
+          utils::complete_node_slices(context.internode_comm, pmap,
+                                      sF_skij.local().data(), nF_flat);
+          utils::complete_node_slices(context.internode_comm, pmap,
+                                      sSigma_tskij.local().data(), nS_flat);
+        }
+        sF_skij.node_sync();
+        sSigma_tskij.node_sync();
       }
     } else {
     // DIIS does not support mpi yet
@@ -717,7 +729,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
         // at iteration 1, so this state is also the accepted previous state
         // for the first warmup damping.
         dspmd->spmd.configure(dspmd->mixing, dspmd->max_subsp_size, dspmd->warmup_iter);
-        dspmd->spmd.init_x0(context.node_comm, sF_skij.local(), sSigma_tskij.local(),
+        dspmd->spmd.init_x0(context, sF_skij.local(), sSigma_tskij.local(),
                             /*capture_prev=*/true);
       } else if (context.comm.root()) {
         // Initialize DIIS solver at the root process since the serial solver doesn't support mpi

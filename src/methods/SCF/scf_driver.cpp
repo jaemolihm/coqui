@@ -32,6 +32,7 @@
 #include "dca_dyson.h"
 #include "scf_driver.hpp"
 #include "scf_mem_report.hpp"
+#include "utilities/proc_meminfo.hpp"
 
 namespace methods {
 
@@ -73,8 +74,9 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   // Predicted footprint and layout of the large arrays, before anything is allocated.
   auto mem_params = make_scf_mem_params(mf, FT, mb_eri, mb_solver, iter_solver,
                                         keep_w, dump_exchange, eval_thermodynamics);
-  print_scf_memory_estimate(*mpi, mem_params);
+  const double predicted_peak_pn = print_scf_memory_estimate(*mpi, mem_params);
   print_scf_distribution_summary(*mpi, mem_params);
+  utils::memlog("scf_loop: before state alloc");
 
   Timer.start("SCF_TOTAL");
   // Initialize MBState
@@ -99,6 +101,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
         *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   double mu = 0.0;
   Timer.stop("STATE_ALLOC");
+  utils::memlog("scf_loop: after state alloc");
   Timer.start("INIT_FOCK");
   if (!restart) {
     // Initial mean-field Fock F = F_full - H0. Reuse the H0 the dyson solver
@@ -185,15 +188,19 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
         }
       }
       mpi->comm.barrier();
+      utils::memlog("scf_loop: after HF");
     }
     // correlated solver for dynamic self-energy, e.g. gw, gf2
     if (mb_solver.corr != nullptr) {
 
-      if (mb_solver.scr_eri != nullptr)
+      if (mb_solver.scr_eri != nullptr) {
         mb_solver.scr_eri->update_w(mb_state, mb_eri.corr_eri->get(), output_iter);
+        utils::memlog("scf_loop: after W");
+      }
 
       mb_solver.corr->iter() = output_iter;
       mb_solver.corr->evaluate(mb_state, mb_eri.corr_eri->get());
+      utils::memlog("scf_loop: after Sigma");
       // deallocate mb_state.dW_qtPQ after this since it's only used in the corr solver and can be very large for GW.
       // keep_w preserves the final W for post-loop consumers (e.g. dump_w_to_h5).
       if (!keep_w) mb_state.dW_qtPQ.reset();
@@ -221,6 +228,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
                                                      &dyson.sS_skij(), &dyson.sH0_skij());
     }
     Timer.stop("ITERATIVE");
+    utils::memlog("scf_loop: after mixing");
 
     Timer.start("DYSON");
     // whether to update mu depends on const_mu
@@ -233,6 +241,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     mpi->comm.barrier();
     Timer.stop("DYSON_HERMITIZE");
     Timer.stop("DYSON");
+    utils::memlog("scf_loop: after Dyson");
 
 
     Timer.start("ENERGY");
@@ -287,6 +296,23 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   app_log(2, "    Iterative alg:        {0:.3f} sec", Timer.elapsed("ITERATIVE"));
   app_log(2, "    Energy eval:          {0:.3f} sec", Timer.elapsed("ENERGY"));
   app_log(2, "    Write:                {0:.3f} sec\n", Timer.elapsed("WRITE"));
+
+  // Close the loop on the estimate printed before the first allocation: a model
+  // nobody checks drifts. VmHWM is per process and includes the node-shared
+  // windows this rank touched, so the node sum double-counts them -- it is an
+  // upper bound on what the node held, and the shm figure says by how much.
+  {
+    auto m = utils::read_proc_mem();
+    double node_hwm_gb = m.vm_hwm_kb / 1048576.0;
+    mpi->node_comm.all_reduce_in_place_n(&node_hwm_gb, 1, std::plus<>{});
+    app_log(2, "  SCF memory: predicted peak {:.3f} GB/node, observed VmHWM {:.3f} GB/node",
+            predicted_peak_pn, node_hwm_gb);
+    app_log(2, "    (sum of per-rank VmHWM over the node, which double-counts the {:.3f} GB "
+               "of /dev/shm this rank maps; node used {:.1f} of {:.1f} GB)\n",
+            m.shm_bytes / double(1ll << 30),
+            (m.mem_total_kb - m.mem_available_kb) / 1048576.0,
+            m.mem_total_kb / 1048576.0);
+  }
 
   if (eval_thermodynamics) {
     for (auto &v: {"THERMODYNAMICS", "PHI_DYNAMICAL", "OTHERS"}) {
