@@ -380,7 +380,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            recompute_W=False,
            unperturbed="checkpoint",
            split_sigma_terms=False,
-           div_treatment=None):
+           div_treatment=None,
+           save_DeltaG=True,
+           nbnd_save=None):
     """
     Run unified linear response calculation.
 
@@ -486,6 +488,18 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Divergence treatment for the ε⁻¹ head. For unperturbed="mf_dft" the
         checkpoint holds none, so this selects it (default "gygi" in C++).
         Ignored for unperturbed="checkpoint" (read from the checkpoint).
+    save_DeltaG : bool, optional
+        Write DeltaG_tskij to the checkpoint (default True). It is the largest
+        LR dataset and nothing downstream reads it back, so a phonon sweep can
+        turn it off.
+    nbnd_save : int or None, optional
+        Keep only the leading nbnd_save x nbnd_save band block of the
+        imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
+        DeltaSigma_GdW_tskij). None (default) writes them whole. A trimmed
+        DeltaSigma_tskij is the protected-band block of the LR self-energy, not
+        full-basis ΔΣ; each trimmed dataset carries an ``nbnd_save`` HDF5
+        attribute saying so. The single-time-slice arrays (DeltaDm_skij,
+        DeltaF_skij, DeltaVcorr_skij) are never trimmed.
 
     Returns
     -------
@@ -548,22 +562,26 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         dx_right = None
         dv_qPQ = None
 
-    # Pass div_corr flag through params dict (read by C++ run_lr_calc)
-    params_with_div = dict(params)
-    params_with_div["div_corr"] = bool(div_corr)
+    # The C++ run_lr_calc reads its non-positional options off the params dict.
+    lr_params = dict(params)
+    lr_params["div_corr"] = bool(div_corr)
     # Optional explicit path to the screened-interaction (W) HDF5 file. When
     # omitted, C++ auto-derives it from the input checkpoint's directory.
     if screened_interaction_file is not None:
-        params_with_div["screened_interaction_file"] = str(screened_interaction_file)
+        lr_params["screened_interaction_file"] = str(screened_interaction_file)
     # Recompute W from the checkpoint Green's function instead of reading it.
-    params_with_div["recompute_W"] = bool(recompute_W)
+    lr_params["recompute_W"] = bool(recompute_W)
     # Unperturbed reference and split-term output (one-shot G0W0@DFT).
-    params_with_div["unperturbed"] = str(unperturbed)
-    params_with_div["split_sigma_terms"] = bool(split_sigma_terms)
+    lr_params["unperturbed"] = str(unperturbed)
+    lr_params["split_sigma_terms"] = bool(split_sigma_terms)
     if div_treatment is not None:
-        params_with_div["div_treatment"] = str(div_treatment)
+        lr_params["div_treatment"] = str(div_treatment)
+    # LR output volume (read by C++ dump_lr). Defaults keep the checkpoint as-is.
+    lr_params["save_DeltaG"] = bool(save_DeltaG)
+    if nbnd_save is not None:
+        lr_params["nbnd_save"] = int(nbnd_save)
 
-    return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
+    return run_lr_cpp(json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,
                       bool(include_hartree), bool(include_exchange), str(gw_mode),
                       int(max_iter), float(tol), bool(fix_density),
                       alg, mixing, max_subsp_size, diis_warmup,
