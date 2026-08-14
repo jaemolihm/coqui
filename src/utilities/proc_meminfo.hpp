@@ -25,10 +25,9 @@
  * high-water mark, and bytes mapped from /dev/shm. Designed for diagnosing
  * memory growth across repeated calls (e.g. successive run_lr invocations).
  *
- * Gated only by app_log verbosity: memlog() prints at output_level >= 3.
- * The /proc reads are skipped when the level check fails, so there is zero
- * overhead in default runs (output_level = 2). Non-root ranks also short-
- * circuit because setup_loggers(false, ...) sets their level to -10000.
+ * Gated only by app_log verbosity: memlog() prints at verbosity >= 3 on root.
+ * The /proc reads are skipped when the check fails, so there is zero overhead
+ * in default runs (verbosity = 2) and on every non-root rank.
  *
  * Use:
  *     #include "utilities/proc_meminfo.hpp"
@@ -127,7 +126,7 @@ inline proc_mem_t read_proc_mem() {
 inline void memlog(std::string const& tag, int io_lvl = 3) {
   // Skip the /proc reads if the message would not be printed anyway. Mirrors
   // the gating inside app_log() so we pay zero cost when not logging.
-  if (__app_output_level__ <= 0 || io_lvl > __app_output_level__) return;
+  if (not __app_is_root__ || __app_verbosity__ <= 0 || io_lvl > __app_verbosity__) return;
   auto m = read_proc_mem();
   // Per-process line: rank-0's heap and shm view.
   app_log(io_lvl,

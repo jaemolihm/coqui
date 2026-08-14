@@ -72,19 +72,28 @@ namespace solvers {
      * layout, so ~1/nproc of it per rank — not one τ slice: the local IAFT kernel
      * consumes the entire τ/ω axis at once. A buffer is skipped when the caller's
      * distribution already matches ft_buffer_dist.
+     *
+     * check_leakage runs the IAFT leakage diagnostic on the τ-side array. It is a
+     * caller-supplied flag rather than something decided here, matching
+     * scf_common's distributed_tau_to_w: it costs two gemms plus two collectives
+     * per transform, so a hot path turns it off, and it is collective — every rank
+     * must pass the same value. Callers gate it on __app_verbosity__, which is
+     * rank-uniform.
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto tau_to_w(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
                   std::array<long, 4> w_pgrid_out,
                   std::array<long, 4> w_bsize_out = {},
-                  bool reset_input = false)
+                  bool reset_input = false,
+                  bool check_leakage = true)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto w_to_tau(memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
                   std::array<long, 4> t_pgrid_out,
                   std::array<long, 4> t_bsize_out = {},
-                  bool reset_input = false)
+                  bool reset_input = false,
+                  bool check_leakage = true)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
@@ -113,16 +122,11 @@ namespace solvers {
       return {b_pgrid, b_bsize};
     }
 
-    /// Gate for the IAFT leakage checks inside tau_to_w / w_to_tau
-    /// (default on; the LR driver disables them below verbosity 3).
-    void set_check_ft_leakage(bool v) { _check_ft_leakage = v; }
-
     utils::TimerManager& timer() { return _Timer; }
 
   private:
     const imag_axes_ft::IAFT* _ft = nullptr;
     utils::TimerManager _Timer;
-    bool _check_ft_leakage = true;
 
   }; // scr_coulomb_fourier_t
 

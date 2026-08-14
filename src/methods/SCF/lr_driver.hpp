@@ -112,11 +112,13 @@ public:
    * @param include_hartree    - [INPUT] Include ΔJ in SCF loop
    * @param include_exchange   - [INPUT] Include ΔK in SCF loop
    * @param gw_mode            - [INPUT] GW self-energy mode (none/fixed_W/full)
-   * @param dW_tqPQ_in         - [INPUT] Screened interaction W_c(τ) in (t,q,P,Q)
-   *                              (nullable, required if gw_mode != none). Consumed:
-   *                              it becomes dW_tRPQ in place, so the caller must not
-   *                              use it after the call.
-   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if gw_mode != none)
+   * @param dW_wqPQ_in         - [INPUT] Screened interaction W_c(iω) as (w,q,P,Q)
+   *                              on solvers::lr_scr_coulomb_t::W_omega_dist (nullable,
+   *                              required if gw_mode != none). Consumed: it becomes
+   *                              dW_tRPQ / W_full(iω) in place, so the caller must
+   *                              not use it after the call.
+   * @param eps_inv_head       - [INPUT] Inverse dielectric head on the τ axis
+   *                              (nullable, required if gw_mode != none)
    * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
    * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
    * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
@@ -150,7 +152,8 @@ public:
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
       bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
-      dW_t* dW_tqPQ_in, const nda::array<ComplexType, 1>* eps_inv_head,
+      dW_t* dW_wqPQ_in,
+      const nda::array<ComplexType, 1>* eps_inv_head,
       int max_iter, double tol, bool fix_density,
       const lr_iter_params& iter_params,
       const sArray_t<Array_view_4D_t>* sDeltaX_left = nullptr,
@@ -203,6 +206,18 @@ public:
   bool is_q_gamma() const { return _lr_dyson.is_q_gamma(); }
 
 private:
+  /**
+   * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
+   * iteration: W_full(iω) for the ΔW Dyson (gw_full only) and W_c(t,R,P,Q) for
+   * ΔΣ = −ΔG⊙W_c. Consumes dW_wqPQ_in. See the definition for the ordering
+   * constraint between them.
+   */
+  template<THC_ERI THC_t, typename dW_t>
+  void lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
+                  solvers::lr_scr_coulomb_t* lr_scr,
+                  std::optional<dW_t>& opt_dW_full_wqPQ,
+                  std::optional<dW_t>& opt_dW_tRPQ);
+
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
