@@ -194,8 +194,7 @@ namespace methods {
     /// The R-space total leads; transpose/div-correction siblings live outside
     /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
     /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
-    /// Aux->Primary breaks that one line down and is already counted in it —
-    /// never add those lines to the sum.
+    /// Aux->Primary is a breakdown of it, not further terms of that sum.
     inline void print_subclocks(int level, const std::string& indent) {
       app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
@@ -206,15 +205,10 @@ namespace methods {
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
       app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
-      app_log(level, "{0}    - Set zero (Σ):             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SETZERO"), _Timer.number_of_calls("SIGMA_A2P_SETZERO"));
-      app_log(level, "{0}    - Pre-divide:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_PREDIV"), _Timer.number_of_calls("SIGMA_A2P_PREDIV"));
       app_log(level, "{0}    - Buffer alloc:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ALLOC"), _Timer.number_of_calls("SIGMA_A2P_ALLOC"));
       app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_GEMM"), _Timer.number_of_calls("SIGMA_A2P_GEMM"));
-      app_log(level, "{0}    - Skew barrier:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SKEW"), _Timer.number_of_calls("SIGMA_A2P_SKEW"));
       app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_REDUCE"), _Timer.number_of_calls("SIGMA_A2P_REDUCE"));
       app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_AXPY"), _Timer.number_of_calls("SIGMA_A2P_AXPY"));
-      app_log(level, "{0}    - Shm reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_SHMREDUCE"), _Timer.number_of_calls("SIGMA_A2P_SHMREDUCE"));
-      app_log(level, "{0}    - Accum into ΔΣ:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ACCUM"), _Timer.number_of_calls("SIGMA_A2P_ACCUM"));
       app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FINAL_REDUCE"), _Timer.number_of_calls("SIGMA_FINAL_REDUCE"));
       app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_DIV_CORR"), _Timer.number_of_calls("SIGMA_DIV_CORR"));
     }
@@ -239,14 +233,12 @@ namespace methods {
       // and the shm arrays reference _tau_mpi — both must outlive (= be declared
       // before) them.
       using sArr_2D_t = math::shm::shared_array<nda::array_view<ComplexType, 2>>;
-      using sArr_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
       using dArr_loc_4D_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
       bool _setup_done = false;
       bool _setup_term1 = false, _setup_term2 = false;
       std::optional<mpi3::communicator> _tau_comm;
       std::optional<utils::mpi_context_t<mpi3::communicator>> _tau_mpi;
       std::optional<dArr_loc_4D_t> _dG_skPQ, _dSigma_skPQ;
-      std::optional<sArr_4D_t> _sSigma_skij;
       std::optional<sArr_2D_t> _sf_Rk, _sf_kR, _sf_qR;
       // Blocked-FFT k<->R transforms; COQUI_LR_DEBUG_GEMM_FT=1 leaves these
       // empty and uses the gemm path (coefficient matrices above) instead.
@@ -265,7 +257,7 @@ namespace methods {
        */
       void _setup_workspace(thc_reader_t& thc, dArr_4D_t const& dW_ref,
                             bool do_term1, bool do_term2,
-                            long ns, long nk_ibz, long nbnd);
+                            long ns, long nk_ibz);
 
       /**
        * R-space convolution workhorse: ΔΣ = -ΔG⊙W - G⊙ΔW.

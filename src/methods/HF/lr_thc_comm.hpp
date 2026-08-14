@@ -22,6 +22,8 @@
 #ifndef COQUI_LR_THC_COMM_HPP
 #define COQUI_LR_THC_COMM_HPP
 
+#include <limits>
+
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "utilities/proc_grid_partition.hpp"
@@ -67,35 +69,26 @@ namespace methods {
       using shape_t = std::array<long, N>;
 
       /**
-       * LR primary→aux wrapper (rank-4 and rank-5 distributed array overload).
-       * Matches thc_solver_comm::primary_to_aux (lines 118-153) using if constexpr
-       * to branch on rank.
+       * LR primary→aux wrapper (rank-4 distributed array).
+       * Matches thc_solver_comm::primary_to_aux, its rank-4 distributed-array overload.
        *
        * @param ip         - [INPUT] left polarization index
        * @param iq         - [INPUT] right polarization index
-       * @param O_Iab      - [INPUT] tensor in primary basis
-       *                     rank-5: (nt_half, ns, nkpts_ibz, nbnd, nbnd)
-       *                     rank-4: (ns, nkpts_ibz, nbnd, nbnd)
-       * @param O_IPQ      - [OUTPUT] tensor in auxiliary basis
-       *                     rank-5: (nt_half, ns, nkpts, NP, NP)
-       *                     rank-4: (ns, nkpts, NP, NP)
+       * @param O_Iab      - [INPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd)
+       * @param O_IPQ      - [OUTPUT] tensor in auxiliary basis (ns, nkpts, NP, NP)
        * @param thc        - [INPUT] THC-ERI handler
        * @param kp_to_ibz  - [INPUT] full BZ k → IBZ k mapping (nkpts,)
        * @param kp_trev    - [INPUT] time-reversal flag per full BZ k-point (nkpts,)
        * @param kpq_map    - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        * @param ibc        - [INPUT] optional IBC correction data (DeltaX arrays + unperturbed quantities)
-       * @param O_unpert   - [INPUT] optional unperturbed quantity in primary basis (same shape as O_Iab)
-       *                     Required when ibc is non-null. For rank-4: (ns, nk_ibz, nb, nb).
-       *                     For rank-5: pass as rank-4 with flattened (nt_loc*ns, nk, nb, nb).
-       * @param O_unpert_5d - [INPUT] optional unperturbed rank-5 quantity (nt, ns, nk_ibz, nb, nb)
-       *                      Alternative to O_unpert for rank-5 transforms — auto-sliced to local τ range.
+       * @param O_unpert   - [INPUT] optional unperturbed quantity in primary basis (ns, nk_ibz, nb, nb),
+       *                     required when ibc is non-null
        *
        * When ibc is provided, adds correction terms:
        *   O_PQ += δ^q X(k) · A(k) · X(k)† + X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t,
-               typename O_unpert_4D_t = nda::array<ComplexType, 4>,
-               typename O_unpert_5D_t = nda::array<ComplexType, 5>>
+               typename O_unpert_4D_t = nda::array<ComplexType, 4>>
       static void primary_to_aux(int ip, int iq,
                                  const Array_primary_t &O_Iab,
                                  memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
@@ -104,81 +97,118 @@ namespace methods {
                                  nda::ArrayOfRank<1> auto const& kp_trev,
                                  nda::ArrayOfRank<1> auto const& kpq_map,
                                  const lr_ibc_DeltaX* ibc = nullptr,
-                                 const O_unpert_4D_t* O_unpert = nullptr,
-                                 const O_unpert_5D_t* O_unpert_5d = nullptr) {
-        constexpr int rank = nda::get_rank<Array_primary_t>;
-        static_assert(rank == 4 || rank == 5,
-                      "lr_thc_comm::primary_to_aux: rank must be 4 or 5");
+                                 const O_unpert_4D_t* O_unpert = nullptr) {
+        static_assert(nda::get_rank<Array_primary_t> == 4,
+                      "lr_thc_comm::primary_to_aux: rank must be 4");
 
         // Extract DeltaX pointers from ibc (null when no correction)
         const nda::array_view<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
         const nda::array_view<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
 
-        if constexpr (rank == 5) {
-          auto t_loc_rng = O_IPQ.local_range(0);
-          auto P_offset = O_IPQ.origin()[3];
-          auto Q_offset = O_IPQ.origin()[4];
+        auto P_offset = O_IPQ.origin()[2];
+        auto Q_offset = O_IPQ.origin()[3];
 
-          auto O_Iab_loc = O_Iab(t_loc_rng, nda::ellipsis{});
-          auto O_IPQ_loc = O_IPQ.local();
-          utils::check(O_IPQ.global_shape()[2] == O_IPQ.local_shape()[2],
-                       "lr_thc_comm::primary_to_aux(rank-5): Does not support mpi distributed along k-axis.");
+        auto O_IPQ_loc = O_IPQ.local();
+        utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
+                     "lr_thc_comm::primary_to_aux: Does not support mpi distributed along k-axis.");
 
-          if (O_unpert_5d) {
-            // Slice to local tau range (rank-5 view), then copy into a rank-5 array
-            // and reshape to rank-4 (dim_i = nt_loc * ns) for _impl.
-            nda::array<ComplexType, 5> O_5d_loc{(*O_unpert_5d)(t_loc_rng, nda::ellipsis{})};
-            long nt_loc_ = O_5d_loc.shape(0), ns_ = O_5d_loc.shape(1);
-            long nk_ = O_5d_loc.shape(2), nb_ = O_5d_loc.shape(3);
-            auto O_unpert_loc = nda::array<ComplexType, 4>{
-                nda::reshape(O_5d_loc, shape_t<4>{nt_loc_ * ns_, nk_, nb_, nb_})};
-            _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
-                                 kp_to_ibz, kp_trev, kpq_map,
-                                 P_offset, Q_offset,
-                                 DeltaX_ptr, DeltaX_mq_ptr, &O_unpert_loc);
-          } else {
-            _primary_to_aux_impl(ip, iq, O_Iab_loc, O_IPQ_loc, thc,
-                                 kp_to_ibz, kp_trev, kpq_map,
-                                 P_offset, Q_offset);
-          }
-        } else if constexpr (rank == 4) {
-          auto P_offset = O_IPQ.origin()[2];
-          auto Q_offset = O_IPQ.origin()[3];
-
-          auto O_IPQ_loc = O_IPQ.local();
-          utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
-                       "lr_thc_comm::primary_to_aux: Does not support mpi distributed along k-axis.");
-
-          _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
-                               kp_to_ibz, kp_trev, kpq_map,
-                               P_offset, Q_offset,
-                               DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
-        }
+        _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
+                             kp_to_ibz, kp_trev, kpq_map,
+                             P_offset, Q_offset,
+                             DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
       }
 
       /**
-       * LR aux→primary wrapper (rank-4 and rank-5 distributed→shared overload).
-       * Matches thc_solver_comm::aux_to_primary (lines 260-325) using if constexpr
-       * to branch on rank.
+       * LR aux→primary accumulation kernel (rank-4), writing into a plain nda
+       * destination: O_Iab_dest += scl · X(k+q)† · O_PQ · X(k).
+       *
+       * The reduction over the (P,Q) tile grid lands on the root of the
+       * sub-communicator that shares an (s,k) block, so **only that rank's**
+       * destination is modified.
+       *
+       * Which of the two to call: aux_to_primary (below) is this kernel plus a
+       * shared-array round trip — pre-divide, window fence, all_reduce over the nodes
+       * — so on return every rank sees the result. Call that one when the destination
+       * is a shared array read collectively right after the call, as lr_hf::thc_lr_hf
+       * does for ΔF.
+       *
+       * Call this kernel directly when that round trip would be wasted: the
+       * destination is not shared, or only the sub-communicator root reads it, or a
+       * later reduction over another axis subsumes it. lr_gw::_eval_sigma_Rspace takes
+       * this path for ΔΣ — the destination is one τ-slab owned by the τ-pool root and
+       * the τ axis is reduced once at the end, so a per-τ shared round trip would be
+       * redundant. The flip side of "only that rank's destination is modified" is that
+       * whatever the caller accumulates afterwards has to be guarded on the same rank
+       * (the IBC add in _eval_sigma_Rspace).
+       *
+       * @param ip        - [INPUT] left polarization index
+       * @param iq        - [INPUT] right polarization index
+       * @param scl       - [INPUT] scaling factor for accumulation
+       * @param O_IPQ     - [INPUT] tensor in auxiliary basis (ns, nkpts_ibz, NP, NP)
+       * @param O_Iab_dest- [OUTPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd),
+       *                    accumulated on the (s,k) sub-communicator root; must be contiguous
+       * @param thc       - [INPUT] THC-ERI handler
+       * @param kp_map    - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
+       * @param kpq_map   - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       * @param Timer     - [INPUT] optional sub-clock manager, see aux_to_primary
+       */
+      template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
+      static void aux_to_primary_local(int ip, int iq,
+                                       ComplexType scl,
+                                       const memory::darray_t<Array_aux_t, communicator_t>& O_IPQ,
+                                       Array_primary_t& O_Iab_dest,
+                                       THC_ERI auto& thc,
+                                       nda::ArrayOfRank<1> auto const& kp_map,
+                                       nda::ArrayOfRank<1> auto const& kpq_map,
+                                       utils::TimerManager* Timer = nullptr) {
+        static_assert(nda::get_rank<Array_aux_t> == 4,
+                      "lr_thc_comm::aux_to_primary_local: aux rank must be 4");
+        static_assert(nda::get_rank<Array_primary_t> == 4,
+                      "lr_thc_comm::aux_to_primary_local: primary rank must be 4");
+
+        auto pgrid = O_IPQ.grid();
+        auto [s_org, k_org, P_org, Q_org] = O_IPQ.origin();
+        auto [ns, nkpts, NP, NQ] = O_IPQ.global_shape();
+        utils::check(nkpts == O_IPQ.local_shape()[1],
+                     "lr_thc_comm::aux_to_primary_local: Does not support mpi distributed along k-axis.");
+
+        auto O_IPQ_loc = O_IPQ.local();
+
+        // The ranks sharing an (s,k) block are all of gcomm: (s,k) is undivided,
+        // so a split on that block would only reproduce its parent.
+        utils::check(pgrid[0] == 1 and pgrid[1] == 1,
+                     "lr_thc_comm::aux_to_primary_local: expected (s,k) undivided, "
+                     "got pgrid ({},{})", pgrid[0], pgrid[1]);
+        communicator_t &dim0_intra_comm = *O_IPQ.communicator();
+        utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
+                     "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
+
+        _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
+                             O_IPQ_loc, O_Iab_dest, thc,
+                             kp_map, kpq_map, k_org, P_org, Q_org, Timer);
+      }
+
+      /**
+       * LR aux→primary wrapper (rank-4 distributed→shared): accumulates into a
+       * shared array and leaves the result replicated on every node.
        *
        * @param ip       - [INPUT] left polarization index
        * @param iq       - [INPUT] right polarization index
        * @param scl      - [INPUT] scaling factor for accumulation
-       * @param O_IPQ    - [INPUT] tensor in auxiliary basis
-       *                   rank-5: (nt_half, ns, nkpts_ibz, NP, NP)
-       *                   rank-4: (ns, nkpts_ibz, NP, NP)
-       * @param O_Iab    - [OUTPUT] tensor in primary basis, accumulated
-       *                   rank-5: (nt_half, ns, nkpts_ibz, nbnd, nbnd)
-       *                   rank-4: (ns, nkpts_ibz, nbnd, nbnd)
+       * @param O_IPQ    - [INPUT] tensor in auxiliary basis (ns, nkpts_ibz, NP, NP)
+       * @param O_Iab    - [OUTPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd), accumulated
        * @param thc      - [INPUT] THC-ERI handler
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        * @param Timer    - [INPUT] optional sub-clock manager. When non-null the call is
-       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,SKEW,
+       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,
        *                   REDUCE,AXPY,SHMREDUCE}; PREDIV and SHMREDUCE are the shared-array
-       *                   bookkeeping this wrapper adds on top of the kernel. SKEW is a
-       *                   barrier that exists only while timing, so that the cost of the
-       *                   reduce is separated from the wait for the slowest tile.
+       *                   bookkeeping this wrapper adds on top of the kernel. REDUCE
+       *                   includes the wait for the slowest tile in dim0_comm.
+       *
+       * The leading x → x/N pre-divide makes the trailing all_reduce over the N
+       * nodes idempotent for content already in the window, so repeated calls
+       * accumulate rather than multiply what is already there.
        */
       template<nda::MemoryArray AF_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq,
@@ -189,11 +219,10 @@ namespace methods {
                                  nda::ArrayOfRank<1> auto const& kp_map,
                                  nda::ArrayOfRank<1> auto const& kpq_map,
                                  utils::TimerManager* Timer = nullptr) {
-        constexpr int rank = nda::get_rank<Array_aux_t>;
-        static_assert(nda::get_rank<AF_t> == rank,
-                      "lr_thc_comm::aux_to_primary: rank mismatch between darray and sarray");
-        static_assert(rank == 4 || rank == 5,
-                      "lr_thc_comm::aux_to_primary: rank must be 4 or 5");
+        static_assert(nda::get_rank<Array_aux_t> == 4,
+                      "lr_thc_comm::aux_to_primary: aux rank must be 4");
+        static_assert(nda::get_rank<AF_t> == 4,
+                      "lr_thc_comm::aux_to_primary: primary rank must be 4");
         using value_type = typename std::decay_t<AF_t>::value_type;
 
         auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
@@ -208,58 +237,12 @@ namespace methods {
         O_Iab.node_comm()->barrier();
         toc("SIGMA_A2P_PREDIV");
 
-        if constexpr (rank == 5) {
-          auto pgrid = O_IPQ.grid();
-          auto t_rng = O_IPQ.local_range(0);
-          auto s_rng = O_IPQ.local_range(1);
-          auto k_rng = O_IPQ.local_range(2);
+        auto s_rng = O_IPQ.local_range(0);
+        auto k_rng = O_IPQ.local_range(1);
+        auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
 
-          auto [t_org, s_org, k_org, P_org, Q_org] = O_IPQ.origin();
-          auto [nt, ns, nkpts, NP, NQ] = O_IPQ.global_shape();
-          utils::check(nkpts == O_IPQ.local_shape()[2],
-                       "lr_thc_comm::aux_to_primary(rank-5): Does not support mpi distributed along k-axis.");
-
-          auto O_Iab_loc = O_Iab.local()(t_rng, s_rng, k_rng, nda::ellipsis{});
-          auto O_IPQ_loc = O_IPQ.local();
-
-          // The ranks sharing a (t,s,k) block are all of gcomm: (t,s,k) is undivided,
-          // so a split on that block would only reproduce its parent.
-          utils::check(pgrid[0] == 1 and pgrid[1] == 1 and pgrid[2] == 1,
-                       "lr_thc_comm::aux_to_primary(rank-5): expected (t,s,k) undivided, "
-                       "got pgrid ({},{},{})", pgrid[0], pgrid[1], pgrid[2]);
-          communicator_t &dim0_intra_comm = *O_IPQ.communicator();
-          utils::check(dim0_intra_comm.size() == pgrid[3] * pgrid[4],
-                       "dim0_intra_comm.size() != pgrid[3]*pgrid[4]");
-
-          _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
-                               O_IPQ_loc, O_Iab_loc, thc,
-                               kp_map, kpq_map, k_org, P_org, Q_org, Timer);
-        } else if constexpr (rank == 4) {
-          auto pgrid = O_IPQ.grid();
-          auto s_rng = O_IPQ.local_range(0);
-          auto k_rng = O_IPQ.local_range(1);
-
-          auto [s_org, k_org, P_org, Q_org] = O_IPQ.origin();
-          auto [ns, nkpts, NP, NQ] = O_IPQ.global_shape();
-          utils::check(nkpts == O_IPQ.local_shape()[1],
-                       "lr_thc_comm::aux_to_primary: Does not support mpi distributed along k-axis.");
-
-          auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
-          auto O_IPQ_loc = O_IPQ.local();
-
-          // The ranks sharing an (s,k) block are all of gcomm: (s,k) is undivided,
-          // so a split on that block would only reproduce its parent.
-          utils::check(pgrid[0] == 1 and pgrid[1] == 1,
-                       "lr_thc_comm::aux_to_primary: expected (s,k) undivided, got pgrid "
-                       "({},{})", pgrid[0], pgrid[1]);
-          communicator_t &dim0_intra_comm = *O_IPQ.communicator();
-          utils::check(dim0_intra_comm.size() == pgrid[2] * pgrid[3],
-                       "dim0_intra_comm.size() != pgrid[2]*pgrid[3]");
-
-          _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
-                               O_IPQ_loc, O_Iab_loc, thc,
-                               kp_map, kpq_map, k_org, P_org, Q_org, Timer);
-        }
+        aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
+                             kp_map, kpq_map, Timer);
 
         // reduce
         tic("SIGMA_A2P_SHMREDUCE");
@@ -538,7 +521,7 @@ namespace methods {
 
       /**
        * LR aux→primary impl. Matches thc_solver_comm::_aux_to_primary_impl
-       * (communicator version, lines 536-590) line-by-line, except the X lookup:
+       * (its communicator overload) line-by-line, except the X lookup:
        *   - Left X uses X(kpq_map(kp_map(k))) instead of X(kp_map(k))
        *   - Right X uses X(kp_map(k)) (unchanged)
        */
@@ -577,6 +560,10 @@ namespace methods {
 
         size_t dim0 = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-2, (size_t)1, std::multiplies<>{});
 
+        // Both operands are flattened over the leading axes, which is only a
+        // relabelling of the same memory when they are contiguous.
+        utils::check(O_tskPQ.indexmap().is_contiguous() and O_tskab.indexmap().is_contiguous(),
+                     "lr_thc_comm::_aux_to_primary_impl: aux and primary arrays must be contiguous.");
         auto O_iPQ_3D = nda::reshape(O_tskPQ, shape_t<3>{dim0, NP_loc, NQ_loc});
         auto O_iab_3D = nda::reshape(O_tskab, shape_t<3>{dim0, nbnd, nbnd});
 
@@ -588,7 +575,10 @@ namespace methods {
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
-        // buffer array to hold local (t,s,k) slices of O_iab for reduction
+        // Buffer array to hold local (t,s,k) slices of O_iab for reduction. It
+        // needs no zeroing: the loop below closes every (i,·,·) block with a
+        // 3-argument gemm, i.e. β = 0, so the whole buffer is assigned before it
+        // is read.
         nda::array<ComplexType, 3> O_buf_iab(dim0, nbnd, nbnd);
         toc("SIGMA_A2P_ALLOC");
 
@@ -615,15 +605,11 @@ namespace methods {
         } // i
         toc("SIGMA_A2P_GEMM");
 
-        // Separates the reduce's own cost from the wait for the slowest tile in
-        // dim0_comm; only present while timing, since it is a real synchronization.
-        if (Timer) {
-          tic("SIGMA_A2P_SKEW");
-          dim0_comm.barrier();
-          toc("SIGMA_A2P_SKEW");
-        }
-
         // Accumulate all (t,s,k) slices locally and reduce once.
+        // mpi3 narrows the element count to MPI's int, silently, so guard it.
+        utils::check(O_buf_iab.size() <= (size_t)std::numeric_limits<int>::max(),
+                     "lr_thc_comm::_aux_to_primary_impl: reduce count {} exceeds the int32 MPI limit.",
+                     O_buf_iab.size());
         tic("SIGMA_A2P_REDUCE");
         dim0_comm.reduce_in_place_n(O_buf_iab.data(), O_buf_iab.size(), std::plus<>{}, 0);
         toc("SIGMA_A2P_REDUCE");
