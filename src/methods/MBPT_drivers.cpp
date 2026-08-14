@@ -303,7 +303,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
       if (dump_w_to_h5) {
-        auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        // W is held in (t,q,P,Q); the on-disk dataset keeps its name and its
+        // (q,t,P,Q) ordering, so the transpose moves to the write.
+        auto W_qtPQ = utils::transpose_axes_01(mb_state.dW_tqPQ.value(), mb_state.mpi->comm);
         auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
           h5::file file(w_path, 'w');
@@ -327,7 +329,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
       if (dump_w_to_h5) {
-        auto& W_qtPQ = mb_state.dW_qtPQ.value();
+        // W is held in (t,q,P,Q); the on-disk dataset keeps its name and its
+        // (q,t,P,Q) ordering, so the transpose moves to the write.
+        auto W_qtPQ = utils::transpose_axes_01(mb_state.dW_tqPQ.value(), mb_state.mpi->comm);
         auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
         if (mb_state.mpi->comm.root()) {
           h5::file file(w_path, 'w');
@@ -1835,11 +1839,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   // Load W and eps_inv_head using helper
   auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
 
-  // eval_Sigma_all wants (q,t,P,Q): it reshapes the local block to (nkpts, nt*P*Q)
-  // and does q→R as one gemm with q leading. Sole caller needing that layout.
-  auto dW_qtPQ = utils::transpose_axes_01(dW_tqPQ, mpi->comm);
-  dW_tqPQ.reset();
-
   // Read overlap matrix from checkpoint for divergence correction
   auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {ns, nkpts_ibz, nbnd, nbnd});
@@ -1851,7 +1850,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  gw.eval_Sigma_all(sG_tskij.local(), dW_qtPQ, sSigma_tskij, thc, "R");
+  gw.eval_Sigma_all(sG_tskij.local(), dW_tqPQ, sSigma_tskij, thc, "R");
   if (div_corr) {
     gw.Sigma_div_correction(sSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
   }
@@ -2426,21 +2425,22 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   auto sW_c_qtPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
       *mpi, std::array<long, 4>{nkpts, nt_half_w, NP, NP}, W_c_qtPQ_root);
 
-  // Scatter into distributed array (q-axis undivided).
+  // Scatter into a distributed (t,q,P,Q) array (q-axis undivided), transposing
+  // out of the (q,t,P,Q) input as it goes -- eval_Sigma_all takes (t,q,P,Q).
   auto pgrid_w = compute_proc_grid_4D(mpi->comm.size(),
-      {nkpts, nt_half_w, NP, NP}, {true, false, false, false});
-  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi->comm, pgrid_w, {nkpts, nt_half_w, NP, NP});
+      {nt_half_w, nkpts, NP, NP}, {false, true, false, false});
+  auto dW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pgrid_w, {nt_half_w, nkpts, NP, NP});
   {
-    auto wc_src = sW_c_qtPQ_in.local();
-    auto wc_loc = dW_qtPQ.local();
-    auto [o0, o1, o2, o3] = dW_qtPQ.origin();
-    auto [n0, n1, n2, n3] = dW_qtPQ.local_shape();
+    auto wc_src = sW_c_qtPQ_in.local();   // (q, t, P, Q), shared, full
+    auto wc_loc = dW_tqPQ.local();
+    auto [o0, o1, o2, o3] = dW_tqPQ.origin();
+    auto [n0, n1, n2, n3] = dW_tqPQ.local_shape();
     for (long i0 = 0; i0 < n0; ++i0)
       for (long i1 = 0; i1 < n1; ++i1)
         for (long i2 = 0; i2 < n2; ++i2)
           for (long i3 = 0; i3 < n3; ++i3)
-            wc_loc(i0, i1, i2, i3) = wc_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+            wc_loc(i0, i1, i2, i3) = wc_src(i1 + o1, i0 + o0, i2 + o2, i3 + o3);
     mpi->comm.barrier();
   }
 
@@ -2455,7 +2455,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  gw.eval_Sigma_all(sG_tskij.local(), dW_qtPQ, sSigma_tskij, thc, "R");
+  gw.eval_Sigma_all(sG_tskij.local(), dW_tqPQ, sSigma_tskij, thc, "R");
   if (div_corr) {
     gw.Sigma_div_correction(sSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
   }

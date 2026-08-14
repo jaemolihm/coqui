@@ -67,8 +67,8 @@ namespace methods {
                    "gw_t::evaluate: sG_tskij is not initialized in MBState.");
       utils::check(mb_state.sSigma_tskij.has_value(),
                      "gw_t::evaluate: sSigma_tskij is not initialized in MBState.");
-      utils::check(mb_state.dW_qtPQ.has_value(),
-                   "gw_t::evaluate: dW_qtPQ is not initialized in MBState.");
+      utils::check(mb_state.dW_tqPQ.has_value(),
+                   "gw_t::evaluate: dW_tqPQ is not initialized in MBState.");
       utils::check(_ft->nt_f() == _ft->nt_b(),
                    "thc-gw: We assume nt_f == nt_b at least for now. \n"
                    "        And we assume tau sampling for fermions and bosons are the same.");
@@ -99,7 +99,7 @@ namespace methods {
                    "gw_t::evaluate: sS_skij (overlap matrix) is not initialized in MBState.");
       thc_gw_Xqindep(mb_state.sG_tskij.value().local(), mb_state.sSigma_tskij.value(),
                      mb_state.sS_skij.value().local(),
-                     thc, mb_state.dW_qtPQ.value(), mb_state.eps_inv_head.value());
+                     thc, mb_state.dW_tqPQ.value(), mb_state.eps_inv_head.value());
       _Timer.stop("TOTAL");
 
       print_thc_gw_timers();
@@ -174,26 +174,26 @@ namespace methods {
 
     template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
     void gw_t::eval_Sigma_all(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                        memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                        memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                         sArray_t<Array_5D_t> &sSigma_tskij,
                         THC_ERI auto &thc,
                         std::string alg) {
       sSigma_tskij.set_zero();
       if (alg == "R") {
-        auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
+        auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
         app_log(2, "  Evaluation of GW self-energy:");
         app_log(2, "    - processor grid for G: (t, k, P, Q) = ({}, {}, {}, {})", tpools, qpools, np_P, np_Q);
         app_log(2, "    - processor grid for W: (t, q, P, Q) = ({}, {}, {}, {})\n", tpools, qpools, np_P, np_Q);
 
-        eval_Sigma_all_Rspace<false, true>(G_tskij, dW_qtPQ, sSigma_tskij, thc, false);
-        eval_Sigma_all_Rspace<true, false>(G_tskij, dW_qtPQ, sSigma_tskij, thc, true);
+        eval_Sigma_all_Rspace<false, true>(G_tskij, dW_tqPQ, sSigma_tskij, thc, false);
+        eval_Sigma_all_Rspace<true, false>(G_tskij, dW_tqPQ, sSigma_tskij, thc, true);
       } else if (alg == "k") {
-        auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
+        auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
         app_log(2, "  Evaluation of GW self-energy:");
         app_log(2, "    - processor grid for W: (t, q, P, Q) = ({}, {}, {}, {})\n", tpools, qpools, np_P, np_Q);
 
-        eval_Sigma_all_kspace(G_tskij, dW_qtPQ, sSigma_tskij, thc, false);
-        eval_Sigma_all_kspace(G_tskij, dW_qtPQ, sSigma_tskij, thc, true);
+        eval_Sigma_all_kspace(G_tskij, dW_tqPQ, sSigma_tskij, thc, false);
+        eval_Sigma_all_kspace(G_tskij, dW_tqPQ, sSigma_tskij, thc, true);
         // collect terms from all processors
         sSigma_tskij.all_reduce();
       } else {

@@ -201,9 +201,9 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
       mb_solver.corr->iter() = output_iter;
       mb_solver.corr->evaluate(mb_state, mb_eri.corr_eri->get());
       utils::memlog("scf_loop: after Sigma");
-      // deallocate mb_state.dW_qtPQ after this since it's only used in the corr solver and can be very large for GW.
+      // deallocate mb_state.dW_tqPQ after this since it's only used in the corr solver and can be very large for GW.
       // keep_w preserves the final W for post-loop consumers (e.g. dump_w_to_h5).
-      if (!keep_w) mb_state.dW_qtPQ.reset();
+      if (!keep_w) mb_state.dW_tqPQ.reset();
       mpi->comm.barrier();
     }
 
