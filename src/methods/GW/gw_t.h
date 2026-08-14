@@ -102,14 +102,14 @@ namespace methods {
       /**
        * Evaluate GW self-energy
        * @param G_tskij      - [INPUT] Green's function in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param dW_qtPQ      - [INPUT] Screened interaction in THC auxiliary basis: (nts, nqpts_ibz, Np, Np)
+       * @param dW_tqPQ      - [INPUT] Screened interaction in THC auxiliary basis: (nts, nqpts_ibz, Np, Np)
        * @param sSigma_tskij - [OUTPUT] Self-energy in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
        * @param thc          - [INPUT] THC ERI object
        * @param alg          - "R": convolution on R space; "k": convolution on k space
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
       void eval_Sigma_all(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                          memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                          memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                           sArray_t<Array_5D_t> &sSigma_tskij,
                           THC_ERI auto &thc,
                           std::string alg = "R");
@@ -192,7 +192,7 @@ namespace methods {
       void thc_gw_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                           sArray_t<Array_view_5D_t> &sSigma_tskij,
                           const nda::MemoryArrayOfRank<4> auto &S_skij,
-                          THC_ERI auto &thc, dArray_4D_t &dW_qtPQ,
+                          THC_ERI auto &thc, dArray_4D_t &dW_tqPQ,
                           const nda::MemoryArrayOfRank<1> auto &eps_inv_head);
 
       /**
@@ -221,7 +221,7 @@ namespace methods {
           nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
           typename communicator_t>
       void eval_Sigma_all_Rspace(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                                 memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                                 memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                  sArray_t<Array_5D_t> &sSigma_tskij,
                                  THC_ERI auto &thc,
                                  bool minus_t);
@@ -232,14 +232,14 @@ namespace methods {
        */
       template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
       void eval_Sigma_all_kspace(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                                 const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                                 const memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                  sArray_t<Array_5D_t> &sSigma_tskij,
                                  THC_ERI auto &thc,
                                  bool minus_t);
       // details of eval_Sigma_all_kspace
       template<nda::MemoryArray Array_4D_t, typename communicator_t>
       void eval_Sigma_all_k_impl(long it, const memory::darray_t<Array_4D_t, communicator_t> &dG_skPQ,
-                                 const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                                 const memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                  memory::darray_t<Array_4D_t, communicator_t> &dSigma_skPQ,
                                  THC_ERI auto &thc, long isym);
 

@@ -127,8 +127,8 @@ public:
   std::optional<sArray_t<nda::array_view<ComplexType, 4> > > sF_skij;
   // Overlap matrix
   std::optional<sArray_t<nda::array_view<ComplexType, 4> > > sS_skij;
-  // Dynamically screened interaction w/o bare term
-  std::optional<dArray_t<nda::array<ComplexType, 4> > > dW_qtPQ;
+  // Dynamically screened interaction w/o bare term, in (t, q, P, Q)
+  std::optional<dArray_t<nda::array<ComplexType, 4> > > dW_tqPQ;
   // Flag to determine screening recipe to calculate the dynamically screened interaction. 
   std::string screen_type = "";
   // Head (G=G'=0) of the inverse dielectric function in the long wavelength limit (q->0 and w->0)

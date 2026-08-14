@@ -26,9 +26,9 @@ namespace methods {
     void gw_t::thc_gw_Xqindep(const nda::MemoryArrayOfRank<5> auto &G_tskij,
                               sArray_t<Array_view_5D_t> &sSigma_tskij,
                               const nda::MemoryArrayOfRank<4> auto &S_skij,
-                              THC_ERI auto &thc, dArray_4D_t &dW_qtPQ,
+                              THC_ERI auto &thc, dArray_4D_t &dW_tqPQ,
                               const nda::MemoryArrayOfRank<1> auto &eps_inv_head) {
-      eval_Sigma_all(G_tskij, dW_qtPQ, sSigma_tskij, thc,
+      eval_Sigma_all(G_tskij, dW_tqPQ, sSigma_tskij, thc,
                      (thc.MF()->nqpts() == thc.MF()->nqpts_ibz()? "R" : "k"));
       Sigma_div_correction(sSigma_tskij, G_tskij, S_skij, thc, eps_inv_head);
     }
@@ -68,7 +68,7 @@ namespace methods {
         nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
         typename communicator_t>
     void gw_t::eval_Sigma_all_Rspace(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                               memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                               memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                sArray_t<Array_5D_t> &sSigma_tskij,
                                THC_ERI auto &thc,
                                bool minus_t) {
@@ -78,12 +78,11 @@ namespace methods {
       utils::check(MF->nqpts() == MF->nqpts_ibz() and MF->nqpts() == MF->nkpts(),
                    "gw_t::eval_Sigma_all_Rspace: Symmetry not allowed in eval_Sigma_all_Rspace.");
       auto ns = G_tskij.shape(1);
-      auto [nk_loc, nt_loc, NP_loc, NQ_loc] = dW_qtPQ.local_shape();
-      auto [nkpts, nt_half, NP, NQ] = dW_qtPQ.global_shape();
-      auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
-      auto bsize = dW_qtPQ.block_size();
-      utils::check(dW_qtPQ.local_shape()[0] == nkpts, "gw_t::eval_Sigma_all_Rspace: nq_loc = {} != nkpts",
-                   dW_qtPQ.local_shape()[0]);
+      auto [nt_loc, nk_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
+      auto [nt_half, nkpts, NP, NQ] = dW_tqPQ.global_shape();
+      auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
+      auto bsize = dW_tqPQ.block_size();   // (t, q, P, Q)
+      utils::check(nk_loc == nkpts, "gw_t::eval_Sigma_all_Rspace: nq_loc = {} != nkpts", nk_loc);
       utils::check(qpools == 1, "gw_t::eval_Sigma_all_Rspace: qpools = {} != 1", qpools);
 
       using local_Array_5D_t = memory::array<HOST_MEMORY, ComplexType, 5>;
@@ -117,7 +116,7 @@ namespace methods {
       // transpose or extra staging array is needed.
       _Timer.start("SIGMA_ALLOC_R");
       auto dG_tskPQ = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
+          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[0], 1, bsize[1], bsize[2], bsize[3]});
       _Timer.stop("SIGMA_ALLOC_R");
 
       _Timer.start("SIGMA_PRIM_TO_AUX");
@@ -147,13 +146,18 @@ namespace methods {
       if (nkpts != 1) {
         _Timer.start("SIGMA_FT_R");
         auto G4 = nda::reshape(dG_tskPQ.local(), shape_t<4>{nt_loc, ns, nkpts, NP_loc * NQ_loc});
-        auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+        // W is (t,q,P,Q): for a fixed t its local block is contiguous over
+        // (q,P,Q), so the q->R transform is one call per local t instead of one
+        // batched call, on matrices of the same shape as G's.
+        auto WR_3d = nda::reshape(dW_tqPQ.local(), shape_t<3>{nt_loc, nkpts, NP_loc * NQ_loc});
         if (use_fft) {
           // Blocked FFT is safe in-place (block-sequential); k->R on G (kpts) and W (Qpts).
           for (long it = 0; it < nt_loc; ++it)
             for (long s = 0; s < ns; ++s)
               _fft_k->k_to_R(G4(it, s, nda::ellipsis{}), G4(it, s, nda::ellipsis{}));
-          if constexpr (!Winp_in_Rspace) _fft_q->k_to_R(WR_2D, WR_2D);
+          if constexpr (!Winp_in_Rspace)
+            for (long it = 0; it < nt_loc; ++it)
+              _fft_q->k_to_R(WR_3d(it, nda::ellipsis{}), WR_3d(it, nda::ellipsis{}));
         } else {
           auto f_Rk = sf_Rk.local();
           utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
@@ -166,9 +170,11 @@ namespace methods {
             }
           if constexpr (!Winp_in_Rspace) {
             utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-            nda::matrix<ComplexType> Rw_buffer(nkpts, nt_loc*NP_loc*NQ_loc);
-            math::detail::gemm_guarded(f_Rk, WR_2D, Rw_buffer);
-            WR_2D = Rw_buffer;
+            for (long it = 0; it < nt_loc; ++it) {
+              auto WR_2d = WR_3d(it, nda::ellipsis{});
+              math::detail::gemm_guarded(f_Rk, WR_2d, R_buffer);
+              WR_2d = R_buffer;
+            }
           }
         }
         _Timer.stop("SIGMA_FT_R");
@@ -182,7 +188,7 @@ namespace methods {
       _Timer.start("SIGMA_HADPROD_R");
       {
         auto G_loc = dG_tskPQ.local();      // (t, s, k, P, Q)
-        auto W_loc = dW_qtPQ.local();       // (k, t, P, Q)
+        auto W_loc = dW_tqPQ.local();       // (t, k, P, Q)
         utils::check(G_loc.shape()[3] == NP_loc and G_loc.shape()[4] == NQ_loc and
                      W_loc.shape()[2] == NP_loc and W_loc.shape()[3] == NQ_loc,
                      "gw_t::eval_Sigma_all_Rspace: G ({},{}) and W ({},{}) local (P,Q) "
@@ -194,7 +200,7 @@ namespace methods {
           for (long s = 0; s < ns; ++s)
             for (long ik = 0; ik < nkpts; ++ik) {
               ComplexType* g = std::addressof(G_loc(it, s, ik, 0, 0));
-              const ComplexType* w = std::addressof(W_loc(ik, it, 0, 0));
+              const ComplexType* w = std::addressof(W_loc(it, ik, 0, 0));
               for (long i = 0; i < nPQ; ++i) g[i] = -1.0 * (g[i] * w[i]);
             }
       }
@@ -205,13 +211,15 @@ namespace methods {
         // FT back to k-space: Sigma per (t,s) slice, W batched.
         _Timer.start("SIGMA_FT_R");
         auto S4 = nda::reshape(dSigma_tskPQ.local(), shape_t<4>{nt_loc, ns, nkpts, NP_loc * NQ_loc});
-        auto WR_2D = nda::reshape(dW_qtPQ.local(), shape_t<2>{nkpts, nt_loc * NP_loc * NQ_loc});
+        auto WR_3d = nda::reshape(dW_tqPQ.local(), shape_t<3>{nt_loc, nkpts, NP_loc * NQ_loc});
         if (use_fft) {
           // R->k on Sigma (kpts) and W (Qpts), in-place.
           for (long it = 0; it < nt_loc; ++it)
             for (long s = 0; s < ns; ++s)
               _fft_k->R_to_k(S4(it, s, nda::ellipsis{}), S4(it, s, nda::ellipsis{}));
-          if constexpr (!Wout_in_Rspace) _fft_q->R_to_k(WR_2D, WR_2D);
+          if constexpr (!Wout_in_Rspace)
+            for (long it = 0; it < nt_loc; ++it)
+              _fft_q->R_to_k(WR_3d(it, nda::ellipsis{}), WR_3d(it, nda::ellipsis{}));
         } else {
           auto f_kR = sf_Rk.local();
           utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
@@ -224,9 +232,11 @@ namespace methods {
             }
           if constexpr (!Wout_in_Rspace) {
             utils::R_to_k_coefficients(mpi->comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
-            nda::matrix<ComplexType> bufw(nkpts, nt_loc*NP_loc*NQ_loc);
-            math::detail::gemm_guarded(f_kR, WR_2D, bufw);
-            WR_2D = bufw;
+            for (long it = 0; it < nt_loc; ++it) {
+              auto WR_2d = WR_3d(it, nda::ellipsis{});
+              math::detail::gemm_guarded(f_kR, WR_2d, buffer);
+              WR_2d = buffer;
+            }
           }
         }
         _Timer.stop("SIGMA_FT_R");
@@ -240,7 +250,7 @@ namespace methods {
 
     template<nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t, typename communicator_t>
     void gw_t::eval_Sigma_all_kspace(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                                     const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                                     const memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                      sArray_t<Array_5D_t> &sSigma_tskij,
                                      THC_ERI auto &thc,
                                      bool minus_t) {
@@ -258,13 +268,13 @@ namespace methods {
       auto nt = G_tskij.shape(0);
       auto ns = G_tskij.shape(1);
 
-      auto [nqpts_ibz, nt_half, NP, NQ] = dW_qtPQ.global_shape();
-      auto [nq_loc, nt_loc, NP_loc, NQ_loc] = dW_qtPQ.local_shape();
-      auto [q_origin, t_origin, P_origin, Q_origin] = dW_qtPQ.origin();
-      auto [qpools, tpools, np_P, np_Q] = dW_qtPQ.grid();
-      auto bsize = dW_qtPQ.block_size();
+      auto [nt_half, nqpts_ibz, NP, NQ] = dW_tqPQ.global_shape();
+      auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
+      auto [t_origin, q_origin, P_origin, Q_origin] = dW_tqPQ.origin();
+      auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
+      auto bsize = dW_tqPQ.block_size();   // (t, q, P, Q)
       long nt_loc_max = nt_loc;
-      dW_qtPQ.communicator()->broadcast_n(&nt_loc_max, 1, 0);
+      dW_tqPQ.communicator()->broadcast_n(&nt_loc_max, 1, 0);
       long tpool_id = (nt_loc==nt_loc_max)? t_origin/nt_loc : (t_origin-nt_half%tpools)/nt_loc;
 
       utils::check(nq_loc == nqpts_ibz, "gw_t::eval_Sigma_all_kspace: nq_loc = {} != nqpts_ibz", nq_loc);
@@ -273,14 +283,14 @@ namespace methods {
       utils::check(qpools == 1, "gw_t::eval_Sigma_all_kspace: qpools = {} != 1", qpools);
 
       // setup t_intra_comm
-      mpi3::communicator t_intra_comm = dW_qtPQ.communicator()->split(t_origin, dW_qtPQ.communicator()->rank());
+      mpi3::communicator t_intra_comm = dW_tqPQ.communicator()->split(t_origin, dW_tqPQ.communicator()->rank());
       utils::check(t_intra_comm.size()==np_P*np_Q, "t_intra_comm.size() = {} != np_P*np_Q", t_intra_comm.size());
 
       _Timer.start("SIGMA_ALLOC_K");
       // The total memory requirement is tpools*ns*nkpts_no_trev*Np*Np rather than nt_half*ns*nkpts_no_trev*Np*Np
       auto dSigma_skPQ = make_distributed_array<local_Array_4D_t>(
           t_intra_comm, {1, qpools, np_P, np_Q}, {ns, nkpts_ibz, NP, NQ},
-          {1, bsize[0], bsize[2], bsize[3]});
+          {1, bsize[1], bsize[2], bsize[3]});
       // different types of distribution for sigma to improve performance of aux_to_primary()
       long qpools_2 = utils::find_proc_grid_max_npools(t_intra_comm.size(), nkpts_ibz, 0.2);
       int np_P_2 = utils::find_proc_grid_min_diff(t_intra_comm.size()/qpools_2, 1, 1);
@@ -292,7 +302,7 @@ namespace methods {
 
       auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
           t_intra_comm, {1, qpools, np_P, np_Q}, {ns, nkpts_no_trev, NP, NQ},
-          {1, bsize[0], bsize[2], bsize[3]});
+          {1, bsize[1], bsize[2], bsize[3]});
       // CNY: the t dimension is tpools not nt_half! Since each t_intra_comm processes one t-point
       //      at a time, we only need tpools along t-axis.
       auto sSigma_tskab = make_shared_array<nda::array_view<ComplexType, 5>>(
@@ -313,7 +323,7 @@ namespace methods {
 
         for( auto isym : nda::range(MF->qsymms().size()) ) {
           // evaluate dSigma_skPQ. mpi over (P, Q)
-          eval_Sigma_all_k_impl(it, dG_skPQ, dW_qtPQ, dSigma_skPQ, thc, isym);
+          eval_Sigma_all_k_impl(it, dG_skPQ, dW_tqPQ, dSigma_skPQ, thc, isym);
 
           sSigma_tskab.set_zero();
           _Timer.start("SIGMA_AUX_TO_PRIM");
@@ -366,7 +376,7 @@ namespace methods {
 
     template<nda::MemoryArray Array_4D_t, typename communicator_t>
     void gw_t::eval_Sigma_all_k_impl(long it, const memory::darray_t<Array_4D_t, communicator_t> &dG_skPQ,
-                                     const memory::darray_t<Array_4D_t, communicator_t> &dW_qtPQ,
+                                     const memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
                                      memory::darray_t<Array_4D_t, communicator_t> &dSigma_skPQ,
                                      [[maybe_unused]] THC_ERI auto &thc, long isym) {
       auto MF = thc.MF();
@@ -385,7 +395,7 @@ namespace methods {
           nda::map([factor](ComplexType x, ComplexType y) { return (x * std::conj(y)) * factor; });
 
       auto G_skPQ  = dG_skPQ.local();
-      auto W_qtPQ = dW_qtPQ.local();
+      auto W_tqPQ = dW_tqPQ.local();
       auto Sigma_skPQ = dSigma_skPQ.local();
 
       _Timer.start("SIGMA_HADPROD_K");
@@ -399,7 +409,7 @@ namespace methods {
         for (size_t iq=0; iq<nqs; iq++) {
           long qp = MF->Qs(isym,iq);   // qpoint index in the 1st BZ which can be mapped to IBZ through isym
           long qs = MF->qp_to_ibz(qp); // associated qp index in the IBZ
-          auto W_q = W_qtPQ(qs, it, nda::ellipsis{});
+          auto W_q = W_tqPQ(it, qs, nda::ellipsis{});
 
           if (qp_trev(qp)) {
             long ksmqs_m = MF->qk_to_k2(qminus(qs),ks); // ksmqs_m + G = ks + qs = ks - (-qs)
@@ -426,7 +436,7 @@ namespace methods {
       /*for (size_t iq=0; iq<nqs; iq++) {
         long qp = MF->Qs(isym,iq);   // qpoint index
         long qs = MF->qp_to_ibz(qp); // associated qp index in the IBZ
-        auto W_q = W_qtPQ(qs, it, nda::ellipsis{});
+        auto W_q = W_tqPQ(it, qs, nda::ellipsis{});
 
         if(qp_trev(qp)) {
           long qs_m = qminus(qs);

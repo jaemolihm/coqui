@@ -57,15 +57,14 @@ enum : uint32_t {
   G_W2T_IN  = 1u << 4,
   G_W2T_FT  = 1u << 5,
   G_W2T_OUT = 1u << 6,
-  G_W_TR    = 1u << 7,
-  G_SIGMA   = 1u << 8,
-  G_MIX     = 1u << 9,
-  G_DYSON_W = 1u << 10,
-  G_DYSON_T = 1u << 11,
-  G_THERMO  = 1u << 12,
+  G_SIGMA   = 1u << 7,
+  G_MIX     = 1u << 8,
+  G_DYSON_W = 1u << 9,
+  G_DYSON_T = 1u << 10,
+  G_THERMO  = 1u << 11,
   PERSIST   = 0u
 };
-constexpr int N_GROUPS = 13;
+constexpr int N_GROUPS = 12;
 
 const char* group_tag(int g) {
   switch (g) {
@@ -76,11 +75,10 @@ const char* group_tag(int g) {
     case 4:  return "W ω→τ in";
     case 5:  return "W ω→τ FT";
     case 6:  return "W ω→τ out";
-    case 7:  return "W transpose";
-    case 8:  return "Σ";
-    case 9:  return "mix";
-    case 10: return "Dyson ω";
-    case 11: return "Dyson τ";
+    case 7:  return "Σ";
+    case 8:  return "mix";
+    case 9:  return "Dyson ω";
+    case 10: return "Dyson τ";
     default: return "thermo";
   }
 }
@@ -118,7 +116,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   const long n_nodes = std::max(1, mpi.internode_comm.size());
 
   // The single t-pool sub-communicator size of the run: Pi splits comm on t_origin
-  // into np_P*np_Q, and the k-space Sigma splits dW_qtPQ's comm the same way
+  // into np_P*np_Q, and the k-space Sigma splits dW_tqPQ's comm the same way
   // (asserted equal at thc_gw.icc:269), so one divisor serves every t-pool row.
   auto [pi_pgrid, pi_bsize] =
       solvers::scr_coulomb_t::Pi_tau_proc_grid(nproc, p.nth, p.nqi, p.ns, p.nk);
@@ -295,15 +293,11 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
                         2.0 * aux4(p.nwh) / double(nchunk_w), DIST,
                         G_T2W_OUT | G_W2T_IN});
 
-    // ---------------- transient: (t,q) -> (q,t) transpose of W ----------------
-    arrays.push_back({"dW_tqPQ", shp4a(p.nth), aux4(p.nth), DIST, G_W2T_OUT | G_W_TR});
-    // dW_qtPQ outlives the transpose: it is the Sigma solver's input, freed at
-    // scf_driver.cpp:192 -- or kept to the end of the run under keep_w.
-    uint32_t w_mask = G_W_TR | G_SIGMA;
+    // W stays in (t,q) all the way to the Sigma solver, which frees it at
+    // scf_driver.cpp -- or keeps it to the end of the run under keep_w.
+    uint32_t w_mask = G_W2T_OUT | G_SIGMA;
     if (p.keep_w) w_mask |= G_MIX | G_DYSON_W | G_DYSON_T;
-    arrays.push_back({"dW_qtPQ",
-                      fmt::format("({},{},{},{})", p.nqi, p.nth, p.NP, p.NP),
-                      aux4(p.nth), DIST, w_mask});
+    arrays.push_back({"dW_tqPQ", shp4a(p.nth), aux4(p.nth), DIST, w_mask});
   }
 
   // ---------------- transient: self-energy ----------------
@@ -435,7 +429,7 @@ void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicato
 
   if (p.thc_eri and p.have_scr) {
     row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"), bs4(pi_bsize),
-        "dPi_tqPQ, dW_tqPQ, dW_qtPQ (axes 0↔1)");
+        "dPi_tqPQ, dW_tqPQ");
     row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q), "(1,1,1,1)",
         "dGp_sRPQ, dGn_sRPQ, dbuf_skPQ  [on t_intra_comm]");
 
@@ -450,18 +444,16 @@ void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicato
   }
 
   if (p.thc_eri and p.have_corr) {
-    // dW_qtPQ is the aux tau grid with axes 0<->1 swapped (scr_coulomb_t.cpp:110-113);
-    // thc_gw destructures its grid and forces qpools to 1.
-    std::array<long, 4> w_qt_bsize = {pi_bsize[1], pi_bsize[0], pi_bsize[2], pi_bsize[3]};
+    // The Sigma solver takes dW_tqPQ on the aux tau grid and forces qpools to 1.
     if (p.sigma_alg == "R") {
       std::array<long, 5> s_pgrid = {ntpools, 1, 1, np_P, np_Q};
-      std::array<long, 5> s_bsize = {w_qt_bsize[1], 1, w_qt_bsize[0],
-                                     w_qt_bsize[2], w_qt_bsize[3]};
+      std::array<long, 5> s_bsize = {pi_bsize[0], 1, pi_bsize[1],
+                                     pi_bsize[2], pi_bsize[3]};
       row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"), bs5(s_bsize),
           "dG_tskPQ, dSigma_tskPQ");
     } else {
       std::array<long, 4> k_pgrid = {1, 1, np_P, np_Q};
-      std::array<long, 4> k_bsize = {1, w_qt_bsize[0], w_qt_bsize[2], w_qt_bsize[3]};
+      std::array<long, 4> k_bsize = {1, pi_bsize[1], pi_bsize[2], pi_bsize[3]};
       row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"), bs4(k_bsize),
           "dSigma_skPQ, dG_skPQ  [on t_intra_comm]");
       // Mirrors thc_gw.icc:277-279 (the aux->primary redistribute target), whose

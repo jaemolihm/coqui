@@ -102,25 +102,7 @@ namespace solvers {
         div_utils::eps_inv_head_t(dW_tqPQ, thc, *thc.MF(), _ft, _div_treatment);
     mb_state.eps_inv_head = eps_inv_head;
 
-    // make routine to transposed distributed arrays over any 2 indices, so should
-    // be easy to template to an array type and to indexes, and replace repeated code
-    auto t_pgrid = dW_tqPQ.grid();
-    auto t_bsize = dW_tqPQ.block_size();
-    auto gshape = dW_tqPQ.global_shape();
-    mb_state.dW_qtPQ.emplace(make_distributed_array<nda::array<ComplexType, 4>> (
-                             thc.mpi()->comm, {t_pgrid[1], t_pgrid[0], t_pgrid[2], t_pgrid[3]},
-                             {gshape[1], gshape[0], gshape[2], gshape[3]},
-                             {t_bsize[1], t_bsize[0], t_bsize[2], t_bsize[3]}));
-    auto W_tqPQ = dW_tqPQ.local();
-    auto W_qtPQ = mb_state.dW_qtPQ.value().local();
-    long nt_loc = dW_tqPQ.local_shape()[0];
-    long nq_loc = dW_tqPQ.local_shape()[1];
-    for (size_t qt = 0; qt < nq_loc * nt_loc; ++qt) {
-      size_t iq = qt / nt_loc;
-      size_t it = qt % nt_loc;
-      W_qtPQ(iq, it, nda::ellipsis{}) = W_tqPQ(it, iq, nda::ellipsis{});
-    }
-    dW_tqPQ.reset();
+    mb_state.dW_tqPQ.emplace(std::move(dW_tqPQ));
 
     mb_state.screen_type = _screen_type;
 

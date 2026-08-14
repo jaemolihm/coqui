@@ -359,7 +359,7 @@ void add_evscf_vcorr(MBState &mb_state,
     FT.check_leakage(mb_state.sG_tskij.value(), imag_axes_ft::fermion, "Green's function");
     
     // update dyanmically screened interaction in mb_state if necessary.
-    if (not fixed_w or not mb_state.dW_qtPQ.has_value()) {
+    if (not fixed_w or not mb_state.dW_tqPQ.has_value()) {
       utils::check(mb_solver.scr_eri!=nullptr, "add_evscf_vcorr: mb_solver.scr_eri == nullptr when update_W is true.");
       mb_solver.scr_eri->update_w(mb_state, eri, mb_solver.corr->iter());
     }
@@ -370,7 +370,7 @@ void add_evscf_vcorr(MBState &mb_state,
 
     // deallocate dynamically screened interaction if it is not fixed for the next iteration.
     if (not fixed_w) {
-      mb_state.dW_qtPQ.reset();
+      mb_state.dW_tqPQ.reset();
     }
   }
 
@@ -743,7 +743,7 @@ void add_qpscf_vcorr(MBState &mb_state,
   mpi->comm.barrier();
  
   // deallocation
-  mb_state.dW_qtPQ.reset();
+  mb_state.dW_tqPQ.reset();
   mb_state.sG_tskij.reset();
   mb_state.sSigma_tskij.reset();
   mpi->comm.barrier();

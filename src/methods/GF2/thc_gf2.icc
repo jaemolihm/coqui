@@ -115,9 +115,9 @@ namespace methods {
       sSigma_tskij.set_zero();
 
       if(direct_type() == "gf2") {
-        if (mb_state.dW_qtPQ) {
+        if (mb_state.dW_tqPQ) {
           app_log(2, "WARNING: screened ineraction exists in mb_state although direct_type == \"gf2\". "
-                     "CoQuí simply ignore the provided dW_qtPQ. ");
+                     "CoQuí simply ignore the provided dW_tqPQ. ");
         }
 
         _Timer.start("EVALUATE_PI");
@@ -128,29 +128,11 @@ namespace methods {
         _Timer.start("EVALUATE_PIUPI");
         eval_UPiU_in_place(dPi_tqPQ, thc);
         _Timer.stop("EVALUATE_PIUPI");
-
-        auto dUPiU_tqPQ = dPi_tqPQ;
-
-        auto t_pgrid = dPi_tqPQ.grid();
-        auto t_bsize = dPi_tqPQ.block_size();
-        auto gshape = dUPiU_tqPQ.global_shape();
-        auto dUPiU_qtPQ = math::nda::make_distributed_array<nda::array<ComplexType, 4> >(
-            _context->comm, {t_pgrid[1], t_pgrid[0], t_pgrid[2], t_pgrid[3]},
-            {gshape[1], gshape[0], gshape[2], gshape[3]}, {t_bsize[1], t_bsize[0], t_bsize[2], t_bsize[3]});
-        auto UPiU_tqPQ = dUPiU_tqPQ.local();
-        auto UPiU_qtPQ = dUPiU_qtPQ.local();
-        long nt_loc = dUPiU_tqPQ.local_shape()[0];
-        long nq_loc = dUPiU_tqPQ.local_shape()[1];
-        for (size_t qt = 0; qt < nq_loc * nt_loc; ++qt) {
-          size_t iq = qt / nt_loc;
-          size_t it = qt % nt_loc;
-          UPiU_qtPQ(iq, it, nda::ellipsis{}) = UPiU_tqPQ(it, iq, nda::ellipsis{});
-        }
-        dUPiU_tqPQ.reset();
+        auto& dUPiU_tqPQ = dPi_tqPQ;
 
         _Timer.start("EVALUATE_SIGMA_DIR");
         gw_t gw(_ft, "ignore_g0", _output);
-        gw.eval_Sigma_all(G_tskij, dUPiU_qtPQ, sSigma_tskij, thc, "R");
+        gw.eval_Sigma_all(G_tskij, dUPiU_tqPQ, sSigma_tskij, thc, "R");
         _Timer.stop("EVALUATE_SIGMA_DIR");
 
       } else if (_direct_type == "gw") {
@@ -164,28 +146,9 @@ namespace methods {
           gw.evaluate(mb_state, thc, false);
 
           // Retrieve dynamical part of W
-          utils::check(mb_state.dW_qtPQ.has_value(),
-                       "gf2_t::thc_run_direct: mb_state.dW_qtPQ == nullptr while direct_type = \"gw\".");
-          auto& dW_qtPQ = mb_state.dW_qtPQ.value();
-          auto q_pgrid = dW_qtPQ.grid();
-          auto q_bsize = dW_qtPQ.block_size();
-          auto gshape = dW_qtPQ.global_shape();
-
-          // Change the format
-          auto dW_tqPQ = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
-              _context->comm, {q_pgrid[1], q_pgrid[0], q_pgrid[2], q_pgrid[3]},
-              {gshape[1], gshape[0], gshape[2], gshape[3]}, {q_bsize[1], q_bsize[0], q_bsize[2], q_bsize[3]});
-
-          auto W_tqPQ = dW_tqPQ.local();
-          auto W_qtPQ = dW_qtPQ.local();
-
-          long nt_loc = dW_tqPQ.local_shape()[0];
-          long nq_loc = dW_tqPQ.local_shape()[1];
-          for (size_t qt = 0; qt < nq_loc * nt_loc; ++qt) {
-            size_t iq = qt / nt_loc;
-            size_t it = qt % nt_loc;
-            W_tqPQ(it, iq, nda::ellipsis{}) = W_qtPQ(iq, it, nda::ellipsis{});
-          }
+          utils::check(mb_state.dW_tqPQ.has_value(),
+                       "gf2_t::thc_run_direct: mb_state.dW_tqPQ == nullptr while direct_type = \"gw\".");
+          auto& dW_tqPQ = mb_state.dW_tqPQ.value();
 
           // Perform tau-to-w transform
           size_t np = _context->comm.size();
@@ -240,9 +203,10 @@ namespace methods {
 
           // unoptimal block sizes are not a problem because build_U_ functions
           // repartitions tensors in a good way
+          auto w_gshape = dW_wqPQ.global_shape();  // (w, q, P, Q)
           dW0_qPQ_opt = math::nda::make_distributed_array<nda::array<ComplexType, 3>> (
               _context->comm, {1, np_P, np_Q},
-              {gshape[0], gshape[2], gshape[3]}, {1, 1, 1});
+              {w_gshape[1], w_gshape[2], w_gshape[3]}, {1, 1, 1});
 
           dW0_qPQ_opt.value().local() = dW_wqPQ.local()(0, nda::ellipsis{});
 
