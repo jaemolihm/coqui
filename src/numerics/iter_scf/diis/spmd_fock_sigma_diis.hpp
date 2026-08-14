@@ -30,10 +30,12 @@
 
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/element_partition.hpp"
 #include "IO/app_loggers.h"
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "numerics/nda_functions.hpp"  // nda::blas 3-argument gemm/gemv
 
 #include "numerics/iter_scf/diis/diis_coefs.hpp"
 #include "numerics/iter_scf/diis/diis_timers.hpp"
@@ -55,23 +57,27 @@ namespace iter_scf {
  *
  * Layout / responsibilities:
  *  - Slices: the flat F (size nF) and Sigma (size nS) index ranges are split
- *    into contiguous chunks over node_comm (F and Sigma sliced independently).
- *    The node-shared source arrays are replicated per node, so each node's
- *    ranks collectively cover the full vector.
+ *    into contiguous chunks over the *global* comm (F and Sigma sliced
+ *    independently) through utils::part_map, so the history is stored once per
+ *    run rather than once per node. Parts are numbered node-major, so each node
+ *    owns one contiguous element run and the mixed result is completed with a
+ *    single allgatherv over the node roots (utils::complete_node_slices,
+ *    the caller's job since the destination is a node-shared window).
  *  - History: per-rank slice copies of every trial vector (_xF/_xS) and every
  *    residual (_resS; the Fock block of the commutator residual is identically
  *    zero, so it is not stored and contributes exactly 0 to every overlap,
  *    matching the serial B bit-for-bit in structure). Growth/purge bookkeeping
  *    mirrors diis_alg::next_step exactly.
- *  - B matrix: per-slice zdotc partials. Only the node that hosts the global
- *    root reduces its partials (its ranks cover the full vector exactly once,
- *    so the sum is complete and independent of other nodes' slice boundaries);
- *    the tiny row is then broadcast from the global root, so every rank on
- *    every node assembles the identical B and computes identical coefficients.
+ *  - B matrix: per-slice zdotc partials, all-reduced over the global comm --
+ *    the parts cover the full vector exactly once, so the sum is complete and
+ *    every rank ends with the identical B (and identical coefficients) by
+ *    construction. The number of partials is comm.size() rather than the
+ *    node size, so B differs from the node-sliced variant in its last bits:
+ *    the association changes, the operands and the arithmetic do not.
  *  - Extrapolation / damping: elementwise on slices, written in place into the
  *    node-shared F/Sigma windows. Given identical coefficients, each element
  *    depends only on same-index inputs, so the result is bitwise identical
- *    across nodes regardless of node sizes -- no internode broadcast needed.
+ *    regardless of the partition -- only the completion allgatherv is needed.
  *  - Warmup damping: out = mixing*new + (1-mixing)*prev with prev = the
  *    previous accepted (post-mix) state, kept as an in-memory slice from the
  *    previous solve (byte-identical to the scf/iter{N-1} checkpoint the serial
@@ -104,12 +110,13 @@ public:
    *   previous state -> pass false; the first damping then stages the
    *   checkpoint state via needs_prev_state().
    */
-  template<typename NodeComm, nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS>
-  void init_x0(NodeComm& node_comm, const AF& F, const AS& Sigma, bool capture_prev) {
+  template<typename MPI_Context_t, nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS>
+  void init_x0(MPI_Context_t& mpi, const AF& F, const AS& Sigma, bool capture_prev) {
     _nF = static_cast<long>(F.size());
     _nS = static_cast<long>(Sigma.size());
-    std::tie(_f0, _f1) = rank_slice(_nF, node_comm.size(), node_comm.rank());
-    std::tie(_s0, _s1) = rank_slice(_nS, node_comm.size(), node_comm.rank());
+    _pmap = utils::make_part_map(mpi);  // collective on mpi.comm
+    std::tie(_f0, _f1) = _pmap.my_slice(_nF);
+    std::tie(_s0, _s1) = _pmap.my_slice(_nS);
     push_x(F, Sigma);
     if (capture_prev) {
       _prevF = _xF.back();
@@ -118,10 +125,14 @@ public:
     }
     _warmup_count = 0;
     _inited = true;
-    app_log(2, "DIIS: SPMD element-sliced subspace active ({} ranks/node, "
+    app_log(2, "DIIS: SPMD element-sliced subspace active ({} parts over {} node(s), "
                "slice sizes F {} / Sigma {})",
-            node_comm.size(), _f1 - _f0, _s1 - _s0);
+            _pmap.nparts, mpi.internode_comm.size(), _f1 - _f0, _s1 - _s0);
   }
+
+  /// The element partition the slices were cut with. The caller needs it to
+  /// complete the node-shared F/Sigma windows after solve().
+  utils::part_map const& pmap() const { return _pmap; }
 
   /// Whether the next solve will consume the commutator residual C_t (i.e.
   /// grow the residual subspace). False on the grow-x-only first DIIS call,
@@ -146,25 +157,23 @@ public:
    * then grow trial+residual subspaces (purging the oldest at max size) and
    * extrapolate when more than one residual is available.
    *
-   * @param comm      - global communicator (B row broadcast, root logging)
-   * @param node_comm - node communicator (B partial reduce on node 0)
-   * @param on_node0  - true on the node hosting the global root
+   * @param comm      - global communicator (B partial reduce, root logging)
    * @param F, Sigma  - node-shared local() views; trial on entry, accepted
    *                    (extrapolated or damped) state on exit (each rank
    *                    writes its own slice; caller fences the windows)
    * @param C_t       - completed distributed commutator residual (node-shared
    *                    local() view), or nullptr when needs_residual_next()
    *                    was false
-   * @param F_prev, S_prev - staged previous accepted state (restart edge;
-   *                    nullptr unless needs_prev_state() was true)
+   * @param F_prev, S_prev - this rank's slice of the staged previous accepted
+   *                    state (restart edge; nullptr unless needs_prev_state()
+   *                    was true)
    * @return per-rank partial {max|dF|, max|dSigma|}; caller max-reduces.
    */
-  template<typename Comm, typename NodeComm,
+  template<typename Comm,
            nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS,
-           typename AC, typename AFP, typename ASP>
-  std::array<double, 2> solve(Comm& comm, NodeComm& node_comm, bool on_node0,
-                              AF&& F, AS&& Sigma, const AC* C_t,
-                              const AFP* F_prev, const ASP* S_prev, long iter) {
+           typename AC>
+  std::array<double, 2> solve(Comm& comm, AF&& F, AS&& Sigma, const AC* C_t,
+                              const Vec1D* F_prev, const Vec1D* S_prev, long iter) {
     (void)iter;
     diis_timers::ScopeLog _d2log;
     diis_timers::spmd_total.start();
@@ -189,13 +198,13 @@ public:
         app_log(2, "DIIS: Growing vector subspace only. No extrapolation.\n");
         push_x(F, Sigma);
       } else {
-        grow_with_residual(comm, node_comm, on_node0, F, Sigma, C_t);
+        grow_with_residual(comm, F, Sigma, C_t);
       }
       app_log(4, "DIIS: DIIS vector space size: {}", _xF.size());
       app_log(4, "DIIS: DIIS residual space size: {}\n", _resS.size());
       conv = apply_damping(F_loc, S_loc, F_prev, S_prev);
     } else {
-      grow_with_residual(comm, node_comm, on_node0, F, Sigma, C_t);
+      grow_with_residual(comm, F, Sigma, C_t);
       if (_resS.size() > 1) {
         app_log(2, "DIIS: Performing the DIIS extrapolation. \n");
         diis_timers::spmd_coefs.start();
@@ -255,14 +264,7 @@ private:
   std::vector<Vec1D> _resS;
   nda::matrix<ComplexType> _B{0, 0};
   Vec1D _prevF, _prevS; // previous accepted (post-mix) state slice
-
-  /// Contiguous [i0, i1) slice of [0, n) owned by rank r of nr (as lr_diis).
-  static std::pair<long, long> rank_slice(long n, long nr, long r) {
-    const long chunk = (n + nr - 1) / nr;
-    const long i0 = std::min(r * chunk, n);
-    const long i1 = std::min(i0 + chunk, n);
-    return {i0, i1};
-  }
+  utils::part_map _pmap; // element partition of F and Sigma over the global comm
 
   template<typename A>
   static auto slice_of(A&& a, long n, long i0, long i1) {
@@ -280,10 +282,9 @@ private:
   /// Mirror of diis_alg::next_step's grow path: purge the oldest trial /
   /// residual / B row+col at max subspace size, add the new residual's B
   /// row (before storing it, as update_overlaps does), store residual+trial.
-  template<typename Comm, typename NodeComm,
+  template<typename Comm,
            nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS, typename AC>
-  void grow_with_residual(Comm& comm, NodeComm& node_comm, bool on_node0,
-                          const AF& F, const AS& Sigma, const AC* C_t) {
+  void grow_with_residual(Comm& comm, const AF& F, const AS& Sigma, const AC* C_t) {
     utils::check(C_t != nullptr, "spmd_fs_diis: commutator residual required but not provided");
     if (_resS.size() >= _max_subsp) {
       app_log(2, "DIIS: Reached maximum subspace -> the first vector will be kicked out of the subspace.\n");
@@ -298,7 +299,7 @@ private:
     diis_timers::spmd_hist_store.start();
     Vec1D u{slice_of(*C_t, _nS, _s0, _s1)};
     diis_timers::spmd_hist_store.stop();
-    update_B(comm, node_comm, on_node0, u);
+    update_B(comm, u);
     _resS.push_back(std::move(u));
     push_x(F, Sigma);
   }
@@ -306,26 +307,26 @@ private:
   /**
    * @brief Extend B by the new residual's row/column.
    *
-   * Per-slice zdotc partials are summed over node 0's node_comm only (its
-   * ranks cover the full vector exactly once, so the sum is complete and
-   * unique regardless of other nodes' slice boundaries), then the tiny row is
-   * broadcast from the global root: every rank ends with the identical B.
+   * Per-slice zdotc partials, all-reduced over the global comm: the parts
+   * cover the full vector exactly once, so the sum is complete and every rank
+   * ends with the identical B (an MPI_Allreduce leaves the same buffer on
+   * every rank, so no trailing broadcast is needed). A trailing part can be
+   * empty when the ceil-div partition runs out of elements, hence the size
+   * guard -- an empty slice contributes exactly 0.
    */
-  template<typename Comm, typename NodeComm>
-  void update_B(Comm& comm, NodeComm& node_comm, bool on_node0, const Vec1D& u) {
+  template<typename Comm>
+  void update_B(Comm& comm, const Vec1D& u) {
     const size_t n = _resS.size() + 1;
     nda::array<ComplexType, 1> col(n);
     col() = 0;
     diis_timers::spmd_B_dots.start();
-    if (on_node0 and u.size() > 0) {
+    if (u.size() > 0) {
       for (size_t i = 0; i + 1 < n; ++i) col(i) = nda::blas::dotc(_resS[i], u); // <res_i|u>
       col(n - 1) = nda::blas::dotc(u, u);
     }
     diis_timers::spmd_B_dots.stop();
     diis_timers::spmd_B_comm.start();
-    if (on_node0)
-      node_comm.all_reduce_in_place_n(col.data(), static_cast<long>(n), std::plus<>{});
-    comm.broadcast_n(col.data(), static_cast<long>(n), 0);
+    comm.all_reduce_in_place_n(col.data(), static_cast<long>(n), std::plus<>{});
     diis_timers::spmd_B_comm.stop();
 
     nda::matrix<ComplexType> Bnew(n, n);
@@ -381,22 +382,21 @@ private:
     return m;
   }
 
-  template<typename FView, typename SView, typename AFP, typename ASP>
+  template<typename FView, typename SView>
   std::array<double, 2> apply_damping(FView&& F_loc, SView&& S_loc,
-                                      const AFP* F_prev, const ASP* S_prev) {
+                                      const Vec1D* F_prev, const Vec1D* S_prev) {
     // Previous accepted state: in-memory slice from the previous solve, or the
-    // staged checkpoint state on the restart edge.
-    Vec1D stageF, stageS;
+    // staged checkpoint state on the restart edge (already this rank's slice).
     const Vec1D *pF = &_prevF, *pS = &_prevS;
     if (not _has_prev) {
       utils::check(F_prev != nullptr and S_prev != nullptr,
                    "spmd_fs_diis: no previous accepted state (in memory or staged)");
-      diis_timers::spmd_damp_stage.start();
-      stageF = Vec1D{slice_of(*F_prev, _nF, _f0, _f1)};
-      stageS = Vec1D{slice_of(*S_prev, _nS, _s0, _s1)};
-      diis_timers::spmd_damp_stage.stop();
-      pF = &stageF;
-      pS = &stageS;
+      utils::check(F_prev->size() == _f1 - _f0 and S_prev->size() == _s1 - _s0,
+                   "spmd_fs_diis: staged previous state has the wrong slice size "
+                   "(F {} vs {}, Sigma {} vs {})",
+                   F_prev->size(), _f1 - _f0, S_prev->size(), _s1 - _s0);
+      pF = F_prev;
+      pS = S_prev;
     }
     std::array<double, 2> conv{0.0, 0.0};
     diis_timers::spmd_damp_mix.start();

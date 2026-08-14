@@ -33,7 +33,7 @@
 #include "nda/blas.hpp"
 #include "nda/linalg/eigenelements.hpp"
 #include "IO/app_loggers.h"
-#include "utilities/lr_utils.hpp"
+#include "utilities/element_partition.hpp"
 
 namespace methods {
 
@@ -72,7 +72,7 @@ struct lr_iter_params {
  *   SPMD / distributed: next_step_combined is called on every rank of the
  *   supplied communicator. Each rank stores and operates on only its own
  *   contiguous element-slice of every trial/residual vector (std::vector<Vec1D>),
- *   the slice being the one named by the lr_part_map it is handed. Striped over
+ *   the slice being the one named by the part_map it is handed. Striped over
  *   the global communicator, the whole history is stored exactly once across the
  *   job rather than once per node. The B-matrix overlaps are formed from
  *   per-rank partial dot products combined with a single all_reduce, so every
@@ -117,7 +117,7 @@ public:
    * @param iter             - [INPUT]  current iteration number (1-based)
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
-  void next_step_combined(Comm& comm, utils::lr_part_map const& pmap,
+  void next_step_combined(Comm& comm, utils::part_map const& pmap,
                           FView DeltaF, FPrev const& DeltaF_prev,
                           SView DeltaSigma, SPrev const& DeltaSigma_prev,
                           int iter) {

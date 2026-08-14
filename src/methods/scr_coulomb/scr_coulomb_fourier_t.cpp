@@ -20,6 +20,7 @@
 
 
 #include "scr_coulomb_fourier_t.h"
+#include "utilities/proc_meminfo.hpp"
 
 namespace methods {
 namespace solvers {
@@ -67,38 +68,45 @@ namespace solvers {
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(dPi_tqPQ_pos, buffer_ti);
     _Timer.stop("FT_REDISTRIBUTE");
+    utils::memlog("tau_to_w: after in-redistribute");
     if (reset_input) dPi_tqPQ_pos.reset();
     if (_check_ft_leakage) {
       _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "polarizability", true);
     }
 
-    // Output array in the requested distribution.
-    auto dPi_wqPQ = make_distributed_array<local_Array_t>(
-        *comm, w_pgrid_out, w_gshape, w_bsize_out);
-
     if (w_pgrid_out == b_pgrid && w_bsize_out == b_bsize) {
       // Output distribution == buffer distribution: FT straight into the
       // output, no ω-side staging buffer and no final redistribute.
+      auto dPi_wqPQ = make_distributed_array<local_Array_t>(
+          *comm, w_pgrid_out, w_gshape, w_bsize_out);
       auto buf_ti_loc = buffer_ti.local();
       auto Pi_wi_loc = dPi_wqPQ.local();
       _ft->tau_to_w_PHsym(buf_ti_loc, Pi_wi_loc);
       buffer_ti.reset();
-    } else {
-      // Output distribution differs from the buffer distribution: FT into the
-      // ω-side staging buffer, then redistribute into the output.
-      auto buffer_wi = make_distributed_array<local_Array_t>(*comm, b_pgrid, w_gshape, b_bsize);
-      {
-        auto buf_ti_loc = buffer_ti.local();
-        auto buf_wi_loc = buffer_wi.local();
-        _ft->tau_to_w_PHsym(buf_ti_loc, buf_wi_loc);
-      }
-      buffer_ti.reset();
-
-      _Timer.start("FT_REDISTRIBUTE");
-      math::nda::redistribute(buffer_wi, dPi_wqPQ);
-      _Timer.stop("FT_REDISTRIBUTE");
-      buffer_wi.reset();
+      _Timer.stop("IMAG_FT_TtoW");
+      return dPi_wqPQ;
     }
+
+    // Output distribution differs from the buffer distribution: FT into the
+    // ω-side staging buffer, then redistribute into the output. The output is
+    // allocated only once the τ-side buffer is gone, so the τ and ω grids never
+    // coexist three at a time.
+    auto buffer_wi = make_distributed_array<local_Array_t>(*comm, b_pgrid, w_gshape, b_bsize);
+    {
+      auto buf_ti_loc = buffer_ti.local();
+      auto buf_wi_loc = buffer_wi.local();
+      _ft->tau_to_w_PHsym(buf_ti_loc, buf_wi_loc);
+    }
+    buffer_ti.reset();
+
+    auto dPi_wqPQ = make_distributed_array<local_Array_t>(
+        *comm, w_pgrid_out, w_gshape, w_bsize_out);
+
+    _Timer.start("FT_REDISTRIBUTE");
+    math::nda::redistribute(buffer_wi, dPi_wqPQ);
+    _Timer.stop("FT_REDISTRIBUTE");
+    utils::memlog("tau_to_w: after out-redistribute");
+    buffer_wi.reset();
 
     _Timer.stop("IMAG_FT_TtoW");
     return dPi_wqPQ;
@@ -143,12 +151,14 @@ namespace solvers {
 
     // τ-side staging buffer: the FT needs τ rank-local, while t_pgrid_out keeps τ
     // distributed, so the result cannot be written straight into dW_tqPQ. Released
-    // as soon as the FT output has been copied out.
-    auto buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
+    // as soon as the FT output has been copied out, and allocated only once the FT
+    // input is in place, so it is not resident across the input redistribute.
+    memory::darray_t<local_Array_t, mpi3::communicator> buffer_ti;
 
     if (dW_wqPQ_pos.grid() == b_pgrid && dW_wqPQ_pos.block_size() == b_bsize) {
       // Input distribution == buffer distribution: FT straight from the input,
       // no ω-side staging buffer and no input redistribute.
+      buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
       auto buf_wi_loc = dW_wqPQ_pos.local();
       auto buf_ti_loc = buffer_ti.local();
       _ft->w_to_tau_PHsym(buf_wi_loc, buf_ti_loc);
@@ -161,8 +171,10 @@ namespace solvers {
       _Timer.start("FT_REDISTRIBUTE");
       math::nda::redistribute(dW_wqPQ_pos, buffer_wi);
       _Timer.stop("FT_REDISTRIBUTE");
+      utils::memlog("w_to_tau: after in-redistribute");
       if (reset_input) dW_wqPQ_pos.reset();
 
+      buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
       {
         auto buf_wi_loc = buffer_wi.local();
         auto buf_ti_loc = buffer_ti.local();
@@ -181,6 +193,7 @@ namespace solvers {
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(buffer_ti, dW_tqPQ);
     _Timer.stop("FT_REDISTRIBUTE");
+    utils::memlog("w_to_tau: after out-redistribute");
     buffer_ti.reset();
 
     _Timer.stop("IMAG_FT_WtoT");

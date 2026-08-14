@@ -180,7 +180,9 @@ scf_mem_params make_scf_mem_params(mf_ptr_t mf, const imag_axes_ft::IAFT& FT,
  * table (shape / GB / GB per node / location / lifetime) plus the persistent and
  * peak GB-per-node one-liners at verbosity 1. Printed before any allocation.
  */
-void print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
+/// Returns the predicted peak, in GB/node, so the caller can compare it with
+/// what the run actually used (see the [MEM] report at the end of scf_loop).
+double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
                                const scf_mem_params& p);
 
 /**

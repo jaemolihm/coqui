@@ -136,11 +136,13 @@ namespace methods {
       // SCF iterations (mb_solver.hf), so this replaces a per-Fock-build MPI redistribute
       // of the full Coulomb matrix (~nqpts_ibz*Np*Np complex, distributed) with a local
       // copy. Only used for incore readers. A fresh copy is returned each call because the
-      // exchange path overwrites the array in place (U(q)->U(R)). Keyed on reader identity,
-      // basis dimensions, and target processor grid.
+      // exchange path overwrites the array in place (U(q)->U(R)). Keyed on the reader's
+      // monotonic instance id (an address would be recycled by the allocator, so a
+      // destroyed reader replaced at the same address would hit a stale cache), basis
+      // dimensions, and target processor grid.
       using dCoulomb_t = math::nda::distributed_array<nda::array<ComplexType,3>, mpi3::communicator>;
       std::optional<dCoulomb_t> _dZ_cache;
-      const void* _dZ_cache_src = nullptr;
+      long _dZ_cache_src = -1;
       std::array<long,3> _dZ_cache_pgrid{0,0,0};
       long _dZ_cache_nq = -1;
       long _dZ_cache_np = -1;

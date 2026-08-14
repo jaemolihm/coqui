@@ -315,7 +315,7 @@ std::tuple<int, double> lr_driver::run_lr(
   // comm: the DIIS history, the "previous iterate" copies and their norms are
   // all elementwise, so each rank handles one slice and the whole job stores
   // each of those quantities once instead of once per node.
-  auto pmap = utils::make_lr_part_map(*_mpi);
+  auto pmap = utils::make_part_map(*_mpi);
 
   // Allocate array for previous density matrix (for convergence check).
   // Kept whole (0.1 GB) — it only feeds a norm, and the ΔDm norm stays on the
@@ -625,13 +625,13 @@ std::tuple<int, double> lr_driver::run_lr(
       // job, so the per-node drift the old node-0 broadcast papered over cannot
       // arise by construction.
       if (_mpi->node_comm.root()) {
-        utils::lr_complete_node_slices(_mpi->internode_comm, pmap,
+        utils::complete_node_slices(_mpi->internode_comm, pmap,
                                        sDeltaF_skij.local().data(), nF_flat);
         if (has_Vcorr) {
-          utils::lr_complete_node_slices(_mpi->internode_comm, pmap,
+          utils::complete_node_slices(_mpi->internode_comm, pmap,
                                          sDeltaVcorr_skij.local().data(), nV_flat);
         } else if (has_Sigma) {
-          utils::lr_complete_node_slices(_mpi->internode_comm, pmap,
+          utils::complete_node_slices(_mpi->internode_comm, pmap,
                                          sDeltaSigma_tskij->local().data(), nS_flat);
         }
       }
@@ -647,7 +647,7 @@ std::tuple<int, double> lr_driver::run_lr(
     // stored striped, so the norms are reduced over the global comm from the
     // same slices.
     _Timer.start("LR_CONVERGENCE");
-    auto norms_F = utils::lr_striped_norm(
+    auto norms_F = utils::striped_norm(
         _mpi->comm, flat_slice(sDeltaF_skij.local(), nF_flat, iF0, iF1),
         DeltaF_prev, iter > 1);
     double norm_DeltaF = norms_F.first;
@@ -660,7 +660,7 @@ std::tuple<int, double> lr_driver::run_lr(
     double norm_DeltaSigma = 0.0;
     double norm_DeltaSigma_diff = 0.0;
     if (has_Vcorr) {
-      auto norms_V = utils::lr_striped_norm(
+      auto norms_V = utils::striped_norm(
           _mpi->comm, flat_slice(sDeltaVcorr_skij.local(), nV_flat, iV0, iV1),
           DeltaVcorr_prev, iter > 1);
       norm_DeltaSigma = norms_V.first;
@@ -668,7 +668,7 @@ std::tuple<int, double> lr_driver::run_lr(
       _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
       _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     } else if (has_Sigma) {
-      auto norms_Sigma = utils::lr_striped_norm(
+      auto norms_Sigma = utils::striped_norm(
           _mpi->comm, flat_slice(sDeltaSigma_tskij->local(), nS_flat, iS0, iS1),
           DeltaSigma_prev, iter > 1);
       norm_DeltaSigma = norms_Sigma.first;

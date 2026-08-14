@@ -174,24 +174,32 @@ namespace methods {
         _Timer.stop("SIGMA_FT_R");
       }
 
-      // Sigma_R(t,s,k,P,Q) = - G_R(t,s,k,P,Q) * W_R(k,t,P,Q)
-      _Timer.start("SIGMA_ALLOC_R");
-      auto dSigma_tskPQ = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[1], 1, bsize[0], bsize[2], bsize[3]});
-      _Timer.stop("SIGMA_ALLOC_R");
+      // Sigma_R(t,s,k,P,Q) = - G_R(t,s,k,P,Q) * W_R(k,t,P,Q), written over G:
+      // the product is elementwise at matching (t,s,k,P,Q) and G is dead after
+      // it, so Sigma needs no array of its own. Written as an explicit loop over
+      // the (P,Q)-contiguous runs rather than an nda lazy expression, so the
+      // aliasing does not depend on nda's evaluation order.
       _Timer.start("SIGMA_HADPROD_R");
       {
-        auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y) ; });
         auto G_loc = dG_tskPQ.local();      // (t, s, k, P, Q)
         auto W_loc = dW_qtPQ.local();       // (k, t, P, Q)
-        auto S_loc = dSigma_tskPQ.local();  // (t, s, k, P, Q)
+        utils::check(G_loc.shape()[3] == NP_loc and G_loc.shape()[4] == NQ_loc and
+                     W_loc.shape()[2] == NP_loc and W_loc.shape()[3] == NQ_loc,
+                     "gw_t::eval_Sigma_all_Rspace: G ({},{}) and W ({},{}) local (P,Q) "
+                     "blocks disagree with ({},{})",
+                     G_loc.shape()[3], G_loc.shape()[4], W_loc.shape()[2], W_loc.shape()[3],
+                     NP_loc, NQ_loc);
+        const long nPQ = NP_loc * NQ_loc;
         for (long it = 0; it < nt_loc; ++it)
           for (long s = 0; s < ns; ++s)
-            S_loc(it, s, nda::ellipsis{}) = had_prod2(G_loc(it, s, nda::ellipsis{}),
-                                                      W_loc(nda::range::all, it, nda::ellipsis{}));
+            for (long ik = 0; ik < nkpts; ++ik) {
+              ComplexType* g = std::addressof(G_loc(it, s, ik, 0, 0));
+              const ComplexType* w = std::addressof(W_loc(ik, it, 0, 0));
+              for (long i = 0; i < nPQ; ++i) g[i] = -1.0 * (g[i] * w[i]);
+            }
       }
       _Timer.stop("SIGMA_HADPROD_R");
-      dG_tskPQ.reset();
+      auto dSigma_tskPQ = std::move(dG_tskPQ);
 
       if (nkpts != 1) {
         // FT back to k-space: Sigma per (t,s) slice, W batched.

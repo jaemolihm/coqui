@@ -22,6 +22,9 @@
 #ifndef NUMERICS_DISTRIBUTED_ARRAY_NDA_UTILS_HPP
 #define NUMERICS_DISTRIBUTED_ARRAY_NDA_UTILS_HPP
 
+#include <algorithm>
+#include <cstdlib>
+#include <numeric>
 #include <utility>
 #include <tuple>
 #include "configuration.hpp"
@@ -713,8 +716,28 @@ void redistribute_no_order(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get_
 
 }
 
-template<DistributedArray Arr1_t, DistributedArray Arr2_t> 
-void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get_value_t<Arr2_t> b = 0) {
+/// Default per-rank staging-buffer budget for redistribute_alltoallv. A
+/// transfer whose largest local block fits below this is a single
+/// all_to_all_v_n, i.e. exactly what the routine did before chunking existed.
+/// COQUI_REDISTRIBUTE_CHUNK_MB overrides it, so the chunked-vs-unchunked timing
+/// arm needs no rebuild (a very large value disables chunking).
+inline size_t redistribute_chunk_cap_bytes() {
+  static const size_t cap = [] {
+    const char* env = std::getenv("COQUI_REDISTRIBUTE_CHUNK_MB");
+    const double mb = (env != nullptr) ? std::atof(env) : 0.0;
+    return (mb > 0.0) ? size_t(mb * 1024.0 * 1024.0) : size_t(256) * 1024 * 1024;
+  }();
+  return cap;
+}
+
+/**
+ * @param chunk_cap_bytes - staging-buffer budget per rank; 0 selects
+ *        redistribute_chunk_cap_bytes. Only the blocking of the exchange
+ *        depends on it, never the result.
+ */
+template<DistributedArray Arr1_t, DistributedArray Arr2_t>
+void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get_value_t<Arr2_t> b = 0,
+                            size_t chunk_cap_bytes = 0) {
   using value_t = typename std::decay_t<Arr2_t>::Array_t::value_type;
   using local_Arr1_t = typename std::decay_t<Arr1_t>::Array_t::regular_type;
   using local_Arr2_t = typename std::decay_t<Arr2_t>::Array_t::regular_type;
@@ -819,67 +842,114 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
     }
   }
 
-  // FIXME integer overflow when B_loc or A_loc is too large.
   std::vector<int> A_counts(mpi_size);
-  std::vector<int> A_disp(mpi_size);
   std::vector<int> B_counts(mpi_size);
-  std::vector<int> B_disp(mpi_size);
-  for( auto p : itertools::range(mpi_size) ) { 
+  for( auto p : itertools::range(mpi_size) ) {
     A_counts[p] = (ovlps_from_A[p]) ? detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]).size() : 0;
     B_counts[p] = (ovlps_from_B[p]) ? detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]).size() : 0;
-    A_disp[p] = (p == 0) ? 0 : A_disp[p-1] + A_counts[p-1];
-    B_disp[p] = (p == 0) ? 0 : B_disp[p-1] + B_counts[p-1];
   }
 
+  size_t sz_buf_A = std::accumulate(A_counts.begin(), A_counts.end(), size_t(0), std::plus<>());
+  size_t sz_buf_B = std::accumulate(B_counts.begin(), B_counts.end(), size_t(0), std::plus<>());
 
-  size_t sz_buf_A = std::accumulate(A_counts.begin(), A_counts.end(), 0, std::plus<>());
-  size_t sz_buf_B = std::accumulate(B_counts.begin(), B_counts.end(), 0, std::plus<>());
+  utils::check(sz_buf_A == size_t(Aloc.size()), "A Size mismatch.");
+  utils::check(sz_buf_B == size_t(Bloc.size()), "B Size mismatch.");
 
-  utils::check(sz_buf_A == Aloc.size(), "A Size mismatch.");
-  utils::check(sz_buf_B == Bloc.size(), "B Size mismatch.");
+  // Destination-group chunking: rather than staging the whole local block of
+  // both endpoints, exchange with one contiguous group of ranks at a time, so
+  // the pack/unpack buffers hold ~1/nchunk of it. Which elements go where, and
+  // in what order they are packed, is unchanged -- the result is bit-identical
+  // to a single call, and with nchunk == 1 the call sequence is identical too.
+  // nchunk comes from the *globally* largest local block, which the all_gather
+  // above already put on every rank, so the grouping is agreed without extra
+  // communication.
+  // This also bounds the displacements, which are int: they now span one chunk
+  // instead of the whole block. (The per-peer counts are unchanged and still
+  // int; one peer's sub-block exceeding 2^31 elements would overflow as before,
+  // but such a chunk is already past the byte budget.)
+  long nchunk = 1;
+  {
+    const size_t cap = (chunk_cap_bytes > 0) ? chunk_cap_bytes : redistribute_chunk_cap_bytes();
+    const size_t cap_elem = std::max(size_t(1), cap / sizeof(value_t));
+    size_t gmax = 0;
+    for( auto p : itertools::range(mpi_size) ) {
+      size_t szA = 1, szB = 1;
+      for( auto r : itertools::range(rank) ) {
+        szA *= size_t(blocks(p,1,r));
+        szB *= size_t(blocks(p,3,r));
+      }
+      gmax = std::max(gmax, std::max(szA, szB));
+    }
+    nchunk = std::clamp(long((gmax + cap_elem - 1) / cap_elem), 1l, mpi_size);
+  }
+  const long grp_size = (mpi_size + nchunk - 1) / nchunk;  // ranks per chunk
 
-  std::vector<value_t> buffer_A(sz_buf_A);
-  std::vector<value_t> buffer_B(sz_buf_B);
+  size_t max_A = 0, max_B = 0;
+  for( long c = 0; c < nchunk; ++c ) {
+    const long p0 = std::min(c*grp_size, mpi_size), p1 = std::min(p0+grp_size, mpi_size);
+    size_t sa = 0, sb = 0;
+    for( long p = p0; p < p1; ++p ) { sa += size_t(A_counts[p]); sb += size_t(B_counts[p]); }
+    max_A = std::max(max_A, sa);
+    max_B = std::max(max_B, sb);
+  }
 
-  // copy inversections of A with all ranges into a buffer
+  std::vector<value_t> buffer_A(max_A);
+  std::vector<value_t> buffer_B(max_B);
+  std::vector<int> A_cnt(mpi_size, 0), A_disp(mpi_size, 0);
+  std::vector<int> B_cnt(mpi_size, 0), B_disp(mpi_size, 0);
+
   size_t count_sz_check = 0;
-  for( auto p : itertools::range(mpi_size) ) {
-    if(ovlps_from_A[p]) {
-      auto A_ = detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]);
-      if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
-        // pack strided sub-block directly into the contiguous send buffer
-        ::nda::array_view<value_t,rank>(A_.shape(), buffer_A.data()+A_disp[p]) = A_;
-      } else {
-        auto A_reg = make_regular(A_);
-        std::copy_n(A_reg.data(),A_reg.size(),buffer_A.data()+A_disp[p]);
-      }
-      count_sz_check += A_.size();
+  for( long c = 0; c < nchunk; ++c ) {
+    const long p0 = std::min(c*grp_size, mpi_size), p1 = std::min(p0+grp_size, mpi_size);
+    if(p1 <= p0) continue;
+    std::fill(A_cnt.begin(), A_cnt.end(), 0);
+    std::fill(B_cnt.begin(), B_cnt.end(), 0);
+    std::fill(A_disp.begin(), A_disp.end(), 0);
+    std::fill(B_disp.begin(), B_disp.end(), 0);
+    int offA = 0, offB = 0;
+    for( long p = p0; p < p1; ++p ) {
+      A_cnt[p] = A_counts[p];  A_disp[p] = offA;  offA += A_counts[p];
+      B_cnt[p] = B_counts[p];  B_disp[p] = offB;  offB += B_counts[p];
     }
-  }
-  utils::check(count_sz_check == Aloc.size(), "A Size mismatch.");
 
-  comm->all_to_all_v_n(buffer_A.data(), A_counts.data(), A_disp.data(), 
-                       buffer_B.data(), B_counts.data(), B_disp.data());
-
-
-  for( auto p : itertools::range(mpi_size) ) {
-    if(ovlps_from_B[p]) {
-      auto B_ = detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]);
-      if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
-        // Direct overwrite of the strided sub-block from the contiguous recv
-        // buffer. This relies on the a==1 && b==0 assertion at the top of the
-        // function. If that restriction is ever lifted, this must become
-        //   B_ += a * (buffer view)
-        // and the b-scaling prologue (currently only in the serial branch) must
-        // return to the parallel path.
-        B_ = ::nda::array_view<const value_t,rank>(B_.shape(), buffer_B.data()+B_disp[p]);
-      } else {
-        auto B_reg = make_regular(B_);
-        std::copy_n(buffer_B.data()+B_disp[p],B_reg.size(),B_reg.data());
-        B_ = B_reg;
+    // copy intersections of A with this group's ranges into the send buffer
+    for( long p = p0; p < p1; ++p ) {
+      if(ovlps_from_A[p]) {
+        auto A_ = detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]);
+        if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
+          // pack strided sub-block directly into the contiguous send buffer
+          ::nda::array_view<value_t,rank>(A_.shape(), buffer_A.data()+A_disp[p]) = A_;
+        } else {
+          auto A_reg = make_regular(A_);
+          std::copy_n(A_reg.data(),A_reg.size(),buffer_A.data()+A_disp[p]);
+        }
+        count_sz_check += A_.size();
       }
     }
+
+    comm->all_to_all_v_n(buffer_A.data(), A_cnt.data(), A_disp.data(),
+                         buffer_B.data(), B_cnt.data(), B_disp.data());
+
+    for( long p = p0; p < p1; ++p ) {
+      if(ovlps_from_B[p]) {
+        auto B_ = detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]);
+        if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
+          // Direct overwrite of the strided sub-block from the contiguous recv
+          // buffer. This relies on the a==1 && b==0 assertion at the top of the
+          // function. If that restriction is ever lifted, this must become
+          //   B_ += a * (buffer view)
+          // and the b-scaling prologue (currently only in the serial branch) must
+          // return to the parallel path.
+          B_ = ::nda::array_view<const value_t,rank>(B_.shape(), buffer_B.data()+B_disp[p]);
+        } else {
+          auto B_reg = make_regular(B_);
+          std::copy_n(buffer_B.data()+B_disp[p],B_reg.size(),B_reg.data());
+          B_ = B_reg;
+        }
+      }
+    }
   }
+  utils::check(count_sz_check == size_t(Aloc.size()), "A Size mismatch.");
 }
 
 template<DistributedArray Arr1_t, DistributedArray Arr2_t, int Alg = 3> 
