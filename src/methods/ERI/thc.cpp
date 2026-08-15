@@ -311,7 +311,7 @@ thc::thc(mf::MF *mf_,
                   "energy-weighted band range [{}, {}), weights in [{:.3e}, {:.3e}].",
                 nbnd_protected, nbnd_protected-1, mf->efermi(),
                 nbnd_protected, nbnd_energy_end, wmin, wmax);
-        if(aug_weights) {
+        if(aug_weights and nbnd_orig < mf->nbnd()) {
           // Report the range actually present on the augmentation block: an h5 written
           // before augmented_band_weights existed loads as all ones, which would make a
           // claim of "singular values" false.

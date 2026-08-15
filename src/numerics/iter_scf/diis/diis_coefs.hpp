@@ -30,6 +30,7 @@
 #include "numerics/nda_functions.hpp"  // nda::blas 3-argument gemm/gemv
 #include "nda/linalg/eigenelements.hpp"
 #include "IO/app_loggers.h"
+#include "utilities/check.hpp"
 
 namespace iter_scf {
 
@@ -95,6 +96,12 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   for (long i = 0; i < n; ++i) x(i) /= d(i);
 
   double sum = std::accumulate(x.begin(), x.end(), 0.0);
+  utils::check(std::isfinite(sum) and std::abs(sum) > 1e-300,
+               "compute_diis_coefs_c1: singular residual-overlap matrix (sum of the "
+               "unnormalized coefficients = {}). B_ii = ||r_i||^2, so this happens when "
+               "the residuals are zero (already converged) or linearly dependent to "
+               "machine precision; normalizing would hand NaN coefficients to the "
+               "extrapolation.", sum);
   return nda::make_regular(x / sum);
 }
 

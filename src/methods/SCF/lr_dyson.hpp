@@ -50,12 +50,9 @@ namespace methods {
  * of which it keeps one block, and it leaves ΔΣ unusable, so LR-GW rejects it.
  *
  * Greedy ω-then-k pool filling can leave a remainder that neither axis can absorb
- * and spill it onto the bands — e.g. nproc=960, nw=40: ω saturates at 40 (nwpools
- * cannot exceed nw), k takes 12 of the remaining 24, and the last 2 ranks split the
- * bands. Only in that case do we search the factorisations nwpools*nkpools == nproc
- * with nwpools <= nw and nkpools <= nkpts_ibz and take the best; rank counts the
- * greedy fill already handles keep their existing grid, so no working configuration
- * changes distribution.
+ * and spill it onto the bands. Only in that case do we search the factorisations
+ * nwpools*nkpools == nproc with nwpools <= nw and nkpools <= nkpts_ibz and take the
+ * best.
  *
  * Cost model for the search: a rank owns ceil(nw/nwpools) x ceil(nkpts_ibz/nkpools)
  * of the (ω, k) plane and the Dyson loop is one nbnd^3 pair of gemms per element, so
@@ -289,7 +286,6 @@ public:
     app_log(level, "{0}  - LR Dyson loop:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
     app_log(level, "{0}  - Redistribute ΔG(iω):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
     app_log(level, "{0}  - ΔG(iω)->ΔG(τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
-    app_log(level, "{0}  - Skew (barrier pre-gather):   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_SKEW"), _Timer.number_of_calls("LR_DYSON_SKEW"));
     app_log(level, "{0}  - Gather ΔG(τ):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
     app_log(level, "{0}      - set_zero:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ZERO"), _Timer.number_of_calls("GATHER_SHM_ZERO"));
     app_log(level, "{0}      - local assign:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ASSIGN"), _Timer.number_of_calls("GATHER_SHM_ASSIGN"));

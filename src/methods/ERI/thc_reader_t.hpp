@@ -61,10 +61,13 @@ namespace methods {
    *   auto Zq = thc.Z(iq);
    */
   namespace detail {
-  /// Monotonic identity token. A fresh value on construction *and* on copy, so
-  /// a consumer that caches data derived from its owner cannot mistake a
-  /// different object -- or a new object at a recycled address -- for the one
-  /// it cached from.
+  /// Monotonic identity token. It identifies the *data*, not the object: a fresh
+  /// value on construction and on copy, so a consumer caching data derived from
+  /// its owner cannot mistake a different object -- or a new object at a recycled
+  /// address -- for the one it cached from; a move carries the value over, since
+  /// the destination owns the very buffers the cache was built from. The
+  /// corollary is that a moved-from owner shares the id with its destination and
+  /// must not be used again.
   struct instance_id_t {
     long value = next();
     instance_id_t() = default;
@@ -716,10 +719,14 @@ namespace methods {
         _Y_shm.value().win().fence();
       }
 
+      const bool read_Z   = (_storage == eri_storage_e::incore);
       // Vxc is read for either storage mode: the build path keeps it resident under
       // outcore too, so gating it on incore would make a rebuild and a reread of the
       // same input disagree about has_Vxc().
-      if (_storage == eri_storage_e::incore or grp.has_dataset("Vxc")) {
+      const bool read_Vxc = grp.has_dataset("Vxc");
+
+      std::array<long, 3> q_pgrid = {1, 1, 1};
+      if (read_Z or read_Vxc) {
         int np = _mpi->comm.size();
         long nqpools = utils::find_proc_grid_max_npools(np, _nqpts_ibz, 0.2);
         utils::check(nqpools > 0 and nqpools <= _nqpts_ibz, "thc_reader_t::build: nqpools <= 0 or nqpools > nqpts");
@@ -727,23 +734,25 @@ namespace methods {
         int np_PQ = np / nqpools;
         int np_P = utils::find_proc_grid_min_diff(np_PQ, 1, 1);
         int np_Q = np_PQ / np_P;
-        if (_storage == eri_storage_e::incore) {
-          _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, {nqpools, np_P, np_Q}, {_nqpts_ibz, _Np, _Np});
-          math::nda::h5_read(grp, "coulomb_matrix", _dZ);
-        }
-
-        if (grp.has_dataset("Vxc")) {
-          _Vxc = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, {nqpools, np_P, np_Q}, {_nqpts_ibz, _Np, _Np});
-          math::nda::h5_read(grp, "Vxc", _Vxc.value());
-          if (grp.has_dataset("Vxc_source")) {
-            h5::h5_read(grp, "Vxc_source", _vxc_source);
-          }
-          app_log(1, "  THC: found a semilocal xc-kernel matrix (Vxc) in {}{}.", _eri_file,
-                  _vxc_source.empty() ? "" : fmt::format(" (from {})", _vxc_source));
-        }
-
-        _mpi->comm.barrier();
+        q_pgrid = {nqpools, np_P, np_Q};
       }
+
+      if (read_Z) {
+        _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, q_pgrid, {_nqpts_ibz, _Np, _Np});
+        math::nda::h5_read(grp, "coulomb_matrix", _dZ);
+      }
+
+      if (read_Vxc) {
+        _Vxc = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, q_pgrid, {_nqpts_ibz, _Np, _Np});
+        math::nda::h5_read(grp, "Vxc", _Vxc.value());
+        if (grp.has_dataset("Vxc_source")) {
+          h5::h5_read(grp, "Vxc_source", _vxc_source);
+        }
+        app_log(1, "  THC: found a semilocal xc-kernel matrix (Vxc) in {}{}.", _eri_file,
+                _vxc_source.empty() ? "" : fmt::format(" (from {})", _vxc_source));
+      }
+
+      if (read_Z or read_Vxc) _mpi->comm.barrier();
       _Timer.stop("BUILD_TOTAL");
 
       print_thc_summary();

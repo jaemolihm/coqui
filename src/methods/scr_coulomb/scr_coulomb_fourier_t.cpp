@@ -68,7 +68,6 @@ namespace solvers {
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(dPi_tqPQ_pos, buffer_ti);
     _Timer.stop("FT_REDISTRIBUTE");
-    utils::memlog("tau_to_w: after in-redistribute");
     if (reset_input) dPi_tqPQ_pos.reset();
     if (check_leakage) {
       _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "polarizability", true);
@@ -105,7 +104,6 @@ namespace solvers {
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(buffer_wi, dPi_wqPQ);
     _Timer.stop("FT_REDISTRIBUTE");
-    utils::memlog("tau_to_w: after out-redistribute");
     buffer_wi.reset();
 
     _Timer.stop("IMAG_FT_TtoW");
@@ -171,7 +169,6 @@ namespace solvers {
       _Timer.start("FT_REDISTRIBUTE");
       math::nda::redistribute(dW_wqPQ_pos, buffer_wi);
       _Timer.stop("FT_REDISTRIBUTE");
-      utils::memlog("w_to_tau: after in-redistribute");
       if (reset_input) dW_wqPQ_pos.reset();
 
       buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_bsize);
@@ -193,7 +190,6 @@ namespace solvers {
     _Timer.start("FT_REDISTRIBUTE");
     math::nda::redistribute(buffer_ti, dW_tqPQ);
     _Timer.stop("FT_REDISTRIBUTE");
-    utils::memlog("w_to_tau: after out-redistribute");
     buffer_ti.reset();
 
     _Timer.stop("IMAG_FT_WtoT");

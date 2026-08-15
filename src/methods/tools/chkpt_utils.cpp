@@ -380,6 +380,28 @@ void read_qp_hamilt_components(X_4D_t &Vhf_skij,
   Vcorr_skij.communicator()->barrier();
 }
 
+void write_scf_status(mpi3::communicator &comm, std::string output, std::string status) {
+  if (comm.root()) {
+    std::string filename = output + ".mbpt.h5";
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    auto scf_grp = (grp.has_subgroup("scf"))? grp.open_group("scf") : grp.create_group("scf");
+    h5::h5_write(scf_grp, "scf_status", status);
+  }
+  comm.barrier();
+}
+
+std::string read_scf_status(std::string filename) {
+  h5::file file(filename, 'r');
+  h5::group grp(file);
+  if (not grp.has_subgroup("scf")) return "unknown";
+  auto scf_grp = grp.open_group("scf");
+  if (not scf_grp.has_dataset("scf_status")) return "unknown";
+  std::string status;
+  h5::h5_read(scf_grp, "scf_status", status);
+  return status;
+}
+
 auto read_input_iterations(std::string filename)
 -> std::tuple<long, long, long, long> {
   long gw_iter;

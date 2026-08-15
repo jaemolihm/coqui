@@ -22,6 +22,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "configuration.hpp"
@@ -107,6 +108,14 @@ struct entry_t {
 
 long ceil_div(long a, long b) { return (b > 0) ? (a + b - 1) / b : a; }
 
+// Pad to a display width counting UTF-8 code points, not bytes, so rows carrying
+// Π/Σ/τ/ω in a column line up with the ASCII ones.
+std::string pad(std::string const& s, size_t w) {
+  size_t n = 0;
+  for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
+  return s + std::string(n < w ? w - n : 0, ' ');
+}
+
 } // anonymous namespace
 
 double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
@@ -120,7 +129,6 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // (asserted equal at thc_gw.icc:269), so one divisor serves every t-pool row.
   auto [pi_pgrid, pi_bsize] =
       solvers::scr_coulomb_t::Pi_tau_proc_grid(nproc, p.nth, p.nqi, p.ns, p.nk);
-  (void)pi_bsize;
   const long ntpools  = std::max(1L, pi_pgrid[0]);
   const long np_P     = std::max(1L, pi_pgrid[2]);
   const long np_Q     = std::max(1L, pi_pgrid[3]);
@@ -130,14 +138,6 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   const double to_GB = 1.0 / (1024.0 * 1024.0 * 1024.0);
 
   auto gb = [&](double nelem) { return nelem * bytes_per * to_GB; };
-
-  // Pad to a display width counting UTF-8 code points, not bytes, so rows with
-  // Π/Σ/ω in the name or lifetime line up with the ASCII ones.
-  auto pad = [](std::string const& s, size_t w) {
-    size_t n = 0;
-    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
-    return s + std::string(n < w ? w - n : 0, ' ');
-  };
 
   auto spread = [&](loc_t l) -> long {
     switch (l) {
@@ -223,15 +223,16 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // Only the THC path builds the auxiliary-basis grids; ft_buffer_dist and
   // W_omega_proc_grid have no meaning (and reject NP = 0) without them.
   const bool aux_path = p.thc_eri and p.have_scr;
+  std::array<long, 4> ftb_pgrid{}, ftb_bsize{}, wo_pgrid{}, wo_bsize{};
   if (aux_path) {
     // redistribute_alltoallv stages the local block of both endpoints and chunks
     // those buffers to a per-rank byte budget; nchunk follows the largest local
     // block of either endpoint, exactly as nda_utils.hpp computes it.
     const std::array<long, 4> t_gshape = {p.nth, p.nqi, p.NP, p.NP};
     const std::array<long, 4> w_gshape = {p.nwh, p.nqi, p.NP, p.NP};
-    auto [ftb_pgrid, ftb_bsize] =
+    std::tie(ftb_pgrid, ftb_bsize) =
         solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, t_gshape);
-    auto [wo_pgrid, wo_bsize] =
+    std::tie(wo_pgrid, wo_bsize) =
         solvers::scr_coulomb_t::W_omega_proc_grid(nproc, p.nqi, p.nw_b, p.NP);
     // When the W(iw) distribution is already the FT buffer distribution, both
     // Fourier calls take their fast branch: tau_to_w transforms straight into
@@ -389,13 +390,8 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   app_log(1, "  Estimated SCF memory (peak):       {:.3f} GB/node  [{} dominates]",
           peak_pn, group_tag(peak_grp));
   app_log(2, "");
-  return peak_pn;
-}
 
-void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicator>& mpi,
-                                    const scf_mem_params& p) {
-  const long nproc = std::max(1, mpi.comm.size());
-
+  // ---------------- distribution patterns ----------------
   auto pg4 = [](const std::array<long, 4>& g, const char* ax) {
     return fmt::format("{}=({},{},{},{})", ax, g[0], g[1], g[2], g[3]); };
   auto pg5 = [](const std::array<long, 5>& g, const char* ax) {
@@ -405,12 +401,6 @@ void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicato
   auto bs5 = [](const std::array<long, 5>& b) {
     return fmt::format("({},{},{},{},{})", b[0], b[1], b[2], b[3], b[4]); };
 
-  // Pad counting UTF-8 code points (the pattern column carries τ/ω/Σ).
-  auto pad = [](std::string const& s, size_t w) {
-    size_t n = 0;
-    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
-    return s + std::string(n < w ? w - n : 0, ' ');
-  };
   auto row = [&](std::string const& pattern, std::string const& grid,
                  std::string const& bsize, std::string const& arrs) {
     app_log(2, "    {}{}{}{}", pad(pattern, 22), pad(grid, 30), pad(bsize, 18), arrs);
@@ -420,27 +410,14 @@ void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicato
   app_log(2, "  {}", std::string(112, '-'));
   row("pattern", "pgrid", "bsize", "arrays");
 
-  auto [pi_pgrid, pi_bsize] =
-      solvers::scr_coulomb_t::Pi_tau_proc_grid(nproc, p.nth, p.nqi, p.ns, p.nk);
-  const long ntpools = pi_pgrid[0];
-  const long np_P = pi_pgrid[2];
-  const long np_Q = pi_pgrid[3];
-  const long np_tpool = std::max(1L, np_P * np_Q);
-
-  if (p.thc_eri and p.have_scr) {
+  if (aux_path) {
     row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"), bs4(pi_bsize),
         "dPi_tqPQ, dW_tqPQ");
     row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q), "(1,1,1,1)",
         "dGp_sRPQ, dGn_sRPQ, dbuf_skPQ  [on t_intra_comm]");
-
-    auto [ftb_pgrid, ftb_bsize] = solvers::scr_coulomb_fourier_t::ft_buffer_dist(
-        nproc, {p.nth, p.nqi, p.NP, p.NP});
     row("aux FT buffer", pg4(ftb_pgrid, "(·,q,P,Q)"), bs4(ftb_bsize),
         "buffer_ti, buffer_wi");
-
-    auto [w_pgrid, w_bsize] =
-        solvers::scr_coulomb_t::W_omega_proc_grid(nproc, p.nqi, p.nw_b, p.NP);
-    row("aux ω (W Dyson)", pg4(w_pgrid, "(w,q,P,Q)"), bs4(w_bsize), "W(iω) (dPi_wqPQ)");
+    row("aux ω (W Dyson)", pg4(wo_pgrid, "(w,q,P,Q)"), bs4(wo_bsize), "W(iω) (dPi_wqPQ)");
   }
 
   if (p.thc_eri and p.have_corr) {
@@ -477,6 +454,8 @@ void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicato
   app_log(2, "  {}", std::string(112, '-'));
   app_log(2, "    (aux & band arrays are distributed over comm unless marked t_intra_comm; "
              "shared arrays are node-replicated)\n");
+
+  return peak_pn;
 }
 
 } // methods

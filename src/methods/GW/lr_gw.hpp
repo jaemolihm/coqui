@@ -204,12 +204,10 @@ namespace methods {
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
       app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_COEFF"), _Timer.number_of_calls("SIGMA_FT_COEFF"));
       app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_W_COPY"), _Timer.number_of_calls("SIGMA_W_COPY"));
-      app_log(level, "{0}  - Pre-loop fence (sync):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRE_FENCE"), _Timer.number_of_calls("SIGMA_PRE_FENCE"));
       app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
       app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
-      app_log(level, "{0}    - Buffer alloc:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_ALLOC"), _Timer.number_of_calls("SIGMA_A2P_ALLOC"));
       app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_GEMM"), _Timer.number_of_calls("SIGMA_A2P_GEMM"));
       app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_REDUCE"), _Timer.number_of_calls("SIGMA_A2P_REDUCE"));
       app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_AXPY"), _Timer.number_of_calls("SIGMA_A2P_AXPY"));
@@ -249,6 +247,8 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
+      // Aux→Primary reduction buffer, one (nbnd, nbnd) block per local (s,k).
+      nda::array<ComplexType, 3> _A2P_buf_iab;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(thc_reader_t& thc);

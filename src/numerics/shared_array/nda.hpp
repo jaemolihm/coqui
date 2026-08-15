@@ -147,9 +147,7 @@ namespace math {
         ::nda::range i_range(origin_i, end_i);
         auto _array = Array_view_t(_shape, (value_type*) _win->base(0));
         auto array_1D = ::nda::reshape(_array, std::array<long, 1>{_size});
-        _win->fence();
         array_1D(i_range) = value_type(0.0);
-        _win->fence();
         node_sync();
       }
 

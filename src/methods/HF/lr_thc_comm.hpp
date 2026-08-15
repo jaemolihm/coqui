@@ -150,7 +150,12 @@ namespace methods {
        * @param thc       - [INPUT] THC-ERI handler
        * @param kp_map    - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map   - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
-       * @param Timer     - [INPUT] optional sub-clock manager, see aux_to_primary
+       * @param Timer     - [INPUT] optional sub-clock manager. When non-null the call is
+       *                    split under the clock names SIGMA_A2P_{GEMM,REDUCE,AXPY};
+       *                    REDUCE includes the wait for the slowest tile in dim0_comm.
+       * @param O_buf     - [INPUT/OUTPUT] optional caller-owned (dim0, nbnd, nbnd) scratch
+       *                    for the reduction; resized on shape mismatch. Pass a cached
+       *                    buffer to avoid one heap allocation per call.
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary_local(int ip, int iq,
@@ -160,7 +165,8 @@ namespace methods {
                                        THC_ERI auto& thc,
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       utils::TimerManager* Timer = nullptr) {
+                                       utils::TimerManager* Timer = nullptr,
+                                       nda::array<ComplexType, 3>* O_buf = nullptr) {
         static_assert(nda::get_rank<Array_aux_t> == 4,
                       "lr_thc_comm::aux_to_primary_local: aux rank must be 4");
         static_assert(nda::get_rank<Array_primary_t> == 4,
@@ -185,7 +191,7 @@ namespace methods {
 
         _aux_to_primary_impl(ip, iq, dim0_intra_comm, scl,
                              O_IPQ_loc, O_Iab_dest, thc,
-                             kp_map, kpq_map, k_org, P_org, Q_org, Timer);
+                             kp_map, kpq_map, k_org, P_org, Q_org, Timer, O_buf);
       }
 
       /**
@@ -200,11 +206,6 @@ namespace methods {
        * @param thc      - [INPUT] THC-ERI handler
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
-       * @param Timer    - [INPUT] optional sub-clock manager. When non-null the call is
-       *                   split under the clock names SIGMA_A2P_{PREDIV,ALLOC,GEMM,
-       *                   REDUCE,AXPY,SHMREDUCE}; PREDIV and SHMREDUCE are the shared-array
-       *                   bookkeeping this wrapper adds on top of the kernel. REDUCE
-       *                   includes the wait for the slowest tile in dim0_comm.
        *
        * The leading x → x/N pre-divide makes the trailing all_reduce over the N
        * nodes idempotent for content already in the window, so repeated calls
@@ -217,38 +218,30 @@ namespace methods {
                                  sArray_t<AF_t>& O_Iab,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_map,
-                                 nda::ArrayOfRank<1> auto const& kpq_map,
-                                 utils::TimerManager* Timer = nullptr) {
+                                 nda::ArrayOfRank<1> auto const& kpq_map) {
         static_assert(nda::get_rank<Array_aux_t> == 4,
                       "lr_thc_comm::aux_to_primary: aux rank must be 4");
         static_assert(nda::get_rank<AF_t> == 4,
                       "lr_thc_comm::aux_to_primary: primary rank must be 4");
         using value_type = typename std::decay_t<AF_t>::value_type;
 
-        auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
-        auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
-
         // to compensate for reduction
-        tic("SIGMA_A2P_PREDIV");
         O_Iab.win().fence();
         O_Iab.communicator()->barrier();
         if(O_Iab.node_comm()->root())
           O_Iab.local() /= value_type(O_Iab.internode_comm()->size());
         O_Iab.node_comm()->barrier();
-        toc("SIGMA_A2P_PREDIV");
 
         auto s_rng = O_IPQ.local_range(0);
         auto k_rng = O_IPQ.local_range(1);
         auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
 
         aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
-                             kp_map, kpq_map, Timer);
+                             kp_map, kpq_map);
 
         // reduce
-        tic("SIGMA_A2P_SHMREDUCE");
         O_Iab.win().fence();
         O_Iab.all_reduce();
-        toc("SIGMA_A2P_SHMREDUCE");
       }
 
       /**
@@ -535,7 +528,8 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
                                        long k_offset, long P_offset, long Q_offset,
-                                       utils::TimerManager* Timer = nullptr) {
+                                       utils::TimerManager* Timer = nullptr,
+                                       nda::array<ComplexType, 3>* O_buf = nullptr) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_aux_to_primary_impl: Rank mismatch");
         static_assert(nda::get_rank<Array_primary_t> >= 4,
@@ -571,16 +565,20 @@ namespace methods {
         // for the first gemm plus nbnd² times the extent contracted last, so
         // contract the larger of the two aux extents first.
         const bool q_first = (NP_loc <= NQ_loc);
-        tic("SIGMA_A2P_ALLOC");
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
-        // Buffer array to hold local (t,s,k) slices of O_iab for reduction. It
-        // needs no zeroing: the loop below closes every (i,·,·) block with a
-        // 3-argument gemm, i.e. β = 0, so the whole buffer is assigned before it
-        // is read.
-        nda::array<ComplexType, 3> O_buf_iab(dim0, nbnd, nbnd);
-        toc("SIGMA_A2P_ALLOC");
+        // Buffer array to hold local (t,s,k) slices of O_iab for reduction; owned
+        // by the caller when one is supplied. It needs no zeroing: the loop below
+        // closes every (i,·,·) block with a 3-argument gemm, i.e. β = 0, so the
+        // whole buffer is assigned before it is read.
+        auto buf_shape = shape_t<3>{(long)dim0, (long)nbnd, (long)nbnd};
+        nda::array<ComplexType, 3> O_buf_local;
+        if (O_buf == nullptr)
+          O_buf_local.resize(buf_shape);
+        else if (O_buf->shape() != buf_shape)
+          O_buf->resize(buf_shape);
+        nda::array_view<ComplexType, 3> O_buf_iab(O_buf ? *O_buf : O_buf_local);
 
         tic("SIGMA_A2P_GEMM");
         for (size_t i = 0; i < dim0; ++i) {
