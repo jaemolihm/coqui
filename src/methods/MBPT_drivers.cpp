@@ -1185,6 +1185,52 @@ auto load_W_and_eps_inv_head(
 }
 
 /**
+ * Helper: read W from the screened-interaction file and hand it to the LR path
+ * on the Matsubara axis, so lr_driver has exactly one W layout to support.
+ *
+ * The τ→ω transform lives here rather than in load_W_and_eps_inv_head because
+ * that function's other callers (the standalone scGW Σ paths) want W(τ). Only
+ * this from-file path pays the transform; recompute_W_and_eps_inv_head, which
+ * solves the W Dyson in ω anyway, hands ω back for free.
+ *
+ * @param mpi         - MPI context
+ * @param thc         - THC ERI
+ * @param ft          - IAFT (from checkpoint)
+ * @param input_file  - Path to checkpoint HDF5 file
+ * @param input_grp   - SCF group name in checkpoint
+ * @param input_iter  - Iteration to read (-1 = final_iter)
+ * @param screened_interaction_file - Explicit path to W_qtPQ, "" = auto-derive
+ * @return (dW_wqPQ, eps_inv_head, div_treatment) — W on the Matsubara axis on
+ *         solvers::lr_scr_coulomb_t::W_omega_dist, head on the τ axis
+ */
+template<typename mpi_context_t, typename THC_t>
+auto lr_load_W_omega(
+    mpi_context_t& mpi,
+    THC_t& thc,
+    imag_axes_ft::IAFT const& ft,
+    const std::string& input_file,
+    const std::string& input_grp,
+    long input_iter,
+    const std::string& screened_interaction_file = "")
+{
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      mpi, thc, input_file, input_grp, input_iter, ft.nt_f(),
+      screened_interaction_file);
+
+  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
+      mpi.comm.size(), thc.MF()->nkpts(), nw_half, thc.Np());
+
+  solvers::scr_coulomb_fourier_t setup_ft(&ft);
+  auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
+                                   __app_verbosity__ >= 3);
+  mpi.comm.barrier();
+
+  return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
+                         std::move(div_treatment));
+}
+
+/**
  * Helper: recompute W and eps_inv_head from the (already-built) unperturbed
  * Green's function instead of reading W from a screened-interaction file.
  *
@@ -1194,16 +1240,23 @@ auto load_W_and_eps_inv_head(
  * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
  * the no-symmetry requirement below + the RPA screen_type.
  *
- * Returns the same (dW_tqPQ, eps_inv_head) as load_W_and_eps_inv_head
- * (sans div_treatment, which the caller already holds), so it is
- * a drop-in at the call site. dyson_W_from_Pi_tau already produces (t,q), so no
- * transpose is needed here.
+ * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
+ * wants (solvers::lr_scr_coulomb_t::W_omega_dist) — the one layout lr_driver accepts.
+ * The W Dyson is solved in ω anyway, so returning ω saves the ω→τ transform
+ * back onto Π's τ grid *and* the redistribute onto the LR tiling that would
+ * follow it — the LR driver does one ω→τ straight onto its own grid instead.
+ *
+ * eps_inv_head is built with eps_inv_head_w rather than eps_inv_head_t and then
+ * transformed to τ. eval_eps_inv_q is linear and pointwise in the imaginary-axis
+ * index, and eps_inv_head_t is exactly "eval → tau_to_w_PHsym → extrapolate →
+ * w_to_tau_PHsym", so this is the same quantity with two fewer transforms.
  *
  * @param mpi           - MPI context
  * @param thc           - THC ERI
  * @param ft            - IAFT (from checkpoint)
  * @param sG_tskij      - Unperturbed G(τ) shared array (nt, ns, nk, nb, nb)
  * @param div_treatment - Divergence treatment scGW used (from checkpoint)
+ * @return (dW_wqPQ, eps_inv_head) — W on the Matsubara axis, head on the τ axis
  */
 template<typename mpi_context_t, typename THC_t, typename sArray_5D_t>
 auto recompute_W_and_eps_inv_head(
@@ -1225,15 +1278,29 @@ auto recompute_W_and_eps_inv_head(
   // Standard GW: W is RPA-screened. cRPA / edmft are not supported here.
   solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
 
+  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
+      mpi.comm.size(), nkpts, nw_half, thc.Np());
+
   auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi.comm.barrier();
-  auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+  auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
   mpi.comm.barrier();
 
-  auto [eps_inv_head_q, eps_inv_head] =
-      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+  // eps_inv_head_w returns the head at every (iω, q) plus the q→0 extrapolated
+  // head at every iω; only the latter is wanted here.
+  auto [eps_inv_head_wq, eps_inv_head_q0_w] =
+      solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *mf, div_treatment);
 
-  return std::make_pair(std::move(dW_tqPQ), std::move(eps_inv_head));
+  // The head is consumed on the τ axis (lr_gw::apply_div_correction_*), so make
+  // the same final ω→τ step eps_inv_head_t ends with.
+  long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+  nda::array<ComplexType, 1> eps_inv_head(nt_half);
+  auto head_w_2D = nda::reshape(eps_inv_head_q0_w, std::array<long, 2>{nw_half, 1});
+  auto head_t_2D = nda::reshape(eps_inv_head, std::array<long, 2>{nt_half, 1});
+  ft.w_to_tau_PHsym(head_w_2D, head_t_2D);
+
+  return std::make_pair(std::move(dW_wqPQ), std::move(eps_inv_head));
 }
 
 /**
@@ -1242,10 +1309,17 @@ auto recompute_W_and_eps_inv_head(
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
  *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
  *
+ * Several perturbations at the same q are solved in one call: the unperturbed
+ * state, the screened interaction, the G^R/G(iω) caches and the solvers are set
+ * up once and reused, and each perturbation is written to its own
+ * "linear_response/mode{m}" group. This is the whole reason the ΔH0 argument
+ * carries a leading mode axis. q_vec is fixed for the call — the driver and all
+ * its solvers latch it at construction.
+ *
  * @param eri              - [INPUT] ERI handler (must be THC)
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
- * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
  * @param include_hartree  - [INPUT] Include ΔJ in SCF loop; overridden by the
  *                             "method" key when that is given
  * @param include_exchange - [INPUT] Include ΔK in SCF loop; likewise
@@ -1264,12 +1338,13 @@ auto recompute_W_and_eps_inv_head(
  *                        kernel is the difference of the two
  *   two_step_order       truncation order n of the K_pert expansion (default 1)
  *
- * @return Tuple of (number of iterations, final Δμ)
+ * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
 template<typename eri_t>
-std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
+std::tuple<nda::array<long, 1>, nda::array<double, 1>>
+                        run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
-                                     std::optional<nda::array<ComplexType, 4>> const& DeltaH0_skij_root,
+                                     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      bool include_hartree,
                                      bool include_exchange,
                                      lr_gw_update_mode gw_mode,
@@ -1384,6 +1459,19 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // include_xc precondition the bed happens to violate first.
   utils::check(!(lr_two_step && include_xc),
                "run_lr_calc: lr_two_step is incompatible with include_xc.");
+
+  // LR output volume. Defaults reproduce the previous checkpoint byte for byte.
+  //   save_DeltaG — write DeltaG_tskij at all. It is the biggest LR dataset and
+  //     nothing reads it back, so a phonon sweep can drop it.
+  //   nbnd_save   — keep only the leading nbnd_save x nbnd_save band block of the
+  //     imaginary-time arrays. The result is a protected-band block, not a
+  //     full-basis object; each trimmed dataset says so via an "nbnd_save"
+  //     attribute. Absent = no trim.
+  auto save_DeltaG = io::get_value_with_default<bool>(pt, "save_DeltaG", true);
+  std::optional<long> nbnd_save;
+  if (io::check_exists<long>(pt, "nbnd_save")) {
+    nbnd_save = io::get_value<long>(pt, "nbnd_save");
+  }
   if (include_xc) {
     utils::check(include_hartree,
                  "run_lr_calc: include_xc = true requires include_hartree = true.");
@@ -1623,25 +1711,50 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
             off_diag_mode, ac_alg, Nfit, eta);
   }
 
-  // Validate DeltaH0 shape on root before broadcasting
+  // Validate DeltaH0 shape on root, then broadcast the mode count.
+  long nmodes = 0;
   if (mpi->comm.root()) {
-    utils::check(DeltaH0_skij_root.has_value(),
-                 "run_lr_calc: DeltaH0_skij must be provided on the MPI global root");
-    auto const& dh = *DeltaH0_skij_root;
-    utils::check(dh.shape(0) == mf->nspin() &&
-                 dh.shape(1) == mf->nkpts_ibz() &&
-                 dh.shape(2) == mf->nbnd() &&
-                 dh.shape(3) == mf->nbnd(),
-                 "run_lr_calc: DeltaH0_skij shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+    utils::check(DeltaH0_mskij_root.has_value(),
+                 "run_lr_calc: DeltaH0_mskij must be provided on the MPI global root");
+    auto const& dh = *DeltaH0_mskij_root;
+    utils::check(dh.shape(1) == mf->nspin() &&
+                 dh.shape(2) == mf->nkpts_ibz() &&
+                 dh.shape(3) == mf->nbnd() &&
+                 dh.shape(4) == mf->nbnd(),
+                 "run_lr_calc: DeltaH0_mskij shape mismatch: expected (nmodes,{},{},{},{}), "
+                 "got ({},{},{},{},{})",
                  mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
-                 dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3));
+                 dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3), dh.shape(4));
+    utils::check(dh.shape(0) > 0, "run_lr_calc: DeltaH0_mskij has no perturbations.");
+    nmodes = dh.shape(0);
+  }
+  mpi->comm.broadcast_n(&nmodes, 1, 0);
+
+  // The δX/δV IBC path is per-perturbation in a way this loop does not yet
+  // handle: build_lr_ibc mixes mode-independent V_HF/F_PQ with the ΔF_ibc/ΔΣ_ibc
+  // built from *this* δX, and lr_driver moves F_PQ_skij out of the IBC object on
+  // the first solve, so perturbations 2..n would silently get no F_PQ. Batching
+  // it needs DeltaX/DeltaV to grow a mode axis of their own.
+  if (nmodes > 1) {
+    utils::check(!DeltaX_left_root.has_value() && !DeltaX_right_root.has_value() &&
+                 !DeltaV_qPQ_root.has_value(),
+                 "run_lr_calc: batching {} perturbations in one call is not supported "
+                 "together with DeltaX / DeltaV (the IBC correction is itself "
+                 "per-perturbation). Call run_lr once per mode.", nmodes);
   }
 
-  // LR state: perturbation + response quantities
+  // LR state: perturbation + response quantities. sDeltaH0_skij is one rank-4
+  // shm window, refilled from the caller's rank-5 array per perturbation — no
+  // node memory scales with nmodes.
   lr_state_t lr_state;
   lr_state.q_vec.emplace(q_vec);
-  lr_state.sDeltaH0_skij.emplace(
-      math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, DeltaH0_skij_root));
+  {
+    std::optional<nda::array<ComplexType, 4>> h0_first;
+    if (mpi->comm.root())
+      h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
+    lr_state.sDeltaH0_skij.emplace(
+        math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first));
+  }
   lr_state.sDeltaG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   lr_state.sDeltaDm_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
@@ -1677,9 +1790,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   // Load W and eps_inv_head if GW self-energy is requested. W is either read
   // from disk (explicit screened_interaction_file, else the auto-derived path)
-  // or recomputed on the fly from the checkpoint Green's function (RPA).
-  using dW_type = std::tuple_element_t<0, decltype(load_W_and_eps_inv_head(
-      *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()))>;
+  // or recomputed on the fly from the checkpoint Green's function (RPA). Both
+  // hand W to lr_driver as W_c(iω) on solvers::lr_scr_coulomb_t::W_omega_dist.
+  using dW_type = std::tuple_element_t<0, decltype(lr_load_W_omega(
+      *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter))>;
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
   std::string div_treatment = "gygi";
@@ -1708,8 +1822,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
     } else {
-      auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(
-          *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f(),
+      auto [dW, eps_inv, div_str] = lr_load_W_omega(
+          *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter,
           screened_interaction_file);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
@@ -1813,83 +1927,141 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
-  // K_pert evaluations actually made. With an outer tolerance this is not
-  // two_step_order, and it is the cost figure a downstream reader needs.
-  int n_pert_applied = 0;
+  lr_params p;
+  p.include_hartree  = include_hartree;
+  p.include_exchange = include_exchange;
+  p.gw_mode          = gw_mode;
+  p.include_xc       = include_xc;
+  p.max_iter         = max_iter;
+  p.tol              = tol;
+  p.fix_density      = fix_density;
+  p.iter_params      = iter_params;
+  p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
+  p.div_corr         = div_corr;
+  p.div_treatment    = div_treatment;
+  p.sDeltaX_left     = pDeltaX_left;
+  p.sDeltaX_right    = pDeltaX_right;
+  p.Dm_ab            = Dm_ab_ptr;
+  p.DeltaV_qPQ       = pDeltaV_qPQ;
+  p.qp_static        = pQpStatic;
+  p.split_sigma_terms = (pDeltaSigma2 != nullptr);
+  p.keep_F_PQ        = output_aux_fock;
+  // Split-kernel schedule. It selects which solvers lr_setup builds and how many
+  // ΔΣ-sized buffers it allocates, so it has to be in `p` rather than per-solve.
+  p.sc_kernel        = sc_kernel;
+  p.pert_kernel      = pert_kernel;
+  p.pert_order       = pert_order;
+  if (lr_two_step) p.outer_accel = outer_params;
 
-  auto [niter, Delta_mu] = driver.run_lr(
-      lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-      lr_state.sDeltaF_skij.value(), pDeltaSigma,
-      sG_tskij, lr_state.sDeltaH0_skij.value(), thc,
-      sc_kernel, pert_kernel, pert_order,
-      opt_dW ? &(*opt_dW) : nullptr,
-      opt_eps_inv ? &(*opt_eps_inv) : nullptr,
-      max_iter, tol, fix_density, iter_params,
-      pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
-      pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr,
-      output_aux_fock ? &DeltaF_ibc_skij : nullptr,
-      output_aux_fock ? &F_PQ_skij : nullptr,
-      output_aux_fock ? &DeltaF_PQ_skij : nullptr, include_xc,
-      lr_two_step ? &outer_params : nullptr, &n_pert_applied);
-  lr_state.Delta_mu.emplace(Delta_mu);
-  mpi->comm.barrier();
+  driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
-  utils::memlog("run_lr_calc: after driver.run_lr");
+  nda::array<long, 1> niter_m(nmodes);
+  nda::array<double, 1> Delta_mu_m(nmodes);
 
-  // Write results
-  chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
-                 lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-                 lr_state.sDeltaF_skij.value(), pDeltaSigma,
-                 Delta_mu, niter,
-                 dump_hartree, dump_exchange, include_gw_sigma,
-                 pDeltaSigma2, pDeltaVcorr,
-                 lr_two_step, two_step_sc_method, two_step_pert_method,
-                 static_cast<int>(two_step_order),
-                 outer_active, two_step_outer_alg, two_step_outer_tol,
-                 n_pert_applied);
+  for (long m = 0; m < nmodes; ++m) {
+    if (nmodes > 1)
+      app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
 
-  // Persist the IBC aux→primary correction and the aux-basis Fock matrices
-  // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
-  // DeltaF_ibc as
-  //   dE/dx = spin · Σ_{s,k} w_k · Tr(DeltaF_ibc[s,k] · Dm[s,k]),
-  // and the phonon drivers contract F_PQ / ΔF_PQ against δX for the ΔΔF_ibc
-  // curvature terms.
-  if (mpi->comm.root() && (DeltaF_ibc_skij.size() > 0 ||
-                           F_PQ_skij.size() > 0 ||
-                           DeltaF_PQ_skij.size() > 0)) {
-    h5::file file(output + ".mbpt.h5", 'a');
-    h5::group grp(file);
-    auto lr_grp = grp.has_subgroup("linear_response") ?
-                  grp.open_group("linear_response") :
-                  grp.create_group("linear_response");
-    if (DeltaF_ibc_skij.size() > 0) {
-      nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
-      app_log(2, "  - DeltaF_ibc_skij written to \"linear_response/\"");
+    // Refill the shm ΔH0 window from this perturbation's slice: root writes,
+    // then broadcast_to_nodes publishes it (its leading node_sync makes root's
+    // write visible before the internode broadcast, and its trailing one makes
+    // the result visible to every rank on every node). Mode 0 is already in the
+    // window from the allocation above. Costs one 0.1 GB broadcast, no memory.
+    if (m > 0) {
+      auto& sDeltaH0 = lr_state.sDeltaH0_skij.value();
+      if (mpi->comm.root())
+        sDeltaH0.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
+      sDeltaH0.broadcast_to_nodes(0);
+      mpi->comm.barrier();
     }
-    if (F_PQ_skij.size() > 0) {
-      nda::h5_write(lr_grp, "F_PQ_skij", F_PQ_skij, false);
-      app_log(2, "  - F_PQ_skij written to \"linear_response/\"");
+
+    // K_pert evaluations actually made for THIS perturbation. With an outer
+    // tolerance it is not two_step_order, and it is the cost figure a
+    // downstream reader needs.
+    int n_pert_applied = 0;
+
+    auto [niter, Delta_mu] = driver.lr_solve_one(
+        lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
+        lr_state.sDeltaF_skij.value(), pDeltaSigma,
+        sG_tskij, lr_state.sDeltaH0_skij.value(), thc, p,
+        pDeltaSigma2, pDeltaVcorr,
+        output_aux_fock ? &DeltaF_ibc_skij : nullptr,
+        output_aux_fock ? &F_PQ_skij : nullptr,
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr,
+        &n_pert_applied);
+    niter_m(m) = niter;
+    Delta_mu_m(m) = Delta_mu;
+    lr_state.Delta_mu.emplace(Delta_mu);
+    mpi->comm.barrier();
+
+    utils::memlog(fmt::format("run_lr_calc: after lr_solve_one (mode {}/{})", m + 1, nmodes));
+
+    // Write results. A single-perturbation run keeps writing into
+    // "linear_response/" so its checkpoint layout is unchanged.
+    chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
+                   lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
+                   lr_state.sDeltaF_skij.value(), pDeltaSigma,
+                   Delta_mu, niter,
+                   dump_hartree, dump_exchange, include_gw_sigma,
+                   pDeltaSigma2, pDeltaVcorr,
+                   nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
+                   save_DeltaG, nbnd_save,
+                   lr_two_step, two_step_sc_method, two_step_pert_method,
+                   static_cast<int>(two_step_order),
+                   outer_active, two_step_outer_alg, two_step_outer_tol,
+                   n_pert_applied);
+
+    // Persist the IBC aux→primary correction and the aux-basis Fock matrices
+    // alongside the LR results. Hellmann-Feynman-style δX gradient consumers
+    // read DeltaF_ibc as
+    //   dE/dx = spin · Σ_{s,k} w_k · Tr(DeltaF_ibc[s,k] · Dm[s,k]),
+    // and the phonon drivers contract F_PQ / ΔF_PQ against δX for the ΔΔF_ibc
+    // curvature terms. All three are per-perturbation, so they go into the same
+    // group as the rest of this perturbation's output. (DeltaF_ibc and F_PQ
+    // require IBC, which a batched call rejects, so in practice only ΔF_PQ ever
+    // repeats.)
+    if (mpi->comm.root() && (DeltaF_ibc_skij.size() > 0 ||
+                             F_PQ_skij.size() > 0 ||
+                             DeltaF_PQ_skij.size() > 0)) {
+      h5::file file(output + ".mbpt.h5", 'a');
+      h5::group grp(file);
+      auto lr_grp = grp.has_subgroup("linear_response") ?
+                    grp.open_group("linear_response") :
+                    grp.create_group("linear_response");
+      std::string where = "linear_response/";
+      if (nmodes > 1) {
+        std::string mg = "mode" + std::to_string(m + 1);
+        lr_grp = lr_grp.has_subgroup(mg) ? lr_grp.open_group(mg) : lr_grp.create_group(mg);
+        where += mg + "/";
+      }
+      if (DeltaF_ibc_skij.size() > 0) {
+        nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
+        app_log(2, "  - DeltaF_ibc_skij written to \"{}\"", where);
+      }
+      if (F_PQ_skij.size() > 0) {
+        nda::h5_write(lr_grp, "F_PQ_skij", F_PQ_skij, false);
+        app_log(2, "  - F_PQ_skij written to \"{}\"", where);
+      }
+      if (DeltaF_PQ_skij.size() > 0) {
+        nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
+        app_log(2, "  - DeltaF_PQ_skij written to \"{}\"", where);
+      }
     }
-    if (DeltaF_PQ_skij.size() > 0) {
-      nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
-      app_log(2, "  - DeltaF_PQ_skij written to \"linear_response/\"");
-    }
+    mpi->comm.barrier();
   }
-  mpi->comm.barrier();
-
   utils::memlog("run_lr_calc: exit (before RAII)");
-  return std::make_tuple(niter, Delta_mu);
+  return std::make_tuple(std::move(niter_m), std::move(Delta_mu_m));
 }
 
 
 // run_lr_calc instantiations (THC only — lr_hf and lr_gw require THC).
 // Cholesky LR Dyson (one-shot, no HF/GW) was never used externally,
 // so Cholesky ERI combinations are intentionally not instantiated here.
-template std::tuple<int, double> run_lr_calc(
+template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<double, 1> const&,
-    std::optional<nda::array<ComplexType, 4>> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
     bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
@@ -2245,10 +2417,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
 
-  // Load W_c(τ) from thc_screened_interaction.h5 in (t, q, P, Q), the layout the FT wants
+  // Load W_c from thc_screened_interaction.h5 and take it in ω, the axis the LR
+  // W Dyson works on.
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
-      *mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_wqPQ, eps_inv_head, div_treatment] = lr_load_W_omega(
+      *mpi, thc, ft, input_file, input_grp, input_iter);
   (void)div_treatment;
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
@@ -2270,10 +2443,9 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
-  // Sole consumer of W_c here, so release it inside the FT — before ΔW's own
-  // staging buffer and ΔΠ(iω) go live in solve_lr_dyson_W below.
-  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc, /*reset_input=*/true);
-  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
+  // W_c has no correlation-only consumer here, so += Z right away, in place.
+  lr_scr.lr_Wc_to_Wfull(dW_wqPQ, thc);
+  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_wqPQ, thc);
   // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
 

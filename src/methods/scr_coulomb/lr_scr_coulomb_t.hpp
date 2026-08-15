@@ -68,30 +68,45 @@ namespace solvers {
     ~lr_scr_coulomb_t() {}
 
     /**
-     * Compute W_full(iω) = W_c(iω) + V from W_c(τ).
+     * Processor grid and block size W(iω) is carried on for the LR path.
      *
-     * Input: dW_c_tqPQ in q-local (τ-dist) distribution.
-     * Output: dW_full_wqPQ in PQ-local distribution (ready for lr_dyson_W_in_place).
+     * ft_buffer_dist keeps ω local and distributes over q, then P and Q;
+     * lr_W_proc_grid distributes over ω and q, then P and Q. When the FT buffer
+     * already has P and Q local it is reused, so the τ→ω transform lands
+     * directly on the output grid and the redundant redistribute disappears.
      *
-     * @param dW_c_tqPQ   - [IN] W_c(τ) in τ-dist
-     * @param thc         - [IN] THC-ERI handler
-     * @param reset_input - [IN] release dW_c_tqPQ once the FT has consumed it.
-     *                      True whenever this is W_c's only consumer: the release
-     *                      happens inside the FT, before the ω-side output is
-     *                      allocated, so it lowers the peak in a way a caller-side
-     *                      reset after the call cannot. Pass false only to keep the
-     *                      array for a second consumer (the driver hands the same
-     *                      (t,q) copy on to lr_precompute_W_tRPQ).
-     *                      Deliberately has no default — releasing a caller's array
-     *                      is not something a call site should inherit silently.
-     * @return W_full(iω) = W_c(iω) + V in PQ-local distribution
+     * Static, and not just an implementation detail of one producer, because
+     * every W(iω) reaching lr_dyson_W_in_place must be on the same grid and there
+     * are three independent producers: the scGW W Dyson on the recompute path
+     * (asked to emit W here instead of on Π's τ grid), the τ→ω transform in
+     * lr_load_W_omega on the from-file path, and run_lr_gw_W. A fourth reader,
+     * lr_driver::print_distribution_summary, reports it.
      */
-    template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
-    auto compute_W_full_omega(
-        memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
-        THC_ERI auto& thc,
-        bool reset_input)
-    -> memory::darray_t<local_Array_t, mpi3::communicator>;
+    static auto W_omega_dist(long nproc, long nq, long nw_half, long NP)
+    -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
+      auto [b_pgrid, b_bsize] =
+          scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nw_half, nq, NP, NP});
+      if (b_pgrid[2] == 1 && b_pgrid[3] == 1)
+        return std::make_tuple(b_pgrid, b_bsize);
+      return utils::lr_W_proc_grid(nproc, nq, nw_half, NP);
+    }
+
+    /**
+     * Add the bare interaction: W_c(iω) → W_full(iω) = W_c(iω) + Z(q) in place,
+     * then build the Q≠Γ (q+Q) Dyson operand from the result.
+     *
+     * Must run *after* every consumer of the correlation-only W_c (ΔΣ = −ΔG⊙W_c
+     * reads it through dW_tRPQ): Z is added in place, so adding it first would
+     * corrupt them.
+     *
+     * Concrete (not templated on the array type) for the same reason as
+     * _build_W_full_qpQ: it touches the concrete member cache directly.
+     *
+     * @param dW_c_wqPQ - [IN/OUT] W_c(iω) on entry, W_full(iω) on exit. Must be
+     *                    on W_omega_dist.
+     * @param thc       - [IN] THC-ERI handler (supplies Z(q))
+     */
+    void lr_Wc_to_Wfull(dArr4D_concrete_t& dW_c_wqPQ, THC_ERI auto& thc);
 
     /**
      * LR W Dyson: ΔΠ(τ) → ΔW_c(τ), in-place.
@@ -121,7 +136,7 @@ namespace solvers {
      *
      * Stateless: both W operands are passed in (not read from a member), so the
      * function is a pure function of its arguments. solve_lr_dyson_W supplies the
-     * (q+Q) operand from _dW_full_qpQ_wqPQ (built once in compute_W_full_omega);
+     * (q+Q) operand from _dW_full_qpQ_wqPQ (built once in lr_Wc_to_Wfull);
      * for Q=Γ it passes dW_full_wqPQ for both, since W_full(q+Q) = W_full(q).
      *
      * @param dDeltaPi_wqPQ    - [IN/OUT] ΔΠ on input, ΔW_c on output
@@ -154,8 +169,8 @@ namespace solvers {
    * Embedded (with deeper indent) in lr_driver's final hierarchical report.
    * The flat FT component clocks (redistribute / gemm / alloc / leak check)
    * come from the member scr_coulomb_fourier_t's internal timers; they only cover
-   * solve_lr_dyson_W calls (compute_W_full_omega uses a separate local
-   * scr_coulomb_fourier_t so the one-time setup FT does not pollute them).
+   * solve_lr_dyson_W calls (the one-time setup FTs use their callers' own local
+   * scr_coulomb_fourier_t, so they do not pollute them).
    */
   inline void print_subclocks(int level, const std::string& indent) {
     auto& ftT = _scr_fourier.timer();

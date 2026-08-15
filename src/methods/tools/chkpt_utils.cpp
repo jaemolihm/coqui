@@ -665,6 +665,9 @@ void dump_lr(communicator_t& comm,
              bool include_gw_sigma,
              Sigma_t const* sDeltaSigma2_tskij,
              F_t const* sDeltaVcorr_skij,
+             std::optional<long> imode,
+             bool save_DeltaG,
+             std::optional<long> nbnd_save,
              bool lr_two_step,
              std::string const& two_step_sc_method,
              std::string const& two_step_pert_method,
@@ -681,11 +684,34 @@ void dump_lr(communicator_t& comm,
     auto lr_grp = grp.has_subgroup("linear_response") ?
                   grp.open_group("linear_response") :
                   grp.create_group("linear_response");
+    // A multi-perturbation run gives each one its own subgroup; a single one
+    // keeps writing straight into "linear_response/", as before.
+    if (imode) {
+      std::string m = "mode" + std::to_string(*imode);
+      lr_grp = lr_grp.has_subgroup(m) ? lr_grp.open_group(m) : lr_grp.create_group(m);
+    }
+
+    // Write an imaginary-time array, trimmed to the leading nbnd_save x nbnd_save
+    // band block when asked. A trimmed dataset is the protected-band block of the
+    // quantity, not the full-basis object, so it is stamped with the band count
+    // it was cut to; untrimmed datasets carry no attribute.
+    auto write_tskij = [&](std::string const& name, auto const& A) {
+      if (nbnd_save) {
+        long nb = A.shape(3);
+        utils::check(*nbnd_save >= 0 and *nbnd_save <= nb,
+                     "dump_lr: nbnd_save must be in [0, {}], got {}", nb, *nbnd_save);
+        auto rng = nda::range(0, *nbnd_save);
+        nda::h5_write(lr_grp, name,
+                      nda::make_regular(A(nda::ellipsis{}, rng, rng)), false);
+        h5::h5_write_attribute(lr_grp.open_dataset(name), "nbnd_save", *nbnd_save);
+      } else {
+        nda::h5_write(lr_grp, name, A, false);
+      }
+    };
 
     nda::h5_write(lr_grp, "q_vec", q_vec, false);
-    auto DeltaG_loc = sDeltaG_tskij.local();
     auto DeltaDm_loc = sDeltaDm_skij.local();
-    nda::h5_write(lr_grp, "DeltaG_tskij", DeltaG_loc, false);
+    if (save_DeltaG) write_tskij("DeltaG_tskij", sDeltaG_tskij.local());
     nda::h5_write(lr_grp, "DeltaDm_skij", DeltaDm_loc, false);
     h5::h5_write(lr_grp, "Delta_mu", Delta_mu);
     h5::h5_write(lr_grp, "niter", niter);
@@ -701,8 +727,7 @@ void dump_lr(communicator_t& comm,
     if (include_gw_sigma) {
       utils::check(sDeltaSigma_tskij != nullptr,
                    "dump_lr: include_gw_sigma=true but sDeltaSigma_tskij is null.");
-      auto DeltaSigma_loc = sDeltaSigma_tskij->local();
-      nda::h5_write(lr_grp, "DeltaSigma_tskij", DeltaSigma_loc, false);
+      write_tskij("DeltaSigma_tskij", sDeltaSigma_tskij->local());
     }
     // Split-term one-shot G0W0 output (opt-in): DeltaSigma_tskij above holds the
     // TOTAL correlation ΔΣ = dG0·W_c0 + G0·dW0 (same as the fused output); this
@@ -712,8 +737,7 @@ void dump_lr(communicator_t& comm,
     // (fused) output format is unchanged.
     if (sDeltaSigma2_tskij != nullptr) {
       h5::h5_write(lr_grp, "split_sigma_terms", 1);
-      auto DeltaSigma_GdW_loc = sDeltaSigma2_tskij->local();
-      nda::h5_write(lr_grp, "DeltaSigma_GdW_tskij", DeltaSigma_GdW_loc, false);
+      write_tskij("DeltaSigma_GdW_tskij", sDeltaSigma2_tskij->local());
     }
     // Static ΔV_QPGW (LR-qpGW): the frequency-independent correlation potential
     // response that entered the Dyson RHS in place of the dynamic ΔΣ. Written
@@ -745,7 +769,9 @@ void dump_lr(communicator_t& comm,
       }
     }
 
-    app_log(2, "LR results written to \"linear_response/\" in {}", filename);
+    app_log(2, "LR results written to \"{}\" in {}",
+            imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
+            filename);
     app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
   }
   comm.barrier();
@@ -844,6 +870,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       double, int, bool, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
+                      std::optional<long>, bool, std::optional<long>,
                       bool, std::string const&, std::string const&, int,
                       bool, std::string const&, double, int);
 

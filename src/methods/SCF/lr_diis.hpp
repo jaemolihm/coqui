@@ -105,6 +105,22 @@ public:
         _B(0, 0) {}
 
   /**
+   * @brief Empty the subspace, keeping every history buffer allocated.
+   *
+   * For restarting the accelerator between independent solves — successive
+   * perturbations of a batched run — without touching the storage. The history
+   * is `2·S·(|ΔF| + |ΔΣ|)` complex striped over the job (hundreds of GB at
+   * production sizes), so freeing and regrowing it per solve is exactly what
+   * must not happen; the ring below keeps the slots and only forgets them.
+   * `_B` is (S+1)² and is cheap to rebuild.
+   */
+  void reset() {
+    _n = 0;
+    _head = 0;
+    _B = nda::matrix<ComplexType>(0, 0);
+  }
+
+  /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
    *
    * SPMD: called on every rank of `comm`. Each rank owns the contiguous element
@@ -166,35 +182,30 @@ public:
       }
     };
 
-    // Residual + trial-vector slices (this rank's portion).
-    Vec1D xF{F_loc};
-    Vec1D resF{F_loc - F_prev_loc};
-    Vec1D xS, resS;
+    // Store this rank's slices into the newest ring slot, then update B (one
+    // all_reduce over comm). Assigning into the slot keeps the buffers the
+    // previous solve/iteration allocated: past the first max_subsp_size+1
+    // iterations this loop performs no allocation at all.
+    const size_t s = push_slot();
+    _xF[s]   = F_loc;
+    _resF[s] = F_loc - F_prev_loc;
     if (has_sigma) {
       auto S_loc = nda::reshape(DeltaSigma, std::array<long, 1>{nS})(nda::range(sS0, sS1));
-      xS   = Vec1D{S_loc};
-      resS = Vec1D{S_loc - DeltaSigma_prev};
-    }
-
-    // Store this rank's slices, then update B (one all_reduce over comm).
-    _xF.push_back(std::move(xF));
-    _resF.push_back(std::move(resF));
-    if (has_sigma) {
-      _xS.push_back(std::move(xS));
-      _resS.push_back(std::move(resS));
+      _xS[s]   = S_loc;
+      _resS[s] = S_loc - DeltaSigma_prev;
     }
 
     // Warmup gate, evaluated on the subspace INCLUDING the step just stored.
     const bool warmup =
-        (iter <= static_cast<int>(_warmup_iter) + 1 || _xF.size() < _min_subsp);
+        (iter <= static_cast<int>(_warmup_iter) + 1 || _n < _min_subsp);
 
     update_B(comm, has_sigma);
 
-    if (_xF.size() > _max_subsp_size) purge_oldest();
+    if (_n > _max_subsp_size) purge_oldest();
 
     if (warmup) {
       app_log(3, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
-              iter, _mixing, _xF.size());
+              iter, _mixing, _n);
       write_damping();
       return;
     }
@@ -222,7 +233,7 @@ public:
       make_linear_comb_into(S_loc, _xS, C);
     }
 
-    app_log(3, "    DIIS: extrapolation with subspace size {}", _xF.size());
+    app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
   }
 
 private:
@@ -231,18 +242,50 @@ private:
   double _mixing;
   size_t _min_subsp;
   // History stores only THIS rank's contiguous element-slice of each flattened
-  // trial / residual vector (striped across comm), not the full arrays.
+  // trial / residual vector (striped across comm), not the full arrays. The four
+  // vectors are a fixed-capacity ring: `_n` entries live, chronological entry i
+  // in slot `(_head + i) % capacity`. Eviction moves `_head`, so no buffer is
+  // ever destroyed and no slice is ever reallocated once the ring has filled.
   std::vector<Vec1D> _xF, _resF;   // ΔF trial / residual slices
   std::vector<Vec1D> _xS, _resS;   // ΔΣ trial / residual slices
+  size_t _n = 0;                   // live entries
+  size_t _head = 0;                // ring origin
   nda::matrix<ComplexType> _B;
 
+  /// Storage slot holding chronological entry `i` (0 = oldest).
+  size_t slot(size_t i) const { return (_head + i) % _xF.size(); }
+
+  /**
+   * @brief Claim the slot for the newest entry, growing the ring if needed.
+   *
+   * The caller assigns into the four vectors at the returned slot; nda's
+   * assignment resizes only when the shape differs, so the first solve sizes
+   * each slice and every later one reuses the same allocation.
+   */
+  size_t push_slot() {
+    if (_n == _xF.size()) {
+      // Growth happens only before the first eviction, i.e. while the ring
+      // origin is still 0 — so appending keeps the entries in order. Once the
+      // subspace has overflowed once, capacity is max_subsp_size+1 forever.
+      utils::check(_head == 0, "lr_diis: ring growth with _head = {} != 0", _head);
+      _xF.emplace_back();
+      _resF.emplace_back();
+      _xS.emplace_back();
+      _resS.emplace_back();
+    }
+    size_t s = slot(_n);
+    ++_n;
+    return s;
+  }
+
   /// Local (this rank's slice) contribution to the combined overlap
-  /// <res_F_i, res_F_j> + <res_Sigma_i, res_Sigma_j>.
+  /// <res_F_i, res_F_j> + <res_Sigma_i, res_Sigma_j>, for chronological i, j.
   ComplexType local_overlap(size_t i, size_t j, bool has_sigma) const {
+    const size_t si = slot(i), sj = slot(j);
     ComplexType result = 0.0;
-    if (_resF[i].size() > 0) result += nda::blas::dotc(_resF[i], _resF[j]);
-    if (has_sigma && !_resS.empty() && _resS[i].size() > 0) {
-      result += nda::blas::dotc(_resS[i], _resS[j]);
+    if (_resF[si].size() > 0) result += nda::blas::dotc(_resF[si], _resF[sj]);
+    if (has_sigma && _resS[si].size() > 0) {
+      result += nda::blas::dotc(_resS[si], _resS[sj]);
     }
     return result;
   }
@@ -255,7 +298,7 @@ private:
    */
   template<typename Comm>
   void update_B(Comm& comm, bool has_sigma) {
-    const size_t n = _xF.size();
+    const size_t n = _n;
     nda::matrix<ComplexType> Bnew(n, n);
     Bnew() = 0;
 
@@ -280,7 +323,11 @@ private:
   }
 
   /**
-   * @brief Remove oldest vector from subspace and shrink B-matrix
+   * @brief Forget the oldest vector and shrink the B-matrix.
+   *
+   * The history buffers are untouched: advancing the ring origin frees the slot
+   * for the next push to overwrite. B stays indexed chronologically, so it does
+   * shift — it is (S+1)² and costs nothing.
    */
   void purge_oldest() {
     size_t n = _B.shape()[0];
@@ -292,12 +339,8 @@ private:
     }
     _B = Bnew;
 
-    _xF.erase(_xF.begin());
-    _resF.erase(_resF.begin());
-    if (!_xS.empty()) {
-      _xS.erase(_xS.begin());
-      _resS.erase(_resS.begin());
-    }
+    _head = (_head + 1) % _xF.size();
+    --_n;
   }
 
   /**
@@ -375,14 +418,14 @@ private:
    * @brief Write Σ_i C(i) * hist[i] into `out` (this rank's slice).
    *
    * `out` is a 1D slice view of the output array; `hist` are the matching
-   * trial-vector slices.
+   * trial-vector slices, walked in chronological order to match C.
    */
   template<typename OutView>
   void make_linear_comb_into(OutView&& out, const std::vector<Vec1D>& hist,
                              const nda::array<double, 1>& C) const {
     out() = ComplexType{0};
-    for (size_t i = 0; i < hist.size(); ++i) {
-      out += C(i) * hist[i];
+    for (size_t i = 0; i < _n; ++i) {
+      out += C(i) * hist[slot(i)];
     }
   }
 };

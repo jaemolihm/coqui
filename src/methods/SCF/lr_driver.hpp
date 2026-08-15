@@ -160,6 +160,93 @@ struct lr_diis_hist_t {
 };
 
 /**
+ * Everything an LR solve needs that does not depend on the perturbation ΔH0:
+ * which terms are active, how the SCF iterates, and the optional inputs shared
+ * by every perturbation at this q.
+ *
+ * Caller-owned: lr_setup and lr_solve_one take it by reference and keep no copy,
+ * so the struct and every pointer in it must outlive the last lr_solve_one call.
+ * The same instance must be handed to both — lr_setup allocates against it.
+ *
+ * The derived predicates below are deliberately functions rather than stored
+ * flags — one source of truth, and no way for a cached copy to drift from the
+ * field it was computed from.
+ */
+struct lr_params {
+  using sArray_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+
+  // --- Active terms ---
+  bool include_hartree = false;   ///< ΔJ in the SCF loop
+  bool include_exchange = false;  ///< ΔK in the SCF loop
+  lr_gw_update_mode gw_mode = lr_gw_update_mode::none;
+  /// LR-DFT: add the semilocal xc kernel to the direct channel, i.e. use
+  /// (V + Vxc)(q) in ΔJ. Requires include_hartree and a THC carrying Vxc;
+  /// rejected together with include_exchange.
+  bool include_xc = false;
+
+  // --- SCF control ---
+  int max_iter = 1;               ///< 1 = one-shot
+  double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
+  bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
+  lr_iter_params iter_params{};   ///< damping / DIIS
+
+  // --- Split-kernel (two-step) schedule ---
+  /// Kernel components resummed self-consistently by the inner SCF loop. Left
+  /// empty it is filled from the active terms above, i.e. the single-kernel path.
+  lr_kernel_spec sc_kernel{};
+  /// Kernel components applied perturbatively, K_pert = kernel(total) \ sc_kernel.
+  /// Empty for a plain single-kernel run.
+  lr_kernel_spec pert_kernel{};
+  /// Truncation order n of the K_pert expansion. 0 (or an empty pert_kernel)
+  /// runs the sc kernel alone. Costs n K_pert evaluations, each on a converged
+  /// inner K_sc solve; max_iter counts total inner iterations across all n+1
+  /// stages. With outer_accel active this is an iteration cap, not an order.
+  int pert_order = 0;
+  /// Acceleration of the outer (perturbative-source) iteration. Default-valued
+  /// leaves the plain Neumann series untouched. Requires a split-kernel run.
+  lr_outer_accel_params outer_accel{};
+
+  /// Split-kernel run: the perturbative channel is a distinct kernel evaluated
+  /// outside the SCF resummation. Single source of truth for the extra buffers,
+  /// the outer loop and the checkpoint provenance fields.
+  bool two_step() const { return !pert_kernel.empty() && pert_order > 0; }
+
+  // --- Screened interaction ---
+  /// Inverse dielectric head on the τ axis; required when gw_mode != none.
+  const nda::array<ComplexType, 1>* eps_inv_head = nullptr;
+  bool div_corr = true;                     ///< Madelung / head divergence corrections
+  std::string div_treatment = "gygi";
+
+  // --- Optional inputs ---
+  const sArray_4D_t* sDeltaX_left = nullptr;   ///< δ^q X, with sDeltaX_right: IBC
+  const sArray_4D_t* sDeltaX_right = nullptr;  ///< δ^{-q} X
+  const nda::array<ComplexType, 4>* Dm_ab = nullptr;      ///< unperturbed Dm, for δX/δV
+  const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr;  ///< δV^q in the aux basis
+  /// Non-null puts the driver in LR-qpGW static-map mode.
+  const lr_qp_static_params* qp_static = nullptr;
+
+  // --- Output selection ---
+  /// Store the two ΔΣ terms separately instead of fusing them (one-shot G0W0).
+  bool split_sigma_terms = false;
+  /// Gather the unperturbed V_HF in the aux basis during the IBC build.
+  bool keep_F_PQ = false;
+
+  bool need_hf() const { return include_hartree || include_exchange; }
+  bool include_gw_sigma() const { return gw_mode != lr_gw_update_mode::none; }
+  bool gw_full() const { return gw_mode == lr_gw_update_mode::full; }
+  /// LR-qpGW: the dynamic ΔΣ(iω) is statified into a ΔV_QPGW(k) that enters the
+  /// Dyson RHS in its place, and is the quantity mixed and tracked.
+  bool qp_mode() const { return qp_static != nullptr; }
+  /// Which quantity is mixed/tracked alongside ΔF: the static ΔV_QPGW in qp
+  /// mode, the dynamic ΔΣ(iω) otherwise.
+  bool has_Vcorr() const { return qp_mode(); }
+  bool has_Sigma() const { return include_gw_sigma() && !qp_mode(); }
+  bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
+  bool use_diis() const { return iter_params.alg == "DIIS"; }
+  double mixing() const { return iter_params.mixing; }
+};
+
+/**
  * @class lr_driver
  * @brief Driver for self-consistent Linear Response calculations
  *
@@ -203,25 +290,14 @@ public:
    * @param sG_tskij           - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
    * @param sDeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb)
    * @param thc                - [INPUT] THC ERI handler
-   * @param sc_kernel          - [INPUT] Kernel components resummed self-consistently
-   * @param pert_kernel        - [INPUT] Kernel components applied perturbatively
-   *                              (K_pert = kernel(total) \ kernel(sc)). Empty for
-   *                              a plain single-kernel run.
-   * @param pert_order         - [INPUT] Truncation order n of the K_pert expansion.
-   *                              0 (or an empty pert_kernel) runs the sc kernel
-   *                              alone, i.e. exactly the single-kernel path.
-   *                              Costs n K_pert evaluations, each on a converged
-   *                              inner K_sc solve; max_iter counts total inner
-   *                              iterations across all n+1 stages.
-   * @param dW_tqPQ_in         - [INPUT] Screened interaction W_c(τ) in (t,q,P,Q)
-   *                              (nullable, required if a Σ is active). Consumed:
-   *                              it becomes dW_tRPQ in place, so the caller must not
-   *                              use it after the call.
-   * @param eps_inv_head       - [INPUT] Inverse dielectric head (nullable, required if a Σ is active)
-   * @param max_iter           - [INPUT] Maximum iterations (1 = one-shot)
-   * @param tol                - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
-   * @param fix_density        - [INPUT] If true, compute Δμ to enforce ΔN=0
-   * @param iter_params        - [INPUT] Iteration algorithm parameters (damping/DIIS)
+   * @param dW_wqPQ_in         - [INPUT] Screened interaction W_c(iω) as (w,q,P,Q)
+   *                              on solvers::lr_scr_coulomb_t::W_omega_dist (nullable,
+   *                              required if gw_mode != none). Consumed: it becomes
+   *                              dW_tRPQ / W_full(iω) in place, so the caller must
+   *                              not use it after the call.
+   * @param p                  - [INPUT] Everything that does not depend on ΔH0,
+   *                              including the split-kernel schedule (sc_kernel /
+   *                              pert_kernel / pert_order / outer_accel)
    * @param DeltaF_ibc_out     - [OUTPUT] If non-null AND DeltaX was provided, the
    *                              precomputed IBC aux→primary correction
    *                              δX†·F_PQ·X + X†·F_PQ·δX (ns, nk_ibz, nb, nb)
@@ -235,18 +311,13 @@ public:
    *                              is gathered here via one extra lr_hf::evaluate
    *                              call. Consumed, with F_PQ_out, by the Python
    *                              phonon post-processors (ΔΔF_ibc T1/T3 terms).
-   * @param include_xc         - [INPUT] LR-DFT: add the semilocal xc kernel to the
-   *                              direct channel, i.e. use (V + Vxc)(q) in ΔJ.
-   *                              Requires include_hartree and a THC carrying Vxc;
-   *                              rejected together with include_exchange.
-   * @param outer_accel        - [INPUT] Acceleration of the outer (perturbative
-   *                              source) iteration; null or default-valued
-   *                              leaves the plain Neumann series untouched.
-   *                              Requires a split-kernel run.
    * @param n_pert_applied_out - [OUTPUT] If non-null, the number of K_pert
    *                              evaluations actually made. With an outer
-   *                              tolerance this is not pert_order.
+   *                              tolerance this is not p.pert_order.
    * @return Tuple of (number of iterations, final Δμ)
+   *
+   * Equivalent to lr_setup(...) followed by one lr_solve_one(...); use those two
+   * directly to amortize the setup over several perturbations at the same q.
    */
   template<THC_ERI THC_t, typename dW_t>
   std::tuple<int, double> run_lr(
@@ -257,24 +328,74 @@ public:
       const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       THC_t& thc,
-      lr_kernel_spec sc_kernel, lr_kernel_spec pert_kernel, int pert_order,
-      dW_t* dW_tqPQ_in, const nda::array<ComplexType, 1>* eps_inv_head,
-      int max_iter, double tol, bool fix_density,
-      const lr_iter_params& iter_params,
-      const sArray_t<Array_view_4D_t>* sDeltaX_left = nullptr,
-      const sArray_t<Array_view_4D_t>* sDeltaX_right = nullptr,
-      const nda::array<ComplexType, 4>* Dm_ab = nullptr,
-      bool div_corr = true,
-      std::string div_treatment = "gygi",
-      const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
+      dW_t* dW_wqPQ_in,
+      lr_params p,
       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
-      const lr_qp_static_params* qp_static = nullptr,
       sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
       nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      bool include_xc = false,
-      const lr_outer_accel_params* outer_accel = nullptr,
+      int* n_pert_applied_out = nullptr);
+
+  /**
+   * @brief Build everything an LR SCF solve needs that does not depend on ΔH0.
+   *
+   * The solvers, the cached W_full(iω) / dW_tRPQ / G^R / G(iω) operands, the
+   * DIIS history and the previous-iterate buffers are all functions of the
+   * unperturbed state and the q-vector alone, so several perturbations at the
+   * same q share one setup. Nothing here is seeded from ΔH0 — the perturbation
+   * enters only through the Dyson RHS — which is what makes repeated lr_solve_one
+   * calls independent of each other.
+   *
+   * The solvers and buffers built here are shaped by `p` — which solvers exist
+   * (gw_mode, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
+   * capacity — so every lr_solve_one must be handed the same `p`. `dW_wqPQ_in` is
+   * consumed exactly as run_lr documents.
+   *
+   * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
+   * lr_rpa_pi / lr_scr_coulomb_t solvers and their kpq maps are all latched to
+   * the constructor's q, and none of them re-checks it; a batch spanning several
+   * q-points would silently reuse the wrong maps.
+   */
+  template<THC_ERI THC_t, typename dW_t>
+  void lr_setup(
+      const sArray_t<Array_view_5D_t>& sG_tskij,
+      THC_t& thc,
+      dW_t* dW_wqPQ_in,
+      const lr_params& p);
+
+  /**
+   * @brief Run the LR SCF loop for one perturbation. Requires a prior lr_setup.
+   *
+   * `p` must be the one lr_setup was given: it selects which solvers and buffers
+   * this call reads, and those were allocated by lr_setup.
+   *
+   * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW, the previous iterates and
+   * the DIIS subspace) on entry, so the result depends only on ΔH0 and not on
+   * whichever perturbation ran before it. The SCF timers are reset per call as
+   * well; the LR_DRIVER_SETUP_* clocks are not, so the one-time cost stays
+   * visible and is never double-counted.
+   *
+   * The output arrays may be the same ones on every call — they are fully
+   * overwritten.
+   *
+   * @return Tuple of (number of iterations, final Δμ)
+   */
+  template<THC_ERI THC_t>
+  std::tuple<int, double> lr_solve_one(
+      sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+      sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+      sArray_t<Array_view_4D_t>& sDeltaF_skij,
+      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
+      const sArray_t<Array_view_5D_t>& sG_tskij,
+      const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+      THC_t& thc,
+      const lr_params& p,
+      sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
+      sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij = nullptr,
+      nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
+      nda::array<ComplexType, 4>* F_PQ_out = nullptr,
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
       int* n_pert_applied_out = nullptr);
 
   /**
@@ -337,13 +458,100 @@ public:
   bool is_q_gamma() const { return _lr_dyson.is_q_gamma(); }
 
 private:
+  // Concrete distributed-array types of the cached aux-basis operands. The LR
+  // path is instantiated for THC + host mpi3 only (see lr_gw / lr_scr_coulomb_t),
+  // so naming them concretely here costs no generality.
+  using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+  using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
+
+  /**
+   * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
+   * iteration: W_full(iω) for the ΔW Dyson (gw_full only) and W_c(t,R,P,Q) for
+   * ΔΣ = −ΔG⊙W_c. Consumes dW_wqPQ_in. See the definition for the ordering
+   * constraint between them.
+   */
+  template<THC_ERI THC_t, typename dW_t>
+  void lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
+                  solvers::lr_scr_coulomb_t* lr_scr,
+                  std::optional<dW_t>& opt_dW_full_wqPQ,
+                  std::optional<dW_t>& opt_dW_tRPQ);
+
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
 
   lr_dyson _lr_dyson;
+
+  // --- Solvers, built once by lr_setup and reused by every lr_solve_one. Each
+  //     latches the perturbation q and (for lr_gw) a workspace keyed on its
+  //     (term1, term2) usage, which is why the split-kernel path needs two.
+  //     Declared before the arrays below: darray_t stores a raw communicator_t*,
+  //     so communicator-owning objects must outlive the arrays built on them.
   std::unique_ptr<solvers::lr_hf> _lr_hf;
+  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of K_sc (fused, or term 1 when split)
+  std::unique_ptr<solvers::lr_gw> _lr_gw_pert;   // ΔΣ of K_pert, split-kernel path only
+  std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
+  std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
+  std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
   std::unique_ptr<lr_diis> _lr_diis;
+  /// Accelerator of the outer (perturbative-source) iteration. Its own subspace,
+  /// history and warmup: the inner one restarts at every stage boundary while
+  /// this one is keyed on the outer step index, so the two share nothing.
+  std::unique_ptr<lr_diis> _outer_diis;
+
+  // --- Cached operands (constant across perturbations and SCF iterations) ---
+  // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
+  // *address* of this array, so a per-call local would silently invalidate it.
+  std::optional<sArray_t<Array_view_5D_t>> _sG_wskij;
+  std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), ω-side
+  std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist
+  std::optional<dArr_5D_t> _opt_dG_tsRPQ, _opt_dG_mtau_tsRPQ;  // G^R(τ)/G^R(β−τ)
+  std::optional<lr_ibc_DeltaX> _opt_ibc;
+
+  /**
+   * One elementwise-mixed quantity (ΔF, ΔΣ or ΔV_QPGW), striped over the global
+   * comm: this rank owns [i0, i1) of the flattened array and keeps only that
+   * slice of the previous iterate. The whole job then stores each previous
+   * iterate once instead of once per node.
+   */
+  struct lr_iterate_history {
+    long n_flat = 0;                  ///< elements of the flattened array (0 = inactive)
+    long i0 = 0, i1 = 0;              ///< this rank's slice
+    nda::array<ComplexType, 1> prev;  ///< previous iterate over [i0, i1)
+
+    void alloc(utils::part_map const& pmap, long n) {
+      n_flat = n;
+      std::tie(i0, i1) = pmap.my_slice(n);
+      prev = nda::array<ComplexType, 1>(i1 - i0);
+    }
+    void zero() { prev() = ComplexType{0}; }
+    /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
+    auto slice(auto&& A) const {
+      return nda::reshape(A, std::array<long, 1>{n_flat})(nda::range(i0, i1));
+    }
+  };
+
+  // --- Per-perturbation buffers: allocated once, zeroed at the top of each
+  //     lr_solve_one so mode m's solve cannot see mode m−1's state.
+  utils::part_map _pmap;
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;
+  lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
+
+  // --- Split-kernel (two-step) buffers. sDeltaF_skij / sDeltaSigma_tskij always
+  //     hold the TOTAL (sc + pert) quantities; a per-channel buffer exists only
+  //     for a quantity BOTH channels contribute to, otherwise the sole
+  //     contributing channel writes the caller's array directly.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_sc, _sDeltaF_pert;
+  std::optional<sArray_t<Array_view_5D_t>> _sDeltaSigma_sc, _sDeltaSigma_pert;
+  /// Previous perturbative source, for the outer accelerator's extrapolation
+  /// and its residual. Striped exactly like the inner loop's iterates.
+  lr_iterate_history _DeltaF_pert, _DeltaSigma_pert;
+  /// ΔDm at the previous stage boundary, whose change is the outer termination
+  /// criterion. Kept whole: its norm is taken on the node_comm path.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_stage_prev;
+
+  bool _setup_done = false;
 
   int _nts;
   int _ns;

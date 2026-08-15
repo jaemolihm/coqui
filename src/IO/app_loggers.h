@@ -30,7 +30,8 @@
 #include "IO/AppAbort.hpp"
 
 extern int __app_debug_level__;
-extern int __app_output_level__;
+extern int __app_verbosity__;
+extern bool __app_is_root__;
 
 // currently using 2 separate loggers
 // app_log: uses "std_console" with a clean format only on Global().root()
@@ -68,7 +69,7 @@ inline std::shared_ptr<spdlog::logger> app_get_logger(const char* name,
 template<class... Args>
 void app_log(int level, const std::string_view string_format, Args&&... args)
 {
-  if(__app_output_level__ > 0 and level <= __app_output_level__) {
+  if(__app_is_root__ and __app_verbosity__ > 0 and level <= __app_verbosity__) {
 #if defined(ENABLE_SPDLOG)
     app_get_logger("std_console","%v")->info(string_format,std::forward<Args>(args)...);
 #else
@@ -127,7 +128,7 @@ void app_debug(int level, const std::string_view string_format, Args&&... args)
 
 inline void app_log_flush() 
 {
-  if(__app_output_level__ > 0) {
+  if(__app_is_root__ and __app_verbosity__ > 0) {
 #if defined(ENABLE_SPDLOG)
     app_get_logger("std_console","%v")->flush();
 #else

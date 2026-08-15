@@ -381,6 +381,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            unperturbed="checkpoint",
            split_sigma_terms=False,
            div_treatment=None,
+           save_DeltaG=True,
+           nbnd_save=None,
            method=None,
            lr_two_step=False,
            two_step_sc_method=None,
@@ -427,8 +429,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     q_vec : array-like
         Perturbation wavevector in crystal coordinates, shape (3,)
     DeltaH0_skij : np.ndarray or None
-        External perturbation matrix, shape (ns, nk, nb, nb).
+        External perturbation matrix, shape (ns, nk, nb, nb), or a stack of
+        perturbations at the same q, shape (nmodes, ns, nk, nb, nb).
         Required on the MPI global root; ignored on non-root ranks.
+        A stack is solved in one call: the unperturbed state, W, the G^R/G(iw)
+        caches and the solvers are set up once and reused, which is the bulk of
+        the per-perturbation cost. Each perturbation is written to its own
+        ``linear_response/mode{m}`` group (1-based); a single 4-D perturbation
+        keeps writing ``linear_response/`` exactly as before.
     include_hartree : bool, optional
         Include Hartree (Coulomb) term in SCF loop (default True)
     include_exchange : bool, optional
@@ -493,6 +501,18 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Divergence treatment for the ε⁻¹ head. For unperturbed="mf_dft" the
         checkpoint holds none, so this selects it (default "gygi" in C++).
         Ignored for unperturbed="checkpoint" (read from the checkpoint).
+    save_DeltaG : bool, optional
+        Write DeltaG_tskij to the checkpoint (default True). It is the largest
+        LR dataset and nothing downstream reads it back, so a phonon sweep can
+        turn it off.
+    nbnd_save : int or None, optional
+        Keep only the leading nbnd_save x nbnd_save band block of the
+        imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
+        DeltaSigma_GdW_tskij). None (default) writes them whole. A trimmed
+        DeltaSigma_tskij is the protected-band block of the LR self-energy, not
+        full-basis ΔΣ; each trimmed dataset carries an ``nbnd_save`` HDF5
+        attribute saying so. The single-time-slice arrays (DeltaDm_skij,
+        DeltaF_skij, DeltaVcorr_skij) are never trimmed.
     method : str or None, optional
         Alias on the kernel ladder — "none", "Hartree", "HF", "GW0" or "GW" —
         that expands to include_hartree / include_exchange / gw_mode. When
@@ -543,12 +563,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float]
-        (niter, Delta_mu) - number of iterations and final chemical potential shift
+    tuple[int, float] or tuple[np.ndarray, np.ndarray]
+        (niter, Delta_mu) — scalars for a 4-D DeltaH0_skij, per-mode arrays for
+        a 5-D one.
 
     Notes
     -----
-    Results are written to {output}.mbpt.h5 under the "linear_response" group.
+    Results are written to {output}.mbpt.h5 under the "linear_response" group,
+    or "linear_response/mode{m}" when several perturbations are passed at once.
     """
     import numpy as np
     from coqui._lib.mbpt_module import run_lr as run_lr_cpp
@@ -557,12 +579,24 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     # Force non-root ranks to pass None: tolerates legacy callers that
     # still hand a replicated array on every rank.
     from mpi4py import MPI
+    # C++ always carries the mode axis (the c2py converter fixes the rank, so
+    # one binding cannot accept both), so promote a single perturbation here and
+    # unwrap the length-1 result on the way out.
+    squeeze = None
     if MPI.COMM_WORLD.Get_rank() == 0:
         if DeltaH0_skij is None:
             raise ValueError("run_lr: DeltaH0_skij must be provided on the MPI root rank")
         DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
+        if DeltaH0_skij.ndim not in (4, 5):
+            raise ValueError(
+                "run_lr: DeltaH0_skij must be (ns, nk, nb, nb) or "
+                f"(nmodes, ns, nk, nb, nb), got shape {DeltaH0_skij.shape}")
+        squeeze = (DeltaH0_skij.ndim == 4)
+        if squeeze:
+            DeltaH0_skij = DeltaH0_skij[None]
     else:
         DeltaH0_skij = None
+    squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
 
     # Handle deprecated include_gw_sigma parameter
     if include_gw_sigma is not None:
@@ -602,31 +636,35 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         dx_right = None
         dv_qPQ = None
 
-    # Pass div_corr flag through params dict (read by C++ run_lr_calc)
-    params_with_div = dict(params)
-    params_with_div["div_corr"] = bool(div_corr)
+    # The C++ run_lr_calc reads its non-positional options off the params dict.
+    lr_params = dict(params)
+    lr_params["div_corr"] = bool(div_corr)
     # Optional explicit path to the screened-interaction (W) HDF5 file. When
     # omitted, C++ auto-derives it from the input checkpoint's directory.
     if screened_interaction_file is not None:
-        params_with_div["screened_interaction_file"] = str(screened_interaction_file)
+        lr_params["screened_interaction_file"] = str(screened_interaction_file)
     # Recompute W from the checkpoint Green's function instead of reading it.
-    params_with_div["recompute_W"] = bool(recompute_W)
+    lr_params["recompute_W"] = bool(recompute_W)
     # Unperturbed reference and split-term output (one-shot G0W0@DFT).
-    params_with_div["unperturbed"] = str(unperturbed)
-    params_with_div["split_sigma_terms"] = bool(split_sigma_terms)
+    lr_params["unperturbed"] = str(unperturbed)
+    lr_params["split_sigma_terms"] = bool(split_sigma_terms)
     if div_treatment is not None:
-        params_with_div["div_treatment"] = str(div_treatment)
+        lr_params["div_treatment"] = str(div_treatment)
+    # LR output volume (read by C++ dump_lr). Defaults keep the checkpoint as-is.
+    lr_params["save_DeltaG"] = bool(save_DeltaG)
+    if nbnd_save is not None:
+        lr_params["nbnd_save"] = int(nbnd_save)
     # Kernel ladder alias and the split-kernel (two-step) schedule. Read by C++
     # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
     # are overridden by "method" when it is given.
     if method is not None:
-        params_with_div["method"] = str(method)
-    params_with_div["lr_two_step"] = bool(lr_two_step)
+        lr_params["method"] = str(method)
+    lr_params["lr_two_step"] = bool(lr_two_step)
     if two_step_sc_method is not None:
-        params_with_div["two_step_sc_method"] = str(two_step_sc_method)
+        lr_params["two_step_sc_method"] = str(two_step_sc_method)
     if two_step_pert_method is not None:
-        params_with_div["two_step_pert_method"] = str(two_step_pert_method)
-    params_with_div["two_step_order"] = int(two_step_order)
+        lr_params["two_step_pert_method"] = str(two_step_pert_method)
+    lr_params["two_step_order"] = int(two_step_order)
     # Outer-loop acceleration, flattened to the ptree keys C++ reads. Mirrors
     # the iter_alg dict; type conversion only.
     outer = dict(two_step_outer_iter_alg or {})
@@ -634,18 +672,22 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if outer_alg not in ("damping", "DIIS"):
         raise ValueError(
             f"Unknown two_step_outer_iter_alg '{outer_alg}'. Must be 'damping' or 'DIIS'.")
-    params_with_div["two_step_outer_alg"] = outer_alg
-    params_with_div["two_step_outer_mixing"] = float(outer.get("mixing", 1.0))
-    params_with_div["two_step_outer_subsp"] = int(outer.get("max_subsp_size", 3))
-    params_with_div["two_step_outer_warmup"] = int(outer.get("diis_warmup", 0))
-    params_with_div["two_step_outer_min_subsp"] = int(outer.get("min_subsp_size", 2))
-    params_with_div["two_step_outer_tol"] = float(two_step_outer_tol)
+    lr_params["two_step_outer_alg"] = outer_alg
+    lr_params["two_step_outer_mixing"] = float(outer.get("mixing", 1.0))
+    lr_params["two_step_outer_subsp"] = int(outer.get("max_subsp_size", 3))
+    lr_params["two_step_outer_warmup"] = int(outer.get("diis_warmup", 0))
+    lr_params["two_step_outer_min_subsp"] = int(outer.get("min_subsp_size", 2))
+    lr_params["two_step_outer_tol"] = float(two_step_outer_tol)
 
-    return run_lr_cpp(json.dumps(params_with_div), h_int, q_vec, DeltaH0_skij,
-                      bool(include_hartree), bool(include_exchange), str(gw_mode),
-                      int(max_iter), float(tol), bool(fix_density),
-                      alg, mixing, max_subsp_size, diis_warmup,
-                      dx_left, dx_right, dv_qPQ)
+    niter, delta_mu = run_lr_cpp(
+        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,
+        bool(include_hartree), bool(include_exchange), str(gw_mode),
+        int(max_iter), float(tol), bool(fix_density),
+        alg, mixing, max_subsp_size, diis_warmup,
+        dx_left, dx_right, dv_qPQ)
+    if squeeze:
+        return int(niter[0]), float(delta_mu[0])
+    return niter, delta_mu
 
 def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment=None):
     """
