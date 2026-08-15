@@ -422,8 +422,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     q_vec : array-like
         Perturbation wavevector in crystal coordinates, shape (3,)
     DeltaH0_skij : np.ndarray or None
-        External perturbation matrix, shape (ns, nk, nb, nb).
+        External perturbation matrix, shape (ns, nk, nb, nb), or a stack of
+        perturbations at the same q, shape (nmodes, ns, nk, nb, nb).
         Required on the MPI global root; ignored on non-root ranks.
+        A stack is solved in one call: the unperturbed state, W, the G^R/G(iw)
+        caches and the solvers are set up once and reused, which is the bulk of
+        the per-perturbation cost. Each perturbation is written to its own
+        ``linear_response/mode{m}`` group (1-based); a single 4-D perturbation
+        keeps writing ``linear_response/`` exactly as before.
     include_hartree : bool, optional
         Include Hartree (Coulomb) term in SCF loop (default True)
     include_exchange : bool, optional
@@ -503,12 +509,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float]
-        (niter, Delta_mu) - number of iterations and final chemical potential shift
+    tuple[int, float] or tuple[np.ndarray, np.ndarray]
+        (niter, Delta_mu) — scalars for a 4-D DeltaH0_skij, per-mode arrays for
+        a 5-D one.
 
     Notes
     -----
-    Results are written to {output}.mbpt.h5 under the "linear_response" group.
+    Results are written to {output}.mbpt.h5 under the "linear_response" group,
+    or "linear_response/mode{m}" when several perturbations are passed at once.
     """
     import numpy as np
     from coqui._lib.mbpt_module import run_lr as run_lr_cpp
@@ -517,12 +525,24 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     # Force non-root ranks to pass None: tolerates legacy callers that
     # still hand a replicated array on every rank.
     from mpi4py import MPI
+    # C++ always carries the mode axis (the c2py converter fixes the rank, so
+    # one binding cannot accept both), so promote a single perturbation here and
+    # unwrap the length-1 result on the way out.
+    squeeze = None
     if MPI.COMM_WORLD.Get_rank() == 0:
         if DeltaH0_skij is None:
             raise ValueError("run_lr: DeltaH0_skij must be provided on the MPI root rank")
         DeltaH0_skij = np.asarray(DeltaH0_skij, dtype=np.complex128)
+        if DeltaH0_skij.ndim not in (4, 5):
+            raise ValueError(
+                "run_lr: DeltaH0_skij must be (ns, nk, nb, nb) or "
+                f"(nmodes, ns, nk, nb, nb), got shape {DeltaH0_skij.shape}")
+        squeeze = (DeltaH0_skij.ndim == 4)
+        if squeeze:
+            DeltaH0_skij = DeltaH0_skij[None]
     else:
         DeltaH0_skij = None
+    squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
 
     # Handle deprecated include_gw_sigma parameter
     if include_gw_sigma is not None:
@@ -581,11 +601,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
 
-    return run_lr_cpp(json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,
-                      bool(include_hartree), bool(include_exchange), str(gw_mode),
-                      int(max_iter), float(tol), bool(fix_density),
-                      alg, mixing, max_subsp_size, diis_warmup,
-                      dx_left, dx_right, dv_qPQ)
+    niter, delta_mu = run_lr_cpp(
+        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,
+        bool(include_hartree), bool(include_exchange), str(gw_mode),
+        int(max_iter), float(tol), bool(fix_density),
+        alg, mixing, max_subsp_size, diis_warmup,
+        dx_left, dx_right, dv_qPQ)
+    if squeeze:
+        return int(niter[0]), float(delta_mu[0])
+    return niter, delta_mu
 
 def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment=None):
     """

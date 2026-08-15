@@ -43,8 +43,10 @@ namespace coqui_py {
    * @param lr_params         - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
    * @param h_int             - [INPUT] THC ERI handler
    * @param q_vec             - [INPUT] Perturbation wavevector in crystal coords (3,)
-   * @param DeltaH0_skij      - [INPUT] Perturbation matrix (ns, nk, nb, nb);
+   * @param DeltaH0_mskij     - [INPUT] Perturbations (nmodes, ns, nk, nb, nb);
    *                            required on the MPI global root, None elsewhere.
+   *                            All share the one q_vec; each is written to its
+   *                            own "linear_response/mode{m}" group when nmodes > 1.
    * @param include_hartree   - [INPUT] Include ΔJ in SCF loop
    * @param include_exchange  - [INPUT] Include ΔK in SCF loop
    * @param gw_mode           - [INPUT] GW mode: "none", "fixed_W", or "full"
@@ -58,13 +60,13 @@ namespace coqui_py {
    * @param DeltaX_left       - [INPUT] Optional δ^q X collocation perturbation (root only)
    * @param DeltaX_right      - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
    * @param DeltaV_qPQ        - [INPUT] Optional THC Coulomb perturbation δV (root only)
-   * @return                  - [OUTPUT] Tuple of (niter, Delta_mu)
+   * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
-  std::tuple<int, double> run_lr(
+  std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_vec,
-      std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
+      std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
       bool include_hartree,
       bool include_exchange,
       std::string gw_mode_str,
@@ -97,7 +99,7 @@ namespace coqui_py {
       throw std::invalid_argument("run_lr: gw_mode must be 'none', 'fixed_W', or 'full', got '" + gw_mode_str + "'");
     }
 
-    return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_skij,
+    return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
                                 include_hartree, include_exchange, gw_mode,
                                 max_iter, tol, fix_density, iter_params,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ);

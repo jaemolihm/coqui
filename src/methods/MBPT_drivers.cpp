@@ -1309,10 +1309,17 @@ auto recompute_W_and_eps_inv_head(
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
  *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
  *
+ * Several perturbations at the same q are solved in one call: the unperturbed
+ * state, the screened interaction, the G^R/G(iω) caches and the solvers are set
+ * up once and reused, and each perturbation is written to its own
+ * "linear_response/mode{m}" group. This is the whole reason the ΔH0 argument
+ * carries a leading mode axis. q_vec is fixed for the call — the driver and all
+ * its solvers latch it at construction.
+ *
  * @param eri              - [INPUT] ERI handler (must be THC)
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
- * @param DeltaH0_skij     - [INPUT] Perturbation matrix (ns, nk, nb, nb)
+ * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
  * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
  * @param include_exchange - [INPUT] Include ΔK in SCF loop
  * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
@@ -1320,12 +1327,13 @@ auto recompute_W_and_eps_inv_head(
  * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
  * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
  * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
- * @return Tuple of (number of iterations, final Δμ)
+ * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
 template<typename eri_t>
-std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
+std::tuple<nda::array<long, 1>, nda::array<double, 1>>
+                        run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
-                                     std::optional<nda::array<ComplexType, 4>> const& DeltaH0_skij_root,
+                                     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      bool include_hartree,
                                      bool include_exchange,
                                      lr_gw_update_mode gw_mode,
@@ -1547,25 +1555,50 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
             off_diag_mode, ac_alg, Nfit, eta);
   }
 
-  // Validate DeltaH0 shape on root before broadcasting
+  // Validate DeltaH0 shape on root, then broadcast the mode count.
+  long nmodes = 0;
   if (mpi->comm.root()) {
-    utils::check(DeltaH0_skij_root.has_value(),
-                 "run_lr_calc: DeltaH0_skij must be provided on the MPI global root");
-    auto const& dh = *DeltaH0_skij_root;
-    utils::check(dh.shape(0) == mf->nspin() &&
-                 dh.shape(1) == mf->nkpts_ibz() &&
-                 dh.shape(2) == mf->nbnd() &&
-                 dh.shape(3) == mf->nbnd(),
-                 "run_lr_calc: DeltaH0_skij shape mismatch: expected ({},{},{},{}), got ({},{},{},{})",
+    utils::check(DeltaH0_mskij_root.has_value(),
+                 "run_lr_calc: DeltaH0_mskij must be provided on the MPI global root");
+    auto const& dh = *DeltaH0_mskij_root;
+    utils::check(dh.shape(1) == mf->nspin() &&
+                 dh.shape(2) == mf->nkpts_ibz() &&
+                 dh.shape(3) == mf->nbnd() &&
+                 dh.shape(4) == mf->nbnd(),
+                 "run_lr_calc: DeltaH0_mskij shape mismatch: expected (nmodes,{},{},{},{}), "
+                 "got ({},{},{},{},{})",
                  mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
-                 dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3));
+                 dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3), dh.shape(4));
+    utils::check(dh.shape(0) > 0, "run_lr_calc: DeltaH0_mskij has no perturbations.");
+    nmodes = dh.shape(0);
+  }
+  mpi->comm.broadcast_n(&nmodes, 1, 0);
+
+  // The δX/δV IBC path is per-perturbation in a way this loop does not yet
+  // handle: build_lr_ibc mixes mode-independent V_HF/F_PQ with the ΔF_ibc/ΔΣ_ibc
+  // built from *this* δX, and lr_driver moves F_PQ_skij out of the IBC object on
+  // the first solve, so perturbations 2..n would silently get no F_PQ. Batching
+  // it needs DeltaX/DeltaV to grow a mode axis of their own.
+  if (nmodes > 1) {
+    utils::check(!DeltaX_left_root.has_value() && !DeltaX_right_root.has_value() &&
+                 !DeltaV_qPQ_root.has_value(),
+                 "run_lr_calc: batching {} perturbations in one call is not supported "
+                 "together with DeltaX / DeltaV (the IBC correction is itself "
+                 "per-perturbation). Call run_lr once per mode.", nmodes);
   }
 
-  // LR state: perturbation + response quantities
+  // LR state: perturbation + response quantities. sDeltaH0_skij is one rank-4
+  // shm window, refilled from the caller's rank-5 array per perturbation — no
+  // node memory scales with nmodes.
   lr_state_t lr_state;
   lr_state.q_vec.emplace(q_vec);
-  lr_state.sDeltaH0_skij.emplace(
-      math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, DeltaH0_skij_root));
+  {
+    std::optional<nda::array<ComplexType, 4>> h0_first;
+    if (mpi->comm.root())
+      h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
+    lr_state.sDeltaH0_skij.emplace(
+        math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first));
+  }
   lr_state.sDeltaG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   lr_state.sDeltaDm_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
@@ -1729,74 +1762,125 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
-  auto [niter, Delta_mu] = driver.run_lr(
-      lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-      lr_state.sDeltaF_skij.value(), pDeltaSigma,
-      sG_tskij, lr_state.sDeltaH0_skij.value(), thc,
-      include_hartree, include_exchange, gw_mode,
-      opt_dW ? &(*opt_dW) : nullptr,
-      opt_eps_inv ? &(*opt_eps_inv) : nullptr,
-      max_iter, tol, fix_density, iter_params,
-      pDeltaX_left, pDeltaX_right, Dm_ab_ptr, div_corr, div_treatment,
-      pDeltaV_qPQ, pDeltaSigma2, pQpStatic, pDeltaVcorr,
-      output_aux_fock ? &DeltaF_ibc_skij : nullptr,
-      output_aux_fock ? &F_PQ_skij : nullptr,
-      output_aux_fock ? &DeltaF_PQ_skij : nullptr, include_xc);
-  lr_state.Delta_mu.emplace(Delta_mu);
-  mpi->comm.barrier();
+  lr_params p;
+  p.include_hartree  = include_hartree;
+  p.include_exchange = include_exchange;
+  p.gw_mode          = gw_mode;
+  p.include_xc       = include_xc;
+  p.max_iter         = max_iter;
+  p.tol              = tol;
+  p.fix_density      = fix_density;
+  p.iter_params      = iter_params;
+  p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
+  p.div_corr         = div_corr;
+  p.div_treatment    = div_treatment;
+  p.sDeltaX_left     = pDeltaX_left;
+  p.sDeltaX_right    = pDeltaX_right;
+  p.Dm_ab            = Dm_ab_ptr;
+  p.DeltaV_qPQ       = pDeltaV_qPQ;
+  p.qp_static        = pQpStatic;
+  p.split_sigma_terms = (pDeltaSigma2 != nullptr);
+  p.keep_F_PQ        = output_aux_fock;
 
-  utils::memlog("run_lr_calc: after driver.run_lr");
+  driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
-  // Write results
-  chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
-                 lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-                 lr_state.sDeltaF_skij.value(), pDeltaSigma,
-                 Delta_mu, niter,
-                 include_hartree, include_exchange, include_gw_sigma,
-                 pDeltaSigma2, pDeltaVcorr, save_DeltaG, nbnd_save);
+  nda::array<long, 1> niter_m(nmodes);
+  nda::array<double, 1> Delta_mu_m(nmodes);
 
-  // Persist the IBC aux→primary correction and the aux-basis Fock matrices
-  // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
-  // DeltaF_ibc as
-  //   dE/dx = spin · Σ_{s,k} w_k · Tr(DeltaF_ibc[s,k] · Dm[s,k]),
-  // and the phonon drivers contract F_PQ / ΔF_PQ against δX for the ΔΔF_ibc
-  // curvature terms.
-  if (mpi->comm.root() && (DeltaF_ibc_skij.size() > 0 ||
-                           F_PQ_skij.size() > 0 ||
-                           DeltaF_PQ_skij.size() > 0)) {
-    h5::file file(output + ".mbpt.h5", 'a');
-    h5::group grp(file);
-    auto lr_grp = grp.has_subgroup("linear_response") ?
-                  grp.open_group("linear_response") :
-                  grp.create_group("linear_response");
-    if (DeltaF_ibc_skij.size() > 0) {
-      nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
-      app_log(2, "  - DeltaF_ibc_skij written to \"linear_response/\"");
+  for (long m = 0; m < nmodes; ++m) {
+    if (nmodes > 1)
+      app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
+
+    // Refill the shm ΔH0 window from this perturbation's slice: root writes,
+    // then broadcast_to_nodes publishes it (its leading node_sync makes root's
+    // write visible before the internode broadcast, and its trailing one makes
+    // the result visible to every rank on every node). Mode 0 is already in the
+    // window from the allocation above. Costs one 0.1 GB broadcast, no memory.
+    if (m > 0) {
+      auto& sDeltaH0 = lr_state.sDeltaH0_skij.value();
+      if (mpi->comm.root())
+        sDeltaH0.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
+      sDeltaH0.broadcast_to_nodes(0);
+      mpi->comm.barrier();
     }
-    if (F_PQ_skij.size() > 0) {
-      nda::h5_write(lr_grp, "F_PQ_skij", F_PQ_skij, false);
-      app_log(2, "  - F_PQ_skij written to \"linear_response/\"");
+
+    auto [niter, Delta_mu] = driver.lr_solve_one(
+        lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
+        lr_state.sDeltaF_skij.value(), pDeltaSigma,
+        sG_tskij, lr_state.sDeltaH0_skij.value(), thc, p,
+        pDeltaSigma2, pDeltaVcorr,
+        output_aux_fock ? &DeltaF_ibc_skij : nullptr,
+        output_aux_fock ? &F_PQ_skij : nullptr,
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr);
+    niter_m(m) = niter;
+    Delta_mu_m(m) = Delta_mu;
+    lr_state.Delta_mu.emplace(Delta_mu);
+    mpi->comm.barrier();
+
+    utils::memlog(fmt::format("run_lr_calc: after lr_solve_one (mode {}/{})", m + 1, nmodes));
+
+    // Write results. A single-perturbation run keeps writing into
+    // "linear_response/" so its checkpoint layout is unchanged.
+    chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
+                   lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
+                   lr_state.sDeltaF_skij.value(), pDeltaSigma,
+                   Delta_mu, niter,
+                   include_hartree, include_exchange, include_gw_sigma,
+                   pDeltaSigma2, pDeltaVcorr,
+                   nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
+                   save_DeltaG, nbnd_save);
+
+    // Persist the IBC aux→primary correction and the aux-basis Fock matrices
+    // alongside the LR results. Hellmann-Feynman-style δX gradient consumers
+    // read DeltaF_ibc as
+    //   dE/dx = spin · Σ_{s,k} w_k · Tr(DeltaF_ibc[s,k] · Dm[s,k]),
+    // and the phonon drivers contract F_PQ / ΔF_PQ against δX for the ΔΔF_ibc
+    // curvature terms. All three are per-perturbation, so they go into the same
+    // group as the rest of this perturbation's output. (DeltaF_ibc and F_PQ
+    // require IBC, which a batched call rejects, so in practice only ΔF_PQ ever
+    // repeats.)
+    if (mpi->comm.root() && (DeltaF_ibc_skij.size() > 0 ||
+                             F_PQ_skij.size() > 0 ||
+                             DeltaF_PQ_skij.size() > 0)) {
+      h5::file file(output + ".mbpt.h5", 'a');
+      h5::group grp(file);
+      auto lr_grp = grp.has_subgroup("linear_response") ?
+                    grp.open_group("linear_response") :
+                    grp.create_group("linear_response");
+      std::string where = "linear_response/";
+      if (nmodes > 1) {
+        std::string mg = "mode" + std::to_string(m + 1);
+        lr_grp = lr_grp.has_subgroup(mg) ? lr_grp.open_group(mg) : lr_grp.create_group(mg);
+        where += mg + "/";
+      }
+      if (DeltaF_ibc_skij.size() > 0) {
+        nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
+        app_log(2, "  - DeltaF_ibc_skij written to \"{}\"", where);
+      }
+      if (F_PQ_skij.size() > 0) {
+        nda::h5_write(lr_grp, "F_PQ_skij", F_PQ_skij, false);
+        app_log(2, "  - F_PQ_skij written to \"{}\"", where);
+      }
+      if (DeltaF_PQ_skij.size() > 0) {
+        nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
+        app_log(2, "  - DeltaF_PQ_skij written to \"{}\"", where);
+      }
     }
-    if (DeltaF_PQ_skij.size() > 0) {
-      nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
-      app_log(2, "  - DeltaF_PQ_skij written to \"linear_response/\"");
-    }
+    mpi->comm.barrier();
   }
-  mpi->comm.barrier();
-
   utils::memlog("run_lr_calc: exit (before RAII)");
-  return std::make_tuple(niter, Delta_mu);
+  return std::make_tuple(std::move(niter_m), std::move(Delta_mu_m));
 }
 
 
 // run_lr_calc instantiations (THC only — lr_hf and lr_gw require THC).
 // Cholesky LR Dyson (one-shot, no HF/GW) was never used externally,
 // so Cholesky ERI combinations are intentionally not instantiated here.
-template std::tuple<int, double> run_lr_calc(
+template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<double, 1> const&,
-    std::optional<nda::array<ComplexType, 4>> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
     bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,

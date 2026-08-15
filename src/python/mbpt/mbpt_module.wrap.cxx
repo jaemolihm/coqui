@@ -153,8 +153,23 @@ static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "h_int", "q_vec", "DeltaDm_skij", "S_skij", "compute_hartree",
     "compute_exchange")};
 
+// lr_qp_approx
+static auto const fun_12 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &h_int, const std::string &prefix,
+       const nda::array<ComplexType, 5> &DeltaSigma_tskij,
+       const nda::array<ComplexType, 4> &MO_skia,
+       const nda::array<ComplexType, 3> &E_ska, double mu,
+       const nda::array<long, 1> &kpq_map, bool q_is_gamma,
+       std::string off_diag_mode, std::string ac_alg, int Nfit, double eta) {
+      return coqui_py::lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia,
+                                    E_ska, mu, kpq_map, q_is_gamma,
+                                    off_diag_mode, ac_alg, Nfit, eta);
+    },
+    "h_int", "prefix", "DeltaSigma_tskij", "MO_skia", "E_ska", "mu", "kpq_map",
+    "q_is_gamma", "off_diag_mode", "ac_alg", "Nfit", "eta")};
+
 // mbpt
-static auto const fun_12 = c2py::dispatcher_f_kw_t{
+static auto const fun_13 = c2py::dispatcher_f_kw_t{
     c2py::cfun(
         [](const std::string &solver_type, const std::string &mbpt_params,
            coqui_py::ThcCoulomb &h_int,
@@ -291,41 +306,26 @@ static auto const fun_12 = c2py::dispatcher_f_kw_t{
         "h_int_exchange")};
 
 // run_lr
-static auto const fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
        const nda::array<double, 1> &q_vec,
-       std::optional<nda::array<ComplexType, 4>> DeltaH0_skij,
+       std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
        bool include_hartree, bool include_exchange, std::string gw_mode_str,
        int max_iter, double tol, bool fix_density, std::string iter_alg,
        double mixing, int max_subsp_size, int diis_warmup,
        std::optional<nda::array<ComplexType, 4>> DeltaX_left,
        std::optional<nda::array<ComplexType, 4>> DeltaX_right,
        std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
-      return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_skij,
+      return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
                               include_hartree, include_exchange, gw_mode_str,
                               max_iter, tol, fix_density, iter_alg, mixing,
                               max_subsp_size, diis_warmup, DeltaX_left,
                               DeltaX_right, DeltaV_qPQ);
     },
-    "lr_params", "h_int", "q_vec", "DeltaH0_skij", "include_hartree",
+    "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "include_hartree",
     "include_exchange", "gw_mode_str", "max_iter", "tol", "fix_density",
     "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ")};
-
-// lr_qp_approx
-static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](coqui_py::ThcCoulomb &h_int, const std::string &prefix,
-       const nda::array<ComplexType, 5> &DeltaSigma_tskij,
-       const nda::array<ComplexType, 4> &MO_skia,
-       const nda::array<ComplexType, 3> &E_ska, double mu,
-       const nda::array<long, 1> &kpq_map, bool q_is_gamma,
-       std::string off_diag_mode, std::string ac_alg, int Nfit, double eta) {
-      return coqui_py::lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia,
-                                    E_ska, mu, kpq_map, q_is_gamma,
-                                    off_diag_mode, ac_alg, Nfit, eta);
-    },
-    "h_int", "prefix", "DeltaSigma_tskij", "MO_skia", "E_ska", "mu", "kpq_map",
-    "q_is_gamma", "off_diag_mode", "ac_alg", "Nfit", "eta")};
 
 static const auto doc_d_0 =
     fun_0.doc(R"DOC(
@@ -642,79 +642,14 @@ Returns
                 {c2py::python_typename<bool>()},
                 {c2py::python_typename<bool>()}},
                {c2py::python_typename<nda::array<ComplexType, 4>>()});
-static const auto doc_d_12 = fun_12.doc(R"DOC()DOC");
-static const auto doc_d_13 = fun_13.doc(
-    R"DOC(
-Unified linear response calculation
-
-Reads the unperturbed state from the checkpoint, runs the LR SCF loop
-  ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence,
-and writes results to the "linear_response" group of the output checkpoint.
-
-Parameters
-----------
-lr_params : {par_0}
-   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
-h_int : {par_1}
-   - [INPUT] THC ERI handler
-q_vec : {par_2}
-   - [INPUT] Perturbation wavevector in crystal coords (3,)
-DeltaH0_skij : {par_3}
-   - [INPUT] Perturbation matrix (ns, nk, nb, nb);
-                              required on the MPI global root, None elsewhere.
-include_hartree : {par_4}
-   - [INPUT] Include ΔJ in SCF loop
-include_exchange : {par_5}
-   - [INPUT] Include ΔK in SCF loop
-gw_mode : {par_6}
-   - [INPUT] GW mode: "none", "fixed_W", or "full"
-max_iter : {par_7}
-   - [INPUT] Maximum SCF iterations (1 = one-shot)
-tol : {par_8}
-   - [INPUT] Convergence tolerance
-fix_density : {par_9}
-   - [INPUT] If true, compute Δμ to enforce ΔN=0
-iter_alg : {par_10}
-   - [INPUT] Iteration algorithm: "damping" or "DIIS"
-mixing : {par_11}
-   - [INPUT] Damping/mixing parameter
-max_subsp_size : {par_12}
-   - [INPUT] DIIS subspace size
-diis_warmup : {par_13}
-   - [INPUT] DIIS warmup iterations
-DeltaX_left : {par_14}
-   - [INPUT] Optional δ^q X collocation perturbation (root only)
-DeltaX_right : {par_15}
-   - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
-DeltaV_qPQ : {par_16}
-   - [INPUT] Optional THC Coulomb perturbation δV (root only)
-
-Returns
--------
-{ret_0}
-   - [OUTPUT] Tuple of (niter, Delta_mu)
-)DOC",
-    {{c2py::python_typename<const std::string &>()},
-     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
-     {c2py::python_typename<const nda::array<double, 1> &>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
-     {c2py::python_typename<bool>()},
-     {c2py::python_typename<bool>()},
-     {},
-     {c2py::python_typename<int>()},
-     {c2py::python_typename<double>()},
-     {c2py::python_typename<bool>()},
-     {c2py::python_typename<std::string>()},
-     {c2py::python_typename<double>()},
-     {c2py::python_typename<int>()},
-     {c2py::python_typename<int>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
-    {c2py::python_typename<std::tuple<int, double>>()});
-static const auto doc_d_14 =
-    fun_14.doc(R"DOC(
+static const auto doc_d_12 =
+    fun_12.doc(R"DOC(
 Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (test API)
+
+Python entry point for methods::lr_qp_approx (the q-aware LR-qpGW static
+map). Wraps the numpy inputs into node-shared arrays, reads the IAFT from
+the checkpoint, builds a qp_params_t from the AC parameters, and returns the
+resulting static ΔV_QPGW(k) in the primary basis.
 
 Parameters
 ----------
@@ -761,6 +696,79 @@ Returns
                 {c2py::python_typename<int>()},
                 {c2py::python_typename<double>()}},
                {c2py::python_typename<nda::array<ComplexType, 4>>()});
+static const auto doc_d_13 = fun_13.doc(R"DOC()DOC");
+static const auto doc_d_14 = fun_14.doc(
+    R"DOC(
+Unified linear response calculation
+
+Reads the unperturbed state from the checkpoint, runs the LR SCF loop
+  ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence,
+and writes results to the "linear_response" group of the output checkpoint.
+
+Parameters
+----------
+lr_params : {par_0}
+   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
+h_int : {par_1}
+   - [INPUT] THC ERI handler
+q_vec : {par_2}
+   - [INPUT] Perturbation wavevector in crystal coords (3,)
+DeltaH0_mskij : {par_3}
+   - [INPUT] Perturbations (nmodes, ns, nk, nb, nb);
+                              required on the MPI global root, None elsewhere.
+                              All share the one q_vec; each is written to its
+                              own "linear_response/mode{m}" group when nmodes > 1.
+include_hartree : {par_4}
+   - [INPUT] Include ΔJ in SCF loop
+include_exchange : {par_5}
+   - [INPUT] Include ΔK in SCF loop
+gw_mode : {par_6}
+   - [INPUT] GW mode: "none", "fixed_W", or "full"
+max_iter : {par_7}
+   - [INPUT] Maximum SCF iterations (1 = one-shot)
+tol : {par_8}
+   - [INPUT] Convergence tolerance
+fix_density : {par_9}
+   - [INPUT] If true, compute Δμ to enforce ΔN=0
+iter_alg : {par_10}
+   - [INPUT] Iteration algorithm: "damping" or "DIIS"
+mixing : {par_11}
+   - [INPUT] Damping/mixing parameter
+max_subsp_size : {par_12}
+   - [INPUT] DIIS subspace size
+diis_warmup : {par_13}
+   - [INPUT] DIIS warmup iterations
+DeltaX_left : {par_14}
+   - [INPUT] Optional δ^q X collocation perturbation (root only)
+DeltaX_right : {par_15}
+   - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
+DeltaV_qPQ : {par_16}
+   - [INPUT] Optional THC Coulomb perturbation δV (root only)
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<bool>()},
+     {c2py::python_typename<bool>()},
+     {},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<double>()},
+     {c2py::python_typename<bool>()},
+     {c2py::python_typename<std::string>()},
+     {c2py::python_typename<double>()},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<int>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
+    {c2py::python_typename<
+        std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -788,12 +796,12 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_10.c_str()},
     {"lr_hf", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
      doc_d_11.c_str()},
-    {"lr_qp_approx", (PyCFunction)c2py::pyfkw<fun_14>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_14.c_str()},
-    {"mbpt", (PyCFunction)c2py::pyfkw<fun_12>, METH_VARARGS | METH_KEYWORDS,
-     doc_d_12.c_str()},
-    {"run_lr", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
+    {"lr_qp_approx", (PyCFunction)c2py::pyfkw<fun_12>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_12.c_str()},
+    {"mbpt", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
      doc_d_13.c_str()},
+    {"run_lr", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_14.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

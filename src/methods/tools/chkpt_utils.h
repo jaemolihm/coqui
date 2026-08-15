@@ -190,6 +190,9 @@ namespace methods {
    *   one-shot G0W0 output. When non-null, sDeltaSigma_tskij holds the total ΔΣ
    *   and this holds the G0·dW0 piece, written as "DeltaSigma_GdW_tskij".
    *   Nullptr for the standard fused output.
+   * @param imode          - [INPUT] perturbation index. Unset (default) writes
+   *   "linear_response/" exactly as before; set writes
+   *   "linear_response/mode{imode}/", for a run covering several perturbations.
    * @param save_DeltaG    - [INPUT] write DeltaG_tskij (default true). ΔG is the
    *   single largest LR dataset and no consumer reads it back, so a batched run
    *   can drop it.
@@ -216,6 +219,7 @@ namespace methods {
                bool include_gw_sigma,
                Sigma_t const* sDeltaSigma2_tskij = nullptr,
                F_t const* sDeltaVcorr_skij = nullptr,
+               std::optional<long> imode = std::nullopt,
                bool save_DeltaG = true,
                std::optional<long> nbnd_save = std::nullopt);
 
