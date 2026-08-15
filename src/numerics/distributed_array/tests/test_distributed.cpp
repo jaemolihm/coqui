@@ -516,12 +516,20 @@ TEST_CASE("redistribute_nda", "[math]")
  * Cases: a ragged global shape (so the block boundaries do not divide the rank
  * count), a block size of 1 on the split axis, and caps from "one element per
  * chunk" (nchunk saturates at comm.size()) up to "no chunking at all".
+ *
+ * Needs >= 2 ranks: at one rank redistribute_alltoallv takes the serial branch
+ * and never reaches the chunking at all, so a silent early return here would
+ * report a pass that exercised nothing. Run with CTEST_NPROC >= 2.
  */
 TEST_CASE("redistribute_chunked_equivalence", "[math]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
   const long size = world.size();
-  if (size < 2) return;
+  if (size < 2) {
+    WARN("redistribute_chunked_equivalence skipped: needs >= 2 ranks, got "
+         << size << " -- the chunked exchange is NOT covered by this run");
+    return;
+  }
 
   using larray = nda::array<ComplexType, 3>;
   // Ragged in every axis, so no chunk boundary lands where a block does.
@@ -579,6 +587,56 @@ TEST_CASE("redistribute_chunked_equivalence", "[math]")
           err = std::max(err, std::abs(Dloc(i,j,k) - Rloc(i,j,k)));
     err = world.all_reduce_value(err, boost::mpi3::max<>{});
     REQUIRE(err == 0.0);
+  }
+}
+
+/**
+ * The chunked exchange must be a legal MPI_Alltoallv in every round: whatever
+ * rank i sends to j in a round, j must post a matching receive from i in that
+ * same round (MPI requires sendcount_i[j] == recvcount_j[i]).
+ *
+ * This is checked on the schedule itself, not by moving data, because moving
+ * data does not reliably catch a violation. An unmatched send under the eager
+ * protocol is simply buffered, and since the per-peer counts are the same either
+ * way and the collective's internal tags repeat across calls, a later round's
+ * receive matches it out of order and the result still comes out bit-identical.
+ * A wrong schedule therefore passes redistribute_chunked_equivalence on one node
+ * and deadlocks over a fabric at scale -- which is exactly what happened. Only
+ * the invariant separates the two.
+ *
+ * Pure arithmetic on redistribute_schedule, so it runs at any rank count.
+ */
+TEST_CASE("redistribute_round_schedule_is_alltoallv_legal", "[math]")
+{
+  for (long np : {2L, 3L, 8L, 12L, 97L, 768L}) {
+    std::vector<long> chunks{1, 2, 3, 7, 8, np/2, np};
+    for (long nchunk : chunks) {
+      if (nchunk < 1 or nchunk > np) continue;
+      math::nda::redistribute_schedule sched(np, nchunk);
+
+      // send_round(i,j): the round in which i sends to j.
+      // recv_round(i,j): the round in which j receives from i.
+      nda::array<long,2> send_round(np,np), recv_round(np,np);
+      send_round() = -1;
+      recv_round() = -1;
+      for (long me = 0; me < np; ++me)
+        for (long o = 0; o < np; ++o) {
+          send_round(me, sched.send_peer(me,o)) = sched.round_of(o);
+          recv_round(sched.recv_peer(me,o), me) = sched.round_of(o);
+        }
+
+      long unscheduled = 0, mismatched = 0, out_of_range = 0;
+      for (long i = 0; i < np; ++i)
+        for (long j = 0; j < np; ++j) {
+          if (send_round(i,j) < 0 or recv_round(i,j) < 0) ++unscheduled;
+          else if (send_round(i,j) != recv_round(i,j)) ++mismatched;
+          if (send_round(i,j) >= nchunk) ++out_of_range;
+        }
+      INFO("np=" << np << " nchunk=" << nchunk);
+      REQUIRE(unscheduled == 0);   // every pair is exchanged exactly once
+      REQUIRE(mismatched == 0);    // and in the same round at both ends
+      REQUIRE(out_of_range == 0);  // within the advertised number of rounds
+    }
   }
 }
 

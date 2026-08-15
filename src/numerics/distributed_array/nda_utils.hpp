@@ -730,6 +730,34 @@ inline size_t redistribute_chunk_cap_bytes() {
   return cap;
 }
 
+/// Round schedule of the chunked exchange in redistribute_alltoallv. Round c
+/// covers the rank offsets [c*grp, (c+1)*grp): a rank sends to (me + o) % np and
+/// receives from (me - o) % np.
+///
+/// MPI_Alltoallv requires sendcount_i[j] == recvcount_j[i] in every call, so the
+/// round in which i sends to j must be the round in which j receives from i.
+/// Grouping the rounds by offset is what makes that hold; grouping by peer index
+/// does not -- it posts "everyone -> group" sends against "group -> everyone"
+/// receives, which agree only inside the group. That is illegal even where an
+/// MPI survives it: small messages are buffered and matched out of order by a
+/// later round, so the result can come out bit-correct on one node and still
+/// deadlock over a fabric at scale.
+///
+/// Split out of the loop so that invariant can be asserted directly, rather than
+/// inferred from whether a given transport tolerates violating it.
+struct redistribute_schedule {
+  long np;      // communicator size
+  long nchunk;  // number of rounds
+  long grp;     // offsets per round
+
+  redistribute_schedule(long np_, long nchunk_)
+    : np(np_), nchunk(nchunk_), grp((np_ + nchunk_ - 1) / nchunk_) {}
+
+  long send_peer(long me, long o) const { return (me + o) % np; }
+  long recv_peer(long me, long o) const { return (me - o + np) % np; }
+  long round_of(long o)           const { return o / grp; }
+};
+
 /**
  * @param chunk_cap_bytes - staging-buffer budget per rank; 0 selects
  *        redistribute_chunk_cap_bytes. Only the blocking of the exchange
@@ -855,15 +883,29 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
   utils::check(sz_buf_A == size_t(Aloc.size()), "A Size mismatch.");
   utils::check(sz_buf_B == size_t(Bloc.size()), "B Size mismatch.");
 
-  // Destination-group chunking: rather than staging the whole local block of
-  // both endpoints, exchange with one contiguous group of ranks at a time, so
-  // the pack/unpack buffers hold ~1/nchunk of it. Which elements go where, and
-  // in what order they are packed, is unchanged -- the result is bit-identical
-  // to a single call, and with nchunk == 1 the call sequence is identical too.
+  // Offset-round chunking: rather than staging the whole local block of both
+  // endpoints, exchange with a subset of the peers at a time, so the pack/unpack
+  // buffers hold ~1/nchunk of it. Which elements go where, and in what order they
+  // are packed, is unchanged -- the result is bit-identical to a single call, and
+  // with nchunk == 1 the call sequence is identical too.
+  //
+  // The rounds group *rank offsets*, not peer indices: in round c this rank sends
+  // to (my_rank + o) % mpi_size and receives from (my_rank - o) % mpi_size, for
+  // the offsets o of that round. MPI_Alltoallv requires sendcount_i[j] ==
+  // recvcount_j[i], and offset grouping is what makes that hold -- rank i sends
+  // to j = (i+o) % mpi_size in the very round in which j receives from
+  // (j-o) % mpi_size == i. Grouping by peer index instead posts
+  // "everyone -> group" sends against "group -> everyone" receives, which agree
+  // only inside the group; every other pair is an unmatched send, which an MPI
+  // may buffer and match out of order in a later round, or may block on
+  // indefinitely, depending on message size and transport. It also spreads the
+  // traffic: at each offset every rank has a distinct partner, instead of the
+  // whole communicator pushing into the same group of ranks.
+  //
   // nchunk comes from the *globally* largest local block, which the all_gather
-  // above already put on every rank, so the grouping is agreed without extra
+  // above already put on every rank, so the round count is agreed without extra
   // communication.
-  // This also bounds the displacements, which are int: they now span one chunk
+  // This also bounds the displacements, which are int: they now span one round
   // instead of the whole block. (The per-peer counts are unchanged and still
   // int; one peer's sub-block exceeding 2^31 elements would overflow as before,
   // but such a chunk is already past the byte budget.)
@@ -882,13 +924,20 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
     }
     nchunk = std::clamp(long((gmax + cap_elem - 1) / cap_elem), 1l, mpi_size);
   }
-  const long grp_size = (mpi_size + nchunk - 1) / nchunk;  // ranks per chunk
+  const redistribute_schedule sched(mpi_size, nchunk);
+  const long grp_size = sched.grp;  // offsets per round
+  const long my_rank = comm->rank();
+  auto send_peer = [&](long o) { return sched.send_peer(my_rank, o); };
+  auto recv_peer = [&](long o) { return sched.recv_peer(my_rank, o); };
 
   size_t max_A = 0, max_B = 0;
   for( long c = 0; c < nchunk; ++c ) {
-    const long p0 = std::min(c*grp_size, mpi_size), p1 = std::min(p0+grp_size, mpi_size);
+    const long o0 = std::min(c*grp_size, mpi_size), o1 = std::min(o0+grp_size, mpi_size);
     size_t sa = 0, sb = 0;
-    for( long p = p0; p < p1; ++p ) { sa += size_t(A_counts[p]); sb += size_t(B_counts[p]); }
+    for( long o = o0; o < o1; ++o ) {
+      sa += size_t(A_counts[send_peer(o)]);
+      sb += size_t(B_counts[recv_peer(o)]);
+    }
     max_A = std::max(max_A, sa);
     max_B = std::max(max_B, sb);
   }
@@ -900,20 +949,22 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
 
   size_t count_sz_check = 0;
   for( long c = 0; c < nchunk; ++c ) {
-    const long p0 = std::min(c*grp_size, mpi_size), p1 = std::min(p0+grp_size, mpi_size);
-    if(p1 <= p0) continue;
+    const long o0 = std::min(c*grp_size, mpi_size), o1 = std::min(o0+grp_size, mpi_size);
+    if(o1 <= o0) continue;
     std::fill(A_cnt.begin(), A_cnt.end(), 0);
     std::fill(B_cnt.begin(), B_cnt.end(), 0);
     std::fill(A_disp.begin(), A_disp.end(), 0);
     std::fill(B_disp.begin(), B_disp.end(), 0);
     int offA = 0, offB = 0;
-    for( long p = p0; p < p1; ++p ) {
-      A_cnt[p] = A_counts[p];  A_disp[p] = offA;  offA += A_counts[p];
-      B_cnt[p] = B_counts[p];  B_disp[p] = offB;  offB += B_counts[p];
+    for( long o = o0; o < o1; ++o ) {
+      const long ps = send_peer(o), pr = recv_peer(o);
+      A_cnt[ps] = A_counts[ps];  A_disp[ps] = offA;  offA += A_counts[ps];
+      B_cnt[pr] = B_counts[pr];  B_disp[pr] = offB;  offB += B_counts[pr];
     }
 
-    // copy intersections of A with this group's ranges into the send buffer
-    for( long p = p0; p < p1; ++p ) {
+    // copy intersections of A with this round's peers into the send buffer
+    for( long o = o0; o < o1; ++o ) {
+      const long p = send_peer(o);
       if(ovlps_from_A[p]) {
         auto A_ = detail::get_sub_matrix<rank>(Aloc,subblocks_from_A[p]);
         if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
@@ -930,7 +981,8 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
     comm->all_to_all_v_n(buffer_A.data(), A_cnt.data(), A_disp.data(),
                          buffer_B.data(), B_cnt.data(), B_disp.data());
 
-    for( long p = p0; p < p1; ++p ) {
+    for( long o = o0; o < o1; ++o ) {
+      const long p = recv_peer(o);
       if(ovlps_from_B[p]) {
         auto B_ = detail::get_sub_matrix<rank>(Bloc,subblocks_from_B[p]);
         if constexpr( ::nda::mem::have_host_compatible_addr_space<local_Arr1_t,local_Arr2_t> ) {
