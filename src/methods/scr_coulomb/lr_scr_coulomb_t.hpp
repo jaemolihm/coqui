@@ -164,6 +164,11 @@ namespace solvers {
     app_log(level, "");
   }
 
+  /// Zero this solver's sub-clocks, including the FT engine it owns. lr_driver
+  /// calls it per perturbation so a batched run's timing report covers one
+  /// perturbation, not the running total.
+  inline void reset_timers() { _Timer.reset(); _scr_fourier.timer().reset(); }
+
   /**
    * Print only the component clocks, each line prefixed by `indent`.
    * Embedded (with deeper indent) in lr_driver's final hierarchical report.
