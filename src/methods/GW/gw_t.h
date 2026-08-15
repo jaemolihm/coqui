@@ -49,9 +49,10 @@ namespace methods {
      * and ERIs are provided at runtime
      *
      * Usage:
-     *   gw_t mygw(comm, std::addressof(myMF));
-     *   mygw.evaluate(G, Sigma, thc_eri);
-     *   mygw.evaluate(G, Sigma, chol_eri);
+     *   gw_t mygw(ft);
+     *   mygw.evaluate(mb_state, thc_eri);       // THC-GW
+     *   mygw.evaluate(mb_state, chol_eri);      // Chol-GW
+     *   mygw.evaluate(G, Sigma, chol_eri);      // Chol-GW without an MBState
      */
     class gw_t {
     public:
