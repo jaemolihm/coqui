@@ -22,6 +22,8 @@
 #ifndef COQUI_CHKPT_UTILS_H
 #define COQUI_CHKPT_UTILS_H
 
+#include <optional>
+
 #include "configuration.hpp"
 #include "mpi3/communicator.hpp"
 
@@ -188,6 +190,16 @@ namespace methods {
    *   one-shot G0W0 output. When non-null, sDeltaSigma_tskij holds the total ΔΣ
    *   and this holds the G0·dW0 piece, written as "DeltaSigma_GdW_tskij".
    *   Nullptr for the standard fused output.
+   * @param save_DeltaG    - [INPUT] write DeltaG_tskij (default true). ΔG is the
+   *   single largest LR dataset and no consumer reads it back, so a batched run
+   *   can drop it.
+   * @param nbnd_save      - [INPUT] keep only the leading nbnd_save x nbnd_save
+   *   band block of the imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
+   *   DeltaSigma_GdW_tskij); unset (default) writes them whole. Must be in
+   *   [0, nbnd]. Each trimmed dataset carries an "nbnd_save" HDF5 attribute —
+   *   the only thing on disk that distinguishes a protected-band block from a
+   *   full-basis array, so any reader must check for it. The one-time-slice
+   *   arrays (DeltaDm_skij, DeltaF_skij, DeltaVcorr_skij) are never trimmed.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -203,7 +215,9 @@ namespace methods {
                bool include_exchange,
                bool include_gw_sigma,
                Sigma_t const* sDeltaSigma2_tskij = nullptr,
-               F_t const* sDeltaVcorr_skij = nullptr);
+               F_t const* sDeltaVcorr_skij = nullptr,
+               bool save_DeltaG = true,
+               std::optional<long> nbnd_save = std::nullopt);
 
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint

@@ -1311,6 +1311,19 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
   // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
   // not do IBC should never pay for them.
   auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
+
+  // LR output volume. Defaults reproduce the previous checkpoint byte for byte.
+  //   save_DeltaG — write DeltaG_tskij at all. It is the biggest LR dataset and
+  //     nothing reads it back, so a phonon sweep can drop it.
+  //   nbnd_save   — keep only the leading nbnd_save x nbnd_save band block of the
+  //     imaginary-time arrays. The result is a protected-band block, not a
+  //     full-basis object; each trimmed dataset says so via an "nbnd_save"
+  //     attribute. Absent = no trim.
+  auto save_DeltaG = io::get_value_with_default<bool>(pt, "save_DeltaG", true);
+  std::optional<long> nbnd_save;
+  if (io::check_exists<long>(pt, "nbnd_save")) {
+    nbnd_save = io::get_value<long>(pt, "nbnd_save");
+  }
   if (include_xc) {
     utils::check(include_hartree,
                  "run_lr_calc: include_xc = true requires include_hartree = true.");
@@ -1672,7 +1685,7 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
                  lr_state.sDeltaF_skij.value(), pDeltaSigma,
                  Delta_mu, niter,
                  include_hartree, include_exchange, include_gw_sigma,
-                 pDeltaSigma2, pDeltaVcorr);
+                 pDeltaSigma2, pDeltaVcorr, save_DeltaG, nbnd_save);
 
   // Persist the IBC aux→primary correction and the aux-basis Fock matrices
   // alongside the LR results. Hellmann-Feynman-style δX gradient consumers read
