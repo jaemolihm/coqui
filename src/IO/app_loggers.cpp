@@ -24,9 +24,14 @@
 #include "spdlog/sinks/stdout_color_sinks.h"
 #endif
 
-int __app_debug_level__  = -10000; 
-int __app_output_level__ = -10000; 
-bool __app_stacktrace__  = true;
+// debug_level: how much app_debug prints. Set on every rank.
+// verbosity:   how much app_log prints. Set on every rank.
+// is_root:     flag to do printing only at the root.
+// -10000 means setup_loggers was never called, which keeps app_log quiet.
+int __app_debug_level__ = -10000;
+int __app_verbosity__   = -10000;
+bool __app_is_root__    = false;
+bool __app_stacktrace__ = true;
 
 // currently using 2 separate loggers
 // app_log: uses "std_console" with a clean format only on Global().root()
@@ -37,8 +42,9 @@ bool __app_stacktrace__  = true;
 void setup_loggers(bool root, int output_level, int debug_level)
 {
   __app_debug_level__ = debug_level;
+  __app_verbosity__ = output_level;
+  __app_is_root__ = root;
   if(root) {
-    __app_output_level__ = output_level;
 #if defined(ENABLE_SPDLOG)
     auto l = spdlog::get("std_console");
     if(not l) {
@@ -46,8 +52,6 @@ void setup_loggers(bool root, int output_level, int debug_level)
       spdlog::get("std_console")->set_pattern("%v");
     }
 #endif
-  } else {
-    __app_output_level__ = -10000;
   }
 #if defined(ENABLE_SPDLOG)
   {
@@ -85,8 +89,9 @@ void set_debug_level([[maybe_unused]] bool root, int debug_level)
 
 void set_output_level(bool root, int output_level)
 {
+  __app_verbosity__ = output_level;
+  __app_is_root__ = root;
   if(root) {
-    __app_output_level__ = output_level;
 #if defined(ENABLE_SPDLOG)
     // should check that logger exists! 
     auto l = spdlog::get("std_console");
@@ -95,8 +100,7 @@ void set_output_level(bool root, int output_level)
       spdlog::get("std_console")->set_pattern("%v");
     }
 #endif
-  } else
-    __app_output_level__ = -10000;
+  }
 #if defined(ENABLE_SPDLOG)
   {
     auto l = spdlog::get("warn_console");

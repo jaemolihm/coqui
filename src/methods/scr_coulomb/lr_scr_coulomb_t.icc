@@ -30,52 +30,15 @@ namespace methods {
 namespace solvers {
 
 /**
- * Compute W_full(iω) = W_c(iω) + V from W_c(τ).
- *
- * FTs W_c(τ) → W_c(iω) into the LR ω-side {nwpools, nqpools, np_P, np_Q}
- * distribution, then adds the bare interaction Z(q) at each (q, iω) slice.
+ * W_c(iω) → W_full(iω) = W_c(iω) + V, in place, plus the Q≠Γ (q+Q) operand.
  */
-template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
-auto lr_scr_coulomb_t::compute_W_full_omega(
-    memory::darray_t<local_Array_t, communicator_t>& dW_c_tqPQ,
-    THC_ERI auto& thc,
-    bool reset_input)
--> memory::darray_t<local_Array_t, mpi3::communicator>
-{
+void lr_scr_coulomb_t::lr_Wc_to_Wfull(
+    dArr4D_concrete_t& dW_c_wqPQ, THC_ERI auto& thc) {
+
   _Timer.start("LR_W_COMPUTE_W_FULL");
 
-  auto [nt_half, nqpts, NP, NQ] = dW_c_tqPQ.global_shape();
-  long nproc = thc.mpi()->comm.size();
-  long nw_half = (_ft->nw_b()%2==0)? _ft->nw_b()/2 : _ft->nw_b()/2 + 1;
-
-  // Distribution for W_full(iω).
-  // ft_buffer_dist keeps w local, distributes over q, then P and Q.
-  // lr_W_proc_grid distributes over w and q, then P and Q.
-  // If FT buffer has P and Q local, use it for W_full to skip the redundant redistributions.
-  // If not, use a separate lr_W_proc_grid distribution to make P and Q as local as possible.
-  auto [b_pgrid, b_bsize] =
-      scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nw_half, nqpts, NP, NQ});
-  std::array<long, 4> w_pgrid, w_bsize;
-  if (b_pgrid[2] == 1 && b_pgrid[3] == 1) {
-    w_pgrid = b_pgrid;
-    w_bsize = b_bsize;
-  } else {
-    std::tie(w_pgrid, w_bsize) = utils::lr_W_proc_grid(nproc, nqpts, nw_half, NP);
-  }
-
-  // FT τ → ω directly into the chosen distribution.
-  // Deliberately uses a local scr_coulomb_fourier_t (not the member _scr_fourier):
-  // this is one-time setup, and keeping it separate leaves _scr_fourier's FT
-  // component clocks attributable to the per-iteration solve_lr_dyson_W calls
-  // only. The local engine is a trivial object (IAFT ptr + timer + flag), so
-  // this carries none of the cost of the old throwaway scr_coulomb_t.
-  scr_coulomb_fourier_t setup_ft(_ft);
-  // Rank-uniform leak-check gate (see solve_lr_dyson_W): __app_output_level__
-  // is a sentinel on non-root ranks and check_leakage is collective.
-  int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
-  thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
-  setup_ft.set_check_ft_leakage(chk_leak != 0);
-  auto dW_c_wqPQ = setup_ft.tau_to_w(dW_c_tqPQ, w_pgrid, w_bsize, reset_input);
+  auto w_pgrid = dW_c_wqPQ.grid();
+  auto [nw_half, nqpts, NP, NQ] = dW_c_wqPQ.global_shape();
 
   // Add bare interaction Z(q) at each (w, q) slice. PQ may be split across the
   // wq_intra subgroup, so use the sub-block version of thc.Z.
@@ -91,7 +54,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
       thc.mpi()->comm.split(q_origin, thc.mpi()->comm.rank());
   utils::check(
       (long)q_intra_comm.size() == w_pgrid[0] * w_pgrid[2] * w_pgrid[3],
-      "compute_W_full_omega: q_intra_comm size {} != pgrid[0]*pgrid[2]*pgrid[3] = {}",
+      "lr_Wc_to_Wfull: q_intra_comm size {} != pgrid[0]*pgrid[2]*pgrid[3] = {}",
       (long)q_intra_comm.size(), w_pgrid[0] * w_pgrid[2] * w_pgrid[3]);
 
   // q-pool id matches the convention in scr_coulomb_t::dyson_W_in_place:
@@ -117,9 +80,7 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
     (void)Z_PQ;
   }
 
-  app_log(2, "  compute_W_full_omega:");
-  app_log(2, "    - FT-buffer pgrid: ({}, {}, {}, {})",
-          b_pgrid[0], b_pgrid[1], b_pgrid[2], b_pgrid[3]);
+  app_log(2, "  lr_Wc_to_Wfull:");
   app_log(2, "    - ω-side pgrid: ({}, {}, {}, {})",
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
@@ -129,7 +90,6 @@ auto lr_scr_coulomb_t::compute_W_full_omega(
   _build_W_full_qpQ(dW_c_wqPQ, thc);
 
   _Timer.stop("LR_W_COMPUTE_W_FULL");
-  return dW_c_wqPQ;
 }
 
 /**
@@ -150,9 +110,9 @@ void lr_scr_coulomb_t::_init_kpq_map(THC_ERI auto& thc) {
  *   dW_full_qpQ[iw, iq, P, Q] = dW_full_wqPQ[iw, kpq_map(iq), P, Q]
  * via an Alltoallv inside the q-pool subgroup (ranks sharing the same w/P/Q
  * tile, varying q-tile). No-op for Q=Γ (the Dyson then reuses W_full(q) for both
- * operands). Built once from compute_W_full_omega — W_full is constant across the
+ * operands). Built once from lr_Wc_to_Wfull — W_full is constant across the
  * SCF loop. Concrete (not templated on the array type) so it can touch the
- * concrete member cache directly, keeping compute_W_full_omega's call out of an
+ * concrete member cache directly, keeping lr_Wc_to_Wfull's call out of an
  * `if constexpr` (and pinning setup to the concrete LR instantiation — a future
  * GPU build fails to compile here; see TODO_lr_cleanup.md).
  */
@@ -365,13 +325,9 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   _Timer.start("SOLVE_LR_DYSON_W");
   _init_kpq_map(thc);
 
-  // Leakage diagnostics inside the FT are verbosity-gated on the LR path.
-  // __app_output_level__ holds a sentinel (-10000) on non-root ranks, and
-  // check_leakage is collective (internal barrier + max-reduce), so broadcast
-  // root's decision to keep the gate rank-uniform.
-  int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
-  thc.mpi()->comm.broadcast_n(&chk_leak, 1, 0);
-  _scr_fourier.set_check_ft_leakage(chk_leak != 0);
+  // Leakage diagnostics inside the FT are verbosity-gated on the LR path: two
+  // gemms plus two collectives per transform, on the per-iteration path.
+  bool chk_leak = __app_verbosity__ >= 3;
 
   long nproc = thc.mpi()->comm.size();
   long NP = thc.Np();
@@ -382,7 +338,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
   // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
-  // so just adopt W_full's distribution. compute_W_full_omega already chose it
+  // so just adopt W_full's distribution. W_omega_dist already chose it
   // (fused FT-buffer layout when nproc ≤ nq, else the LR ω-side grid); tau_to_w
   // / w_to_tau then fuse away the matching redistribute automatically whenever
   // that layout is the FT-buffer one.
@@ -391,11 +347,11 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // FT ΔΠ: τ → ω, output in the LR ω-side distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true);
+  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true, chk_leak);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
-  // operand is built once in compute_W_full_omega; thread the member cache into
+  // operand is built once in lr_Wc_to_Wfull; thread the member cache into
   // the (stateless) Dyson. For Q=Γ, W_full(q+Q) = W_full(q) → pass dW_full_wqPQ
   // for both operands.
   if (_is_q_gamma) {
@@ -403,14 +359,14 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   } else {
     utils::check(_dW_full_qpQ_wqPQ.has_value(),
                  "solve_lr_dyson_W: W_full(q+Q) not prepared for Q≠Γ "
-                 "(compute_W_full_omega must run before the SCF loop)");
+                 "(lr_Wc_to_Wfull must run before the SCF loop)");
     lr_dyson_W_in_place(dDeltaPi_wqPQ, dW_full_wqPQ, *_dW_full_qpQ_wqPQ);
   }
 
   // FT back: ω → τ, output in q-local (τ-dist) distribution
   auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true);
+  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true, chk_leak);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");

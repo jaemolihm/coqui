@@ -184,13 +184,10 @@ void lr_dyson::solve_lr_dyson_impl(
   using dArray_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
   std::optional<dArray_5D_t> opt_dDeltaSigma_wskij;
   if (sDeltaSigma_tskij) {
-    // ΔΣ leakage diagnostics gated at verbosity >= 3. __app_output_level__ is
-    // set only on the root, so need to broadcast chk_leak.
-    int chk_leak = (__app_output_level__ >= 3) ? 1 : 0;
-    _context->comm.broadcast_n(&chk_leak, 1, 0);
+    // ΔΣ leakage diagnostics gated at verbosity >= 3.
     opt_dDeltaSigma_wskij.emplace(
         distributed_tau_to_w(_context->comm, *sDeltaSigma_tskij, *_dyson.FT(), w_pgrid, w_bsize,
-                             chk_leak != 0));
+                             __app_verbosity__ >= 3));
   }
   _Timer.stop("LR_DYSON_TAU_TO_W");
 

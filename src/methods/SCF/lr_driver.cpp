@@ -78,9 +78,11 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 //   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
 //   ω-side:            pgrid = {nwpools, nqpools, np_P, np_Q}  — distributed over (w, q, P, Q)
 //
-//   W_c in:              (t,q,P,Q), τ-dist — one copy, consumed by both setup steps
-//   compute_W_full_omega: τ-dist → FT(τ→ω) → ω-side, + Z(q) → W_full(iω) [cached]
-//   lr_precompute_W_tRPQ: q→R in place → (t,R,P,Q), τ-dist [cached]
+//   W_c in:              (w,q,P,Q), ω-side (solvers::lr_scr_coulomb_t::W_omega_dist)
+//   lr_setup_W:
+//     w_to_tau:          ω-side → (t,q,P,Q) straight onto the τ-dist tiling
+//     lr_Wc_to_Wfull:    + Z(q) in place on the ω copy → W_full(iω) [cached]
+//     lr_precompute_W_tRPQ: q→R in place on the τ copy → (t,R,P,Q), τ-dist [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
 //   solve_lr_dyson_W (in-place):
@@ -90,6 +92,53 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 //     w_to_tau:          ω-side → τ-dist (via q-distributed FT buffer)
 //     output:            τ-dist (overwrites input)
 //   evaluate_sigma_*:    τ-dist in (t,q) order, i.e. ΔW is consumed as produced
+
+/**
+ * Build the two cached W operands the ΔΣ/ΔW pipeline reads every iteration, from
+ * the single W_c(iω) the caller hands in:
+ *
+ *   dW_full_wqPQ = W_c(iω) + Z(q), the ΔW Dyson operand (gw_full only)
+ *   dW_tRPQ      = W_c(t,R,P,Q),   the ΔΣ = −ΔG⊙W_c operand
+ *
+ * Ordering is load-bearing: dW_tRPQ carries the *correlation-only* W_c, so Z is
+ * added to the ω array only once the τ copy has been taken.
+ *
+ * Out-params rather than a return value because the two operands are owned by
+ * the caller's scope, and each is absent on the paths that do not need it.
+ */
+template<THC_ERI THC_t, typename dW_t>
+void lr_driver::lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
+                           solvers::lr_scr_coulomb_t* lr_scr,
+                           std::optional<dW_t>& opt_dW_full_wqPQ,
+                           std::optional<dW_t>& opt_dW_tRPQ) {
+  // The canonical LR q-local (t,q,P,Q) tiling every τ-side operand shares, and
+  // the target of the ω→τ transform below. The fused ΔΣ loop pairs the P/Q tile
+  // of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the G^R cache, both
+  // built via lr_W_q_local_dist, so a W_c on a different tiling makes the fused
+  // pairing abort: the contiguous PQ split disagrees whenever Np % np_P != 0
+  // (bsize=1 vs bsize=Np/np_P round differently).
+  long nt_half = (_nts % 2 == 0) ? _nts / 2 : _nts / 2 + 1;
+  auto [tq_pgrid, tq_bsize] =
+      utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
+
+  _Timer.start("LR_DRIVER_SETUP_W_FULL");
+  // One ω→τ, landing directly on the LR τ tiling. The ω array survives it only
+  // when the ΔW Dyson needs it as W_full; otherwise the FT releases it before
+  // allocating the output, which a caller-side reset cannot do.
+  solvers::scr_coulomb_fourier_t setup_ft(_dyson.FT());
+  auto dW_tqPQ = setup_ft.w_to_tau(*dW_wqPQ_in, tq_pgrid, tq_bsize,
+                                   /*reset_input=*/!gw_full,
+                                   __app_verbosity__ >= 3);
+  if (gw_full) {
+    lr_scr->lr_Wc_to_Wfull(*dW_wqPQ_in, thc);
+    opt_dW_full_wqPQ.emplace(std::move(*dW_wqPQ_in));
+  }
+  _Timer.stop("LR_DRIVER_SETUP_W_FULL");
+
+  _Timer.start("LR_DRIVER_SETUP_W_TRPQ");
+  opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(dW_tqPQ, thc));
+  _Timer.stop("LR_DRIVER_SETUP_W_TRPQ");
+}
 
 template<THC_ERI THC_t, typename dW_t>
 std::tuple<int, double> lr_driver::run_lr(
@@ -101,7 +150,8 @@ std::tuple<int, double> lr_driver::run_lr(
     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
     THC_t& thc,
     bool include_hartree, bool include_exchange, lr_gw_update_mode gw_mode,
-    dW_t* dW_tqPQ_in, const nda::array<ComplexType, 1>* eps_inv_head,
+    dW_t* dW_wqPQ_in,
+    const nda::array<ComplexType, 1>* eps_inv_head,
     int max_iter, double tol, bool fix_density,
     const lr_iter_params& iter_params,
     const sArray_t<Array_view_4D_t>* sDeltaX_left,
@@ -144,8 +194,8 @@ std::tuple<int, double> lr_driver::run_lr(
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
                  "lr_driver::run_lr: gw_mode != none but sDeltaSigma_tskij is null.");
-    utils::check(dW_tqPQ_in != nullptr && eps_inv_head != nullptr,
-                 "lr_driver::run_lr: gw_mode != none but dW_tqPQ or eps_inv_head is null.");
+    utils::check(dW_wqPQ_in != nullptr && eps_inv_head != nullptr,
+                 "lr_driver::run_lr: gw_mode != none but dW or eps_inv_head is null.");
   }
   if (split_sigma_terms) {
     utils::check(gw_full,
@@ -198,29 +248,6 @@ std::tuple<int, double> lr_driver::run_lr(
                         use_diis, iter_params.max_subsp_size);
   print_distribution_summary(thc.Np(), include_gw_sigma, gw_full);
 
-  // Force dW_tqPQ onto the canonical LR q-local distribution. The fused ΔΣ loop
-  // pairs the P/Q tile of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the
-  // G^R cache, both built via lr_W_q_local_dist. When dW_tqPQ arrives on a
-  // different tiling — e.g. a W_c recomputed through the scGW pipeline inherits
-  // the polarizability's block_size={1,1,1,1} — the contiguous PQ split disagrees
-  // whenever Np % np_P != 0 (bsize=1 vs bsize=Np/np_P round differently), and
-  // the fused pairing aborts. Redistributing here makes all operands share one
-  // tiling by construction. (The from-file G0W0 path already builds dW_tqPQ on
-  // this distribution, so the redistribute is a no-op there.)
-  if (include_gw_sigma) {
-    long nt_f = sG_tskij.shape()[0];
-    long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
-    auto [tq_pgrid, tq_bsize] =
-        utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
-    if (dW_tqPQ_in->grid() != tq_pgrid || dW_tqPQ_in->block_size() != tq_bsize) {
-      app_log(2, "lr_driver::run_lr: redistributing dW_tqPQ onto canonical "
-                 "LR q-local tiling (pgrid ({},{},{},{}), bsize ({},{},{},{}))",
-              tq_pgrid[0], tq_pgrid[1], tq_pgrid[2], tq_pgrid[3],
-              tq_bsize[0], tq_bsize[1], tq_bsize[2], tq_bsize[3]);
-      math::nda::redistribute_in_place(*dW_tqPQ_in, tq_pgrid, tq_bsize);
-    }
-  }
-
   // Initialize lr_hf solver if needed
   if (need_hf && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
@@ -246,28 +273,12 @@ std::tuple<int, double> lr_driver::run_lr(
     lr_pi_solver = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
     lr_scr_solver = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT(), _lr_dyson.q_vec());
   }
-  // Precompute W_full(iω) = W_c(iω) + V (cached across iterations).
   _Timer.start("LR_DRIVER_SETUP");
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dW_full_wqPQ;
-  // Both W_c consumers below read the same (t,q,P,Q) array the caller handed in:
-  // compute_W_full_omega FTs it τ→ω, then lr_precompute_W_tRPQ turns it
-  // into (t,R,P,Q). So the FT must not release it — hence reset_input=false — and
-  // the R-space step needs no copy of its own.
-  if (gw_full) {
-    _Timer.start("LR_DRIVER_SETUP_W_FULL");
-    opt_dW_full_wqPQ.emplace(
-        lr_scr_solver->compute_W_full_omega(*dW_tqPQ_in, thc, /*reset_input=*/false));
-    _Timer.stop("LR_DRIVER_SETUP_W_FULL");
-  }
-
-  // Precompute W in R-space: q→R FT in place on the (t,q) input.
-  // Result: dW_tRPQ with (t,R,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
-  std::optional<dW_t> opt_dW_tRPQ;
+  std::optional<dW_t> opt_dW_full_wqPQ;   // W_full(iω), ω-side distribution
+  std::optional<dW_t> opt_dW_tRPQ;        // W_c(t,R,P,Q), τ-dist (q-local)
   if (include_gw_sigma) {
-    _Timer.start("LR_DRIVER_SETUP_W_TRPQ");
-    opt_dW_tRPQ.emplace(lr_precompute_W_tRPQ(*dW_tqPQ_in, thc));
-    _Timer.stop("LR_DRIVER_SETUP_W_TRPQ");
+    lr_setup_W(dW_wqPQ_in, thc, gw_full, lr_scr_solver.get(),
+               opt_dW_full_wqPQ, opt_dW_tRPQ);
   }
 
   // Precompute the unperturbed G^R(τ)/G^R(β−τ) pair in aux basis (constant
@@ -950,17 +961,13 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
             pg4(tau_pg, "(t,q,P,Q)"), arrs);
   }
   // Aux FT-buffer + ω-side — only the full-GW W Dyson pipeline (mirrors the
-  // distribution choice in lr_scr_coulomb_t::compute_W_full_omega).
+  // distribution choice in solvers::lr_scr_coulomb_t::W_omega_dist).
   if (gw_full) {
     auto [ftb_pg, ftb_bs] =
         solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nth, nq, NP, NP});
     (void)ftb_bs;
-    std::array<long,4> w_pg, w_bs;
-    if (ftb_pg[2] == 1 && ftb_pg[3] == 1) {
-      w_pg = ftb_pg; w_bs = ftb_bs;
-    } else {
-      std::tie(w_pg, w_bs) = utils::lr_W_proc_grid(nproc, nq, nwbh, NP);
-    }
+    auto [w_pg, w_bs] =
+        solvers::lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwbh, NP);
     (void)w_bs;
     app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer",
             pg4(ftb_pg, "(·,q,P,Q)"), "FT staging buffers (τ, ω)");

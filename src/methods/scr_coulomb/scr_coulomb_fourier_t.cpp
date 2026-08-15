@@ -29,7 +29,7 @@ namespace solvers {
   auto scr_coulomb_fourier_t::tau_to_w(
       memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
       std::array<long, 4> w_pgrid_out, std::array<long, 4> w_bsize_out,
-      bool reset_input)
+      bool reset_input, bool check_leakage)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
     using math::nda::make_distributed_array;
@@ -45,7 +45,7 @@ namespace solvers {
     // Single-rank fast path: the whole array is already local, so axis 0 (τ)
     // needs no redistribution — FT in place, skipping all staging buffers.
     if (dPi_tqPQ_pos.communicator()->size() == 1) {
-      if (_check_ft_leakage) {
+      if (check_leakage) {
         _ft->check_leakage(dPi_tqPQ_pos, imag_axes_ft::boson, "polarizability", true);
       }
       auto dPi_wqPQ = make_distributed_array<local_Array_t>(
@@ -70,7 +70,7 @@ namespace solvers {
     _Timer.stop("FT_REDISTRIBUTE");
     utils::memlog("tau_to_w: after in-redistribute");
     if (reset_input) dPi_tqPQ_pos.reset();
-    if (_check_ft_leakage) {
+    if (check_leakage) {
       _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "polarizability", true);
     }
 
@@ -116,7 +116,7 @@ namespace solvers {
   auto scr_coulomb_fourier_t::w_to_tau(
       memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
       std::array<long, 4> t_pgrid_out, std::array<long, 4> t_bsize_out,
-      bool reset_input)
+      bool reset_input, bool check_leakage)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
     using math::nda::make_distributed_array;
@@ -138,7 +138,7 @@ namespace solvers {
       auto W_ti_loc = dW_tqPQ.local();
       _ft->w_to_tau_PHsym(W_wi_loc, W_ti_loc);
       if (reset_input) dW_wqPQ_pos.reset();
-      if (_check_ft_leakage) {
+      if (check_leakage) {
         _ft->check_leakage(dW_tqPQ, imag_axes_ft::boson, "screened interaction", true);
       }
       _Timer.stop("IMAG_FT_WtoT");
@@ -183,7 +183,7 @@ namespace solvers {
       buffer_wi.reset();
     }
 
-    if (_check_ft_leakage) {
+    if (check_leakage) {
       _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "screened interaction", true);
     }
 
@@ -205,11 +205,11 @@ namespace solvers {
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_fourier_t::tau_to_w(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool);
+                 std::array<long, 4>, std::array<long, 4>, bool, bool);
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_fourier_t::w_to_tau(memory::darray_t<Arr4D, mpi3::communicator> &,
-                 std::array<long, 4>, std::array<long, 4>, bool);
+                 std::array<long, 4>, std::array<long, 4>, bool, bool);
 
 }  // solvers
 }  // methods

@@ -1185,6 +1185,52 @@ auto load_W_and_eps_inv_head(
 }
 
 /**
+ * Helper: read W from the screened-interaction file and hand it to the LR path
+ * on the Matsubara axis, so lr_driver has exactly one W layout to support.
+ *
+ * The τ→ω transform lives here rather than in load_W_and_eps_inv_head because
+ * that function's other callers (the standalone scGW Σ paths) want W(τ). Only
+ * this from-file path pays the transform; recompute_W_and_eps_inv_head, which
+ * solves the W Dyson in ω anyway, hands ω back for free.
+ *
+ * @param mpi         - MPI context
+ * @param thc         - THC ERI
+ * @param ft          - IAFT (from checkpoint)
+ * @param input_file  - Path to checkpoint HDF5 file
+ * @param input_grp   - SCF group name in checkpoint
+ * @param input_iter  - Iteration to read (-1 = final_iter)
+ * @param screened_interaction_file - Explicit path to W_qtPQ, "" = auto-derive
+ * @return (dW_wqPQ, eps_inv_head, div_treatment) — W on the Matsubara axis on
+ *         solvers::lr_scr_coulomb_t::W_omega_dist, head on the τ axis
+ */
+template<typename mpi_context_t, typename THC_t>
+auto lr_load_W_omega(
+    mpi_context_t& mpi,
+    THC_t& thc,
+    imag_axes_ft::IAFT const& ft,
+    const std::string& input_file,
+    const std::string& input_grp,
+    long input_iter,
+    const std::string& screened_interaction_file = "")
+{
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
+      mpi, thc, input_file, input_grp, input_iter, ft.nt_f(),
+      screened_interaction_file);
+
+  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
+      mpi.comm.size(), thc.MF()->nkpts(), nw_half, thc.Np());
+
+  solvers::scr_coulomb_fourier_t setup_ft(&ft);
+  auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
+                                   __app_verbosity__ >= 3);
+  mpi.comm.barrier();
+
+  return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
+                         std::move(div_treatment));
+}
+
+/**
  * Helper: recompute W and eps_inv_head from the (already-built) unperturbed
  * Green's function instead of reading W from a screened-interaction file.
  *
@@ -1194,16 +1240,23 @@ auto load_W_and_eps_inv_head(
  * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
  * the no-symmetry requirement below + the RPA screen_type.
  *
- * Returns the same (dW_tqPQ, eps_inv_head) as load_W_and_eps_inv_head
- * (sans div_treatment, which the caller already holds), so it is
- * a drop-in at the call site. dyson_W_from_Pi_tau already produces (t,q), so no
- * transpose is needed here.
+ * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
+ * wants (solvers::lr_scr_coulomb_t::W_omega_dist) — the one layout lr_driver accepts.
+ * The W Dyson is solved in ω anyway, so returning ω saves the ω→τ transform
+ * back onto Π's τ grid *and* the redistribute onto the LR tiling that would
+ * follow it — the LR driver does one ω→τ straight onto its own grid instead.
+ *
+ * eps_inv_head is built with eps_inv_head_w rather than eps_inv_head_t and then
+ * transformed to τ. eval_eps_inv_q is linear and pointwise in the imaginary-axis
+ * index, and eps_inv_head_t is exactly "eval → tau_to_w_PHsym → extrapolate →
+ * w_to_tau_PHsym", so this is the same quantity with two fewer transforms.
  *
  * @param mpi           - MPI context
  * @param thc           - THC ERI
  * @param ft            - IAFT (from checkpoint)
  * @param sG_tskij      - Unperturbed G(τ) shared array (nt, ns, nk, nb, nb)
  * @param div_treatment - Divergence treatment scGW used (from checkpoint)
+ * @return (dW_wqPQ, eps_inv_head) — W on the Matsubara axis, head on the τ axis
  */
 template<typename mpi_context_t, typename THC_t, typename sArray_5D_t>
 auto recompute_W_and_eps_inv_head(
@@ -1225,15 +1278,29 @@ auto recompute_W_and_eps_inv_head(
   // Standard GW: W is RPA-screened. cRPA / edmft are not supported here.
   solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
 
+  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
+      mpi.comm.size(), nkpts, nw_half, thc.Np());
+
   auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi.comm.barrier();
-  auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+  auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
   mpi.comm.barrier();
 
-  auto [eps_inv_head_q, eps_inv_head] =
-      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+  // eps_inv_head_w returns the head at every (iω, q) plus the q→0 extrapolated
+  // head at every iω; only the latter is wanted here.
+  auto [eps_inv_head_wq, eps_inv_head_q0_w] =
+      solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *mf, div_treatment);
 
-  return std::make_pair(std::move(dW_tqPQ), std::move(eps_inv_head));
+  // The head is consumed on the τ axis (lr_gw::apply_div_correction_*), so make
+  // the same final ω→τ step eps_inv_head_t ends with.
+  long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+  nda::array<ComplexType, 1> eps_inv_head(nt_half);
+  auto head_w_2D = nda::reshape(eps_inv_head_q0_w, std::array<long, 2>{nw_half, 1});
+  auto head_t_2D = nda::reshape(eps_inv_head, std::array<long, 2>{nt_half, 1});
+  ft.w_to_tau_PHsym(head_w_2D, head_t_2D);
+
+  return std::make_pair(std::move(dW_wqPQ), std::move(eps_inv_head));
 }
 
 /**
@@ -1525,9 +1592,10 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
 
   // Load W and eps_inv_head if GW self-energy is requested. W is either read
   // from disk (explicit screened_interaction_file, else the auto-derived path)
-  // or recomputed on the fly from the checkpoint Green's function (RPA).
-  using dW_type = std::tuple_element_t<0, decltype(load_W_and_eps_inv_head(
-      *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f()))>;
+  // or recomputed on the fly from the checkpoint Green's function (RPA). Both
+  // hand W to lr_driver as W_c(iω) on solvers::lr_scr_coulomb_t::W_omega_dist.
+  using dW_type = std::tuple_element_t<0, decltype(lr_load_W_omega(
+      *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter))>;
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
   std::string div_treatment = "gygi";
@@ -1556,8 +1624,8 @@ std::tuple<int, double> run_lr_calc(eri_t &eri, ptree const& pt,
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
     } else {
-      auto [dW, eps_inv, div_str] = load_W_and_eps_inv_head(
-          *mpi, eri.corr_eri->get(), input_file, input_grp, input_iter, ft.nt_f(),
+      auto [dW, eps_inv, div_str] = lr_load_W_omega(
+          *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter,
           screened_interaction_file);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
@@ -2084,10 +2152,11 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
 
-  // Load W_c(τ) from thc_screened_interaction.h5 in (t, q, P, Q), the layout the FT wants
+  // Load W_c from thc_screened_interaction.h5 and take it in ω, the axis the LR
+  // W Dyson works on.
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
-      *mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_wqPQ, eps_inv_head, div_treatment] = lr_load_W_omega(
+      *mpi, thc, ft, input_file, input_grp, input_iter);
   (void)div_treatment;
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
@@ -2109,10 +2178,9 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
-  // Sole consumer of W_c here, so release it inside the FT — before ΔW's own
-  // staging buffer and ΔΠ(iω) go live in solve_lr_dyson_W below.
-  auto dW_full_wqPQ = lr_scr.compute_W_full_omega(dW_tqPQ, thc, /*reset_input=*/true);
-  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_full_wqPQ, thc);
+  // W_c has no correlation-only consumer here, so += Z right away, in place.
+  lr_scr.lr_Wc_to_Wfull(dW_wqPQ, thc);
+  lr_scr.solve_lr_dyson_W(dDeltaPi_tqPQ, dW_wqPQ, thc);
   // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
 
