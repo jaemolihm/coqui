@@ -194,8 +194,9 @@ namespace methods {
    *   "linear_response/" exactly as before; set writes
    *   "linear_response/mode{imode}/", for a run covering several perturbations.
    * @param save_DeltaG    - [INPUT] write DeltaG_tskij (default true). ΔG is the
-   *   single largest LR dataset and no consumer reads it back, so a batched run
-   *   can drop it.
+   *   single largest LR dataset, so a batched run that only needs ΔDm/ΔF can drop
+   *   it. The one reader, python `coqui.mbpt.read_lr_results`, then returns None
+   *   for it.
    * @param nbnd_save      - [INPUT] keep only the leading nbnd_save x nbnd_save
    *   band block of the imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
    *   DeltaSigma_GdW_tskij); unset (default) writes them whole. Must be in

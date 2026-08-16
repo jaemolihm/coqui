@@ -388,7 +388,16 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // makes a solve depend on nothing but its own ΔH0.
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   if (p.use_diis()) _lr_diis->reset();
+  // Both halves of the report: the driver's own SCF clocks and the solvers'
+  // sub-clocks. Resetting only the former leaves print_timers showing a per-mode
+  // total above sub-clocks accumulated over every mode so far.
   for (auto& k : lr_scf_timer_keys) _Timer.reset(k);
+  _lr_dyson.reset_timers();
+  if (_lr_hf) _lr_hf->reset_timers();
+  if (_lr_gw) _lr_gw->reset_timers();
+  if (_lr_gw2) _lr_gw2->reset_timers();
+  if (_lr_pi) _lr_pi->reset_timers();
+  if (_lr_scr) _lr_scr->reset_timers();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -782,35 +791,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 }
 
 
-template<THC_ERI THC_t, typename dW_t>
-std::tuple<int, double> lr_driver::run_lr(
-    sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-    sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-    sArray_t<Array_view_4D_t>& sDeltaF_skij,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-    const sArray_t<Array_view_5D_t>& sG_tskij,
-    const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-    THC_t& thc,
-    dW_t* dW_wqPQ_in,
-    lr_params p,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
-    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij,
-    nda::array<ComplexType, 4>* DeltaF_ibc_out,
-    nda::array<ComplexType, 4>* F_PQ_out,
-    nda::array<ComplexType, 4>* DeltaF_PQ_out) {
-
-  // The two output selectors are implied by which outputs the caller asked for.
-  p.split_sigma_terms = (sDeltaSigma_term2_tskij != nullptr);
-  p.keep_F_PQ = (F_PQ_out != nullptr);
-  lr_setup(sG_tskij, thc, dW_wqPQ_in, p);
-
-  return lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
-                      sDeltaSigma_tskij, sG_tskij, sDeltaH0_skij, thc, p,
-                      sDeltaSigma_term2_tskij, sDeltaVcorr_out_skij,
-                      DeltaF_ibc_out, F_PQ_out, DeltaF_PQ_out);
-}
-
-
 void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                                       bool use_diis, size_t max_subsp_size) {
   // Dimensions of the large arrays.
@@ -859,7 +839,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   auto shp5a = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nq, NP, NP); };
 
   // --- Persistent, shared (replicated per node), band basis ~ nk·nt·nb² ---
-  // sG_tskij is caller-owned but resident throughout run_lr, so count it here.
+  // sG_tskij is caller-owned but resident throughout the solve, so count it here.
   arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
@@ -1102,20 +1082,5 @@ template std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>*,
     nda::array<ComplexType, 4>*);
 
-template std::tuple<int, double> lr_driver::run_lr(
-    sArray_t<Array_view_5D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_5D_t>*,
-    const sArray_t<Array_view_5D_t>&,
-    const sArray_t<Array_view_4D_t>&,
-    thc_reader_t&,
-    dW_concrete_t*,
-    lr_params,
-    sArray_t<Array_view_5D_t>*,
-    sArray_t<Array_view_4D_t>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*);
 
 } // namespace methods

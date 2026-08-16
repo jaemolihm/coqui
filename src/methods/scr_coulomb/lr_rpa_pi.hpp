@@ -110,6 +110,10 @@ namespace methods {
       app_log(level, "");
     }
 
+    /// Zero this solver's sub-clocks. lr_driver calls it per perturbation so a
+    /// batched run's timing report covers one perturbation, not the running total.
+    inline void reset_timers() { _Timer.reset(); }
+
     /// Print only the component clocks, each line prefixed by `indent`.
     /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
     inline void print_subclocks(int level, const std::string& indent) {
