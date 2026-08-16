@@ -706,7 +706,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // Both halves of the report: the driver's own SCF clocks and the solvers'
   // sub-clocks. Resetting only the former leaves print_timers showing a per-mode
   // total above sub-clocks accumulated over every mode so far.
-  for (auto& k : lr_scf_timer_keys) _Timer.reset(k);
+  for (auto& kkey : lr_scf_timer_keys) _Timer.reset(kkey);
   _lr_dyson.reset_timers();
   if (_lr_hf) _lr_hf->reset_timers();
   if (_lr_gw) _lr_gw->reset_timers();
