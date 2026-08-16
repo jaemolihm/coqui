@@ -49,9 +49,10 @@ namespace methods {
      * and ERIs are provided at runtime
      *
      * Usage:
-     *   gw_t mygw(comm, std::addressof(myMF));
-     *   mygw.evaluate(G, Sigma, thc_eri);
-     *   mygw.evaluate(G, Sigma, chol_eri);
+     *   gw_t mygw(ft);
+     *   mygw.evaluate(mb_state, thc_eri);       // THC-GW
+     *   mygw.evaluate(mb_state, chol_eri);      // Chol-GW
+     *   mygw.evaluate(G, Sigma, chol_eri);      // Chol-GW without an MBState
      */
     class gw_t {
     public:
@@ -76,20 +77,6 @@ namespace methods {
        * @param thc          - [INPUT] THC ERI object
        */
       void evaluate(MBState &mb_state, THC_ERI auto const& thc, bool verbose=true);
-
-      /**
-       * Evalaute THC-GW self-energy
-       * @param G_tskij      - [INPUT] Green's function in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param sSigma_tskij - [OUTPUT] Self-energy in primary basis: (nts, ns, nkpts_ibz, nbnd, nbnd)
-       * @param S_skij       - [INPUT] Overlap matrix (ns, nkpts_ibz, nbnd, nbnd)
-       * @param thc          - [INPUT] THC ERI object
-       */
-      template<nda::MemoryArray Array_view_5D_t>
-      void evaluate(const nda::MemoryArrayOfRank<5> auto &G_tskij,
-                    sArray_t<Array_view_5D_t> &sSigma_tskij,
-                    const nda::MemoryArrayOfRank<4> auto &S_skij,
-                    THC_ERI auto const& thc, scr_coulomb_t* scr_eri=nullptr,
-                    bool verbose=true);
 
       /**
        * Evaluate THC-RPA correlation energy

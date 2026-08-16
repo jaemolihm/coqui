@@ -110,6 +110,23 @@ namespace methods {
                                  std::string filename,
                                  long gw_iter);
 
+  /**
+   * Write the SCF run status into the "scf" group of output.mbpt.h5.
+   *
+   * Called once, after the SCF loop has exited, so a checkpoint carrying no
+   * "scf_status" dataset comes from a run that was killed mid-flight (or from a
+   * run that predates the marker). Readers must use has_dataset and treat the
+   * absence as unknown; see read_scf_status.
+   *
+   * @param comm   - [INPUT] MPI communicator; only the root writes
+   * @param output - [INPUT] Prefix for the checkpoint file: output.mbpt.h5
+   * @param status - [INPUT] "converged" or "max_iter"
+   */
+  void write_scf_status(mpi3::communicator &comm, std::string output, std::string status);
+
+  /// SCF run status stored by write_scf_status; "unknown" when absent.
+  std::string read_scf_status(std::string filename);
+
   auto read_input_iterations(std::string filename) -> std::tuple<long, long, long, long>;
 
   bool is_qp_selfenergy(std::string filename);

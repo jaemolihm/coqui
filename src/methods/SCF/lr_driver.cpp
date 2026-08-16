@@ -154,6 +154,20 @@ void lr_driver::lr_setup(
     utils::check(dW_wqPQ_in != nullptr && p.eps_inv_head != nullptr,
                  "lr_driver::lr_setup: gw_mode != none but dW or eps_inv_head is null.");
   }
+  if (p.include_xc) {
+    utils::check(p.include_hartree,
+                 "lr_driver::lr_setup: include_xc = true requires include_hartree = true.");
+    utils::check(!p.include_exchange,
+                 "lr_driver::lr_setup: include_xc = true is incompatible with "
+                 "include_exchange = true. The semilocal xc kernel contracts with the "
+                 "diagonal density response only; LR-DFT is include_hartree = true, "
+                 "include_exchange = false.");
+    utils::check(!p.include_gw_sigma(),
+                 "lr_driver::lr_setup: include_xc = true is incompatible with a GW "
+                 "self-energy (gw_mode != none): f_xc and ΔΣ_GW both carry the "
+                 "correlation response, so the two together double-count it. "
+                 "include_xc works only in the Hartree mode.");
+  }
   if (p.split_sigma_terms) {
     utils::check(p.gw_full(),
                  "lr_driver::lr_setup: split ΔΣ terms require gw_mode='full'.");
@@ -642,9 +656,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _mpi->node_comm.barrier();
       // Each node now holds a valid copy of its own contiguous element run
       // only; one allgatherv among the node roots completes every replica. With
-      // the striping global, each element is mixed exactly once in the whole
-      // job, so the per-node drift the old node-0 broadcast papered over cannot
-      // arise by construction.
+      // the striping global, each element is mixed exactly once in the whole job.
       if (_mpi->node_comm.root()) {
         utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                        sDeltaF_skij.local().data(), _DeltaF.n_flat);
@@ -672,8 +684,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         _mpi->comm, _DeltaF.slice(sDeltaF_skij.local()), _DeltaF.prev, iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
-    _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
-    _mpi->comm.broadcast_n(&norm_DeltaF_diff, 1, 0);
 
     // Compute norms of the tracked static second quantity (dynamic ΔΣ in the
     // standard path; static ΔV_QPGW in qp mode) for logging/convergence.
@@ -684,15 +694,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           _mpi->comm, _DeltaVcorr.slice(sDeltaVcorr_skij.local()), _DeltaVcorr.prev, iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
-      _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
-      _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     } else if (has_Sigma) {
       auto norms_Sigma = utils::striped_norm(
           _mpi->comm, _DeltaSigma.slice(sDeltaSigma_tskij->local()), _DeltaSigma.prev, iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
       norm_DeltaSigma_diff = norms_Sigma.second;
-      _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
-      _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     }
 
     // Log iteration

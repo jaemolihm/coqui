@@ -306,44 +306,9 @@ namespace solvers {
      */
     void print_timers(int level = 2);
 
-  private:
-
-    // optional container for screened interaction
-    // TODO Remove these
-    std::optional<memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator> > _dW_qtPQ_opt;
-    std::optional<nda::array<ComplexType, 1> > _eps_inv_head;
-
-  public:
     std::string div_treatment() const { return _div_treatment; }
     std::string& screen_type() { return _screen_type; };
     std::string screen_type() const { return _screen_type; };
-
-    // TODO Remove everything below
-    const nda::array<ComplexType, 1>& eps_inv_head() const {
-      if (!_eps_inv_head.has_value()) {
-        utils::check(false, "scr_coulomb_t: uninitialized _eps_inv_head.");
-      }
-      return _eps_inv_head.value();
-    }
-
-    // access to screened interaction
-    const memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>& get() const {
-      if (!_dW_qtPQ_opt.has_value()) {
-        utils::check(false, "scr_coulomb_t: uninitialized _dW_qtPQ_opt.");
-      }
-      return _dW_qtPQ_opt.value();
-    }
-    memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>& get_mutable() {
-      if (!_dW_qtPQ_opt.has_value()) {
-        utils::check(false, "scr_coulomb_t: uninitialized _dW_qtPQ_opt.");
-      }
-      return _dW_qtPQ_opt.value();
-    }
-    bool has_result() const noexcept { return _dW_qtPQ_opt.has_value(); }
-    void reset() noexcept {
-      if (_dW_qtPQ_opt.has_value()) _dW_qtPQ_opt.reset();
-      if (_eps_inv_head.has_value()) _eps_inv_head.reset();
-    }
 
   }; // scr_coulomb_t
 } // solvers

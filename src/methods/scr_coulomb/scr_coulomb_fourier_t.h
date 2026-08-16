@@ -69,8 +69,8 @@ namespace solvers {
      *
      * The staging buffers are allocated and released within the call. Each holds
      * a full aux grid — the whole (τ/ω, q, P, Q) array in the ft_buffer_dist
-     * layout, so ~1/nproc of it per rank — not one τ slice: the local IAFT kernel
-     * consumes the entire τ/ω axis at once. A buffer is skipped when the caller's
+     * layout, so ~1/nproc of it per rank — because the local IAFT kernel consumes
+     * the entire τ/ω axis at once. A buffer is skipped when the caller's
      * distribution already matches ft_buffer_dist.
      *
      * check_leakage runs the IAFT leakage diagnostic on the τ-side array. It is a

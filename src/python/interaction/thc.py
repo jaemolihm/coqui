@@ -82,54 +82,54 @@ def make_thc_coulomb(mf, params):
         - ``chol_block_size`` *(int, optional, default ``8``)* — block size for
           the internal Cholesky step.
         - ``band_weights`` *(bool, optional, default ``True``)* — master switch
-          for per-band fit weighting. When ``True``, an augmented mean field
-          (``augment_mf`` / ``augment_mf_dpsi``) weights each band by its stored
-          augmentation singular value (1 for the original bands) in the pivot
-          search and the interpolating-vector fit, and ``nbnd_protected`` (below)
-          adds its energy suppression on top. The collocation matrices and the
-          resulting ERIs remain unweighted. ``False`` treats all bands equally
-          and turns off **both** sources, so ``nbnd_protected`` then only selects
+          for per-band fit weighting; see ``nbnd_protected`` below for what is
+          weighted. ``False`` treats all bands equally and turns off **both**
+          sources of weight, leaving ``nbnd_protected`` only as the selector of
           the unprotected band range for ``exclude_unprotected_pairs``.
         - ``nbnd_protected`` *(int, optional, default ``-1``)* — number of
-          protected bands ``N_P``. When positive, bands ``b < N_P`` keep weight
-          1 and the band tail ``b >= N_P`` is energy-suppressed by
-          ``(E(s,k,N_P-1) - mu)/(E(s,k,b) - mu)`` in the pivot search and the
-          interpolating-vector fit, with ``mu`` the mean field's Fermi energy
-          and ``E(s,k,N_P-1)`` the last protected band. The collocation
-          matrices and the resulting ERIs remain unweighted. Requires a mean
-          field carrying a Fermi energy (``System/fermi_energy``) — a checkpoint
-          written without one is rejected rather than treated as ``mu = 0``.
-          ``N_P`` must leave at least one unoccupied band protected, since the
-          reference band is ``N_P-1`` and ``E(N_P-1) - mu`` must be positive.
-          Requires ``band_weights=True``. On an augmented mean field the energy
-          weights stop at ``nbnd_orig`` and the augmentation block keeps its
-          singular values, so the two weightings combine rather than exclude
-          each other.
+          protected bands ``N_P``, and the reference description of the
+          protected-band scheme. Two weightings enter the pivot search and the
+          interpolating-vector fit, both gated on ``band_weights=True``: an
+          augmented mean field (``augment_mf`` / ``augment_mf_dpsi``) weights each
+          band by its stored augmentation singular value (1 for the original
+          bands), and a positive ``N_P`` keeps bands ``b < N_P`` at weight 1 while
+          suppressing the tail ``b >= N_P`` by
+          ``(E(s,k,N_P-1) - mu)/(E(s,k,b) - mu)``, with ``mu`` the mean field's
+          Fermi energy and ``E(s,k,N_P-1)`` the last protected band. The two
+          combine rather than exclude each other: on an augmented mean field the
+          energy weights stop at ``nbnd_orig`` and the augmentation block keeps
+          its singular values. The collocation matrices and the resulting ERIs
+          remain unweighted.
+          Preconditions: a mean field carrying a Fermi energy
+          (``System/fermi_energy``) — a checkpoint written without one is rejected
+          rather than treated as ``mu = 0`` — and an ``N_P`` leaving at least one
+          unoccupied band protected, since the reference band is ``N_P-1`` and
+          ``E(N_P-1) - mu`` must be positive.
           ``nbnd_protected == nbnd`` is accepted as an explicit no-op: the
           unprotected tail is empty, so no weights are built and
           ``exclude_unprotected_pairs`` is forced off, giving a run identical to
-          plain THC. The preconditions are still checked, so it works as a dry
-          run. Passing ``exclude_unprotected_pairs=True`` explicitly in that case
-          is an error rather than a silent no-op.
+          plain THC while the preconditions are still checked (a dry run).
+          Passing ``exclude_unprotected_pairs=True`` explicitly in that case is an
+          error rather than a silent no-op.
         - ``nbnd_orig`` *(int, optional, default ``-1``)* — number of original
           (non-augmentation) bands of an augmented mean field, i.e. where the
           augmentation block starts in the ``[originals | augmentation]`` basis.
-          Required together with ``nbnd_protected`` on an augmented mean field
-          and rejected otherwise: the block boundary cannot be inferred from the
-          mean field. Energy weights then cover ``[nbnd_protected, nbnd_orig)``
-          and the augmentation singular values cover ``[nbnd_orig, nbnd)``.
+          Required together with ``nbnd_protected`` on an augmented mean field and
+          rejected otherwise: the block boundary cannot be inferred from the mean
+          field. It is the split point of the two weightings above — energy
+          weights cover ``[nbnd_protected, nbnd_orig)``, augmentation singular
+          values ``[nbnd_orig, nbnd)``.
         - ``exclude_unprotected_pairs`` *(bool, optional, default ``True`` when
           ``nbnd_protected > 0``)* — research diagnostic. When ``True``, drop
           the unprotected-unprotected pair densities
           (``M_keep = M_full - M_aug``) from BOTH the pivot-point-selection
           metric AND the interpolating-vector / Coulomb-matrix (zeta) fit; the
-          returned collocation and the pair densities in the ERIs are
-          unchanged, so it only changes which pairs the fit prioritizes. The
-          unprotected set is the band tail ``[nbnd_protected, nbnd)``, so
-          ``nbnd_protected`` is required. On an augmented mean field that tail
-          runs past ``nbnd_orig``, i.e. the augmentation states count as
-          unprotected. The zeta-fit part is implemented on the host/CPU backend
-          only (a GPU run with ``True`` errors).
+          returned collocation and the pair densities in the ERIs are unchanged,
+          so it only changes which pairs the fit prioritizes. The unprotected set
+          is the band tail ``[nbnd_protected, nbnd)`` (so ``nbnd_protected`` is
+          required, and on an augmented mean field the augmentation states count
+          as unprotected). The zeta-fit part is implemented on the host/CPU
+          backend only (a GPU run with ``True`` errors).
         - ``init`` *(bool, optional, default ``True``)* — if ``True``, runs the
           full THC computation immediately at construction. Set to ``False`` to
           defer until ``.init()`` is called explicitly.
@@ -201,19 +201,11 @@ def make_thc_pivots(mf, params):
         - ``band_weights`` *(bool, optional, default ``True``)* — as in
           ``make_thc_coulomb``: weight the pivot search by the augmentation
           singular values of an augmented mean field.
-        - ``nbnd_protected`` *(int, optional, default ``-1``)* — as in
-          ``make_thc_coulomb``: energy-suppress the band tail
-          ``[nbnd_protected, nbnd)``. Here only the pivot-selection metric is
-          built, so it affects only the point selection.
-        - ``nbnd_orig`` *(int, optional, default ``-1``)* — as in
-          ``make_thc_coulomb``: start of the augmentation block, required with
-          ``nbnd_protected`` on an augmented mean field.
-        - ``exclude_unprotected_pairs`` *(bool, optional, default ``True`` when
-          ``nbnd_protected > 0``)* — as in ``make_thc_coulomb``: drop the
-          unprotected-unprotected pair densities. In ``make_thc_pivots`` only
-          the pivot-point-selection metric is built, so it affects only the
-          point selection here (the zeta-fit part applies in
-          ``make_thc_coulomb``, host/CPU backend only).
+        - ``nbnd_protected`` / ``nbnd_orig`` / ``exclude_unprotected_pairs`` — as
+          in ``make_thc_coulomb`` (see ``nbnd_protected`` there for the full
+          description). Only the pivot-selection metric is built here, so they
+          affect the point selection alone; the interpolating-vector (zeta) part
+          of ``exclude_unprotected_pairs`` applies in ``make_thc_coulomb``.
         - ``chol_block_size``, ``matrix_block_size``, ... — as in
           ``make_thc_coulomb``.
 

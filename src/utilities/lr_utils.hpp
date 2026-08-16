@@ -316,7 +316,12 @@ inline auto lr_W_proc_grid(long nproc, long nq, long nw_half, long NP)
 
   std::array<long, 4> pgrid = {nwpools, nqpools, np_P, np_Q};
   std::array<long, 4> bsize = {1, 1, 1, 1};
-  bsize[2] = std::min({1024L, NP / std::max(np_P, 1L), NP / std::max(np_Q, 1L)});
+  // The block size must divide the LARGEST local block: make_distributed_array
+  // hands the leading grid rows/columns the extra element, and is_slate_compatible
+  // rejects local_shape % block_size != 0 on every non-last row/column.
+  long lp = (NP + np_P - 1) / np_P;
+  long lq = (NP + np_Q - 1) / np_Q;
+  bsize[2] = std::min({1024L, lp, lq});
   if (bsize[2] < 1) bsize[2] = 1;
   bsize[3] = bsize[2];
   return {pgrid, bsize};

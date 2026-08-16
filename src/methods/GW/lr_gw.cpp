@@ -58,9 +58,9 @@ namespace methods {
                       "SIGMA_PRIM_TO_AUX", "SIGMA_FT_R",
                       "SIGMA_HADPROD_R", "SIGMA_AUX_TO_PRIM",
                       "SIGMA_FT_COEFF", "SIGMA_W_COPY",
-                      "SIGMA_PRE_FENCE", "SIGMA_FINAL_REDUCE",
+                      "SIGMA_FINAL_REDUCE",
                       "SIGMA_DIV_CORR",
-                      "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM",
+                      "SIGMA_A2P_GEMM",
                       "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
         _Timer.add(v);
       }
@@ -242,9 +242,11 @@ namespace methods {
       _tau_comm.emplace(mpi->comm.split(t_origin, mpi->comm.rank()));
       _tau_mpi.emplace(utils::make_mpi_context(*_tau_comm));
 
-      _dG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
-          *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
-          {1, 1, P_bs, Q_bs}));
+      // The ΔG aux buffer is read by term 1 only.
+      if (do_term1)
+        _dG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
+            *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
+            {1, 1, P_bs, Q_bs}));
       _dSigma_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
           *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
           {1, 1, P_bs, Q_bs}));
@@ -252,15 +254,12 @@ namespace methods {
       // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
       // of ΔΣ has exactly one writer, _tau_comm rank 0 — the premise of the
       // all_reduce_parallel that closes _eval_sigma_Rspace.
-      utils::check(_dSigma_skPQ->grid()[0] == 1 and _dSigma_skPQ->grid()[1] == 1 and
-                   _dSigma_skPQ->communicator() == std::addressof(*_tau_comm),
-                   "lr_gw::_setup_workspace: Σ must be undivided along (s,k) on _tau_comm "
-                   "(pgrid = ({},{},{},{})).",
-                   _dSigma_skPQ->grid()[0], _dSigma_skPQ->grid()[1],
-                   _dSigma_skPQ->grid()[2], _dSigma_skPQ->grid()[3]);
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
+
+      // Aux→Primary reduction buffer: one (nbnd, nbnd) block per local (s,k).
+      _A2P_buf_iab.resize(ns * nkpts, MF->nbnd(), MF->nbnd());
 
       // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
       // selects the gemm path with explicit FT coefficients (kept for testing).
@@ -401,7 +400,6 @@ namespace methods {
       // The Σ buffer is accumulated in R-space (dSigma_sRPQ) and FT'd in place
       // to k-space (aliased dSigma_skPQ) before aux_to_primary.
       auto& tau_comm = *_tau_comm;
-      auto& dG_skPQ = *_dG_skPQ;
       auto& dSigma_sRPQ = *_dSigma_skPQ;
       auto& ft_buffer = _ft_buffer;
       auto& W2_tau_RPQ = _W2_tau_RPQ;
@@ -415,12 +413,6 @@ namespace methods {
       auto neg_prod = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
 
       // === Step 2: Per-tau loop with inner minus_t loop ===
-      // Timed: this fence synchronizes all ranks sharing the ΔΣ window, so it
-      // also absorbs any load imbalance from the preceding driver steps.
-      _Timer.start("SIGMA_PRE_FENCE");
-      sDeltaSigma_tskij.win().fence();
-      _Timer.stop("SIGMA_PRE_FENCE");
-
       for (long it_local = 0; it_local < nt_loc; ++it_local) {
         long it_w = t_origin + it_local;  // global W tau index (first half: 0..nt_half-1)
 
@@ -466,6 +458,10 @@ namespace methods {
 
           // Term 1: ΔG ⊙ W_c
           if (do_term1) {
+            auto& dG_skPQ = *_dG_skPQ;
+            // dG_skPQ needs no zeroing: primary_to_aux closes every (s,k) block
+            // with a 3-argument gemm, i.e. β = 0, over the full local P range and
+            // all of Q, so the whole local block is assigned before it is read.
             _Timer.start("SIGMA_PRIM_TO_AUX");
             auto DeltaG_slice = (*DeltaG_tskij)(it_g, nda::ellipsis{});
             if (ibc && ibc->sG_tskij) {
@@ -548,23 +544,10 @@ namespace methods {
           auto DeltaSigma_slab = sDeltaSigma_tskij.local()(it_out, nda::ellipsis{});
           const bool add_ibc = (ibc && ibc->sDeltaSigma_ibc_tskij.has_value());
 
-          // The IBC term lands on the destination after the transform, so the two
-          // accumulations regroup as (dest + Σ) + ibc; that reproduces
-          // dest + (Σ + ibc) only for dest == 0.
-          if (add_ibc && tau_comm.rank() == 0) {
-            ComplexType const* dest_p = DeltaSigma_slab.data();
-            bool dest_is_zero = true;
-            for (long i = 0; i < DeltaSigma_slab.size(); ++i)
-              if (dest_p[i] != ComplexType(0.0)) { dest_is_zero = false; break; }
-            utils::check(dest_is_zero,
-                         "lr_gw::_eval_sigma_Rspace: ΔΣ(it={}) must be zero before the IBC "
-                         "accumulation.", it_out);
-          }
-
           _Timer.start("SIGMA_AUX_TO_PRIM");
           lr_thc_comm::aux_to_primary_local(0, 0, ComplexType(1.0), dSigma_skPQ,
                                             DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
-                                            &_Timer);
+                                            &_Timer, _A2P_buf_iab);
 
           // Add precomputed IBC correction for this τ-point
           if (add_ibc && tau_comm.rank() == 0) {

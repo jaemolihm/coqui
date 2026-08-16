@@ -129,11 +129,13 @@ scf_mem_params make_scf_mem_params(mf_ptr_t mf, const imag_axes_ft::IAFT& FT,
   using corr_eri_t = std::decay_t<decltype(mb_eri.corr_eri->get())>;
   p.thc_eri = THC_ERI<corr_eri_t>;
   if constexpr (THC_ERI<corr_eri_t>) {
-    auto& eri = mb_eri.corr_eri->get();
-    p.NP = eri.Np();
-    if constexpr (requires { eri.dZ_incore(); }) p.eri_incore = eri.dZ_incore();
-    if constexpr (requires { eri.X_orbital_range() != eri.Y_orbital_range(); }) {
-      p.separate_Y = (eri.X_orbital_range() != eri.Y_orbital_range());
+    if (mb_eri.corr_eri) {
+      auto& eri = mb_eri.corr_eri->get();
+      p.NP = eri.Np();
+      if constexpr (requires { eri.dZ_incore(); }) p.eri_incore = eri.dZ_incore();
+      if constexpr (requires { eri.X_orbital_range() != eri.Y_orbital_range(); }) {
+        p.separate_Y = (eri.X_orbital_range() != eri.Y_orbital_range());
+      }
     }
   }
 
@@ -176,21 +178,17 @@ scf_mem_params make_scf_mem_params(mf_ptr_t mf, const imag_axes_ft::IAFT& FT,
 }
 
 /**
- * Predicted footprint of the large arrays of one scf_loop run: a verbosity-2
- * table (shape / GB / GB per node / location / lifetime) plus the persistent and
- * peak GB-per-node one-liners at verbosity 1. Printed before any allocation.
+ * Predicted footprint and layout of the large arrays of one scf_loop run, printed
+ * before any allocation: a verbosity-2 table (shape / GB / GB per node / location /
+ * lifetime), the persistent and peak GB-per-node one-liners at verbosity 1, and a
+ * verbosity-2 summary of the processor grids and block sizes, each taken from the
+ * same helper the allocator itself calls.
+ *
+ * Returns the predicted peak, in GB/node, so the caller can compare it with what
+ * the run actually used (see the [MEM] report at the end of scf_loop).
  */
-/// Returns the predicted peak, in GB/node, so the caller can compare it with
-/// what the run actually used (see the [MEM] report at the end of scf_loop).
 double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>& mpi,
                                const scf_mem_params& p);
-
-/**
- * Predicted processor grids and block sizes of those arrays (verbosity 2), each
- * taken from the same helper the allocator itself calls.
- */
-void print_scf_distribution_summary(const utils::mpi_context_t<mpi3::communicator>& mpi,
-                                    const scf_mem_params& p);
 
 } // methods
 

@@ -91,11 +91,13 @@ auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
  * @brief In-place q→R Fourier transform of W, (t,q,P,Q) → (t,R,P,Q).
  *
  * Input/output: dW_tqPQ with (t,q,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
- * The transform is done in place and the same array is returned, so the caller's
- * (t,q) copy is consumed. For nkpts == 1 (Gamma-only), q-space == R-space and
- * there is nothing to do.
+ * The input array is MOVED FROM and transformed in place, i.e. the caller's
+ * (t,q) copy is consumed and is empty after the call — the returned array is the
+ * only handle on that memory. For nkpts == 1 (Gamma-only), q-space == R-space
+ * and there is nothing to do.
  *
- * @param dW_tqPQ  - [INPUT/OUTPUT] W_c in THC basis, shape (nt_half, nkpts, NP, NQ).
+ * @param dW_tqPQ_in - [INPUT/OUTPUT] W_c in THC basis, shape (nt_half, nkpts, NP, NQ);
+ *                     moved from.
  * @param thc      - [INPUT] THC-ERI handler (provides MF for Qpts, lattv, kp_grid)
  * @return dW_tRPQ with (t,R,P,Q) layout
  */
