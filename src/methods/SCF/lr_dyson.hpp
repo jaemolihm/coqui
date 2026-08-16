@@ -171,10 +171,13 @@ public:
    * @param G_wskij - [INPUT] Pointer to precomputed shared G(iω) (nw, ns, nk, nb, nb)
    */
   void set_cached_G_omega(const sArray_t<Array_view_5D_t>* G_wskij) {
-    // Invalidate dN/dμ cache when G pointer changes (dN/dμ depends on G)
+    // Invalidate the whole Δμ-response cache when G changes: dN/dμ, R(τ) and
+    // dΔDm/dΔμ are all functions of G(iω) and S alone.
     if (_cached_G_wskij != G_wskij) {
       _dN_dmu_cached = false;
       _cached_dN_dmu = 0.0;
+      _dR_tskij.reset();
+      _sdDmdmu_skij.reset();
     }
     _cached_G_wskij = G_wskij;
   }
@@ -267,6 +270,12 @@ public:
    * any LR quantities (ΔH0, ΔF, ΔΣ). The result is cached internally. Subsequent
    * calls return the cached value without recomputation.
    *
+   * The same call also builds the Δμ response of the solution itself — R(τ) and
+   * dΔDm/dΔμ — which solve_lr_dyson needs in fix_density mode; see
+   * build_dmu_response(). It is therefore the setup hook of the fix_density, q=Γ
+   * path and is the only place that allocates the ~ΔG-sized R(τ): lr_driver calls
+   * it exactly when `fix_density && is_q_gamma()`, so no other path pays for it.
+   *
    * Requires: set_cached_G_omega() must have been called first.
    *
    * @throws std::runtime_error if q≠0
@@ -328,6 +337,7 @@ public:
     app_log(level, "{0}      - trailing barrier:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_BARRIER"), _Timer.number_of_calls("GATHER_SHM_BARRIER"));
     print_gather_bandwidth(level, indent);
     app_log(level, "{0}  - Compute ΔDm (incl. gather): {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
+    app_log(level, "{0}  - Δμ shift (ΔG += Δμ·R):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DMU_SHIFT"), _Timer.number_of_calls("LR_DYSON_DMU_SHIFT"));
     app_log(level, "{0}  - Compute ΔN:                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
     app_log(level, "{0}  - Misc (barrier/reset):       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
   }
@@ -378,12 +388,10 @@ private:
   // τ and spin axes undivided, so every rank can form its own (k, i, j) block
   // locally instead of re-reading the gathered replica.
   //
-  // ΔΣ arrives already on the ω grid: it does not depend on Δμ, so the caller
-  // transforms it once and both fix_density passes read the same darray.
+  // ΔΣ arrives already on the ω grid: the caller transforms it once per solve.
   //
-  // set_dDeltaG_tau_buffer stores this pass's ΔG(τ) in _dDeltaG_tau_buffer for
-  // materialize_DeltaG_tau() to replicate. Only the last pass sets it: an
-  // earlier pass's ΔG is overwritten before anything can read it.
+  // Every solve runs exactly one pass, and its ΔG(τ) goes into
+  // _dDeltaG_tau_buffer for materialize_DeltaG_tau() to replicate.
   template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
   void solve_lr_dyson_impl(
       DeltaDm_t& sDeltaDm_skij,
@@ -391,8 +399,18 @@ private:
       const DeltaF_t& sDeltaF_skij,
       const dArray_5D_t* dDeltaSigma_wskij,
       double Delta_mu,
-      bool set_dDeltaG_tau_buffer,
       const DeltaF_t* sDeltaVcorr_skij);
+
+  // Build R(τ) and dΔDm/dΔμ, the Δμ response of the LR solution. See the member
+  // declarations below for what they are and why one solve suffices; called once
+  // from compute_dN_dmu(), which is the fix_density setup hook.
+  void build_dmu_response();
+
+  // Turn the Δμ=0 solution retained by the last pass into the solution at Δμ:
+  // ΔG(τ) += Δμ·R(τ) on the retained distributed array, ΔDm += Δμ·dΔDm/dΔμ on the
+  // node-replicated one. Both are local adds; nothing is recomputed.
+  template<typename DeltaDm_t>
+  void apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;
@@ -419,6 +437,19 @@ private:
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
   // of every solve so a solve never inherits the previous one's array.
   std::optional<dArray_5D_t> _dDeltaG_tau_buffer;
+
+  // Δμ response of the LR solution. Δμ enters the RHS only through the −Δμ·S
+  // term, so ΔG is affine in it:
+  //     ΔG(iω; Δμ) = ΔG(iω; 0) + Δμ·R(iω),   R = −G_{k+q}·S·G_k,
+  // and w_to_tau / tau_to_beta / the gather are all linear, so the same relation
+  // holds in τ and for ΔDm = −ΔG(β⁻), with dΔDm/dΔμ = −R(β⁻).
+  //
+  // Both depend only on the reference G(iω) and S, so the fix_density solve
+  // builds them once and then adds Δμ·R instead of running a second Dyson pass.
+  // R(τ) carries the same layout as the solve's own ΔG(τ) — it is produced by the
+  // same kernel — and so is one ΔG-sized distributed array resident for the run.
+  std::optional<dArray_5D_t> _dR_tskij;
+  std::optional<sArray_t<Array_view_4D_t>> _sdDmdmu_skij;
 
   // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
   size_t _gather_bytes = 0;

@@ -447,7 +447,8 @@ void lr_driver::lr_setup(
   // Estimate the persistent large-array memory footprint for this path, then
   // summarize the MPI distribution patterns the large arrays use.
   print_memory_estimate(thc.Np(), k.include_gw_sigma, k.gw_full, extra_sigma,
-                        n_sigma_prev, inner_hist, outer_hist);
+                        n_sigma_prev, inner_hist, outer_hist,
+                        p.fix_density && _lr_dyson.is_q_gamma());
   print_distribution_summary(thc.Np(), k.include_gw_sigma, k.gw_full);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -1409,7 +1410,8 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
                                       std::vector<std::string> const& extra_sigma,
                                       long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
-                                      lr_diis_hist_t outer_hist) {
+                                      lr_diis_hist_t outer_hist,
+                                      bool affine_dmu) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1498,6 +1500,18 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // consumer replicates it at the top of eval_sigma_channel, ahead of any ΔΠ/ΔW
   // — so counting it as persistent is a deliberate over-estimate.
   arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
+
+  // R(τ) = ∂ΔG(τ)/∂Δμ and the matching ΔDm response. ΔG is affine in Δμ, so
+  // fix_density at q=Γ adds Δμ·R instead of running a second Dyson pass; both are
+  // built once from the reference G(iω) and resident for the run. R is exactly one
+  // more ΔG(τ) — the largest single distributed array here — so it is listed even
+  // though only this one path allocates it.
+  if (affine_dmu) {
+    arrays.push_back({"R(τ) = ∂ΔG/∂Δμ (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
+    arrays.push_back({"∂ΔDm/∂Δμ (lr_dyson)",
+                      fmt::format("({},{},{},{})", ns, nki, nb, nb),
+                      band5(1), false, PERSIST});
+  }
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {
