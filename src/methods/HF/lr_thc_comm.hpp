@@ -196,7 +196,7 @@ namespace methods {
 
       /**
        * LR aux→primary wrapper (rank-4 distributed→shared): accumulates into a
-       * shared array and leaves the result replicated on every node.
+       * shared array, node-locally. The caller reduces over nodes; see below.
        *
        * @param ip       - [INPUT] left polarization index
        * @param iq       - [INPUT] right polarization index
@@ -207,9 +207,17 @@ namespace methods {
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        *
-       * The leading x → x/N pre-divide makes the trailing all_reduce over the N
-       * nodes idempotent for content already in the window, so repeated calls
-       * accumulate rather than multiply what is already there.
+       * Does NOT reduce over nodes, and does not synchronize the window: the only
+       * writer is O_IPQ's reduce root — a single rank in the whole job, since (s,k)
+       * is undivided — so a group of these calls races with nothing. The caller
+       * accumulates every (ip, iq) block it needs and then reduces once.
+       *
+       * Caller's side of the contract:
+       *   - zero O_Iab before the first call of a group (this accumulates with +=,
+       *     and a stale window would be folded into the reduction);
+       *   - reduce before anything reads O_Iab across ranks.
+       * set_zero() and all_reduce_parallel() each open and close with node_sync(),
+       * so those two calls alone publish the writes made in between.
        */
       template<nda::MemoryArray AF_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq,
@@ -223,14 +231,6 @@ namespace methods {
                       "lr_thc_comm::aux_to_primary: aux rank must be 4");
         static_assert(nda::get_rank<AF_t> == 4,
                       "lr_thc_comm::aux_to_primary: primary rank must be 4");
-        using value_type = typename std::decay_t<AF_t>::value_type;
-
-        // to compensate for reduction
-        O_Iab.win().fence();
-        O_Iab.communicator()->barrier();
-        if(O_Iab.node_comm()->root())
-          O_Iab.local() /= value_type(O_Iab.internode_comm()->size());
-        O_Iab.node_comm()->barrier();
 
         auto s_rng = O_IPQ.local_range(0);
         auto k_rng = O_IPQ.local_range(1);
@@ -241,10 +241,6 @@ namespace methods {
         nda::array<ComplexType, 3> O_buf;
         aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
                              kp_map, kpq_map, nullptr, O_buf);
-
-        // reduce
-        O_Iab.win().fence();
-        O_Iab.all_reduce();
       }
 
       /**

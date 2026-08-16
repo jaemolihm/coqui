@@ -173,11 +173,14 @@ namespace math {
        * node_comm.rank(), so every rank — not only the root — belongs to a communicator
        * that spans the nodes, and rank r cooperates with rank r of every other node.
        *
-       * Post-condition is identical to all_reduce(). It is bit-identical to it whenever
-       * each element is contributed by at most one node (the gather_to_shm case, where
-       * the sum is x + 0 + ... and independent of grouping); with genuinely nonzero
-       * partial sums on several nodes the reduction order differs and last-bit drift is
-       * possible, so prefer all_reduce() there.
+       * Post-condition is identical to all_reduce(), and this is the default choice.
+       * It is additionally bit-identical to all_reduce() whenever each element is
+       * contributed by at most one node (the gather_to_shm case, where the sum is
+       * x + 0 + ... and independent of grouping). With genuinely nonzero partial sums
+       * on several nodes the reduction order differs, so results can move in the last
+       * bit — that is floating-point noise and not a reason to avoid this routine.
+       * Reach for all_reduce() only if it is expected to be faster for the case at
+       * hand, which is hard to arrange: it moves the whole buffer through one core.
        */
       void all_reduce_parallel() {
         utils::check(_internode_comm != nullptr and _gcomm != nullptr,

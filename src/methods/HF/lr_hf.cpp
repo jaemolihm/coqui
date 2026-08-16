@@ -93,6 +93,54 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
 }
 
 
+void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
+                        nda::range P_rng, nda::range Q_rng, bool compute_xc,
+                        nda::array<ComplexType, 2>& Uq_PQ) {
+  if (not _Vq_cached) {
+    // One (P,Q) tile at the perturbation q, instead of the whole (nq, NP, NP)
+    // array redistributed on every call.
+    _Timer.start("Z_FETCH");
+    _Vq_PQ = thc.Z(_q_ibz_idx, P_rng, Q_rng, 0, 1, _mpi->comm);
+    _Timer.stop("Z_FETCH");
+    _Vq_cached = true;
+  }
+  utils::check(_Vq_PQ.extent(0) == P_rng.size() and _Vq_PQ.extent(1) == Q_rng.size(),
+               "lr_hf: cached V(q) block is ({},{}), expected ({},{}).",
+               _Vq_PQ.extent(0), _Vq_PQ.extent(1), P_rng.size(), Q_rng.size());
+
+  if (Uq_PQ.shape() != _Vq_PQ.shape()) Uq_PQ.resize(_Vq_PQ.shape());
+  Uq_PQ() = _Vq_PQ();
+
+  // LR-DFT: the direct channel uses (V + Vxc)(q). Vxc goes into this private copy,
+  // read only by the ΔJ gemv — the exchange path works off U(R)_PQ, so the xc
+  // kernel structurally cannot reach ΔK. It carries no spin factor of its own: the
+  // (ns==1) factor 2 multiplies the density, and QE's dmuxc at nspin_mag=1 is
+  // dV_xc/dρ_total, the same structure as v, so it inherits that factor exactly as
+  // the Coulomb term does.
+  if (compute_xc) {
+    if (not _Vxc_q_cached) {
+      utils::check(thc.has_Vxc(),
+                   "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
+                   "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
+                   "THC checkpoint), or set include_xc = false.");
+      _Timer.start("Z_FETCH");
+      auto dVxc_qPQ = thc.dVxc({1, np_P, np_Q});
+      _Timer.stop("Z_FETCH");
+      utils::check(dVxc_qPQ.local_range(1).first() == P_rng.first() and
+                   dVxc_qPQ.local_range(1).size() == P_rng.size() and
+                   dVxc_qPQ.local_range(2).first() == Q_rng.first() and
+                   dVxc_qPQ.local_range(2).size() == Q_rng.size(),
+                   "lr_hf: Vxc and Coulomb distributions differ.");
+      _Vxc_q_PQ = dVxc_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
+      _Vxc_q_cached = true;
+    }
+    Uq_PQ() += _Vxc_q_PQ();
+    app_log(2, "  LR-DFT: direct channel uses V(q) + Vxc(q) at q index {}.",
+            _q_ibz_idx);
+  }
+}
+
+
 template<nda::MemoryArray AF_t>
 void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      const sArray_t<AF_t>& sDeltaDm_skij,
@@ -220,38 +268,11 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   auto Q_origin = dDeltaDm_skPQ.origin()[3];
   _Timer.stop("ALLOC");
 
-  // Get Coulomb kernel U(q)_PQ; later FT'd in-place to U(R)_PQ for exchange
-  _Timer.start("Z_FETCH");
-  auto dU_qPQ = thc.dZ({1, np_P, np_Q});
-  _Timer.stop("Z_FETCH");
-  auto dU_qPQ_loc = dU_qPQ.local();  // U(q)_PQ before FT, U(R)_PQ after
-
-  // Keep a copy of V(q) for Hartree (V(q=0) when q is Gamma, V(q) otherwise)
-  nda::array<ComplexType, 2> Uq_PQ(NP_loc, NQ_loc);
-  Uq_PQ() = dU_qPQ_loc(_q_ibz_idx, nda::ellipsis{});
-
-  // LR-DFT: the direct channel uses (V + Vxc)(q). Vxc is folded into this
-  // private copy, which is taken before dU_qPQ_loc is FT'd q→R in place and is
-  // read only by the ΔJ gemv below — the exchange path works off U(R)_PQ, so the
-  // xc kernel structurally cannot reach ΔK. It carries no spin factor of its
-  // own: the (ns==1) factor 2 multiplies the density (DeltaDm_QQ /
-  // Dm_QQ_unpert), and QE's dmuxc at nspin_mag=1 is dV_xc/dρ_total, the same
-  // structure as v, so it inherits that factor exactly as the Coulomb term does.
-  if (compute_xc) {
-    utils::check(thc.has_Vxc(),
-                 "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
-                 "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
-                 "THC checkpoint), or set include_xc = false.");
-    _Timer.start("Z_FETCH");
-    auto dVxc_qPQ = thc.dVxc({1, np_P, np_Q});
-    _Timer.stop("Z_FETCH");
-    utils::check(dVxc_qPQ.local_shape() == dU_qPQ.local_shape() and
-                 dVxc_qPQ.origin() == dU_qPQ.origin(),
-                 "lr_hf: Vxc and Coulomb distributions differ.");
-    Uq_PQ() += dVxc_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
-    app_log(2, "  LR-DFT: direct channel uses V(q) + Vxc(q) at q index {}.",
-            _q_ibz_idx);
-  }
+  // Direct-channel kernel V(q) (+ Vxc(q)) on this rank's tile, cached across calls
+  nda::range P_rng(P_origin, P_origin + NP_loc);
+  nda::range Q_rng(Q_origin, Q_origin + NQ_loc);
+  nda::array<ComplexType, 2> Uq_PQ;
+  build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
 
   // Accumulate diagonal indices of ΔDm for the Hartree term
   nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
@@ -377,7 +398,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       // FT ΔDm k→R
       if (nkpts != 1) {
         auto f_Rk = sf_Rk.local();
-        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(), _MF->lattv(), R_grid, sf_Rk);
+        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
+                                   _MF->lattv(), R_grid, sf_Rk);
         auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
         if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
           buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
@@ -404,12 +426,12 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // MAM: communication not optimized
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
     nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
     // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ
     if (DeltaV_qPQ) {
       nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
-                      Dm_QQ_unpert(dU_qPQ.local_range(2)),
-                      ComplexType(1.0), DeltaJ_PP(dU_qPQ.local_range(1)));
+                      Dm_QQ_unpert(Q_rng),
+                      ComplexType(1.0), DeltaJ_PP(P_rng));
     }
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
@@ -429,6 +451,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                               dDeltaF_skPQ, sDeltaF_skij, thc,
                                               _MF->ks_to_k(0), _kpq_map);
+    // One reduction over the polarization blocks, which accumulated node-locally.
+    sDeltaF_skij.all_reduce_parallel();
     _Timer.stop("AUX_TO_PRIM");
 
   } else {
@@ -436,19 +460,38 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
     utils::check(compute_exchange, "lr_hf::thc_lr_hf: entered exchange path but compute_exchange=false");
 
-    // FT U(q) to real space U(R) for exchange — overwrites dU_qPQ_loc in-place
-    _Timer.start("UQ_TO_UR");
-    if (nkpts != 1) {
-      buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
-      auto f_Rk = sf_Rk.local();
-      utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(), _MF->lattv(), R_grid, sf_Rk);
-      auto U_2D = nda::reshape(dU_qPQ_loc, shape_t<2>{nkpts, NP_loc * NQ_loc});
-      nda::blas::gemm(f_Rk, U_2D, buffer);
-      U_2D = buffer;
+    // U(R)_PQ for exchange: fetch U(q) and FT it q→R once, then keep it. Neither
+    // the kernel nor the transform depends on ΔDm, so both are pure setup.
+    if (not _U_RPQ_cached) {
+      _Timer.start("Z_FETCH");
+      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+      _Timer.stop("Z_FETCH");
+      auto dU_qPQ_loc = dU_qPQ.local();
+      utils::check(dU_qPQ.local_range(1).first() == P_rng.first() and
+                   dU_qPQ.local_range(1).size() == P_rng.size() and
+                   dU_qPQ.local_range(2).first() == Q_rng.first() and
+                   dU_qPQ.local_range(2).size() == Q_rng.size(),
+                   "lr_hf: the Coulomb (P,Q) tiling differs from ΔDm's.");
+      utils::check(dU_qPQ_loc.extent(0) == nkpts,
+                   "lr_hf: the exchange q→R transform needs one Coulomb q per k-point "
+                   "(got {} q, {} k).", dU_qPQ_loc.extent(0), nkpts);
+
+      _Timer.start("UQ_TO_UR");
+      if (nkpts != 1) {
+        buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
+        auto f_Rk = sf_Rk.local();
+        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
+                                   _MF->lattv(), R_grid, sf_Rk);
+        auto U_2D = nda::reshape(dU_qPQ_loc, shape_t<2>{nkpts, NP_loc * NQ_loc});
+        nda::blas::gemm(f_Rk, U_2D, buffer);
+        U_2D = buffer;
+      }
+      _U_RPQ = dU_qPQ_loc;
+      _U_RPQ_cached = true;
+      dU_qPQ.reset();
+      _Timer.stop("UQ_TO_UR");
     }
-    _Timer.stop("UQ_TO_UR");
-    // After FT: dU_qPQ_loc is now U(R)_PQ
-    auto& U_RPQ_loc = dU_qPQ_loc;
+    auto U_RPQ_loc = _U_RPQ();
 
     // aux_to_primary needs to be called for each {ip,iq} block.
     // You can still use the fact that off diagonal blocks are hermitian with respect
@@ -468,7 +511,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.start("EXCHANGE");
         if (nkpts != 1) {
           auto f_Rk = sf_Rk.local();
-          utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(), _MF->lattv(), R_grid, sf_Rk);
+          utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
+                                     _MF->lattv(), R_grid, sf_Rk);
           auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
           if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
             buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
@@ -495,12 +539,12 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
             // if npol==1, add Coulomb contribution to F_skPQ here
             dDeltaDm_sRPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
             nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-            nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+            nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
             // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ_unpert
             if (DeltaV_qPQ) {
               nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
-                              Dm_QQ_unpert(dU_qPQ.local_range(2)),
-                              ComplexType(1.0), DeltaJ_PP(dU_qPQ.local_range(1)));
+                              Dm_QQ_unpert(Q_rng),
+                              ComplexType(1.0), DeltaJ_PP(P_rng));
             }
             dDeltaDm_sRPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
@@ -539,7 +583,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         if (nkpts != 1) {
           // FT ΔK from R-space back to k-space; accumulates onto dDeltaF_skPQ (may contain ΔJ)
           auto f_kR = sf_Rk.local();
-          utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(), _MF->lattv(), R_grid, sf_Rk);
+          utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
+                                     _MF->lattv(), R_grid, sf_Rk);
           auto DeltaK_R_3D = nda::reshape(dDeltaK_sRPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
           auto DeltaF_k_3D = nda::reshape(dDeltaF_skPQ.local(), shape_t<3>{ns, nkpts_ibz, NP_loc * NQ_loc});
           for (int s = 0; s < ns; ++s) {
@@ -565,15 +610,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     } // ip
 
     if (npol > 1) {
-      // add Coulomb contribution (summed over polarizations) and symmetrize
-
+      // add Coulomb contribution (summed over polarizations)
       if (compute_hartree) {
         // add Coulomb contribution, Dm_QQ has local contribution of diagonal of Dm summed
         // over spin and polarization
         _Timer.start("COULOMB");
         dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
         nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-        nda::blas::gemv(Uq_PQ, DeltaDm_QQ(dU_qPQ.local_range(2)), DeltaJ_PP(dU_qPQ.local_range(1)));
+        nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
         dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
         dDeltaF_skPQ.local() = ComplexType(0.0);
@@ -594,7 +638,16 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                                                   _MF->ks_to_k(0), _kpq_map);
         _Timer.stop("AUX_TO_PRIM");
       }
+    }
 
+    // Every (ip, iq) block above, and the npol > 1 Hartree block, accumulated into
+    // sDeltaF_skij node-locally. Reduce once here, before the symmetrization reads
+    // the transposed element and before the caller sees ΔF.
+    _Timer.start("AUX_TO_PRIM");
+    sDeltaF_skij.all_reduce_parallel();
+    _Timer.stop("AUX_TO_PRIM");
+
+    if (npol > 1) {
       // Symmetrize: the (ip, iq) loop only processes upper-triangle blocks (iq >= ip)
       // with a factor of 2 for off-diagonal blocks. Enforce Hermiticity:
       // ΔF_ij = (ΔF_ij + ΔF_ji*) / 2, ΔF_ji = ΔF_ij*.
@@ -644,7 +697,6 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     sDeltaF_skij.win().fence();
   }
 
-  dU_qPQ.reset();
   dDeltaDm_skPQ.reset();
   _mpi->comm.barrier();
   _Timer.stop("MISC");
@@ -670,33 +722,17 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
   app_log(3, "  LR-HF J evaluation (diagonal Hartree kernel):");
   app_log(3, "    - processor grid for V(q): (P, Q) = ({}, {})\n", np_P, np_Q);
 
-  // Coulomb kernel V(q)_PQ on the same (P,Q) tiling the dense path uses. Only the
-  // one q block the Hartree channel contracts is kept.
-  _Timer.start("Z_FETCH");
-  auto dU_qPQ = thc.dZ({1, np_P, np_Q});
-  _Timer.stop("Z_FETCH");
-  auto P_rng = dU_qPQ.local_range(1);
-  auto Q_rng = dU_qPQ.local_range(2);
-  nda::array<ComplexType, 2> Uq_PQ(P_rng.size(), Q_rng.size());
-  Uq_PQ() = dU_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
-
-  // LR-DFT: the direct channel uses (V + Vxc)(q). See thc_lr_hf for why the xc
-  // kernel structurally cannot reach the exchange channel.
-  if (compute_xc) {
-    utils::check(thc.has_Vxc(),
-                 "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
-                 "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
-                 "THC checkpoint), or set include_xc = false.");
-    _Timer.start("Z_FETCH");
-    auto dVxc_qPQ = thc.dVxc({1, np_P, np_Q});
-    _Timer.stop("Z_FETCH");
-    utils::check(dVxc_qPQ.local_shape() == dU_qPQ.local_shape() and
-                 dVxc_qPQ.origin() == dU_qPQ.origin(),
-                 "lr_hf: Vxc and Coulomb distributions differ.");
-    Uq_PQ() += dVxc_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
-    app_log(2, "  LR-DFT: direct channel uses V(q) + Vxc(q) at q index {}.", _q_ibz_idx);
-  }
-  dU_qPQ.reset();
+  // Direct-channel kernel on the same (P,Q) tiling the dense path uses. Only the
+  // one q block the Hartree channel contracts is ever fetched. The tile comes from
+  // make_distributed_array rather than a hand-rolled block rule, so it cannot drift
+  // from the distribution the dense path builds.
+  using local_Array_2D_t = memory::array<HOST_MEMORY, ComplexType, 2>;
+  auto dPQ = math::nda::make_distributed_array<local_Array_2D_t>(
+      _mpi->comm, {np_P, np_Q}, {NP, NP});
+  nda::range P_rng(dPQ.origin()[0], dPQ.origin()[0] + dPQ.local_shape()[0]);
+  nda::range Q_rng(dPQ.origin()[1], dPQ.origin()[1] + dPQ.local_shape()[1]);
+  nda::array<ComplexType, 2> Uq_PQ;
+  build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
 
   // (1) aux-basis density diagonal, averaged over the full BZ and summed over the
   //     diagonal polarization blocks — the only ones the direct channel sees.
@@ -816,7 +852,10 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
     nda::blas::gemm(ComplexType(1.0), buffer, S_k, ComplexType(0.0), Delta_sk);
   }
   sDelta_skij.win().fence();
-  sDelta_skij.all_reduce();
+  // The strided loop assigns each (is,ik) block with a beta = 0 gemm on exactly one
+  // rank, and the array is zero-initialized, so every element is contributed by one
+  // node: splitting the reduction across the node's ranks is bit-identical here.
+  sDelta_skij.all_reduce_parallel();
 
   if (sDeltaF_skij.node_comm()->root())
     sDeltaF_skij.local() += sDelta_skij.local();
