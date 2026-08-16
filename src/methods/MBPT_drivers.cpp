@@ -2185,12 +2185,14 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
 
-  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, sDeltaG_tskij.local(), dW_tRPQ, thc);
-
   // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
-  if (div_corr) {
-    lr.apply_div_correction_DeltaG(sDeltaSigma_tskij, sDeltaG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
-  }
+  // The evaluator applies it when handed the overlap and the head; withholding
+  // them is how div_corr = false gets the bare convolution for FD tests.
+  auto S_loc = sS_skij.local();
+  lr.evaluate_sigma_DeltaG(sDeltaSigma_tskij, sDeltaG_tskij.local(), dW_tRPQ, thc,
+                           nullptr,
+                           div_corr ? &S_loc : nullptr,
+                           div_corr ? &eps_inv_head : nullptr);
   mpi->comm.barrier();
 
   // Rank-0-only return; non-root ranks return an empty array (→ None in Python).
@@ -2689,15 +2691,22 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // Precompute G^R(τ) and G^R(β−τ) used in evaluate_sigma_DeltaW.
   auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
 
-  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
-                           dG_tsRPQ, dG_mtau_tsRPQ);
-
-  // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+  // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G.
+  // The evaluator applies it when handed the overlap and the head (and skips it
+  // off Γ itself); withholding them is how div_corr = false gets the bare
+  // convolution for FD tests.
+  auto S_loc = sS_skij.local();
+  nda::array<ComplexType, 1> delta_eps_inv_head;
   if (div_corr && utils::is_q_gamma(q_pert)) {
-    auto [delta_eps_inv_q, delta_eps_inv_head] =
+    auto [delta_eps_inv_q, delta_head] =
         solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment);
-    lr.apply_div_correction_G(sDeltaSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
+    delta_eps_inv_head = std::move(delta_head);
   }
+  bool apply_div = div_corr && utils::is_q_gamma(q_pert);
+  lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
+                           dG_tsRPQ, dG_mtau_tsRPQ,
+                           apply_div ? &S_loc : nullptr,
+                           apply_div ? &delta_eps_inv_head : nullptr);
   mpi->comm.barrier();
 
   // Rank-0-only return.

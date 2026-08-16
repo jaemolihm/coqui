@@ -88,7 +88,10 @@ namespace methods {
         thc_reader_t& thc,
         const dArr_5D_t& dG_tsRPQ,
         const dArr_5D_t& dG_mtau_tsRPQ,
-        const lr_ibc_DeltaX* ibc) {
+        const lr_ibc_DeltaX* ibc,
+        const nda::array_view<ComplexType, 4>* S_skij,
+        const nda::array<ComplexType, 1>* eps_inv_head,
+        const nda::array<ComplexType, 1>* delta_eps_inv_head) {
 
       _init_kpq_map(thc);
 
@@ -98,6 +101,16 @@ namespace methods {
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, &G_tskij, &dDeltaW_tqPQ,
                          ibc, &dG_tsRPQ, &dG_mtau_tsRPQ);
+
+      // Each divergence correction belongs to the term it corrects, so it is
+      // applied here rather than by the caller. Both are no-ops under "ignore_g0".
+      utils::check((S_skij == nullptr) == (eps_inv_head == nullptr),
+                   "lr_gw::evaluate_sigma: S_skij and eps_inv_head must be passed together.");
+      if (S_skij) {
+        apply_div_correction_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, *S_skij, thc, *eps_inv_head);
+        if (delta_eps_inv_head and utils::is_q_gamma(_q_pert))
+          apply_div_correction_G(sDeltaSigma_tskij, G_tskij, *S_skij, thc, *delta_eps_inv_head);
+      }
 
       app_log(3, "  LR-GW self-energy (fused) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3
@@ -112,7 +125,9 @@ namespace methods {
         const nda::array_view<ComplexType, 5>& DeltaG_tskij,
         dArr_4D_t& dW_tRPQ,
         thc_reader_t& thc,
-        const lr_ibc_DeltaX* ibc) {
+        const lr_ibc_DeltaX* ibc,
+        const nda::array_view<ComplexType, 4>* S_skij,
+        const nda::array<ComplexType, 1>* eps_inv_head) {
 
       _init_kpq_map(thc);
 
@@ -122,6 +137,12 @@ namespace methods {
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, &DeltaG_tskij, &dW_tRPQ, nullptr, nullptr,
                          ibc);
+
+      // Term 1 owns its divergence correction; a no-op under "ignore_g0".
+      utils::check((S_skij == nullptr) == (eps_inv_head == nullptr),
+                   "lr_gw::evaluate_sigma_DeltaG: S_skij and eps_inv_head must be passed together.");
+      if (S_skij)
+        apply_div_correction_DeltaG(sDeltaSigma_tskij, DeltaG_tskij, *S_skij, thc, *eps_inv_head);
 
       app_log(3, "  LR-GW self-energy (term 1) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3
@@ -137,16 +158,26 @@ namespace methods {
         dArr_4D_t& dDeltaW_tqPQ,
         thc_reader_t& thc,
         const dArr_5D_t& dG_tsRPQ,
-        const dArr_5D_t& dG_mtau_tsRPQ) {
+        const dArr_5D_t& dG_mtau_tsRPQ,
+        const nda::array_view<ComplexType, 4>* S_skij,
+        const nda::array<ComplexType, 1>* delta_eps_inv_head) {
 
       _init_kpq_map(thc);
 
-      app_log(3, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space, no div_corr)");
+      app_log(3, "\n  LR-GW self-energy (term 2): ΔΣ = -G ⊙ ΔW (R-space)");
       app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
 
       sDeltaSigma_tskij.set_zero();
       _eval_sigma_Rspace(sDeltaSigma_tskij, thc, nullptr, nullptr, &G_tskij, &dDeltaW_tqPQ,
                          nullptr, &dG_tsRPQ, &dG_mtau_tsRPQ);
+
+      // Term 2 owns its divergence correction; it exists only at q_pert = 0, and
+      // is a no-op under "ignore_g0".
+      utils::check((S_skij == nullptr) == (delta_eps_inv_head == nullptr),
+                   "lr_gw::evaluate_sigma_DeltaW: S_skij and delta_eps_inv_head must be "
+                   "passed together.");
+      if (S_skij and utils::is_q_gamma(_q_pert))
+        apply_div_correction_G(sDeltaSigma_tskij, G_tskij, *S_skij, thc, *delta_eps_inv_head);
 
       app_log(3, "  LR-GW self-energy (term 2) done.\n");
       print_timers(3);  // per-step diagnostics only at verbosity >= 3

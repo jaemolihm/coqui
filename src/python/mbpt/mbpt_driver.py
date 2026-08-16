@@ -501,17 +501,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
         (G0·dW0). Requires gw_mode="full" and max_iter=1. See run_lr_g0w0.
     div_treatment : str or None, optional
-        Divergence treatment for the ε⁻¹ head. Accepted ONLY for
-        unperturbed="mf_dft", where W0 is built fresh from the DFT G0 and the
-        mean-field checkpoint carries no ground-state value to inherit. Passing
-        it with unperturbed="checkpoint" is a hard error: an LR run must
-        reproduce the divergence treatment of the ground state it linearizes
-        (the q→0 head of Σ_GW is the exchange Madelung term screened by ε⁻¹, so
-        the correlation and exchange corrections only cancel — exactly, in a
-        metal — when both match the unperturbed run). Both treatments are read
-        from "scf/div_treatment" and "scf/hf_div_treatment" in the checkpoint;
-        the latter falls back to "gygi" on checkpoints written before it was
-        stashed, matching previous behaviour.
+        Divergence treatment for the ε⁻¹ head. Accepted only for
+        unperturbed="mf_dft"; a hard error otherwise, since the LR run must reuse
+        the ground-state treatment, read from "scf/div_treatment" and
+        "scf/hf_div_treatment" in the checkpoint.
     save_DeltaG : bool, optional
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can

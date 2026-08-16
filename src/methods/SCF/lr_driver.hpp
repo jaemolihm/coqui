@@ -216,10 +216,6 @@ struct lr_params {
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.
   const nda::array<ComplexType, 1>* eps_inv_head = nullptr;
   /// Divergence treatments the unperturbed run used, read from the checkpoint.
-  /// They are never free parameters here: the q→0 head of Σ_GW is the exchange
-  /// Madelung term screened by ε⁻¹, so the correlation and exchange corrections
-  /// must be built the same way the ground state built them or they stop
-  /// cancelling (exactly, in a metal).
   std::string div_treatment = "gygi";       ///< correlation / GW head
   std::string hf_div_treatment = "gygi";    ///< HF exchange Madelung term
 

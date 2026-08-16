@@ -107,6 +107,12 @@ namespace methods {
        *   cache and skips the per-τ G Primary→Aux + k→R FT.
        * @param dG_mtau_tsRPQ     - [INPUT] cached G^R(β−τ), same layout
        * @param ibc               - [INPUT] optional DeltaX IBC correction data
+       * @param S_skij            - [INPUT] overlap; pass with the heads below to
+       *   have the divergence corrections applied here. Omit all three to get the
+       *   bare convolution (finite-difference tests).
+       * @param eps_inv_head      - [INPUT] ε⁻¹−1 head of W, for the term-1 correction
+       * @param delta_eps_inv_head - [INPUT] Δ(ε⁻¹) head of ΔW, for the term-2
+       *   correction. Applied only at q_pert = 0.
        */
       void evaluate_sigma(
           sArrv_5D_t& sDeltaSigma_tskij,
@@ -117,7 +123,10 @@ namespace methods {
           thc_reader_t& thc,
           const dArr_5D_t& dG_tsRPQ,
           const dArr_5D_t& dG_mtau_tsRPQ,
-          const lr_ibc_DeltaX* ibc = nullptr);
+          const lr_ibc_DeltaX* ibc = nullptr,
+          const nda::array_view<ComplexType, 4>* S_skij = nullptr,
+          const nda::array<ComplexType, 1>* eps_inv_head = nullptr,
+          const nda::array<ComplexType, 1>* delta_eps_inv_head = nullptr);
 
       /**
        * Term 1 only: ΔΣ = -ΔG ⊙ W_c (R-space)
@@ -128,13 +137,19 @@ namespace methods {
        *   Pre-transformed to R-space by lr_precompute_W_tRPQ.
        *   Distribution: pgrid = (tpools, 1, np_P, np_Q).
        * @param thc               - [INPUT] THC-ERI handler
+       * @param S_skij            - [INPUT] overlap; pass with eps_inv_head to have
+       *   the term-1 divergence correction applied here. Omit both for the bare
+       *   convolution (finite-difference tests).
+       * @param eps_inv_head      - [INPUT] ε⁻¹−1 head of W
        */
       void evaluate_sigma_DeltaG(
           sArrv_5D_t& sDeltaSigma_tskij,
           const nda::array_view<ComplexType, 5>& DeltaG_tskij,
           dArr_4D_t& dW_tRPQ,
           thc_reader_t& thc,
-          const lr_ibc_DeltaX* ibc = nullptr);
+          const lr_ibc_DeltaX* ibc = nullptr,
+          const nda::array_view<ComplexType, 4>* S_skij = nullptr,
+          const nda::array<ComplexType, 1>* eps_inv_head = nullptr);
 
       /**
        * Term 2 only: ΔΣ = -G ⊙ ΔW
@@ -147,6 +162,10 @@ namespace methods {
        * @param thc               - [INPUT] THC-ERI handler
        * @param dG_tsRPQ          - [INPUT] cached G^R(τ) in aux basis (it,s,R,P,Q)
        * @param dG_mtau_tsRPQ     - [INPUT] cached G^R(β−τ), same layout
+       * @param S_skij            - [INPUT] overlap; pass with delta_eps_inv_head to
+       *   have the term-2 divergence correction applied here (q_pert = 0 only).
+       *   Omit both for the bare convolution (finite-difference tests).
+       * @param delta_eps_inv_head - [INPUT] Δ(ε⁻¹) head of ΔW
        */
       void evaluate_sigma_DeltaW(
           sArrv_5D_t& sDeltaSigma_tskij,
@@ -154,7 +173,9 @@ namespace methods {
           dArr_4D_t& dDeltaW_tqPQ,
           thc_reader_t& thc,
           const dArr_5D_t& dG_tsRPQ,
-          const dArr_5D_t& dG_mtau_tsRPQ);
+          const dArr_5D_t& dG_mtau_tsRPQ,
+          const nda::array_view<ComplexType, 4>* S_skij = nullptr,
+          const nda::array<ComplexType, 1>* delta_eps_inv_head = nullptr);
 
       /**
        * Divergence correction term 1 (all q_pert):

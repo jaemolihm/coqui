@@ -48,12 +48,13 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
       _hf_div_treatment(std::move(hf_div_treatment)),
       _Timer() {
 
-  // Same coercion as hf_t, so ΔF and F agree on the exchange divergence.
-  if (_hf_div_treatment != "ignore_g0" and _hf_div_treatment != "gygi") {
-    app_log(2, " lr_hf: hf_div_treatment only supports \"ignore_g0\" and \"gygi\". "
-               " coqui will take hf_div_treatment = \"gygi\" instead.");
-    _hf_div_treatment = "gygi";
-  }
+  // hf_t coerces because it takes user input; here the value is read back from the
+  // checkpoint, already normalized by hf_t. Anything else means the stash was not
+  // written by hf_t, and silently defaulting would make ΔF and F disagree on the
+  // divergence correction.
+  utils::check(_hf_div_treatment == "ignore_g0" or _hf_div_treatment == "gygi",
+               "lr_hf: hf_div_treatment must be \"ignore_g0\" or \"gygi\", got \"{}\".",
+               _hf_div_treatment);
 
   // Compute k+q mapping
   auto kpts_crys = MF->kpts_crystal();
