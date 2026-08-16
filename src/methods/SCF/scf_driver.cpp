@@ -126,6 +126,11 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     chkpt::dump_scf(mpi->comm, 0, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, mb_state.coqui_prefix,
                     "scf", -1, /*slim=*/chkpt_slim);
   }
+  // Stash the exchange divergence treatment so a later LR run applies the
+  // Madelung K correction exactly when this run did.
+  if (mb_solver.hf != nullptr)
+    chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
+                                 mb_solver.hf->div_treatment());
   Timer.stop("WRITE");
 
   double F_conv, Sigma_conv;
@@ -452,6 +457,11 @@ double qp_scf_loop(
     chkpt::write_metadata(mpi->comm, *mf, FT, sH0_skij, sS_skij, mb_state.coqui_prefix);
     chkpt::dump_scf(mpi->comm, 0, sDm_skij, sHeff_skij, sMO_skia, sE_ska, mu, mb_state.coqui_prefix);
   }
+  // Stash the exchange divergence treatment so a later LR run applies the
+  // Madelung K correction exactly when this run did.
+  if (mb_solver.hf != nullptr)
+    chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
+                                 mb_solver.hf->div_treatment());
   Timer.stop("WRITE");
 
   double Heff_conv;

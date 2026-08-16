@@ -451,7 +451,7 @@ void lr_driver::lr_setup(
   // Solvers. Each latches the perturbation q at construction and caches a
   // workspace, so they are built once here and reused by every lr_solve_one.
   if (k.need_hf && !_lr_hf) {
-    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
+    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   if (k.sc_sigma) {
     _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
@@ -727,10 +727,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       gw_solver.evaluate_sigma_DeltaG(
           sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr);
       // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-      }
+      // A no-op under "ignore_g0" (apply_div_correction_DeltaG returns early).
+      gw_solver.apply_div_correction_DeltaG(
+          sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
       _Timer.stop(clk.sigma);
       _mpi->comm.barrier();
       return;
@@ -752,7 +751,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
     nda::array<ComplexType, 1> delta_eps_inv_head;
-    if (p.div_corr && is_q_gamma()) {
+    if (p.div_treatment != "ignore_g0" && is_q_gamma()) {
       auto [delta_eps_inv_q, delta_head] =
           solvers::div_utils::eps_inv_head_t(
               dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), p.div_treatment);
@@ -778,13 +777,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _lr_gw2->evaluate_sigma_DeltaW(
           *sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
           *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ);
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-        if (is_q_gamma()) {
-          _lr_gw2->apply_div_correction_G(
-              *sDeltaSigma_term2_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
-        }
+      gw_solver.apply_div_correction_DeltaG(
+          sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
+      if (is_q_gamma()) {
+        _lr_gw2->apply_div_correction_G(
+            *sDeltaSigma_term2_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
       }
       // Accumulate term2 into sSigma_out so it holds the total ΔΣ.
       // Both arrays are node-replicated shared memory (each solver all_reduced
@@ -802,14 +799,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           sG_tskij.local(), dDeltaW_tqPQ, thc,
           *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
       // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-        // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
-        if (is_q_gamma()) {
-          gw_solver.apply_div_correction_G(
-              sSigma_out, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
-        }
+      gw_solver.apply_div_correction_DeltaG(
+          sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
+      // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
+      if (is_q_gamma()) {
+        gw_solver.apply_div_correction_G(
+            sSigma_out, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
       }
     } else {
       // Term 2 only: ΔΣ = -G ⊙ ΔW. Reached only from the perturbative channel
@@ -817,7 +812,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       gw_solver.evaluate_sigma_DeltaW(
           sSigma_out, sG_tskij.local(), dDeltaW_tqPQ, thc,
           *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ);
-      if (p.div_corr && is_q_gamma()) {
+      if (is_q_gamma()) {
         gw_solver.apply_div_correction_G(
             sSigma_out, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
       }

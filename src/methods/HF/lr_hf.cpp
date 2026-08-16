@@ -34,7 +34,8 @@ namespace solvers {
 
 lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
              const mf::MF* MF,
-             nda::array<double, 1> const& q_vec)
+             nda::array<double, 1> const& q_vec,
+             std::string hf_div_treatment)
     : _mpi(mpi),
       _MF(MF),
       _ns(MF->nspin()),
@@ -44,7 +45,15 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
       _npol(MF->npol()),
       _q_vec(q_vec),
       _kpq_map(_nkpts),
+      _hf_div_treatment(std::move(hf_div_treatment)),
       _Timer() {
+
+  // Same coercion as hf_t, so ΔF and F agree on the exchange divergence.
+  if (_hf_div_treatment != "ignore_g0" and _hf_div_treatment != "gygi") {
+    app_log(2, " lr_hf: hf_div_treatment only supports \"ignore_g0\" and \"gygi\". "
+               " coqui will take hf_div_treatment = \"gygi\" instead.");
+    _hf_div_treatment = "gygi";
+  }
 
   // Compute k+q mapping
   auto kpts_crys = MF->kpts_crystal();
@@ -644,6 +653,10 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
                                 const nda::MemoryArrayOfRank<4> auto& DeltaDm_skij,
                                 const nda::MemoryArrayOfRank<4> auto& S_skij,
                                 double madelung) {
+  if (_hf_div_treatment == "ignore_g0") {
+    app_log(3, "  No finite-size correction to the non-local HF exchange potential.");
+    return;
+  }
   app_log(3, "  LR finite-size correction (Madelung = {:.6f})", madelung);
 
   decltype(nda::range::all) all;

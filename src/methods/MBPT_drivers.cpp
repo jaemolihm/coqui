@@ -1081,6 +1081,49 @@ std::string read_div_treatment(mpi_context_t& mpi,
 }
 
 /**
+ * Read the hf_div_treatment the ground-state run used (stashed on the checkpoint
+ * scf group by chkpt::dump_hf_div_treatment), so LR applies the exchange
+ * Madelung term exactly when the unperturbed Fock did.
+ *
+ * Unlike read_div_treatment this does NOT error when the dataset is absent:
+ * checkpoints predating the stash fall back to "gygi", which is both hf_t's
+ * default and what LR applied unconditionally before, so they keep their
+ * previous behaviour instead of needing to be regenerated.
+ */
+template<typename mpi_context_t>
+std::string read_hf_div_treatment(mpi_context_t& mpi,
+                                  const std::string& input_file,
+                                  const std::string& input_grp)
+{
+  char div_buf[64] = {0};
+  int found = 0;
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    if (root_grp.has_subgroup(input_grp)) {
+      auto scf_grp = root_grp.open_group(input_grp);
+      if (scf_grp.has_dataset("hf_div_treatment")) {
+        std::string div_str;
+        h5::h5_read(scf_grp, "hf_div_treatment", div_str);
+        utils::check(div_str.size() < sizeof(div_buf),
+                     "read_hf_div_treatment: hf_div_treatment string too long: {}", div_str);
+        std::copy(div_str.begin(), div_str.end(), div_buf);
+        found = 1;
+      }
+    }
+  }
+  mpi.comm.broadcast_n(&found, 1, 0);
+  if (!found) {
+    app_log(2, "  '{}/hf_div_treatment' not found in {}; assuming \"gygi\" for the LR "
+               "exchange divergence. Regenerate the checkpoint if the ground state "
+               "used hf_div_treatment = \"ignore_g0\".", input_grp, input_file);
+    return "gygi";
+  }
+  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
+  return std::string(div_buf);
+}
+
+/**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
  * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
@@ -1354,7 +1397,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
   auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
   auto h0_source = io::get_value_with_default<std::string>(pt, "h0_source", "compute");
-  auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
   // Explicit screened-interaction (W) file. Empty => auto-derive from the input
   // checkpoint's directory (thc_screened_interaction.h5).
   auto screened_interaction_file =
@@ -1785,8 +1827,25 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
   std::string div_treatment = "gygi";
+  // An LR run must reproduce the divergence treatment of the ground state it
+  // linearizes: the q→0 head of Σ_GW is the exchange Madelung term screened by
+  // ε⁻¹, so the correlation and exchange corrections only cancel (exactly, in a
+  // metal) when both are built the way the unperturbed run built them. Hence
+  // neither is a free parameter here — both come from the checkpoint. The one
+  // exception is unperturbed='mf_dft', where W0 is built fresh from the DFT G0
+  // and the mean-field checkpoint carries no ground-state value to inherit.
+  utils::check(unperturbed == "mf_dft" or !io::check_child_exists(pt, "div_treatment"),
+               "run_lr_calc: 'div_treatment' is not accepted for unperturbed='{}'. "
+               "The LR run always reuses the ground-state value read from "
+               "'{}/div_treatment' in {}, so that ΔΣ matches how Σ was built. "
+               "Remove the argument (it is only meaningful for unperturbed='mf_dft').",
+               unperturbed, input_grp, input_file);
+  // Exchange side: needed whenever ΔF carries exchange, independently of W.
+  // Absent on pre-stash checkpoints, in which case this falls back to "gygi".
+  std::string hf_div_treatment = read_hf_div_treatment(*mpi, input_file, input_grp);
   if (include_gw_sigma) {
     lr_init_timer.start("LR_INIT_LOAD_W");
+    bool div_from_chkpt = false;
     if (unperturbed == "mf_dft") {
       // G0W0@DFT: W0 is the RPA screened interaction built from the DFT G0.
       // The checkpoint holds no scGW W (or div_treatment), so recompute and
@@ -1800,8 +1859,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       // The qpGW checkpoint always stores scf/div_treatment (dump_qp_params), so
       // read it directly; W0 = RPA[G_QP].
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+      div_from_chkpt = true;
     } else {
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+      div_from_chkpt = true;
     }
     if (recompute_W) {
       app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
@@ -1815,6 +1876,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
           screened_interaction_file);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
+      // W carries its own stash; a disagreement means the W file and the
+      // checkpoint came from different runs, and Σ would mix two treatments.
+      utils::check(!div_from_chkpt or div_str == div_treatment,
+                   "run_lr_calc: div_treatment mismatch. The screened interaction "
+                   "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
+                   "must come from the same ground-state run.",
+                   div_str, input_grp, input_file, div_treatment);
       div_treatment = div_str;
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
@@ -1925,8 +1993,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.fix_density      = fix_density;
   p.iter_params      = iter_params;
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
-  p.div_corr         = div_corr;
   p.div_treatment    = div_treatment;
+  p.hf_div_treatment = hf_div_treatment;
   p.sDeltaX_left     = pDeltaX_left;
   p.sDeltaX_right    = pDeltaX_right;
   p.Dm_ab            = Dm_ab_ptr;

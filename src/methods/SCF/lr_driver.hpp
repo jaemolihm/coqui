@@ -215,8 +215,13 @@ struct lr_params {
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.
   const nda::array<ComplexType, 1>* eps_inv_head = nullptr;
-  bool div_corr = true;                     ///< Madelung / head divergence corrections
-  std::string div_treatment = "gygi";
+  /// Divergence treatments the unperturbed run used, read from the checkpoint.
+  /// They are never free parameters here: the q→0 head of Σ_GW is the exchange
+  /// Madelung term screened by ε⁻¹, so the correlation and exchange corrections
+  /// must be built the same way the ground state built them or they stop
+  /// cancelling (exactly, in a metal).
+  std::string div_treatment = "gygi";       ///< correlation / GW head
+  std::string hf_div_treatment = "gygi";    ///< HF exchange Madelung term
 
   // --- Optional inputs ---
   const sArray_4D_t* sDeltaX_left = nullptr;   ///< δ^q X, with sDeltaX_right: IBC
