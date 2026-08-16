@@ -34,7 +34,8 @@ namespace solvers {
 
 lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
              const mf::MF* MF,
-             nda::array<double, 1> const& q_vec)
+             nda::array<double, 1> const& q_vec,
+             std::string hf_div_treatment)
     : _mpi(mpi),
       _MF(MF),
       _ns(MF->nspin()),
@@ -44,7 +45,16 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
       _npol(MF->npol()),
       _q_vec(q_vec),
       _kpq_map(_nkpts),
+      _hf_div_treatment(std::move(hf_div_treatment)),
       _Timer() {
+
+  // hf_t coerces because it takes user input; here the value is read back from the
+  // checkpoint, already normalized by hf_t. Anything else means the stash was not
+  // written by hf_t, and silently defaulting would make ΔF and F disagree on the
+  // divergence correction.
+  utils::check(_hf_div_treatment == "ignore_g0" or _hf_div_treatment == "gygi",
+               "lr_hf: hf_div_treatment must be \"ignore_g0\" or \"gygi\", got \"{}\".",
+               _hf_div_treatment);
 
   // Compute k+q mapping
   auto kpts_crys = MF->kpts_crystal();
@@ -644,6 +654,10 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
                                 const nda::MemoryArrayOfRank<4> auto& DeltaDm_skij,
                                 const nda::MemoryArrayOfRank<4> auto& S_skij,
                                 double madelung) {
+  if (_hf_div_treatment == "ignore_g0") {
+    app_log(3, "  No finite-size correction to the non-local HF exchange potential.");
+    return;
+  }
   app_log(3, "  LR finite-size correction (Madelung = {:.6f})", madelung);
 
   decltype(nda::range::all) all;

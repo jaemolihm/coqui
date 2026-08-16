@@ -828,6 +828,23 @@ void dump_qp_params(communicator_t& comm, std::string filename,
 }
 
 template<typename communicator_t>
+void dump_hf_div_treatment(communicator_t& comm, std::string filename,
+                           std::string const& hf_div_treatment) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_hf_div_treatment: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    // Same create-if-absent convention as scr_coulomb_t::dump_eps_inv_head: this
+    // may run before the first dump_scf on a restart.
+    auto scf_grp = grp.has_subgroup("scf") ? grp.open_group("scf") : grp.create_group("scf");
+    if (!scf_grp.has_dataset("hf_div_treatment"))
+      h5::h5_write(scf_grp, "hf_div_treatment", hf_div_treatment);
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
 bool read_qp_params(communicator_t& comm, std::string filename,
                     std::string& off_diag_mode, double& eta,
                     std::string& ac_alg, int& Nfit) {
@@ -875,6 +892,7 @@ template void dump_qp_params(mpi3::communicator&, std::string,
                              std::string const&);
 template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
+template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,

@@ -98,8 +98,13 @@ def run_hf(params, h_int, h_int_exchange=None):
           - ``"_metal"`` — enforces ε⁻¹(q=0, ω=0) → 0; use for metallic systems.
 
         - ``hf_div_treatment`` *(str, optional, default ``"gygi"``)* — divergence
-          treatment for the HF Coulomb kernel specifically. Accepts the same values
-          and suffix modifiers as ``div_treatment``.
+          treatment for the HF exchange Madelung term. Only ``"gygi"`` and
+          ``"ignore_g0"`` are honoured; anything else (including the ``_2d`` /
+          ``_metal`` suffixes, which have no meaning here — the exchange head
+          weight is ``-madelung``, with no ε in it) is coerced to ``"gygi"``.
+          Keep it in the same family as ``div_treatment``: the two head terms sum
+          to ``-madelung · ε⁻¹``, so treating them differently breaks the
+          cancellation, which in a metal is exact.
         - ``greens_func_source`` *(str, optional, default ``"scf"``)* — source of the
           initial Green's function. ``"mf"`` uses the mean-field Green's function;
           ``"scf"`` reads from the checkpoint.
@@ -375,7 +380,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            include_gw_sigma=None,
            DeltaX_left=None, DeltaX_right=None,
            DeltaV_qPQ=None,
-           div_corr=True,
            screened_interaction_file=None,
            recompute_W=False,
            unperturbed="checkpoint",
@@ -497,9 +501,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
         (G0·dW0). Requires gw_mode="full" and max_iter=1. See run_lr_g0w0.
     div_treatment : str or None, optional
-        Divergence treatment for the ε⁻¹ head. For unperturbed="mf_dft" the
-        checkpoint holds none, so this selects it (default "gygi" in C++).
-        Ignored for unperturbed="checkpoint" (read from the checkpoint).
+        Divergence treatment for the ε⁻¹ head. Accepted only for
+        unperturbed="mf_dft"; a hard error otherwise, since the LR run must reuse
+        the ground-state treatment, read from "scf/div_treatment" and
+        "scf/hf_div_treatment" in the checkpoint.
     save_DeltaG : bool, optional
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can
@@ -635,7 +640,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     # The C++ run_lr_calc reads its non-positional options off the params dict.
     lr_params = dict(params)
-    lr_params["div_corr"] = bool(div_corr)
     # Optional explicit path to the screened-interaction (W) HDF5 file. When
     # omitted, C++ auto-derives it from the input checkpoint's directory.
     if screened_interaction_file is not None:
@@ -684,7 +688,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu
 
-def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment=None):
+def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
+                save_DeltaG=True, nbnd_save=None):
     """
     One-shot G0W0@DFT electron-phonon linear response.
 
@@ -722,15 +727,24 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment
     q_vec : array-like
         Perturbation wavevector in crystal coordinates, shape (3,).
     DeltaH0_skij : np.ndarray or None
-        DFT-screened perturbation ΔH_KS (= g_scr), shape (ns, nk, nb, nb).
+        DFT-screened perturbation ΔH_KS (= g_scr), shape (ns, nk, nb, nb), or
+        (nmodes, ns, nk, nb, nb) to solve several perturbations at this q in one
+        call — the setup and W0 are then shared across them, and each mode is
+        written to its own "linear_response/mode{m}" group.
         Required on the MPI global root; ignored on non-root ranks.
-    div_corr : bool, optional
-        Apply the Madelung/head divergence corrections to ΔΣ (default True).
-        Kept as an opt-out for experimentation; production G0W0 wants True.
     div_treatment : str or None, optional
-        q→0 divergence scheme for the ε⁻¹ head (default "gygi" in C++). Selects
-        how W0's head is built (and, when div_corr, how the LR head correction
-        is applied); relevant even when div_corr=False.
+        q→0 divergence scheme for the ε⁻¹ head (default "gygi" in C++), selecting
+        how W0's head is built and how the LR head correction is applied. Accepted
+        here, unlike in run_lr, because G0W0@DFT builds W0 fresh from the DFT G0
+        and a mean-field checkpoint carries no ground-state value to inherit.
+        Use "gygi_metal" for metals; see run_lr's ``div_treatment`` entry.
+    save_DeltaG : bool, optional
+        Write DeltaG_tskij to the checkpoint (default True). A one-shot G0W0
+        sweep reads only ΔΣ / ΔF back, so turning it off keeps the largest
+        dataset off disk for the duration of the run.
+    nbnd_save : int or None, optional
+        Keep only the leading nbnd_save x nbnd_save band block of the
+        imaginary-time arrays. See run_lr for the full description.
 
     Returns
     -------
@@ -741,7 +755,8 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_corr=True, div_treatment
                   include_hartree=False, include_exchange=True,
                   gw_mode="full", max_iter=1,
                   unperturbed="mf_dft", split_sigma_terms=True,
-                  div_corr=div_corr, div_treatment=div_treatment)
+                  div_treatment=div_treatment,
+                  save_DeltaG=save_DeltaG, nbnd_save=nbnd_save)
 
 def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
                 gw_mode="full", max_iter=50, tol=1e-8,

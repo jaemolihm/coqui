@@ -74,10 +74,16 @@ public:
    * @param mpi        - [INPUT] MPI context
    * @param MF         - [INPUT] Mean-field object (non-owning pointer, caller manages lifetime)
    * @param q_vec      - [INPUT] Perturbation wavevector in crystal coordinates (3,)
+   * @param hf_div_treatment - [INPUT] Divergence treatment of the ground-state HF
+   *                   exchange ("gygi" or "ignore_g0"). Gates the Madelung K
+   *                   correction exactly as hf_t does, so ΔF matches how the
+   *                   unperturbed Fock was built; the caller reads it from the
+   *                   checkpoint.
    */
   lr_hf(std::shared_ptr<mpi_context_t> mpi,
         const mf::MF* MF,
-        nda::array<double, 1> const& q_vec);
+        nda::array<double, 1> const& q_vec,
+        std::string hf_div_treatment = "gygi");
 
   lr_hf(lr_hf const&) = delete;
   lr_hf(lr_hf &&) = default;
@@ -170,6 +176,8 @@ private:
   long _q_ibz_idx;                  // IBZ index of perturbation q-vector (for V(q) lookup)
   nda::array<int, 1> _kpq_ibz_map;  // IBZ k → IBZ k+q mapping (nkpts_ibz,)
   nda::array<bool, 1> _kpq_ibz_trev; // Whether k+q reaches its IBZ rep via time-reversal
+
+  std::string _hf_div_treatment;    // "gygi" or "ignore_g0"; gates the Madelung K correction
 
   utils::TimerManager _Timer;
 

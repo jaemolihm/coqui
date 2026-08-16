@@ -270,6 +270,15 @@ namespace methods {
                       std::string const& div_treatment);
 
   /**
+   * Stash the HF exchange divergence treatment on the "scf" group, so a later
+   * LR run applies the exchange Madelung term exactly when the ground state
+   * did. Same convention as div_treatment: written once, first writer wins.
+   */
+  template<typename communicator_t>
+  void dump_hf_div_treatment(communicator_t& comm, std::string filename,
+                             std::string const& hf_div_treatment);
+
+  /**
    * Read the qpGW AC parameters written by dump_qp_params. Returns true and
    * fills the outputs if "scf/qp_params" is present; returns false (leaving
    * the outputs untouched) otherwise.

@@ -451,7 +451,7 @@ void lr_driver::lr_setup(
   // Solvers. Each latches the perturbation q at construction and caches a
   // workspace, so they are built once here and reused by every lr_solve_one.
   if (k.need_hf && !_lr_hf) {
-    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec());
+    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   if (k.sc_sigma) {
     _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
@@ -709,10 +709,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   constexpr sigma_clocks pert_clocks{"LR_GW_PI_PERT", "LR_GW_W_PERT",
                                      "LR_GW_SIGMA_PERT"};
 
-  // Evaluate the Σ components of `mask` into `sSigma_out`, overwriting it. The
-  // divergence corrections follow their own component into whichever channel
-  // owns it: apply_div_correction_DeltaG belongs to Σ1, apply_div_correction_G
-  // to Σ2.
+  // Evaluate the Σ components of `mask` into `sSigma_out`, overwriting it. Each
+  // divergence correction is applied by the evaluator that owns the term it
+  // corrects, so passing the overlap and the heads is all this has to do.
   auto eval_sigma_channel = [&](lr_kernel_spec const& mask,
                                 solvers::lr_gw& gw_solver,
                                 sArray_t<Array_view_5D_t>& sSigma_out,
@@ -724,13 +723,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     if (!mask.sigma_G_dW) {
       // Term 1 only: ΔΣ = -ΔG ⊙ W_c
       _Timer.start(clk.sigma);
+      // The term-1 divergence correction is applied inside the evaluator.
+      auto S_loc = sS_skij.local();
       gw_solver.evaluate_sigma_DeltaG(
-          sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr);
-      // Divergence correction term 1 (all q): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-      }
+          sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr,
+          &S_loc, p.eps_inv_head);
       _Timer.stop(clk.sigma);
       _mpi->comm.barrier();
       return;
@@ -752,7 +749,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
     nda::array<ComplexType, 1> delta_eps_inv_head;
-    if (p.div_corr && is_q_gamma()) {
+    if (p.div_treatment != "ignore_g0" && is_q_gamma()) {
       auto [delta_eps_inv_q, delta_head] =
           solvers::div_utils::eps_inv_head_t(
               dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), p.div_treatment);
@@ -773,19 +770,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // term 1 (-ΔG⊙W_c + div) and term 2 (-G⊙ΔW + div) use separate solver
       // instances (gw_solver / _lr_gw2, built once by lr_setup) — the workspace
       // is cached per (term1,term2) combination.
+      auto S_loc = sS_skij.local();
       gw_solver.evaluate_sigma_DeltaG(
-          sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr);
+          sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr,
+          &S_loc, p.eps_inv_head);
       _lr_gw2->evaluate_sigma_DeltaW(
           *sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
-          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ);
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-        if (is_q_gamma()) {
-          _lr_gw2->apply_div_correction_G(
-              *sDeltaSigma_term2_tskij, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
-        }
-      }
+          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, &S_loc, &delta_eps_inv_head);
       // Accumulate term2 into sSigma_out so it holds the total ΔΣ.
       // Both arrays are node-replicated shared memory (each solver all_reduced
       // its result), so add once per node on the node root.
@@ -797,30 +788,19 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _mpi->comm.barrier();
     } else if (mask.sigma_dG_W) {
       // Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (single R-space pass)
+      auto S_loc = sS_skij.local();
       gw_solver.evaluate_sigma(
           sSigma_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ,
           sG_tskij.local(), dDeltaW_tqPQ, thc,
-          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
-      // Divergence correction term 1 (all q): eps_inv_head from W, applied to ΔG
-      if (p.div_corr) {
-        gw_solver.apply_div_correction_DeltaG(
-            sSigma_out, sDeltaG_tskij.local(), sS_skij.local(), thc, *p.eps_inv_head);
-        // Divergence correction term 2 (q_pert=0 only): Δeps_inv_head from ΔW, applied to G
-        if (is_q_gamma()) {
-          gw_solver.apply_div_correction_G(
-              sSigma_out, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
-        }
-      }
+          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
+          &S_loc, p.eps_inv_head, &delta_eps_inv_head);
     } else {
       // Term 2 only: ΔΣ = -G ⊙ ΔW. Reached only from the perturbative channel
       // of a split-kernel run whose K_sc already resums Σ1.
+      auto S_loc = sS_skij.local();
       gw_solver.evaluate_sigma_DeltaW(
           sSigma_out, sG_tskij.local(), dDeltaW_tqPQ, thc,
-          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ);
-      if (p.div_corr && is_q_gamma()) {
-        gw_solver.apply_div_correction_G(
-            sSigma_out, sG_tskij.local(), sS_skij.local(), thc, delta_eps_inv_head);
-      }
+          *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, &S_loc, &delta_eps_inv_head);
     }
     _mpi->comm.barrier();
     _Timer.stop(clk.sigma);
