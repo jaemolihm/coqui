@@ -52,6 +52,56 @@ namespace methods {
 enum class lr_gw_update_mode { none, fixed_W, full };
 
 /**
+ * The kernel components K = δ(ΔF + ΔΣ)/δΔG applied by the LR SCF loop.
+ *
+ * The named methods form a nested ladder
+ *
+ *   none ⊂ Hartree {H} ⊂ HF {H,X} ⊂ GW0 {H,X,Σ1} ⊂ GW {H,X,Σ1,Σ2}
+ *
+ * with Σ1 = -ΔG⊙W_c (label "dGW") and Σ2 = -G⊙ΔW (label "GdW"). A two-step run
+ * splits K into a part resummed to all orders (K_sc) and a remainder expanded
+ * to finite order (K_pert = kernel(total) \ kernel(sc)), and the remainder has
+ * no method name of its own — hence the component mask rather than a method
+ * enum.
+ */
+struct lr_kernel_spec {
+  bool hartree = false;
+  bool exchange = false;
+  bool sigma_dG_W = false;   // Σ1 = -ΔG ⊙ W_c, label "dGW"
+  bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW,  label "GdW"
+
+  bool has_sigma() const { return sigma_dG_W || sigma_G_dW; }
+  bool empty()     const { return !hartree && !exchange && !has_sigma(); }
+
+  bool operator==(lr_kernel_spec const&) const = default;
+
+  /// True if every component of `sub` is also in *this.
+  bool contains(lr_kernel_spec const& sub) const {
+    return (hartree    || !sub.hartree)    && (exchange   || !sub.exchange) &&
+           (sigma_dG_W || !sub.sigma_dG_W) && (sigma_G_dW || !sub.sigma_G_dW);
+  }
+
+  /// True if any component appears in both masks.
+  bool overlaps(lr_kernel_spec const& o) const {
+    return (hartree && o.hartree) || (exchange && o.exchange) ||
+           (sigma_dG_W && o.sigma_dG_W) || (sigma_G_dW && o.sigma_G_dW);
+  }
+
+  /// Component list for logging, e.g. "H, X, dGW" ("-" when empty).
+  std::string to_string() const;
+};
+
+/**
+ * Expand a method name on the ladder ("none", "Hartree", "HF", "GW0", "GW")
+ * into its component mask. Single source of truth for the `method` and
+ * `two_step_inner_method` inputs.
+ */
+lr_kernel_spec kernel_spec_from_method(std::string const& name);
+
+/// K_pert = total \ sc, requiring sc ⊆ total.
+lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc);
+
+/**
  * LR-qpGW static-map inputs. When passed to lr_setup (non-null), the driver runs
  * in "qp_static_sigma" mode: after the dynamic ΔΣ(iω) is assembled it is
  * statified via lr_qp_approx into a static ΔV_QPGW(k) (frozen orbitals C/ε/μ),
@@ -63,6 +113,51 @@ struct lr_qp_static_params {
   const math::shm::shared_array<nda::array_view<ComplexType, 4>>* sMO_skia = nullptr;
   const math::shm::shared_array<nda::array_view<ComplexType, 3>>* sE_ska = nullptr;
   double mu = 0.0;
+};
+
+/**
+ * Acceleration of the OUTER (perturbative-source) iteration of a split-kernel
+ * run. The outer sequence is a Picard iteration on an affine map,
+ *
+ *   S_0 = 0,   S_{m+1} = K_pert[ (1 - χ₀K_sc)⁻¹ χ₀ (ΔH0 + S_m) ],
+ *
+ * so the same accelerator the inner SCF uses applies to it verbatim. The outer
+ * accelerator is a separate object with its own subspace, history and warmup —
+ * nothing is shared with the inner `lr_diis`.
+ *
+ * With the defaults (alg "damping", tol = 0) nothing is allocated and no new
+ * code runs: the outer loop is a plain Neumann series and `two_step_order`
+ * counts truncation orders.
+ *
+ * With acceleration on, ORDER COUNTING IS ABANDONED: the source is a
+ * combination of previous sources, so the result is an accelerated iterate
+ * toward the FULL `method` fixed point and `two_step_order` is an
+ * iteration cap, not a truncation order.
+ */
+struct lr_outer_accel_params {
+  /// alg, subspace depth and warmup of the OUTER accelerator. "damping" means
+  /// no acceleration; `mixing` only damps the accelerator's own warmup steps.
+  lr_iter_params iter;
+  /// > 0 switches the outer loop from "run exactly pert_order stages" to
+  /// "iterate until the stage-to-stage ‖ΔDm‖ change is below tol, capped at
+  /// pert_order stages".
+  double tol = 0.0;
+  /// History vectors required before the outer DIIS extrapolates (see lr_diis).
+  /// 2 puts the first extrapolation at the second outer step.
+  size_t min_subsp = 2;
+
+  /// True when the outer loop is accelerated or tolerance-driven, i.e. when the
+  /// run is no longer an order-`pert_order` truncation. Single source of truth
+  /// for the buffers, the logging and the checkpoint provenance fields.
+  bool active() const { return iter.alg == "DIIS" || tol > 0.0; }
+};
+
+/// Per-node footprint of one lr_diis history: 2 vectors (trial + residual) per
+/// subspace entry, of the quantities the accelerator actually stores.
+struct lr_diis_hist_t {
+  long depth = 0;     ///< max_subsp_size; 0 = no history (accelerator off)
+  long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities stored per entry
+  long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per entry
 };
 
 /**
@@ -95,6 +190,27 @@ struct lr_params {
   double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
   lr_iter_params iter_params{};   ///< damping / DIIS
+
+  // --- Split-kernel (two-step) schedule ---
+  /// Kernel components resummed self-consistently by the inner SCF loop. Left
+  /// empty it is filled from the active terms above, i.e. the single-kernel path.
+  lr_kernel_spec sc_kernel{};
+  /// Kernel components applied perturbatively, K_pert = kernel(total) \ sc_kernel.
+  /// Empty for a plain single-kernel run.
+  lr_kernel_spec pert_kernel{};
+  /// Truncation order n of the K_pert expansion. 0 (or an empty pert_kernel)
+  /// runs the sc kernel alone. Costs n K_pert evaluations, each on a converged
+  /// inner K_sc solve; max_iter counts total inner iterations across all n+1
+  /// stages. With outer_accel active this is an iteration cap, not an order.
+  int pert_order = 0;
+  /// Acceleration of the outer (perturbative-source) iteration. Default-valued
+  /// leaves the plain Neumann series untouched. Requires a split-kernel run.
+  lr_outer_accel_params outer_accel{};
+
+  /// Split-kernel run: the perturbative channel is a distinct kernel evaluated
+  /// outside the SCF resummation. Single source of truth for the extra buffers,
+  /// the outer loop and the checkpoint provenance fields.
+  bool two_step() const { return !pert_kernel.empty() && pert_order > 0; }
 
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.
@@ -201,9 +317,11 @@ public:
    *
    * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW, the previous iterates and
    * the DIIS subspace) on entry, so the result depends only on ΔH0 and not on
-   * whichever perturbation ran before it. The SCF timers are reset per call as
-   * well; the LR_DRIVER_SETUP_* clocks are not, so the one-time cost stays
-   * visible and is never double-counted.
+   * whichever perturbation ran before it. No clock is reset: every timer
+   * accumulates over the whole call, so the table printed after the last
+   * perturbation is the cost of the entire batch and each intermediate one is a
+   * running total. The LR_DRIVER_SETUP_* clocks likewise stay as measured, the
+   * setup being paid once for all perturbations.
    *
    * The output arrays may be the same ones on every call — they are fully
    * overwritten.
@@ -224,7 +342,8 @@ public:
       sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
+      int* n_pert_applied_out = nullptr);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -233,9 +352,25 @@ public:
    * arrays (~ nk·nt·NP²), the striped previous-iterate/DIIS history, and the
    * per-iteration transients. Called once at the top of lr_setup so the layout
    * can be inspected before the arrays allocate.
+   *
+   * `extra_sigma` names the additional ΔΣ-sized shared arrays a split-kernel
+   * run allocates on top of the total ΔΣ: the per-channel buffers.
+   *
+   * `n_sigma_prev` counts the ΔΣ-sized striped previous iterates — the inner
+   * loop's tracked ΔΣ and the outer accelerator's previous source.
+   *
+   * `inner_hist` / `outer_hist` are the DIIS histories of the inner SCF and of
+   * the outer (split-kernel source) loop. Each subspace entry holds a trial AND
+   * a residual vector, so a depth-d history is 2d arrays striped over the
+   * global comm — at the default inner depth this dominates every other LR
+   * array at production sizes, which is why it is listed rather than left
+   * implicit.
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
-                             bool use_diis, size_t max_subsp_size);
+                             std::vector<std::string> const& extra_sigma = {},
+                             long n_sigma_prev = 0,
+                             lr_diis_hist_t inner_hist = {},
+                             lr_diis_hist_t outer_hist = {});
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -251,10 +386,18 @@ public:
    * Each "LR_* (total)" line is followed by the corresponding solver's
    * subclocks (indented). The Pi/W/Sigma solvers are passed in as pointers
    * (null = solver not used, subclocks skipped).
+   *
+   * The report has the same lines for every kernel. A split kernel evaluates ΔΣ
+   * on several lr_gw instances (`gw_solver_pert` for the perturbative channel,
+   * `gw_solver_term2` for a split G·ΔW term) against their own clock keys; all
+   * of them are summed into the single Σ line and Σ table, so a split run's
+   * report stays comparable line by line with a one-step run's.
    */
   void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
                     solvers::lr_scr_coulomb_t* scr_solver = nullptr,
-                    solvers::lr_gw* gw_solver = nullptr);
+                    solvers::lr_gw* gw_solver = nullptr,
+                    solvers::lr_gw* gw_solver_pert = nullptr,
+                    solvers::lr_gw* gw_solver_term2 = nullptr);
 
   // Accessors
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }
@@ -292,11 +435,16 @@ private:
   //     Declared before the arrays below: darray_t stores a raw communicator_t*,
   //     so communicator-owning objects must outlive the arrays built on them.
   std::unique_ptr<solvers::lr_hf> _lr_hf;
-  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ (fused, or term 1 when split)
-  std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-kernel path only
+  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of K_sc (fused, or term 1 when split)
+  std::unique_ptr<solvers::lr_gw> _lr_gw_pert;   // ΔΣ of K_pert, split-kernel path only
+  std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
   std::unique_ptr<lr_diis> _lr_diis;
+  /// Accelerator of the outer (perturbative-source) iteration. Its own subspace,
+  /// history and warmup: the inner one restarts at every stage boundary while
+  /// this one is keyed on the outer step index, so the two share nothing.
+  std::unique_ptr<lr_diis> _outer_diis;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
   // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
@@ -336,6 +484,19 @@ private:
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;
   lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
+
+  // --- Split-kernel (two-step) buffers. sDeltaF_skij / sDeltaSigma_tskij always
+  //     hold the TOTAL (sc + pert) quantities; a per-channel buffer exists only
+  //     for a quantity BOTH channels contribute to, otherwise the sole
+  //     contributing channel writes the caller's array directly.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_sc, _sDeltaF_pert;
+  std::optional<sArray_t<Array_view_5D_t>> _sDeltaSigma_sc, _sDeltaSigma_pert;
+  /// Previous perturbative source, for the outer accelerator's extrapolation
+  /// and its residual. Striped exactly like the inner loop's iterates.
+  lr_iterate_history _DeltaF_pert, _DeltaSigma_pert;
+  /// ΔDm at the previous stage boundary, whose change is the outer termination
+  /// criterion. Kept whole: its norm is taken on the node_comm path.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_stage_prev;
 
   bool _setup_done = false;
 

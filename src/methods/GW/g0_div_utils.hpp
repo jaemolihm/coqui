@@ -110,9 +110,9 @@ namespace methods {
             eps_inv_q0_w = eps_inv_wq(nda::range::all, q_indices[0]);
           } else {
             if (two_dimension)
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points on the xy-plane", q_indices.size());
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-points on the xy-plane", q_indices.size());
             else
-              app_log(2, "  Extrapolate head of the inverse of the dielectric function from {} q-points", q_indices.size());
+              app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-points", q_indices.size());
             
             for (int n = 0; n < niw; ++n) {
               eps_inv_q0_w(n) = extrapolate_to_q0(Q_filtered, eps_inv_filtered(n, nda::range::all), 2,
@@ -167,9 +167,9 @@ namespace methods {
           auto closest_indices = find_n_closest_per_direction(mf.Qpts_ibz(), mf.lattv(), fit_order+1);
 
           if (two_dimension)
-            app_log(2, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, and +/-b2 directions."); 
+            app_log(3, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, and +/-b2 directions."); 
           else
-            app_log(2, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, +/-b2, and +/-b3 directions."); 
+            app_log(3, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, +/-b2, and +/-b3 directions."); 
           app_log(4, "   - Maximum polynomial fit order: {}", fit_order);
           app_log(4, "   - Maximum number of q-points used for fit per direction: {}", fit_order+1);
           
@@ -191,7 +191,7 @@ namespace methods {
               continue; // no point found along this direction, skip extrapolation
             }
             
-            app_log(2, "\n  Found {} points along {} direction for extrapolation.", closest_indices[dir].size(), direction_labels[dir]);
+            app_log(3, "\n  Found {} points along {} direction for extrapolation.", closest_indices[dir].size(), direction_labels[dir]);
 
             for (int n = 0; n < niw; ++n) {
               eps_inv_q0_w(n) += extrapolate_to_q0(
@@ -207,7 +207,7 @@ namespace methods {
           eps_inv_q0_w /= static_cast<double>(dim); // average over the number of dimensions extrapolated
 
           if (div_treatment.find("metal") != std::string::npos) {
-            app_log(2, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems.\n");
+            app_log(3, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems.\n");
             // for metals, set the static limit to -1 manually, i.e. inverse dielectric function goes to 0 at q=0 and w=0
             eps_inv_q0_w(0) = -1.0;
           }
@@ -567,8 +567,8 @@ namespace methods {
 
         if (print) {
           for (size_t n=0; n<=fit_order; ++n)
-            app_log(2, "    x({}) = {}", n, x(n));
-          app_log(2, "");
+            app_log(3, "    x({}) = {}", n, x(n));
+          app_log(3, "");
         }
 
         return x(0);

@@ -199,20 +199,35 @@ namespace methods {
     /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
     /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
     /// Aux->Primary is a breakdown of it, not further terms of that sum.
-    inline void print_subclocks(int level, const std::string& indent) {
-      app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EVALUATE_SIGMA_R"), _Timer.number_of_calls("EVALUATE_SIGMA_R"));
-      app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_ALLOC"), _Timer.number_of_calls("SIGMA_ALLOC"));
-      app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_COEFF"), _Timer.number_of_calls("SIGMA_FT_COEFF"));
-      app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_W_COPY"), _Timer.number_of_calls("SIGMA_W_COPY"));
-      app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_PRIM_TO_AUX"), _Timer.number_of_calls("SIGMA_PRIM_TO_AUX"));
-      app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FT_R"), _Timer.number_of_calls("SIGMA_FT_R"));
-      app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_HADPROD_R"), _Timer.number_of_calls("SIGMA_HADPROD_R"));
-      app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_AUX_TO_PRIM"), _Timer.number_of_calls("SIGMA_AUX_TO_PRIM"));
-      app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_GEMM"), _Timer.number_of_calls("SIGMA_A2P_GEMM"));
-      app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_REDUCE"), _Timer.number_of_calls("SIGMA_A2P_REDUCE"));
-      app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_A2P_AXPY"), _Timer.number_of_calls("SIGMA_A2P_AXPY"));
-      app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_FINAL_REDUCE"), _Timer.number_of_calls("SIGMA_FINAL_REDUCE"));
-      app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("SIGMA_DIV_CORR"), _Timer.number_of_calls("SIGMA_DIV_CORR"));
+    ///
+    /// `others` are further lr_gw instances evaluating the same ΔΣ for a
+    /// different kernel channel or term; their clocks are added in, so the
+    /// report keeps one Σ table whatever the kernel was split into.
+    inline void print_subclocks(int level, const std::string& indent,
+                                std::initializer_list<lr_gw*> others = {}) {
+      auto sec = [&](const char* key) {
+        double v = _Timer.elapsed(key);
+        for (auto* o : others) if (o) v += o->_Timer.elapsed(key);
+        return v;
+      };
+      auto cnt = [&](const char* key) {
+        int v = _Timer.number_of_calls(key);
+        for (auto* o : others) if (o) v += o->_Timer.number_of_calls(key);
+        return v;
+      };
+      app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, sec("EVALUATE_SIGMA_R"), cnt("EVALUATE_SIGMA_R"));
+      app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_ALLOC"), cnt("SIGMA_ALLOC"));
+      app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FT_COEFF"), cnt("SIGMA_FT_COEFF"));
+      app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_W_COPY"), cnt("SIGMA_W_COPY"));
+      app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_PRIM_TO_AUX"), cnt("SIGMA_PRIM_TO_AUX"));
+      app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FT_R"), cnt("SIGMA_FT_R"));
+      app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_HADPROD_R"), cnt("SIGMA_HADPROD_R"));
+      app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_AUX_TO_PRIM"), cnt("SIGMA_AUX_TO_PRIM"));
+      app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_GEMM"), cnt("SIGMA_A2P_GEMM"));
+      app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
+      app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_AXPY"), cnt("SIGMA_A2P_AXPY"));
+      app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FINAL_REDUCE"), cnt("SIGMA_FINAL_REDUCE"));
+      app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_DIV_CORR"), cnt("SIGMA_DIV_CORR"));
     }
 
     private:

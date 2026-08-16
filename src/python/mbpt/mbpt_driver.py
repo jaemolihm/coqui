@@ -382,7 +382,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            split_sigma_terms=False,
            div_treatment=None,
            save_DeltaG=True,
-           nbnd_save=None):
+           nbnd_save=None,
+           method=None,
+           lr_two_step=False,
+           two_step_inner_method=None,
+           two_step_order=1,
+           two_step_outer_iter_alg=None,
+           two_step_outer_tol=0.0):
     """
     Run unified linear response calculation.
 
@@ -506,6 +512,51 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         full-basis ΔΣ; each trimmed dataset carries an ``nbnd_save`` HDF5
         attribute saying so. The single-time-slice arrays (DeltaDm_skij,
         DeltaF_skij, DeltaVcorr_skij) are never trimmed.
+    method : str or None, optional
+        Alias on the kernel ladder — "none", "Hartree", "HF", "GW0" or "GW" —
+        that expands to include_hartree / include_exchange / gw_mode. When
+        given it defines all three, so they need not be passed separately. It
+        names the TOTAL kernel, for a two-step run as well.
+    lr_two_step : bool, optional
+        Split the LR kernel into a part resummed by the SCF loop and a
+        remainder expanded to finite order (default False):
+
+            K_sc   = kernel(two_step_inner_method)
+            K_pert = kernel(method) \\ kernel(two_step_inner_method)
+
+        The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW, so K_sc must be a
+        proper subset of the total kernel. Costs two_step_order evaluations of
+        K_pert instead of one per SCF iteration.
+    two_step_inner_method : str or None, optional
+        Method whose kernel is resummed self-consistently. Required with
+        lr_two_step. The total kernel comes from method / include_hartree /
+        include_exchange / gw_mode, and K_pert is the difference.
+    two_step_order : int, optional
+        Truncation order n of the K_pert expansion (default 1). n = 0 runs the
+        self-consistent kernel alone. max_iter counts total inner iterations
+        across all n+1 stages. With outer acceleration on it is an iteration
+        cap rather than a truncation order (see two_step_outer_iter_alg).
+    two_step_outer_iter_alg : dict or None, optional
+        DIIS acceleration of the OUTER (perturbative-source) iteration,
+        mirroring iter_alg but as a fully independent accelerator:
+
+            {"alg": "damping"|"DIIS", "mixing": float,
+             "max_subsp_size": int, "diis_warmup": int, "min_subsp_size": int}
+
+        The default ``{"alg": "damping"}`` is no acceleration. ``mixing``
+        damps only the accelerator's warmup steps (there is no damping-only
+        mode). ``min_subsp_size`` (default 2) is the number of history vectors
+        required to extrapolate, so 2 extrapolates from the second outer step.
+
+        With acceleration on the source is a combination of previous sources,
+        so the result is an accelerated iterate toward the FULL `method` fixed
+        point, with no truncation-order meaning.
+    two_step_outer_tol : float, optional
+        > 0 turns two_step_order into a cap and stops the outer loop once the
+        stage-to-stage change of ΔDm falls below it (default 0.0 = run exactly
+        two_step_order stages). The number of K_pert evaluations actually made
+        is written to the checkpoint as
+        ``linear_response/two_step_stages_applied``.
 
     Returns
     -------
@@ -600,6 +651,28 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     lr_params["save_DeltaG"] = bool(save_DeltaG)
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
+    # Kernel ladder alias and the split-kernel (two-step) schedule. Read by C++
+    # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
+    # are overridden by "method" when it is given.
+    if method is not None:
+        lr_params["method"] = str(method)
+    lr_params["lr_two_step"] = bool(lr_two_step)
+    if two_step_inner_method is not None:
+        lr_params["two_step_inner_method"] = str(two_step_inner_method)
+    lr_params["two_step_order"] = int(two_step_order)
+    # Outer-loop acceleration, flattened to the ptree keys C++ reads. Mirrors
+    # the iter_alg dict; type conversion only.
+    outer = dict(two_step_outer_iter_alg or {})
+    outer_alg = str(outer.get("alg", "damping"))
+    if outer_alg not in ("damping", "DIIS"):
+        raise ValueError(
+            f"Unknown two_step_outer_iter_alg '{outer_alg}'. Must be 'damping' or 'DIIS'.")
+    lr_params["two_step_outer_alg"] = outer_alg
+    lr_params["two_step_outer_mixing"] = float(outer.get("mixing", 1.0))
+    lr_params["two_step_outer_subsp"] = int(outer.get("max_subsp_size", 3))
+    lr_params["two_step_outer_warmup"] = int(outer.get("diis_warmup", 0))
+    lr_params["two_step_outer_min_subsp"] = int(outer.get("min_subsp_size", 2))
+    lr_params["two_step_outer_tol"] = float(two_step_outer_tol)
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,

@@ -689,7 +689,15 @@ void dump_lr(communicator_t& comm,
              F_t const* sDeltaVcorr_skij,
              std::optional<long> imode,
              bool save_DeltaG,
-             std::optional<long> nbnd_save) {
+             std::optional<long> nbnd_save,
+             std::string const& gw_mode,
+             bool lr_two_step,
+             std::string const& two_step_inner_method,
+             int two_step_order,
+             bool two_step_outer_accel,
+             std::string const& two_step_outer_alg,
+             double two_step_outer_tol,
+             int two_step_stages_applied) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -733,6 +741,8 @@ void dump_lr(communicator_t& comm,
     h5::h5_write(lr_grp, "include_hartree", static_cast<int>(include_hartree));
     h5::h5_write(lr_grp, "include_exchange", static_cast<int>(include_exchange));
     h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(include_gw_sigma));
+    // Refines include_gw_sigma, which cannot distinguish fixed_W from full.
+    if (!gw_mode.empty()) h5::h5_write(lr_grp, "gw_mode", gw_mode);
 
     if (include_hartree || include_exchange) {
       auto DeltaF_loc = sDeltaF_skij.local();
@@ -760,6 +770,26 @@ void dump_lr(communicator_t& comm,
       h5::h5_write(lr_grp, "qp_static_sigma", 1);
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
+    }
+    // Split-kernel (two-step) schedule. DeltaF_skij / DeltaSigma_tskij above are
+    // then the sums of the two channels, with the perturbative part evaluated at
+    // the ΔG of the previous stage — so neither is a self-consistent response to
+    // the ΔG that was written.
+    if (lr_two_step) {
+      h5::h5_write(lr_grp, "lr_two_step", 1);
+      h5::h5_write(lr_grp, "two_step_inner_method", two_step_inner_method);
+      h5::h5_write(lr_grp, "two_step_order", two_step_order);
+      // Outer-loop acceleration. Written only when it is actually active, so a
+      // plain two-step checkpoint keeps exactly the fields it had before. With
+      // acceleration on, two_step_order is an iteration cap rather than a
+      // truncation order and the result carries no order interpretation, so
+      // two_step_stages_applied — the number of K_pert evaluations actually
+      // made — is the only honest cost/provenance record.
+      if (two_step_outer_accel) {
+        h5::h5_write(lr_grp, "two_step_outer_alg", two_step_outer_alg);
+        h5::h5_write(lr_grp, "two_step_outer_tol", two_step_outer_tol);
+        h5::h5_write(lr_grp, "two_step_stages_applied", two_step_stages_applied);
+      }
     }
 
     app_log(2, "LR results written to \"{}\" in {}",
@@ -863,7 +893,10 @@ template void dump_lr(mpi3::communicator&, std::string,
                       double, int, bool, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
-                      std::optional<long>, bool, std::optional<long>);
+                      std::optional<long>, bool, std::optional<long>,
+                      std::string const&,
+                      bool, std::string const&, int,
+                      bool, std::string const&, double, int);
 
   } // chkpt
 } // methods
