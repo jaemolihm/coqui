@@ -347,13 +347,13 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().has_hks_matrix; }
 
-    // Which seed produced an augmented basis's energies: "ks_matrix", "kinetic",
-    // or "unknown (pre-provenance basis)" for a file written before the record.
-    std::string augment_ks_seed() const
+    // Read the stored Kohn-Sham matrix Orbitals/H_KS_skij (IBZ only) into `H`,
+    // band-sliced to H's band extent. The calling rank performs the h5 read on
+    // its own; node-root gating and window synchronization belong to the caller.
+    long read_hks_matrix(nda::array_view<ComplexType,4> H) const
     {
-      if(!is_augmented()) return "";
-      auto const& s = std::get<bdft::bdft_readonly>(var).get_sys().augment_ks_seed;
-      return s.size() > 0 ? s : std::string("unknown (pre-provenance basis)");
+      utils::check(has_hks_matrix(), "MF::read_hks_matrix: no H_KS matrix in {}.", filename());
+      return std::get<bdft::bdft_readonly>(var).read_hks_matrix(H);
     }
 
     // Per-band THC fit weights over the full BZ, (nspin, nkpts, nbnd): for an

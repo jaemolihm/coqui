@@ -284,7 +284,9 @@ namespace methods {
    * "diagonal" when it was absent and diag(eigval) was used instead. Written only
    * for augmented runs, so non-augmented checkpoints are unchanged. Lets an
    * archived result be classified after the fact, which the log line cannot.
-   * Same first-writer-wins convention as dump_hf_div_treatment.
+   * write_metadata records the same string when it creates a checkpoint; this entry
+   * point covers restarts and overwrites, so the value always describes the run that
+   * last touched the checkpoint rather than the one that created it.
    */
   template<typename communicator_t>
   void dump_augmented_h_ks(communicator_t& comm, std::string filename,

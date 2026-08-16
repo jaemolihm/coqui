@@ -27,6 +27,7 @@
 #include "hamiltonian/one_body_hamiltonian.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "mean_field/MF.hpp"
+#include "mean_field/mf_utils.hpp"
 #include "utilities/mpi_context.h"
 #include "methods/tools/chkpt_utils.h"
 #include "methods/ERI/mb_eri_context.h"
@@ -781,6 +782,16 @@ double update_mu(double old_mu, const mf::MF &mf, const X_t &sE_ski, double beta
   };
   double nel_old = compute_Nelec(old_mu, mf, sE_ski, beta);
   app_log(2, "Initial chemical potential (mu) = {}, nelec = {}", old_mu, nel_old);
+  // For an augmented basis mf.eigval() is only diag(H_KS); these are its real
+  // eigenvalues. Reported here because every path that forms MO energies -- the qp
+  // SCF, write_mf_data, and the LR "mf_dft" G0 via get_mf_MOs -- passes through.
+  if (mf.is_augmented() and mf.has_hks_matrix()) {
+    auto E = sE_ski.local();
+    double ef = mf.efermi(), max_abs_E = 0.0;
+    for (long i = 0; i < E.size(); ++i)
+      max_abs_E = std::max(max_abs_E, std::abs(E.data()[i].real() - ef));
+    mf::log_spectrum_vs_wmax(mf, max_abs_E, "MO energies");
+  }
 
   if (mu_update_alg == "bisection") {
     auto [mu, f_mu] = detail::update_mu_bisection_impl(old_mu, mu_tol, delta, eval_f);

@@ -203,6 +203,39 @@ public:
     print_metadata("CoQuí mean-field reader");
   }
 
+  // Read the stored Kohn-Sham matrix Orbitals/H_KS_skij -- (nspin, nkpts_ibz,
+  // nbnd_stored, nbnd_stored) over the IBZ -- into `H`, of which Orbitals/eigval
+  // is the diagonal. Only the leading H.extent(2) bands are fetched, as an h5
+  // hyperslab, so opening the basis with fewer bands never materializes the full
+  // stored matrix. Returns nbnd_stored, so the caller can report a truncating read.
+  long read_hks_matrix(nda::array_view<ComplexType,4> H) const
+  {
+    long nb = H.extent(2);
+    utils::check(H.extent(3) == nb,
+                 "bdft_readonly::read_hks_matrix: H is not square in the band axes: ({}, {}).",
+                 nb, H.extent(3));
+    h5::file file(sys.filename, 'r');
+    h5::group grp(file);
+    auto ogrp = grp.open_group("Orbitals");
+    utils::check(ogrp.has_dataset("H_KS_skij"),
+                 "bdft_readonly::read_hks_matrix: {} has no Orbitals/H_KS_skij.", sys.filename);
+    // complex datasets carry a trailing length-2 axis, hence rank 5 on disk
+    auto info = h5::array_interface::get_dataset_info(ogrp, "H_KS_skij");
+    utils::check(info.rank() == 5,
+                 "bdft_readonly::read_hks_matrix: H_KS_skij in {} has rank {}; expected a complex "
+                 "rank-4 dataset.", sys.filename, info.rank());
+    long nbnd_stored = long(info.lengths[2]);
+    utils::check(long(info.lengths[0]) == H.extent(0) and long(info.lengths[1]) == H.extent(1) and
+                 nbnd_stored == long(info.lengths[3]) and nbnd_stored >= nb,
+                 "bdft_readonly::read_hks_matrix: H_KS_skij in {} has shape ({},{},{},{}), "
+                 "incompatible with the requested ({},{},{},{}).", sys.filename,
+                 long(info.lengths[0]), long(info.lengths[1]), long(info.lengths[2]),
+                 long(info.lengths[3]), H.extent(0), H.extent(1), nb, nb);
+    nda::h5_read(ogrp, "H_KS_skij", H,
+                 std::tuple{nda::range::all, nda::range::all, nda::range(nb), nda::range(nb)});
+    return nbnd_stored;
+  }
+
   bdft_readonly(bdft_readonly const& other):
     sys(other.sys),
     h5file(std::nullopt),
@@ -396,7 +429,6 @@ public:
     // The returned in-memory object must agree with the file it just wrote:
     // this ctor never goes through initialize_from_h5, so the flag is set here.
     sys.has_hks_matrix = (H_KS_ibz != nullptr);
-    sys.augment_ks_seed = (H_KS_ibz != nullptr) ? "ks_matrix" : "kinetic";
     if(H_KS_ibz != nullptr)
       utils::check( H_KS_ibz->extent(0)==sys.nspin and H_KS_ibz->extent(1)==nkpts_ibz and
                     H_KS_ibz->extent(2)==norb and H_KS_ibz->extent(3)==norb,

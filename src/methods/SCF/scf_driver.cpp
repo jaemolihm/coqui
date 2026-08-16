@@ -69,7 +69,6 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   }
   app_log(1, "  Number of processors     = {} cores per node, {} nodes\n",
           mpi->node_comm.size(), mpi->internode_comm.size());
-  hamilt::log_augmented_hks_status(*mf);
   FT.metadata_log();
 
   // Predicted footprint and layout of the large arrays, before anything is allocated.
@@ -414,7 +413,6 @@ double qp_scf_loop(
   app_log(1, "  Restart                     = {}", (restart)? "yes" : "no");
   app_log(1, "  Number of processors        = {} cores per node, {} nodes\n",
           mpi->node_comm.size(), mpi->internode_comm.size());
-  hamilt::log_augmented_hks_status(*mf);
   FT.metadata_log();
 
   Timer.start("SCF_TOTAL");

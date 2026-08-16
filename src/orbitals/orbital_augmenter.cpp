@@ -354,13 +354,15 @@ auto rayleigh_eigvals(mf::MF& mf,
   return eig;
 }
 
+using sArray_4d_t = math::shm::shared_array<nda::array_view<ComplexType,4>>;
+
 // Upgrade the augmented-basis eigval seed from the kinetic Rayleigh diagonal to the
 // full DFT Kohn-Sham matrix
 //   H_KS(i,j) = <phi_i|H0|phi_j> + <phi_i|V_H + V_xc|phi_j>,
-// evaluated in the augmented basis. On success `sH_KS` (allocated by the caller with
-// shape (nspin, nkpts_ibz, nbnd_aug, nbnd_aug)) holds the hermitized matrix on every
-// node and the KS diagonal eps_i = Re[H_KS(i,i)] is returned over the IBZ on all ranks.
-// Returns std::nullopt (with a warning, leaving sH_KS undefined) when the DFT V_Hxc is
+// evaluated in the augmented basis. On success returns the KS diagonal
+// eps_i = Re[H_KS(i,i)] over the IBZ, (nspin, nkpts_ibz, norb), on all ranks together
+// with the hermitized matrix itself, (nspin, nkpts_ibz, norb, norb), present on every
+// node. Returns std::nullopt (with a warning, allocating nothing) when the DFT V_Hxc is
 // unavailable -- pyscf-parented augmentation (no exported DFT local potential) or a
 // meta-GGA/hybrid functional (no multiplicative V_xc) -- in which case the caller keeps
 // the kinetic seed. Requires a provisional write of the augmented h5 (`fn`) so a
@@ -368,12 +370,11 @@ auto rayleigh_eigvals(mf::MF& mf,
 // V_Hxc = svsc - svloc then follows from that pseudopot. (Hybrid functionals have no
 // reliable exported signal yet and are not detected -- a known gap.)
 template<class DArr>
-std::optional<nda::array<double,3>>
+std::optional<std::pair<nda::array<double,3>, sArray_4d_t>>
 try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
                   nda::array<double,3> const& band_weights,
                   nda::array<double,3> const& kinetic_eig_ibz,
-                  std::string const& augment_type,
-                  math::shm::shared_array<nda::array_view<ComplexType,4>>& sH_KS)
+                  std::string const& augment_type)
 {
   // Only QE-derived parents export the DFT local potential (svsc/svloc) into the
   // augmented h5 (mirrors the pseudopot write condition in bdft_readonly). Pyscf
@@ -411,12 +412,9 @@ try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
   long nkpts_ibz = aug_mf.nkpts_ibz();
   long norb = aug_mf.nbnd();
   using array_view_4d_t = nda::array_view<ComplexType,4>;
-  utils::check(sH_KS.shape() == std::array<long,4>{nspin, nkpts_ibz, norb, norb},
-               "try_ks_eigval_ibz: sH_KS shape ({},{},{},{}) != ({},{},{},{}).",
-               sH_KS.shape()[0], sH_KS.shape()[1], sH_KS.shape()[2], sH_KS.shape()[3],
-               nspin, nkpts_ibz, norb, norb);
 
-  // H_KS = H0 + V_Hxc in the augmented basis, assembled in place in sH_KS.
+  // H_KS = H0 + V_Hxc in the augmented basis, assembled in place.
+  auto sH_KS = math::shm::make_shared_array<array_view_4d_t>(mpi, {nspin, nkpts_ibz, norb, norb});
   hamilt::set_H0(aug_mf, psp.get(), sH_KS);
 
   auto dVHxc = hamilt::V_Hxc_aug<HOST_MEMORY>(aug_mf, mpi.comm, psp.get());
@@ -428,8 +426,12 @@ try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
   // gen_V_Hxc_aug is hermitian only to round-off, while every consumer of the
   // stored matrix (update_MOs' hermitian generalized eigensolver, update_G)
   // reads a single triangle. The diagonal is unchanged in exact arithmetic and
-  // in floating point, so the eigval seed below is untouched by this.
-  if (mpi.node_comm.root()) {
+  // in floating point, so the eigval seed below is untouched by this. The
+  // asymmetry discarded here bounds the V_Hxc projection error, so it is
+  // reported: once the matrix is stored it is hermitian by construction and no
+  // longer measurable downstream.
+  double asym2 = 0.0, tot2 = 0.0;
+  if (sH_KS.node_comm()->root()) {
     auto H = sH_KS.local();
     H += sVHxc.local();
     for (long s = 0; s < nspin; ++s)
@@ -437,14 +439,22 @@ try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
         for (long i = 0; i < norb; ++i) {
           for (long j = 0; j < i; ++j) {
             auto h = 0.5*(H(s,k,i,j) + std::conj(H(s,k,j,i)));
+            asym2 += 2.0*std::norm(H(s,k,i,j) - std::conj(H(s,k,j,i)));
+            tot2  += std::norm(H(s,k,i,j)) + std::norm(H(s,k,j,i));
             H(s,k,i,j) = h;
             H(s,k,j,i) = std::conj(h);
           }
+          asym2 += std::norm(ComplexType(0.0, 2.0*std::imag(H(s,k,i,i))));
+          tot2  += std::norm(H(s,k,i,i));
           H(s,k,i,i) = ComplexType(std::real(H(s,k,i,i)), 0.0);
         }
       }
   }
   sH_KS.node_sync();
+  mpi.comm.broadcast_n(&asym2, 1, 0);
+  mpi.comm.broadcast_n(&tot2, 1, 0);
+  app_log(2, "  - H_KS asymmetry before hermitization: ||H - H^dag||/||H|| = {:.3e}",
+          (tot2 > 0.0) ? std::sqrt(asym2/tot2) : 0.0);
 
   auto ks_eig_ibz = nda::array<double,3>::zeros({nspin, nkpts_ibz, norb});
   if (mpi.comm.root()) {
@@ -455,7 +465,7 @@ try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
           ks_eig_ibz(s,k,i) = std::real(H(s,k,i,i));
   }
   mpi.comm.broadcast_n(ks_eig_ibz.data(), ks_eig_ibz.size(), 0);
-  return ks_eig_ibz;
+  return std::make_pair(std::move(ks_eig_ibz), std::move(sH_KS));
 }
 
 template<MEMORY_SPACE MEM>
@@ -475,6 +485,11 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   utils::check(nspin == nspin_in_basis,
                "add_augmentation: nspin_in_basis != nspin not supported yet.");
+  // generate_raw carries no polarization axis, and the augment writer sizes eigval
+  // as (nspin, nkpts, norb) while the reader expects npol*nbnd -- the two
+  // conventions only agree at npol == 1.
+  utils::check(mf.npol() == 1,
+               "add_augmentation: only npol == 1 is supported, got npol = {}.", mf.npol());
   utils::check(dtau_step > 0.0, "add_augmentation: dtau_step must be > 0, got {}.", dtau_step);
   if(nbnd_aug < 0 or nbnd_aug > nbnd) nbnd_aug = nbnd;
   int n_raw_per = augmenter->n_raw_per_band();
@@ -514,20 +529,15 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
     // originals are true DFT eigenstates, so their KS diagonal reproduces the parent
     // eigenvalues; when V_Hxc is unavailable the kinetic diagonal is used instead.
     auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
-    auto sH_KS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
-        mpi, {nspin, nkpts_ibz, nbnd, nbnd});
-    bool have_hks = false;
-    if(auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
-                                   augmenter->type(), sH_KS)) {
-      eig_ibz = std::move(*ks);
-      have_hks = true;
-    }
+    auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
+                                augmenter->type());
     app_log(2,"  - KS seed                     : {}",
-            have_hks ? "ks_matrix (full H_KS stored)" : "kinetic (Rayleigh diagonal)");
-    auto H_KS = sH_KS.local();
-    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, augmenter->type(),
-                                          nda::array<double,3>{},
-                                          have_hks ? &H_KS : nullptr));
+            ks ? "full H_KS matrix" : "kinetic (Rayleigh diagonal)");
+    if(not ks)
+      return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, augmenter->type()));
+    auto H_KS = ks->second.local();
+    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, ks->first, augmenter->type(),
+                                          nda::array<double,3>{}, &H_KS));
   }
 
   // base block used to generate the raw augmentation states
@@ -560,21 +570,15 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
   // DFT Kohn-Sham eigval seed for the (non-eigen) augmented basis, falling back to the
   // kinetic Rayleigh diagonal when the DFT V_Hxc is unavailable.
   auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_full);
-  long norb = psi_full.global_shape()[2];
-  auto sH_KS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
-      mpi, {nspin, nkpts_ibz, norb, norb});
-  bool have_hks = false;
-  if(auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz,
-                                 augmenter->type(), sH_KS)) {
-    eig_ibz = std::move(*ks);
-    have_hks = true;
-  }
+  auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz, augmenter->type());
   app_log(2,"  - KS seed                     : {}",
-          have_hks ? "ks_matrix (full H_KS stored)" : "kinetic (Rayleigh diagonal)");
-  auto H_KS = sH_KS.local();
-
-  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type(),
-                                        band_weights, have_hks ? &H_KS : nullptr));
+          ks ? "full H_KS matrix" : "kinetic (Rayleigh diagonal)");
+  if(not ks)
+    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, augmenter->type(),
+                                          band_weights));
+  auto H_KS = ks->second.local();
+  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, ks->first, augmenter->type(),
+                                        band_weights, &H_KS));
 }
 
 namespace {
@@ -778,20 +782,15 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     // is unavailable the kinetic diagonal is used instead. Mirrors the momentum
     // add_augmentation(nbnd_aug==0) baseline.
     auto eig_ibz = rayleigh_eigvals<MEM>(mf, psi_orig);
-    auto sH_KS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
-        mpi, {nspin, nkpts_ibz, M, M});
-    bool have_hks = false;
-    if(auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
-                                   std::string("dpsi"), sH_KS)) {
-      eig_ibz = std::move(*ks);
-      have_hks = true;
-    }
+    auto ks = try_ks_eigval_ibz(mf, fn, psi_orig, nda::array<double,3>{}, eig_ibz,
+                                std::string("dpsi"));
     app_log(2,"  - KS seed                     : {}",
-            have_hks ? "ks_matrix (full H_KS stored)" : "kinetic (Rayleigh diagonal)");
-    auto H_KS = sH_KS.local();
-    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, std::string("dpsi"),
-                                          nda::array<double,3>{},
-                                          have_hks ? &H_KS : nullptr));
+            ks ? "full H_KS matrix" : "kinetic (Rayleigh diagonal)");
+    if(not ks)
+      return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, eig_ibz, std::string("dpsi")));
+    auto H_KS = ks->second.local();
+    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_orig, ks->first, std::string("dpsi"),
+                                          nda::array<double,3>{}, &H_KS));
   }
 
   // 'w' grid Miller indices + FFT-linear → row lookup (for regridding δψ)
@@ -912,21 +911,15 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   // DFT Kohn-Sham eigval seed for the (non-eigen) augmented basis, falling back to the
   // kinetic Rayleigh diagonal when the DFT V_Hxc is unavailable.
   auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
-  long norb = psi_full.global_shape()[2];
-  auto sH_KS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
-      mpi, {nspin, nkpts_ibz, norb, norb});
-  bool have_hks = false;
-  if(auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz,
-                                 std::string("dpsi"), sH_KS)) {
-    eig_ibz = std::move(*ks);
-    have_hks = true;
-  }
+  auto ks = try_ks_eigval_ibz(mf, fn, psi_full, band_weights, eig_ibz, std::string("dpsi"));
   app_log(2,"  - KS seed                     : {}",
-          have_hks ? "ks_matrix (full H_KS stored)" : "kinetic (Rayleigh diagonal)");
-  auto H_KS = sH_KS.local();
-
-  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi"),
-                                        band_weights, have_hks ? &H_KS : nullptr));
+          ks ? "full H_KS matrix" : "kinetic (Rayleigh diagonal)");
+  if(not ks)
+    return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, eig_ibz, std::string("dpsi"),
+                                          band_weights));
+  auto H_KS = ks->second.local();
+  return mf::MF(mf::bdft::bdft_readonly(mf, fn, psi_full, ks->first, std::string("dpsi"),
+                                        band_weights, &H_KS));
 }
 
 // explicit template instantiations

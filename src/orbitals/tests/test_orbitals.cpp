@@ -92,23 +92,25 @@ TEST_CASE("add_pgto", "[orbit]")
 }
 */
 
-// Frobenius diagnostics of the stored augmented Kohn-Sham matrix
-// Orbitals/H_KS_skij (IBZ only), all relative and returned on every rank:
-//   [0] ||H[0:n0,0:n0] - diag(eps_QE)||   / ||eps_QE||   protected block
-//   [1] ||H[0:n0,n0:]||                   / ||H||        protected <-> augmented
-//   [2] ||H - H^dag||                     / ||H||        hermiticity residual
-//   [3] ||H - diag(H)||                   / ||H||        size of the off-diagonal
-// [1] is an exact analytic zero: the protected orbitals are KS eigenstates and
-// orthonormalize_augmentation projects the augmentation states off them, so
-// <psi_n|H_KS|phi_a> = eps_n <psi_n|phi_a> = 0. It catches basis-ordering,
-// transposition and conjugation errors that the diagonal alone cannot see.
-// [3] is the magnitude of the defect that storing the matrix repairs -- logged,
-// never asserted.
-std::array<double,4> hks_matrix_metrics(mf::MF& aug_mf, mf::MF& parent,
-                                        std::string const& fn, long n0)
+// Frobenius diagnostics of an augmented-basis Kohn-Sham matrix, all relative and
+// returned on every rank. H and S need only be valid on the global root, so a
+// shared-memory window or a root-only h5 read both work. n0 = number of protected
+// (parent-eigenstate) bands, p = [0,n0), a = [n0,norb).
+//   [0] ||H[p,p] - diag(eps_QE)|| / ||eps_QE||   protected block
+//   [1] ||H[p,a]||                / ||H||        protected <-> augmented
+//   [2] ||H - H^dag||             / ||H||        hermiticity residual
+//   [3] ||H - diag(H)||           / ||H||        size of the off-diagonal
+//   [4] ||H[p,a] - eps_p S[p,a]|| / ||H||        the sharp gate
+// The protected orbitals are KS eigenstates, so <psi_n|H_KS|phi_a> = eps_n S[n,a]
+// exactly. [4] is that identity; it is machine-precision small however non-orthogonal
+// the bases are, and unlike [1] it also catches a global conjugation (S is complex).
+// [1] is the same statement in the orthogonal limit, so it additionally reports how
+// far S[p,a] is from zero. [3] is the magnitude of the defect that storing the matrix
+// repairs -- logged, never asserted.
+std::array<double,5> hks_metrics(mf::MF& aug_mf, mf::MF& parent, long n0,
+                                 nda::array_view<ComplexType,4> H,
+                                 nda::array_view<ComplexType,4> S)
 {
-  REQUIRE(aug_mf.is_augmented());
-  REQUIRE(aug_mf.has_hks_matrix());
   auto all = nda::range::all;
   long nspin = parent.nspin();
   long nkpts_ibz = parent.nkpts_ibz();
@@ -116,21 +118,15 @@ std::array<double,4> hks_matrix_metrics(mf::MF& aug_mf, mf::MF& parent,
   auto eref = parent.eigval()(all, nda::range(nkpts_ibz), all);
 
   auto& mpi = *aug_mf.mpi();
-  std::array<double,4> m = {0.0, 0.0, 0.0, 0.0};
+  std::array<double,5> m = {0.0, 0.0, 0.0, 0.0, 0.0};
   if (mpi.comm.root()) {
-    nda::array<ComplexType,4> H;
-    {
-      h5::file file(fn, 'r');
-      h5::group grp(file);
-      auto ogrp = grp.open_group("Orbitals");
-      nda::h5_read(ogrp, "H_KS_skij", H);
-    }
     utils::check(H.extent(0)==nspin and H.extent(1)==nkpts_ibz and
                  H.extent(2)==norb and H.extent(3)==norb,
-                 "hks_matrix_metrics: H_KS_skij shape ({},{},{},{}) != ({},{},{},{}).",
+                 "hks_metrics: H shape ({},{},{},{}) != ({},{},{},{}).",
                  H.extent(0),H.extent(1),H.extent(2),H.extent(3),
                  nspin,nkpts_ibz,norb,norb);
-    double n_pro=0.0, d_pro=0.0, n_cpl=0.0, n_her=0.0, n_off=0.0, n_tot=0.0;
+    utils::check(S.shape() == H.shape(), "hks_metrics: S and H shapes differ.");
+    double n_pro=0.0, d_pro=0.0, n_cpl=0.0, n_her=0.0, n_off=0.0, n_tot=0.0, n_res=0.0;
     for (long s = 0; s < nspin; ++s)
       for (long k = 0; k < nkpts_ibz; ++k) {
         for (long i = 0; i < norb; ++i) {
@@ -144,7 +140,12 @@ std::array<double,4> hks_matrix_metrics(mf::MF& aug_mf, mf::MF& parent,
               auto r = h - ((i==j) ? ComplexType(eref(s,k,i)) : ComplexType(0.0));
               n_pro += std::norm(r);
             }
-            if ((i < n0) != (j < n0)) n_cpl += a2;
+            if ((i < n0) != (j < n0)) {
+              n_cpl += a2;
+              // the protected index carries the eigenvalue on either side
+              double eps = (i < n0) ? eref(s,k,i) : eref(s,k,j);
+              n_res += std::norm(h - eps*S(s,k,i,j));
+            }
           }
           if (i < n0) d_pro += eref(s,k,i)*eref(s,k,i);
         }
@@ -153,13 +154,51 @@ std::array<double,4> hks_matrix_metrics(mf::MF& aug_mf, mf::MF& parent,
     m[1] = std::sqrt(n_cpl) / std::sqrt(n_tot);
     m[2] = std::sqrt(n_her) / std::sqrt(n_tot);
     m[3] = std::sqrt(n_off) / std::sqrt(n_tot);
+    m[4] = std::sqrt(n_res) / std::sqrt(n_tot);
   }
   mpi.comm.broadcast_n(m.data(), m.size(), 0);
-  app_log(2, "  H_KS protected block   ||H[p,p] - diag(eps_QE)||/||eps_QE|| = {}", m[0]);
-  app_log(2, "  H_KS protected<->aug   ||H[p,a]||/||H||                     = {}", m[1]);
-  app_log(2, "  H_KS hermiticity       ||H - H^dag||/||H||                  = {}", m[2]);
-  app_log(2, "  H_KS off-diagonal      ||H - diag(H)||/||H||                = {}", m[3]);
+  app_log(2, "  H_KS protected block   ||H[p,p] - diag(eps_QE)||/||eps_QE||   = {}", m[0]);
+  app_log(2, "  H_KS protected<->aug   ||H[p,a]||/||H||                       = {}", m[1]);
+  app_log(2, "  H_KS hermiticity       ||H - H^dag||/||H||                    = {}", m[2]);
+  app_log(2, "  H_KS off-diagonal      ||H - diag(H)||/||H||                  = {}", m[3]);
+  app_log(2, "  H_KS eigenstate ident. ||H[p,a] - eps_p S[p,a]||/||H||        = {}", m[4]);
   return m;
+}
+
+// Overlap of the augmented basis, in a shared array (the [4] gate needs it).
+auto aug_ovlp(mf::MF& aug_mf)
+{
+  auto& mpi = *aug_mf.mpi();
+  auto sS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
+      mpi, {aug_mf.nspin(), aug_mf.nkpts_ibz(), aug_mf.nbnd(), aug_mf.nbnd()});
+  hamilt::set_ovlp(aug_mf, sS);
+  return sS;
+}
+
+// The stored matrix, materialized on the global root (zero elsewhere).
+nda::array<ComplexType,4> read_hks_h5(mf::MF& aug_mf, mf::MF& parent, std::string const& fn)
+{
+  long norb = aug_mf.nbnd();
+  nda::array<ComplexType,4> H(parent.nspin(), parent.nkpts_ibz(), norb, norb);
+  H() = ComplexType(0.0);
+  if (aug_mf.mpi()->comm.root()) {
+    h5::file file(fn, 'r');
+    h5::group grp(file);
+    auto ogrp = grp.open_group("Orbitals");
+    nda::h5_read(ogrp, "H_KS_skij", H);
+  }
+  return H;
+}
+
+// The matrix as set_fock hands it back -- the read path every seed site uses.
+auto hks_via_set_fock(mf::MF& aug_mf)
+{
+  auto& mpi = *aug_mf.mpi();
+  auto psp = hamilt::make_pseudopot(aug_mf);
+  auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
+      mpi, {aug_mf.nspin(), aug_mf.nkpts_ibz(), aug_mf.nbnd(), aug_mf.nbnd()});
+  hamilt::set_fock(aug_mf, psp.get(), sF, false);
+  return sF;
 }
 
 // Write-time DFT KS eigval seed for an augmented basis. With nbnd_aug=0 the augmented
@@ -199,8 +238,12 @@ TEST_CASE("aug_ks_seed", "[orbit]")
 
   // The basis IS the parent eigenbasis, so the stored matrix must be diag(eps_QE):
   // the whole off-diagonal, not only the protected<->augmented block, vanishes.
+  REQUIRE(aug_mf.is_augmented());
+  REQUIRE(aug_mf.has_hks_matrix());
   app_log(2, "aug_ks_seed: stored H_KS matrix");
-  auto m = hks_matrix_metrics(aug_mf, qe_mf, "dummy_aug.h5", nbnd);
+  auto sS = aug_ovlp(aug_mf);
+  auto H_h5 = read_hks_h5(aug_mf, qe_mf, "dummy_aug.h5");
+  auto m = hks_metrics(aug_mf, qe_mf, nbnd, H_h5(), sS.local());
   utils::VALUE_EQUAL(m[0], 0.0, 1e-4);
   utils::VALUE_EQUAL(m[2], 0.0, 1e-12);
   utils::VALUE_EQUAL(m[3], 0.0, 1e-4);
@@ -240,6 +283,23 @@ TEST_CASE("aug_ks_seed", "[orbit]")
 // (the first nbnd of the nbnd+n_aug seeded eigval) must still reproduce the parent
 // eigenvalues, even with augmentation states appended. The augmented-band entries have no
 // ground truth, so we only require them to be finite/real.
+//
+// This is also the only fixture where H_KS is genuinely non-diagonal, so it carries the
+// gates on the matrix and on the set_fock read path.
+//
+// What the ~2e-8 protected<->augmented block is, settled by the two sweeps below:
+//   - [4] tracks [1] to nine digits, so S[p,a] is zero to roundoff and the block is NOT
+//     the eigenstate identity picking up non-orthogonality;
+//   - it is flat to nine digits while dtau_step moves by 1000x, and the retained
+//     singular values -- hence the 1/sqrt(s) roundoff amplification -- move with it, so
+//     it is NOT orthogonalization roundoff.
+// What is left is the parent orbitals not being exact eigenstates of the
+// H0 + (svsc - svloc) operator rebuilt here: 2e-8 is the first-order residual
+// ||(H_KS - eps_n) psi_n|| seen through the augmentation space. Consistently, the
+// protected block [0] sits at ~4e-15, the second-order (Rayleigh-quotient) shadow of
+// that same residual. It is an accuracy floor of the reconstruction, not an indexing
+// error -- a transposition or conjugation would move ~6% of the norm into this block,
+// seven orders larger.
 TEST_CASE("aug_ks_seed_partial", "[orbit]")
 {
   auto& mpi = utils::make_unit_test_mpi_context();
@@ -249,55 +309,78 @@ TEST_CASE("aug_ks_seed_partial", "[orbit]")
   long nkpts_ibz = qe_mf.nkpts_ibz();
   long nbnd = qe_mf.nbnd();
   long nbnd_aug = std::min(2L, nbnd);
-
-  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
-  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug_p.h5", augmenter,
-                                                        nbnd_aug, 1e-6, 1e-2);
-
-  long norb = aug_mf.nbnd();
-  REQUIRE(norb > nbnd); // augmentation states were actually appended
   auto all = nda::range::all;
   auto ref = qe_mf.eigval()(all, nda::range(nkpts_ibz), all);
-  auto got = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
 
-  // original block (first nbnd): KS diagonal must equal parent eigenvalues
-  double num = 0.0, den = 0.0;
-  for (long s = 0; s < nspin; ++s)
-    for (long k = 0; k < nkpts_ibz; ++k)
-      for (long i = 0; i < nbnd; ++i) {
-        double d = got(s,k,i) - ref(s,k,i);
-        num += d*d;
-        den += ref(s,k,i)*ref(s,k,i);
-      }
-  double rel = std::sqrt(num) / std::sqrt(den);
-  app_log(2, "aug_ks_seed_partial: original-block ||KS_diag - QE_eigval|| / ||QE_eigval|| = {}", rel);
-  utils::VALUE_EQUAL(rel, 0.0, 1e-4);
+  // (epstol, dtau_step). dtau_step scales the raw states before orthonormalization,
+  // so the retained singular values s scale with it and the 1/sqrt(s) uniformization
+  // amplifies roundoff proportionally: a residual driven by that grows as dtau_step
+  // shrinks. epstol is swept alongside to move the truncation threshold.
+  for (auto [epstol, dtau_step] : {std::pair{1e-3, 1e-1}, std::pair{1e-6, 1e-2},
+                                   std::pair{1e-9, 1e-4}}) {
+    auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+    auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug_p.h5", augmenter,
+                                                          nbnd_aug, epstol, dtau_step);
+    long norb = aug_mf.nbnd();
+    REQUIRE(norb > nbnd); // augmentation states were actually appended
+    REQUIRE(aug_mf.has_hks_matrix());
+    auto got = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
 
-  // augmented block (nbnd..norb): no ground truth, just require finite/real seeds
-  for (long s = 0; s < nspin; ++s)
-    for (long k = 0; k < nkpts_ibz; ++k)
-      for (long i = nbnd; i < norb; ++i)
-        REQUIRE(std::isfinite(got(s,k,i)));
+    // original block (first nbnd): KS diagonal must equal parent eigenvalues
+    double num = 0.0, den = 0.0;
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k)
+        for (long i = 0; i < nbnd; ++i) {
+          double d = got(s,k,i) - ref(s,k,i);
+          num += d*d;
+          den += ref(s,k,i)*ref(s,k,i);
+        }
+    double rel = std::sqrt(num) / std::sqrt(den);
+    app_log(2, "aug_ks_seed_partial[epstol={:.0e}, dtau={:.0e}, norb={}]: original-block "
+               "||KS_diag - QE_eigval|| / ||QE_eigval|| = {}", epstol, dtau_step, norb, rel);
+    utils::VALUE_EQUAL(rel, 0.0, 1e-4);
 
-  // The stored matrix: protected block against the parent eigenvalues, the exact
-  // analytic zero of the protected<->augmented block, and hermiticity. The
-  // off-diagonal norm is only logged -- it is the size of the coupling that the
-  // old diag(eigval)-only seed discarded.
-  app_log(2, "aug_ks_seed_partial: stored H_KS matrix");
-  auto m = hks_matrix_metrics(aug_mf, qe_mf, "dummy_aug_p.h5", nbnd);
-  utils::VALUE_EQUAL(m[0], 0.0, 1e-4);
-  utils::VALUE_EQUAL(m[1], 0.0, 1e-4);
-  utils::VALUE_EQUAL(m[2], 0.0, 1e-12);
+    // augmented block (nbnd..norb): no ground truth, just require finite/real seeds
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k)
+        for (long i = nbnd; i < norb; ++i)
+          REQUIRE(std::isfinite(got(s,k,i)));
 
-  mpi->comm.barrier();
-  if(mpi->comm.root()) remove("dummy_aug_p.h5");
-  mpi->comm.barrier();
+    auto sS = aug_ovlp(aug_mf);
+    app_log(2, "aug_ks_seed_partial[epstol={:.0e}, dtau={:.0e}]: stored H_KS matrix", epstol, dtau_step);
+    auto H_h5 = read_hks_h5(aug_mf, qe_mf, "dummy_aug_p.h5");
+    auto m = hks_metrics(aug_mf, qe_mf, nbnd, H_h5(), sS.local());
+    utils::VALUE_EQUAL(m[0], 0.0, 1e-4);
+    utils::VALUE_EQUAL(m[2], 0.0, 1e-12);
+    utils::VALUE_EQUAL(m[1], 0.0, 1e-4);
+    // Measured: [4] tracks [1] to nine digits, i.e. S[p,a] is zero to roundoff and
+    // does NOT account for the residual. The protected states are orthogonal to the
+    // augmentation states as constructed; what is left is the parent orbitals not
+    // being exact eigenstates of the H0 + (svsc - svloc) operator rebuilt here. It
+    // is an error floor of that reconstruction, not a basis-ordering or conjugation
+    // error -- either of those would move ~6% of the norm into this block.
+    utils::VALUE_EQUAL(m[4], 0.0, 1e-4);
+
+    // Read path on a genuinely non-diagonal matrix: what set_fock hands the seed
+    // sites must be exactly what is on disk.
+    auto sF = hks_via_set_fock(aug_mf);
+    app_log(2, "aug_ks_seed_partial[epstol={:.0e}, dtau={:.0e}]: same metrics via set_fock", epstol, dtau_step);
+    auto mf_ = hks_metrics(aug_mf, qe_mf, nbnd, sF.local(), sS.local());
+    double dmax = 0.0;
+    for (size_t i = 0; i < m.size(); ++i) dmax = std::max(dmax, std::abs(m[i] - mf_[i]));
+    app_log(2, "aug_ks_seed_partial[epstol={:.0e}, dtau={:.0e}]: "
+               "max|metric(set_fock) - metric(h5)| = {}", epstol, dtau_step, dmax);
+    utils::VALUE_EQUAL(dmax, 0.0, 1e-14);
+
+    mpi->comm.barrier();
+    if(mpi->comm.root()) remove("dummy_aug_p.h5");
+    mpi->comm.barrier();
+  }
 }
 
 // Graceful fallback when the DFT V_Hxc is unavailable (QE-xml parent: no exported
 // scf_local_potential / vxc_with_nlcc). No H_KS_skij dataset is written, the flag
-// is false, the provenance string reads "kinetic", and set_fock falls back to
-// exactly diag(eigval). Written as a consistency gate so it also holds -- and
+// is false, and set_fock falls back to exactly diag(eigval). Written as a consistency gate so it also holds -- and
 // still exercises the stored-matrix branch -- if the fixture ever gains V_Hxc.
 TEST_CASE("aug_ks_seed_fallback", "[orbit]")
 {
@@ -315,11 +398,9 @@ TEST_CASE("aug_ks_seed_fallback", "[orbit]")
     has_ds = grp.open_group("Orbitals").has_dataset("H_KS_skij") ? 1 : 0;
   }
   mpi->comm.broadcast_n(&has_ds, 1, 0);
-  app_log(2, "aug_ks_seed_fallback: H_KS_skij present = {}, KS seed = {}",
-          has_ds, aug_mf.augment_ks_seed());
+  app_log(2, "aug_ks_seed_fallback: H_KS_skij present = {}", has_ds);
   REQUIRE(aug_mf.is_augmented());
   REQUIRE(aug_mf.has_hks_matrix() == (has_ds != 0));
-  REQUIRE(aug_mf.augment_ks_seed() == (has_ds ? "ks_matrix" : "kinetic"));
 
   // set_fock must reproduce diag(eigval) exactly on the fallback path
   if(!has_ds) {

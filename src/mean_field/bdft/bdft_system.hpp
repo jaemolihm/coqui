@@ -181,10 +181,6 @@ namespace mf {
       // Orbitals/H_KS_skij over the IBZ. The dataset's presence is the flag; the
       // matrix itself is read lazily (hamilt::read_H_KS_aug), never stored here.
       bool has_hks_matrix = false;
-      // which seed produced the augmented basis energies: "ks_matrix" (full H_KS
-      // stored alongside its diagonal in eigval) or "kinetic" (Rayleigh diagonal,
-      // DFT V_Hxc unavailable). Empty for files predating the record.
-      std::string augment_ks_seed = "";
 
       public:
       // dummy members, just to be consistent with qe_readonly class...
@@ -217,8 +213,6 @@ namespace mf {
         if(has_efermi) h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
         h5::h5_write_attribute(sgrp, "augmented", int(augmented));
         if(augmented) h5::h5_write(sgrp, "augment_type", augment_type);
-        if(augmented and augment_ks_seed.size() > 0)
-          h5::h5_write(sgrp, "augment_ks_seed", augment_ks_seed);
         h5::h5_write(sgrp, "species", species);
         nda::h5_write(sgrp, "atomic_id", at_ids, false);
         nda::h5_write(sgrp, "atomic_positions", at_pos, false);
@@ -396,8 +390,6 @@ namespace mf {
         if(augmented) {
           // the dataset's presence is the flag; it is read on demand, not here
           has_hks_matrix = ogrp.has_dataset("H_KS_skij");
-          if(sgrp.has_dataset("augment_ks_seed"))
-            h5::h5_read(sgrp, "augment_ks_seed", augment_ks_seed);
           // per-band THC fit weights; all ones for files predating them
           aug_band_weight = nda::array<double, 3>(nspin, nkpts, nbnd);
           aug_band_weight() = 1.0;

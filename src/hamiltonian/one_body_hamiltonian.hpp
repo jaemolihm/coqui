@@ -295,10 +295,12 @@ auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 /**
- * Read the full Kohn-Sham matrix of an augmented basis, Orbitals/H_KS_skij, from the
- * mean-field h5 into a shared memory array. The dataset is stored over the IBZ only,
- * (nspin, nkpts_ibz, nbnd_stored, nbnd_stored); a run that opens the basis with fewer
- * bands gets the leading block, which drops the coupling to the discarded states.
+ * Read the full Kohn-Sham matrix of an augmented basis, Orbitals/H_KS_skij, into a
+ * shared memory array. The dataset is stored over the IBZ only, (nspin, nkpts_ibz,
+ * nbnd_stored, nbnd_stored); a run that opens the basis with fewer bands gets the
+ * leading block as an h5 hyperslab, which drops the coupling to the discarded states.
+ * The h5 schema belongs to the mean-field backend (MF::read_hks_matrix); this owns
+ * only the node-root gating and the window synchronization.
  * Only meaningful when mf.is_augmented() and mf.has_hks_matrix().
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
@@ -312,41 +314,33 @@ void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
                "read_H_KS_aug: shape ({},{},{},{}) != ({},{},{},{}).",
                sH_KS.shape()[0], sH_KS.shape()[1], sH_KS.shape()[2], sH_KS.shape()[3],
                nspin, nkpts_ibz, nbnd, nbnd);
-  if (sH_KS.node_comm()->root()) {
-    h5::file file(mf.filename(), 'r');
-    h5::group grp(file);
-    auto ogrp = grp.open_group("Orbitals");
-    nda::array<ComplexType,4> H;
-    nda::h5_read(ogrp, "H_KS_skij", H);
-    utils::check(H.extent(0) == nspin and H.extent(1) == nkpts_ibz and
-                 H.extent(2) >= nbnd and H.extent(3) >= nbnd,
-                 "read_H_KS_aug: H_KS_skij in {} has shape ({},{},{},{}), incompatible "
-                 "with (nspin, nkpts_ibz, nbnd) = ({},{},{}).", mf.filename(),
-                 H.extent(0), H.extent(1), H.extent(2), H.extent(3), nspin, nkpts_ibz, nbnd);
-    if (H.extent(2) > nbnd)
-      app_log(2, "  read_H_KS_aug: using the leading {} of {} stored bands; the coupling "
-                 "to the discarded states is dropped.", nbnd, H.extent(2));
-    sH_KS.local() = H(nda::range(nspin), nda::range(nkpts_ibz),
-                      nda::range(nbnd), nda::range(nbnd));
-  }
+  long nbnd_stored = nbnd;
+  if (sH_KS.node_comm()->root())
+    nbnd_stored = mf.read_hks_matrix(sH_KS.local());
   sH_KS.node_sync();
+  // broadcast so the notice is emitted by every rank and the logger's own root
+  // gating decides who prints it, rather than by whichever node root read the file
+  sH_KS.node_comm()->broadcast_n(&nbnd_stored, 1, 0);
+  if (nbnd_stored > nbnd)
+    app_log(1, "  [WARNING] Augmented H_KS: using the leading {} of {} stored bands; the "
+               "coupling to the discarded states is dropped.", nbnd, nbnd_stored);
 }
 
 /**
- * Emit which one-body seed an augmented mean field will use. Root-only and
- * verbosity-gated (app_warning is neither, and goes to stderr while the run banner
- * goes to stdout), so an archived log records the path taken.
+ * Emit which one-body seed an augmented mean field is about to use. Called from
+ * set_fock -- the single funnel every seed site goes through -- so no call site has
+ * to remember it. Root-only and verbosity-gated (app_warning is neither, and goes to
+ * stderr while the run banner goes to stdout), so an archived log records the path.
  */
 inline void log_augmented_hks_status(mf::MF &mf) {
   if (not mf.is_augmented()) return;
   if (mf.has_hks_matrix()) {
-    app_log(1, "  Augmented basis one-body seed = full H_KS matrix from {} "
-               "(basis KS seed: {})", mf.filename(), mf.augment_ks_seed());
+    app_log(1, "  Augmented basis one-body seed = full H_KS matrix from {}", mf.filename());
   } else {
-    app_log(1, "  [WARNING] Augmented basis {} carries no H_KS matrix (KS seed: {}); the "
-               "one-body seed falls back to diag(eigval), which drops the off-diagonal "
-               "couplings of the non-eigenstate basis. Regenerate the basis to use the "
-               "full Kohn-Sham matrix.", mf.filename(), mf.augment_ks_seed());
+    app_log(1, "  [WARNING] Augmented basis one-body seed = diag(eigval) (basis predates "
+               "H_KS): {} stores no Kohn-Sham matrix, so the off-diagonal couplings of "
+               "the non-eigenstate basis are dropped. Regenerate the basis to use the "
+               "full Kohn-Sham matrix.", mf.filename());
   }
 }
 
@@ -367,13 +361,27 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
   // An augmented basis is not an eigenbasis, so hamilt::F's diag(eigval) is only the
   // diagonal of its one-body Hamiltonian. When the full matrix was persisted at
   // augmentation time, use it: this is the single funnel every iter-0 seed goes
-  // through (ground-state SCF, qp SCF, the LR "mf_dft" G0, rpa, downfolding).
+  // through (ground-state SCF, qp SCF, the LR "mf_dft" G0, rpa, downfolding), so
+  // reporting the path taken here covers all of them.
+  log_augmented_hks_status(mf);
   if (mf.is_augmented() and mf.has_hks_matrix()) {
     read_H_KS_aug(mf, sF_skij);
     if (exclude_H0) {
       if (sH0_skij != nullptr) {
+        // whole-array subtraction: unlike the distributed fallback below there is no
+        // local_range to slice by, so the shapes must agree exactly
+        utils::check(sH0_skij->shape() == sF_skij.shape(),
+                     "set_fock: sH0_skij shape ({},{},{},{}) != sF_skij shape ({},{},{},{}).",
+                     sH0_skij->shape()[0], sH0_skij->shape()[1], sH0_skij->shape()[2],
+                     sH0_skij->shape()[3], sF_skij.shape()[0], sF_skij.shape()[1],
+                     sF_skij.shape()[2], sF_skij.shape()[3]);
         if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_skij->local();
       } else {
+        // Costs one extra node-replicated (nspin, nkpts_ibz, nbnd, nbnd) buffer,
+        // where the distributed fallback below subtracts H0 block by block. Every
+        // production caller that reaches here already holds H0 and passes it, so
+        // this is the convenience path (tests, ad-hoc calls) -- pass sH0_skij to
+        // avoid the allocation.
         utils::check(sF_skij.communicator() != nullptr and sF_skij.internode_comm() != nullptr,
                      "set_fock: recomputing H0 needs a shared array built with a global "
                      "and internode communicator.");

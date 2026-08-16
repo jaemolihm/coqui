@@ -26,6 +26,7 @@
 #include "scf_common.hpp"
 #include "hamiltonian/one_body_hamiltonian.hpp"
 #include "mean_field/MF.hpp"
+#include "mean_field/mf_utils.hpp"
 #include "utilities/mpi_context.h"
 #include "utilities/element_partition.hpp"
 #include "utilities/h5_flat_slice.hpp"
@@ -357,6 +358,20 @@ void update_G(dyson_type &dyson, const mf::MF &mf, const imag_axes_ft::IAFT &FT,
   dyson.solve_dyson(Dm, G, F, Sigma, mu);
 }
 
+namespace detail {
+// For an augmented basis mf.eigval() is only diag(H_KS); the eigenvalues of the
+// Dyson pencil are the spectrum the run actually samples. Report the two against
+// each other, since the IAFT grid is sized from eigval (see log_spectrum_vs_wmax).
+inline void log_augmented_spectrum(const mf::MF &mf,
+                                   nda::array<ComplexType, 4> const& spectra) {
+  if (not (mf.is_augmented() and mf.has_hks_matrix())) return;
+  double ef = mf.efermi(), max_abs_E = 0.0;
+  for (long i = 0; i < spectra.size(); ++i)
+    max_abs_E = std::max(max_abs_E, std::abs(spectra.data()[i].real() - ef));
+  mf::log_spectrum_vs_wmax(mf, max_abs_E, "Dyson eigenspectrum");
+}
+} // detail
+
 template<typename dyson_type, typename X_t, typename Xt_t>
 double update_mu_bisection(double old_mu, dyson_type& dyson, const mf::MF &mf,
                            const imag_axes_ft::IAFT &FT,
@@ -367,6 +382,7 @@ double update_mu_bisection(double old_mu, dyson_type& dyson, const mf::MF &mf,
   dyson.Timer().start("EIGENSPECTRA");
   dyson.compute_eigenspectra(F, Sigma, FpSigma_spectra);
   dyson.Timer().stop("EIGENSPECTRA");
+  detail::log_augmented_spectrum(mf, FpSigma_spectra);
   auto eval_f = [&](double mu) {
     return compute_Nelec(mu, FpSigma_spectra, mf, FT) - nel_target;
   };
@@ -394,6 +410,7 @@ double update_mu_midpoint(double old_mu, dyson_type& dyson, const mf::MF &mf,
   dyson.Timer().start("EIGENSPECTRA");
   dyson.compute_eigenspectra(F, Sigma, FpSigma_spectra);
   dyson.Timer().stop("EIGENSPECTRA");
+  detail::log_augmented_spectrum(mf, FpSigma_spectra);
 
   auto eval_f = [&](double mu) {
     return compute_Nelec(mu, FpSigma_spectra, mf, FT) - nel_target;
@@ -766,7 +783,7 @@ void write_mf_data(mf::MF &mf,
       *mpi, {ft.nt_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()}));
   sArray_t<Array_view_5D_t> Sigma_shm(math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()}));
-  hamilt::set_fock(mf, dyson.PSP(), sF_skij, true);
+  hamilt::set_fock(mf, dyson.PSP(), sF_skij, true, &dyson.sH0_skij());
   double mu = 0.0;
 
   // init Green's function. By default, we update mu as well.

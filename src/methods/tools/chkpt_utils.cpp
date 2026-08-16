@@ -59,6 +59,13 @@ void write_metadata(communicator_t &comm, const mf::MF &mf, const imag_axes_ft::
     nda::h5_write(sys_grp, "H0_skij", sH0_loc, false);
     auto sSloc = sS_skij.local();
     nda::h5_write(sys_grp, "S_skij", sSloc, false);
+    // Which one-body seed an augmented mean field supplied, so an archived result
+    // can be classified against the basis vintage it ran with. Written here so
+    // every driver that creates a checkpoint records it; absent for non-augmented
+    // runs, whose checkpoints are unchanged.
+    if (mf.is_augmented())
+      h5::h5_write(sys_grp, "augmented_h_ks",
+                   std::string(mf.has_hks_matrix() ? "matrix" : "diagonal"));
 
     auto mf_grp = grp.create_group("mean_field");
     nda::h5_write(mf_grp, "eigvals", mf.eigval(), false);
@@ -854,8 +861,8 @@ void dump_augmented_h_ks(communicator_t& comm, std::string filename,
     h5::group grp(file);
     auto sys_grp = grp.has_subgroup("system") ? grp.open_group("system")
                                               : grp.create_group("system");
-    if (!sys_grp.has_dataset("augmented_h_ks"))
-      h5::h5_write(sys_grp, "augmented_h_ks", mode);
+    // overwrite: a restart against a regenerated basis must not keep the stale value
+    h5::h5_write(sys_grp, "augmented_h_ks", mode);
   }
   comm.barrier();
 }
