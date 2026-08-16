@@ -695,7 +695,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu
 
-def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None):
+def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
+                save_DeltaG=True, nbnd_save=None):
     """
     One-shot G0W0@DFT electron-phonon linear response.
 
@@ -733,7 +734,10 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None):
     q_vec : array-like
         Perturbation wavevector in crystal coordinates, shape (3,).
     DeltaH0_skij : np.ndarray or None
-        DFT-screened perturbation ΔH_KS (= g_scr), shape (ns, nk, nb, nb).
+        DFT-screened perturbation ΔH_KS (= g_scr), shape (ns, nk, nb, nb), or
+        (nmodes, ns, nk, nb, nb) to solve several perturbations at this q in one
+        call — the setup and W0 are then shared across them, and each mode is
+        written to its own "linear_response/mode{m}" group.
         Required on the MPI global root; ignored on non-root ranks.
     div_treatment : str or None, optional
         q→0 divergence scheme for the ε⁻¹ head (default "gygi" in C++), selecting
@@ -741,6 +745,13 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None):
         here, unlike in run_lr, because G0W0@DFT builds W0 fresh from the DFT G0
         and a mean-field checkpoint carries no ground-state value to inherit.
         Use "gygi_metal" for metals; see run_lr's ``div_treatment`` entry.
+    save_DeltaG : bool, optional
+        Write DeltaG_tskij to the checkpoint (default True). A one-shot G0W0
+        sweep reads only ΔΣ / ΔF back, so turning it off keeps the largest
+        dataset off disk for the duration of the run.
+    nbnd_save : int or None, optional
+        Keep only the leading nbnd_save x nbnd_save band block of the
+        imaginary-time arrays. See run_lr for the full description.
 
     Returns
     -------
@@ -751,7 +762,8 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None):
                   include_hartree=False, include_exchange=True,
                   gw_mode="full", max_iter=1,
                   unperturbed="mf_dft", split_sigma_terms=True,
-                  div_treatment=div_treatment)
+                  div_treatment=div_treatment,
+                  save_DeltaG=save_DeltaG, nbnd_save=nbnd_save)
 
 def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
                 gw_mode="full", max_iter=50, tol=1e-8,
