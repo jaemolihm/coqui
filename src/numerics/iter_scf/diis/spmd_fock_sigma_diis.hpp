@@ -65,19 +65,14 @@ namespace iter_scf {
  *    the caller's job since the destination is a node-shared window).
  *  - History: per-rank slice copies of every trial vector (_xF/_xS) and every
  *    residual (_resS; the Fock block of the commutator residual is identically
- *    zero, so it is not stored and contributes exactly 0 to every overlap,
- *    matching the serial B bit-for-bit in structure). Growth/purge bookkeeping
- *    mirrors diis_alg::next_step exactly.
+ *    zero, so it is not stored and contributes exactly 0 to every overlap).
  *  - B matrix: per-slice zdotc partials, all-reduced over the global comm --
  *    the parts cover the full vector exactly once, so the sum is complete and
  *    every rank ends with the identical B (and identical coefficients) by
- *    construction. The number of partials is comm.size() rather than the
- *    node size, so B differs from the node-sliced variant in its last bits:
- *    the association changes, the operands and the arithmetic do not.
+ *    construction.
  *  - Extrapolation / damping: elementwise on slices, written in place into the
- *    node-shared F/Sigma windows. Given identical coefficients, each element
- *    depends only on same-index inputs, so the result is bitwise identical
- *    regardless of the partition -- only the completion allgatherv is needed.
+ *    node-shared F/Sigma windows. Each element depends only on same-index
+ *    inputs, so only the completion allgatherv is needed.
  *  - Warmup damping: out = mixing*new + (1-mixing)*prev with prev = the
  *    previous accepted (post-mix) state, kept as an in-memory slice from the
  *    previous solve (byte-identical to the scf/iter{N-1} checkpoint the serial
@@ -309,10 +304,9 @@ private:
    *
    * Per-slice zdotc partials, all-reduced over the global comm: the parts
    * cover the full vector exactly once, so the sum is complete and every rank
-   * ends with the identical B (an MPI_Allreduce leaves the same buffer on
-   * every rank, so no trailing broadcast is needed). A trailing part can be
-   * empty when the ceil-div partition runs out of elements, hence the size
-   * guard -- an empty slice contributes exactly 0.
+   * ends with the identical B. A trailing part can be empty when the ceil-div
+   * partition runs out of elements, hence the size guard -- an empty slice
+   * contributes exactly 0.
    */
   template<typename Comm>
   void update_B(Comm& comm, const Vec1D& u) {

@@ -1823,12 +1823,17 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
  * compute_Vxc_for_q spreads the pivot-block work over that subcommunicator.
  * Each rank then keeps only its (u,v) block, matching the Coulomb matrix layout.
  */
-template<MEMORY_SPACE MEM, typename DArr_t>
+template<typename DArr_t>
 void thc::build_Vxc_quv(DArr_t const& Z_quG,
                         std::array<long, 3> pgrid3D,
                         std::array<long, 3> block_size)
 {
   decltype(nda::range::all) all;
+  // Host-only: the kernel fields, zeta(u,G) and Vxc(q,u,v) are all host arrays and
+  // the interpolating vectors are read element-wise below.
+  using Z_Array_t = typename std::decay_t<DArr_t>::Array_t;
+  static_assert(nda::mem::on_host<Z_Array_t> or nda::mem::on_unified<Z_Array_t>,
+                "thc::build_Vxc_quv: Z_quG must be host- or unified-resident.");
   long nqpts_ibz = mf->nqpts_ibz();
   long nIpts = Z_quG.global_shape()[1];
   long nG = rho_g.size();
@@ -1860,9 +1865,8 @@ void thc::build_Vxc_quv(DArr_t const& Z_quG,
       mpi->comm, pgrid3D, {nqpts_ibz, nIpts, nIpts},
       {block_size[0], block_size[1], block_size[1]}));
   auto& dVxc = Vxc_quv.value();
-  utils::check(dVxc.local_range(0) == Z_quG.local_range(0) and
-               dVxc.local_range(1) == Z_quG.local_range(1),
-               "thc::build_Vxc_quv: partition mismatch with the interpolating vectors.");
+  // Built on Z_quG's pgrid3D with the same leading shapes and block sizes, so it
+  // shares Z_quG's local (q, u) ranges by construction.
   dVxc.local() = ComplexType(0.0);
 
   mpi3::communicator q_comm = mpi->comm.split(Z_quG.origin()[0], mpi->comm.rank());
@@ -1871,14 +1875,13 @@ void thc::build_Vxc_quv(DArr_t const& Z_quG,
   auto u_rng = Z_quG.local_range(1);
   auto g_rng = Z_quG.local_range(2);
   nda::array<ComplexType,2> zeta_uG(nIpts, nG);
-  memory::array<HOST_MEMORY,ComplexType,2> Zh(u_rng.size(), g_rng.size());
 
   for( auto [iq,q] : itertools::enumerate(Z_quG.local_range(0)) ) {
-    Zh = Z_quG.local()(iq,all,all);
+    auto Zq = Z_quG.local()(iq,all,all);
     zeta_uG() = ComplexType(0.0);
     for( auto [iu,u] : itertools::enumerate(u_rng) )
       for( auto [ig,g] : itertools::enumerate(g_rng) )
-        zeta_uG(u,g) = Zh(iu,ig);
+        zeta_uG(u,g) = Zq(iu,ig);
     q_comm.all_reduce_in_place_n(zeta_uG.data(), zeta_uG.size(), std::plus<>{});
 
     nda::stack_array<double,3> q_cart;
@@ -2013,7 +2016,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
     // C_quv: Vxc is only valid in the direct (Hartree) channel, so it must not
     // be folded into the Coulomb matrix this routine returns.
     if(vxc_file != "")
-      build_Vxc_quv<MEM>(Z_quG, pgrid3D, block_size);
+      build_Vxc_quv(Z_quG, pgrid3D, block_size);
 
     // First compute the inverse of overlap matrices
     Timer.start("ZBAR");

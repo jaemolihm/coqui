@@ -101,7 +101,7 @@ lr_kernel_spec kernel_spec_from_method(std::string const& name);
 lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc);
 
 /**
- * LR-qpGW static-map inputs. When passed to run_lr (non-null), the driver runs
+ * LR-qpGW static-map inputs. When passed to lr_setup (non-null), the driver runs
  * in "qp_static_sigma" mode: after the dynamic ΔΣ(iω) is assembled it is
  * statified via lr_qp_approx into a static ΔV_QPGW(k) (frozen orbitals C/ε/μ),
  * which enters the frequency-independent one-body term of the Dyson RHS in place
@@ -281,63 +281,6 @@ public:
   ~lr_driver() = default;
 
   /**
-   * @brief Run unified LR SCF loop
-   *
-   * @param sDeltaG_tskij      - [OUTPUT] Converged LR Green's function (nt, ns, nk, nb, nb)
-   * @param sDeltaDm_skij      - [OUTPUT] Converged LR density matrix (ns, nk, nb, nb)
-   * @param sDeltaF_skij       - [OUTPUT] Converged LR Fock matrix (ns, nk, nb, nb)
-   * @param sDeltaSigma_tskij  - [OUTPUT] Converged LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
-   * @param sG_tskij           - [INPUT] Unperturbed Green's function (nt, ns, nk, nb, nb)
-   * @param sDeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb)
-   * @param thc                - [INPUT] THC ERI handler
-   * @param dW_wqPQ_in         - [INPUT] Screened interaction W_c(iω) as (w,q,P,Q)
-   *                              on solvers::lr_scr_coulomb_t::W_omega_dist (nullable,
-   *                              required if gw_mode != none). Consumed: it becomes
-   *                              dW_tRPQ / W_full(iω) in place, so the caller must
-   *                              not use it after the call.
-   * @param p                  - [INPUT] Everything that does not depend on ΔH0,
-   *                              including the split-kernel schedule (sc_kernel /
-   *                              pert_kernel / pert_order / outer_accel)
-   * @param DeltaF_ibc_out     - [OUTPUT] If non-null AND DeltaX was provided, the
-   *                              precomputed IBC aux→primary correction
-   *                              δX†·F_PQ·X + X†·F_PQ·δX (ns, nk_ibz, nb, nb)
-   *                              is copied here before return. Otherwise left
-   *                              untouched (size 0 → caller can skip persisting).
-   * @param F_PQ_out           - [OUTPUT] If non-null AND DeltaX was provided, the
-   *                              gathered unperturbed V_HF in aux basis
-   *                              (ns, nk_ibz, NP, NP) is copied here.
-   * @param DeltaF_PQ_out      - [OUTPUT] If non-null AND HF is active, the LR Fock
-   *                              in aux basis at convergence (ns, nk_ibz, NP, NP)
-   *                              is gathered here via one extra lr_hf::evaluate
-   *                              call. Consumed, with F_PQ_out, by the Python
-   *                              phonon post-processors (ΔΔF_ibc T1/T3 terms).
-   * @param n_pert_applied_out - [OUTPUT] If non-null, the number of K_pert
-   *                              evaluations actually made. With an outer
-   *                              tolerance this is not p.pert_order.
-   * @return Tuple of (number of iterations, final Δμ)
-   *
-   * Equivalent to lr_setup(...) followed by one lr_solve_one(...); use those two
-   * directly to amortize the setup over several perturbations at the same q.
-   */
-  template<THC_ERI THC_t, typename dW_t>
-  std::tuple<int, double> run_lr(
-      sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-      sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-      sArray_t<Array_view_4D_t>& sDeltaF_skij,
-      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-      const sArray_t<Array_view_5D_t>& sG_tskij,
-      const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-      THC_t& thc,
-      dW_t* dW_wqPQ_in,
-      lr_params p,
-      sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
-      sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
-      nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      int* n_pert_applied_out = nullptr);
-
-  /**
    * @brief Build everything an LR SCF solve needs that does not depend on ΔH0.
    *
    * The solvers, the cached W_full(iω) / dW_tRPQ / G^R / G(iω) operands, the
@@ -350,7 +293,8 @@ public:
    * The solvers and buffers built here are shaped by `p` — which solvers exist
    * (gw_mode, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
    * capacity — so every lr_solve_one must be handed the same `p`. `dW_wqPQ_in` is
-   * consumed exactly as run_lr documents.
+   * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
+   * must not use it afterwards.
    *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
    * lr_rpa_pi / lr_scr_coulomb_t solvers and their kpq maps are all latched to
@@ -403,7 +347,7 @@ public:
    * per-node memory footprint of the large LR arrays: the node-replicated
    * shared band-basis arrays (~ nk·nt·nb²) and the comm-distributed aux-basis
    * arrays (~ nk·nt·NP²), the striped previous-iterate/DIIS history, and the
-   * per-iteration transients. Called once at the top of run_lr so the layout
+   * per-iteration transients. Called once at the top of lr_setup so the layout
    * can be inspected before the arrays allocate.
    *
    * `extra_sigma` names the additional ΔΣ-sized shared arrays a split-kernel
@@ -437,8 +381,8 @@ public:
   /**
    * Final hierarchical timer report, printed once after the LR SCF loop.
    * Each "LR_* (total)" line is followed by the corresponding solver's
-   * subclocks (indented). The Pi/W/Sigma solvers live in run_lr's scope, so
-   * they are passed in as pointers (null = solver not used, subclocks skipped).
+   * subclocks (indented). The Pi/W/Sigma solvers are passed in as pointers
+   * (null = solver not used, subclocks skipped).
    *
    * The report has the same lines for every kernel. A split kernel evaluates ΔΣ
    * on several lr_gw instances (`gw_solver_pert` for the perturbative channel,

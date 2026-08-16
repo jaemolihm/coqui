@@ -142,7 +142,7 @@ namespace methods {
 
       math::shm::shared_array<nda::array_view<ComplexType,2>> sf_Rk(*mpi, {nkpts,nkpts});
 
-      // forward k->R: G per (t,s) slice (k-contiguous), W batched over (t,P,Q).
+      // forward k->R: G per (t,s) slice and W per t, both k-contiguous.
       if (nkpts != 1) {
         _Timer.start("SIGMA_FT_R");
         auto G4 = nda::reshape(dG_tskPQ.local(), shape_t<4>{nt_loc, ns, nkpts, NP_loc * NQ_loc});
@@ -180,7 +180,7 @@ namespace methods {
         _Timer.stop("SIGMA_FT_R");
       }
 
-      // Sigma_R(t,s,k,P,Q) = - G_R(t,s,k,P,Q) * W_R(k,t,P,Q), written over G:
+      // Sigma_R(t,s,k,P,Q) = - G_R(t,s,k,P,Q) * W_R(t,k,P,Q), written over G:
       // the product is elementwise at matching (t,s,k,P,Q) and G is dead after
       // it, so Sigma needs no array of its own. Written as an explicit loop over
       // the (P,Q)-contiguous runs rather than an nda lazy expression, so the
@@ -208,7 +208,7 @@ namespace methods {
       auto dSigma_tskPQ = std::move(dG_tskPQ);
 
       if (nkpts != 1) {
-        // FT back to k-space: Sigma per (t,s) slice, W batched.
+        // FT back to k-space: Sigma per (t,s) slice and W per t.
         _Timer.start("SIGMA_FT_R");
         auto S4 = nda::reshape(dSigma_tskPQ.local(), shape_t<4>{nt_loc, ns, nkpts, NP_loc * NQ_loc});
         auto WR_3d = nda::reshape(dW_tqPQ.local(), shape_t<3>{nt_loc, nkpts, NP_loc * NQ_loc});

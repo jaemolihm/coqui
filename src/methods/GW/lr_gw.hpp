@@ -189,6 +189,10 @@ namespace methods {
       app_log(level, "");
     }
 
+    /// Zero this solver's sub-clocks. lr_driver calls it per perturbation so a
+    /// batched run's timing report covers one perturbation, not the running total.
+    inline void reset_timers() { _Timer.reset(); }
+
     /// Print only the component clocks, each line prefixed by `indent`.
     /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
     /// The R-space total leads; transpose/div-correction siblings live outside
@@ -215,12 +219,10 @@ namespace methods {
       app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_ALLOC"), cnt("SIGMA_ALLOC"));
       app_log(level, "{0}  - FT coefficients:            {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FT_COEFF"), cnt("SIGMA_FT_COEFF"));
       app_log(level, "{0}  - W slice copy:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_W_COPY"), cnt("SIGMA_W_COPY"));
-      app_log(level, "{0}  - Pre-loop fence (sync):      {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_PRE_FENCE"), cnt("SIGMA_PRE_FENCE"));
       app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_PRIM_TO_AUX"), cnt("SIGMA_PRIM_TO_AUX"));
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FT_R"), cnt("SIGMA_FT_R"));
       app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_HADPROD_R"), cnt("SIGMA_HADPROD_R"));
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_AUX_TO_PRIM"), cnt("SIGMA_AUX_TO_PRIM"));
-      app_log(level, "{0}    - Buffer alloc:             {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_ALLOC"), cnt("SIGMA_A2P_ALLOC"));
       app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_GEMM"), cnt("SIGMA_A2P_GEMM"));
       app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
       app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_AXPY"), cnt("SIGMA_A2P_AXPY"));
@@ -260,6 +262,8 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
+      // Aux→Primary reduction buffer, one (nbnd, nbnd) block per local (s,k).
+      nda::array<ComplexType, 3> _A2P_buf_iab;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)
       void _init_kpq_map(thc_reader_t& thc);

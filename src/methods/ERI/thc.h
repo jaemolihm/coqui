@@ -602,7 +602,7 @@ class thc
    * @param pgrid3D    - [INPUT] processor grid of the Coulomb matrix
    * @param block_size - [INPUT] block sizes of the Coulomb matrix
    */
-  template<MEMORY_SPACE MEM = HOST_MEMORY, typename DArr_t>
+  template<typename DArr_t>
   void build_Vxc_quv(DArr_t const& Z_quG,
                      std::array<long, 3> pgrid3D,
                      std::array<long, 3> block_size);

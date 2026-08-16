@@ -886,8 +886,7 @@ void redistribute_alltoallv(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get
   // Offset-round chunking: rather than staging the whole local block of both
   // endpoints, exchange with a subset of the peers at a time, so the pack/unpack
   // buffers hold ~1/nchunk of it. Which elements go where, and in what order they
-  // are packed, is unchanged -- the result is bit-identical to a single call, and
-  // with nchunk == 1 the call sequence is identical too.
+  // are packed, does not depend on nchunk.
   //
   // The rounds group *rank offsets*, not peer indices: in round c this rank sends
   // to (my_rank + o) % mpi_size and receives from (my_rank - o) % mpi_size, for
@@ -1658,10 +1657,6 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   for(int r=0; r<rank; ++r)
     rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
-  // Release the stores above before the barrier: every node rank reads the whole
-  // window in the reduce below, and all_reduce_parallel's opening node_sync() is
-  // barrier-then-sync, which acquires but does not publish what this rank wrote.
-  sA.win().sync();
   sA.communicator()->barrier();
   toc("GATHER_SHM_ASSIGN");
 

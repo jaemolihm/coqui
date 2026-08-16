@@ -66,8 +66,7 @@ namespace methods {
       // copy (incore only) so subsequent Fock builds skip the MPI redistribute. See hf_t.h.
       _Timer.start("READ_Z");
       std::array<long,3> dZ_pgrid = {1, np_P, np_Q};
-      long dZ_src = -1;
-      if constexpr (requires { thc.instance_id(); }) dZ_src = thc.instance_id();
+      long dZ_src = thc.instance_id();
       bool dZ_cacheable = false;
       if constexpr (requires { thc.dZ_incore(); }) dZ_cacheable = thc.dZ_incore() and dZ_src >= 0;
       bool dZ_hit = dZ_cacheable and _dZ_cache.has_value()

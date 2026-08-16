@@ -99,6 +99,20 @@ xc_kernel_fields_t read_xc_kernel_fields(std::string const& fname,
 
   int is_gradient = 0;
   nda::array<long, 1> mesh_h(3);
+
+  // Size the kernel fields from the grid metadata: on the root inside the read
+  // below, on every other rank once the metadata has been broadcast.
+  auto size_fields = [&]() {
+    for (int i = 0; i < 3; ++i) xc.mesh(i) = mesh_h(i);
+    xc.is_gradient = (is_gradient != 0);
+    long const nnr = xc.nnr();
+    xc.A = nda::array<double, 1>(nnr);
+    if (xc.is_gradient) {
+      xc.B = nda::array<double, 2>(3, nnr);
+      xc.C = nda::array<double, 3>(3, 3, nnr);
+    }
+  };
+
   // The h5 work below is root-only, so a C++ exception escaping it would leave every
   // other rank blocked in the broadcasts that follow. Convert it to a global abort.
   if (comm.root()) try {
@@ -126,26 +140,9 @@ xc_kernel_fields_t read_xc_kernel_fields(std::string const& fname,
                  "({},{},{}) and smooth ({},{},{}) FFT grids (QE doublegrid). "
                  "This configuration is untested; rerun with ecutrho = 4*ecutwfc.",
                  fname, mesh_h(0), mesh_h(1), mesh_h(2), nr1x, nr2x, nr3x);
-  } catch (std::exception const& e) {
-    APP_ABORT("read_xc_kernel_fields: failed to read the grid metadata of '{}': {}",
-              fname, e.what());
-  }
-  comm.broadcast_n(mesh_h.data(), 3, 0);
-  comm.broadcast_n(&is_gradient, 1, 0);
 
-  for (int i = 0; i < 3; ++i) xc.mesh(i) = mesh_h(i);
-  xc.is_gradient = (is_gradient != 0);
-  long const nnr = xc.nnr();
-
-  xc.A = nda::array<double, 1>(nnr);
-  if (xc.is_gradient) {
-    xc.B = nda::array<double, 2>(3, nnr);
-    xc.C = nda::array<double, 3>(3, 3, nnr);
-  }
-
-  if (comm.root()) try {
-    h5::file file(fname, 'r');
-    h5::group grp(file);
+    size_fields();
+    long const nnr = xc.nnr();
 
     nda::array<double, 1> dmuxc;
     detail::read_xc_field(grp, "dmuxc", xc.mesh, dmuxc);
@@ -183,9 +180,12 @@ xc_kernel_fields_t read_xc_kernel_fields(std::string const& fname,
       xc.C() *= detail::Ry2Ha;
     }
   } catch (std::exception const& e) {
-    APP_ABORT("read_xc_kernel_fields: failed to read the kernel fields of '{}': {}",
-              fname, e.what());
+    APP_ABORT("read_xc_kernel_fields: failed to read '{}': {}", fname, e.what());
   }
+
+  comm.broadcast_n(mesh_h.data(), 3, 0);
+  comm.broadcast_n(&is_gradient, 1, 0);
+  if (!comm.root()) size_fields();
 
   comm.broadcast_n(xc.A.data(), xc.A.size(), 0);
   if (xc.is_gradient) {
@@ -342,15 +342,19 @@ nda::array<ComplexType, 2> compute_Vxc_for_q(
   nda::array<ComplexType, 2> tmp(B, B), part(B, B);
 
   // Row block ib builds nblk-ib column blocks, so a plain ib % size round robin
-  // loads rank 0 with ~nblk blocks and the last rank with ~1. Folding pairs each
-  // heavy row with a light one on the same rank.
+  // loads rank 0 with ~nblk blocks and the last rank with ~1. The rows are
+  // folded into pairs {ib, nblk-1-ib} of nearly equal total cost, and it is
+  // those ceil(nblk/2) units that are handed round-robin to the ranks — so the
+  // work parallelizes over ceil(nblk/2) ranks, not nblk.
+  long const nunits = (nblk + 1) / 2;
   auto owner = [nblk, np = long(comm.size())](long ib) {
-    return (2 * ib < nblk ? ib : nblk - 1 - ib) % np;
+    long const unit = std::min(ib, nblk - 1 - ib);
+    return unit % np;
   };
-  if (nblk < long(comm.size()))
-    app_log(3, "    compute_Vxc_for_q: {} row blocks over {} ranks; {} ranks idle. "
-               "Lower Vxc_block_size to use them.",
-            nblk, comm.size(), long(comm.size()) - nblk);
+  if (nunits < long(comm.size()))
+    app_log(3, "    compute_Vxc_for_q: {} row blocks fold into {} work units over {} "
+               "ranks; {} ranks idle. Lower Vxc_block_size to use them.",
+            nblk, nunits, comm.size(), long(comm.size()) - nunits);
 
   for (long ib = 0; ib < nblk; ++ib) {
     if (owner(ib) != comm.rank()) continue;

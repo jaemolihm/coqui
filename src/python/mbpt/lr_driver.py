@@ -27,9 +27,11 @@ lr_debug/si_work/test_lr_phase1.py, not here (per project guidelines that
 src/python/ should contain only wrappers/bindings, not numerical implementations).
 """
 
+import warnings
+
 import numpy as np
 import h5py
-from typing import Tuple
+from typing import Optional, Tuple
 
 # Import C++ implementation
 from coqui._lib.mbpt_module import calculate_kpq_map as calculate_kpq_map_cpp
@@ -185,7 +187,9 @@ def write_DeltaH0(filename: str, q_vec: np.ndarray,
     comm.Barrier()
 
 
-def read_lr_results(filename: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def read_lr_results(filename: str,
+                    mode: Optional[int] = None
+                    ) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]:
     """
     Read LR Dyson results from HDF5 checkpoint file.
 
@@ -193,20 +197,56 @@ def read_lr_results(filename: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     ----------
     filename : str
         HDF5 file path
+    mode : int, optional
+        Perturbation index for a batched run, which writes each perturbation to
+        ``linear_response/mode{m}/``. Required when the file holds several; leave
+        as None for a single-perturbation file, which writes straight to
+        ``linear_response/``.
 
     Returns
     -------
     tuple
-        (q_vec, DeltaG_tskij, DeltaDm_skij)
+        (q_vec, DeltaG_tskij, DeltaDm_skij). DeltaG_tskij is None when the run
+        was made with save_DeltaG=False.
+
+    Raises
+    ------
+    KeyError
+        If the file is batched and `mode` is None, listing the modes present.
+
+    Notes
+    -----
+    A dataset written with nbnd_save carries an ``nbnd_save`` attribute and is
+    the leading protected-band block, not the full-basis array. This function
+    warns when it returns one, since the band axes are then shorter than the
+    calculation's nbnd.
 
     Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the
     same file can contend on the file lock.
     """
     with h5py.File(filename, 'r') as f:
         lr_grp = f['linear_response']
+        if mode is not None:
+            lr_grp = lr_grp[f'mode{mode}']
+        elif 'q_vec' not in lr_grp:
+            modes = sorted(k for k in lr_grp.keys() if k.startswith('mode'))
+            raise KeyError(
+                f"{filename} holds a batched linear response ({', '.join(modes)}); "
+                f"pass mode=<n> to pick one.")
+
         q_vec = lr_grp['q_vec'][:]
-        DeltaG_tskij = lr_grp['DeltaG_tskij'][:]
         DeltaDm_skij = lr_grp['DeltaDm_skij'][:]
+        # Absent when the run set save_DeltaG=False.
+        DeltaG_tskij = lr_grp['DeltaG_tskij'][:] if 'DeltaG_tskij' in lr_grp else None
+
+        for name, dset in (('DeltaG_tskij', lr_grp.get('DeltaG_tskij')),
+                           ('DeltaDm_skij', lr_grp['DeltaDm_skij'])):
+            if dset is not None and 'nbnd_save' in dset.attrs:
+                warnings.warn(
+                    f"{name} is a protected-band block of "
+                    f"nbnd_save={int(dset.attrs['nbnd_save'])} bands, not the "
+                    f"full-basis array.", stacklevel=2)
+
     return q_vec, DeltaG_tskij, DeltaDm_skij
 
 

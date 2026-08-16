@@ -107,6 +107,26 @@ inline simple_dyson make_dyson_with_h0_source(
 }
 
 /**
+ * Write the converged W to <output dir>/thc_screened_interaction.h5.
+ *
+ * W is held in (t,q,P,Q); the on-disk dataset keeps its (q,t,P,Q) ordering, so
+ * the transposed copy is built here and released as soon as it is written.
+ */
+inline void dump_W_to_h5(MBState& mb_state, const std::string& output) {
+  auto W_qtPQ = utils::transpose_axes_01(mb_state.dW_tqPQ.value(), mb_state.mpi->comm);
+  auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
+  if (mb_state.mpi->comm.root()) {
+    h5::file file(w_path, 'w');
+    h5::group grp(file);
+    math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
+  } else {
+    h5::group grp;
+    math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
+  }
+  W_qtPQ.reset();
+}
+
+/**
  * Compute a 4D processor grid for nproc ranks and a given global shape.
  * Axes 0 and 1 get pool-style splits; the remainder goes to axes 2 and 3.
  * Axes flagged in skip_axes stay undivided.
@@ -302,20 +322,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
                /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
-      if (dump_w_to_h5) {
-        // W is held in (t,q,P,Q); the on-disk dataset keeps its name and its
-        // (q,t,P,Q) ordering, so the transpose moves to the write.
-        auto W_qtPQ = utils::transpose_axes_01(mb_state.dW_tqPQ.value(), mb_state.mpi->comm);
-        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
-        if (mb_state.mpi->comm.root()) {
-          h5::file file(w_path, 'w');
-          h5::group grp(file);
-          math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
-        } else {
-          h5::group grp;
-          math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
-        }
-      }
+      if (dump_w_to_h5) dump_W_to_h5(mb_state, output);
 
     } else {
 
@@ -328,20 +335,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
                /*compute_exchange=*/compute_exchange, /*keep_w=*/dump_w_to_h5,
                /*chkpt_slim=*/chkpt_slim, /*dump_exchange=*/dump_exchange);
 
-      if (dump_w_to_h5) {
-        // W is held in (t,q,P,Q); the on-disk dataset keeps its name and its
-        // (q,t,P,Q) ordering, so the transpose moves to the write.
-        auto W_qtPQ = utils::transpose_axes_01(mb_state.dW_tqPQ.value(), mb_state.mpi->comm);
-        auto w_path = (std::filesystem::path(output).parent_path() / "thc_screened_interaction.h5").string();
-        if (mb_state.mpi->comm.root()) {
-          h5::file file(w_path, 'w');
-          h5::group grp(file);
-          math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
-        } else {
-          h5::group grp;
-          math::nda::h5_write(grp, "W_qtPQ", W_qtPQ);
-        }
-      }
+      if (dump_w_to_h5) dump_W_to_h5(mb_state, output);
     }
 
   } else if(solver_type == "gf2") {
@@ -1105,9 +1099,6 @@ std::string read_div_treatment(mpi_context_t& mpi,
  *         (t,q,P,Q): the dataset on disk is (q,t), but eps_inv_head_t needs (t,q)
  *         so that copy is made here regardless — handing it back costs nothing,
  *         while returning (q,t) would make every LR caller transpose it again.
- *         The one caller that wants (q,t) (the standalone scGW Σ path, whose
- *         eval_Sigma_all does q→R as a single gemm with q leading) transposes at
- *         its own call site.
  */
 template<typename mpi_context_t, typename THC_t>
 auto load_W_and_eps_inv_head(
@@ -1171,8 +1162,6 @@ auto load_W_and_eps_inv_head(
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
-  // eps_inv_head_t needs (t,q), and that copy is what we return, so the (q,t)
-  // source is released here rather than the transposed copy being discarded.
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
   auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
   dW_qtPQ.reset();
@@ -1877,7 +1866,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   app_log(2, "      - load W + eps_inv_head:  {0:8.3f} sec  {1:4d} calls\n",
           lr_init_timer.elapsed("LR_INIT_LOAD_W"), lr_init_timer.number_of_calls("LR_INIT_LOAD_W"));
 
-  utils::memlog("run_lr_calc: before driver.run_lr");
+  utils::memlog("run_lr_calc: before driver.lr_setup");
 
   // Create lr_driver and run unified SCF loop
   lr_driver driver(dyson, q_vec);

@@ -54,7 +54,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
                   "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
-                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_MISC", "LR_DYSON_SKEW",
+                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_MISC",
                   "GATHER_SHM_ZERO", "GATHER_SHM_ASSIGN", "GATHER_SHM_REDUCE",
                   "GATHER_SHM_BARRIER"}) {
     _Timer.add(v);
@@ -305,13 +305,6 @@ void lr_dyson::solve_lr_dyson_impl(
     _Timer.start("LR_DYSON_MISC");
     dDeltaG_wskij_tmp.reset();
     _Timer.stop("LR_DYSON_MISC");
-
-    // Both replications below open with gather_to_shm's set_zero(), whose first
-    // statement is a node barrier, so upstream load skew would be charged to
-    // whichever runs first. Absorb it here to keep all three clocks separable.
-    _Timer.start("LR_DYSON_SKEW");
-    _context->comm.barrier();
-    _Timer.stop("LR_DYSON_SKEW");
 
     // ΔDm = -ΔG(τ=β⁻), formed on the distributed τ array before it is replicated.
     // tau_to_beta contracts the leading τ axis only and the pgrid above leaves τ

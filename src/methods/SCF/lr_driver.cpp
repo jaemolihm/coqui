@@ -324,6 +324,20 @@ void lr_driver::lr_setup(
                  "lr_driver::lr_setup: a GW self-energy is active but dW or "
                  "eps_inv_head is null.");
   }
+  if (p.include_xc) {
+    utils::check(p.include_hartree,
+                 "lr_driver::lr_setup: include_xc = true requires include_hartree = true.");
+    utils::check(!p.include_exchange,
+                 "lr_driver::lr_setup: include_xc = true is incompatible with "
+                 "include_exchange = true. The semilocal xc kernel contracts with the "
+                 "diagonal density response only; LR-DFT is include_hartree = true, "
+                 "include_exchange = false.");
+    utils::check(!p.include_gw_sigma(),
+                 "lr_driver::lr_setup: include_xc = true is incompatible with a GW "
+                 "self-energy (gw_mode != none): f_xc and ΔΣ_GW both carry the "
+                 "correlation response, so the two together double-count it. "
+                 "include_xc works only in the Hartree mode.");
+  }
   if (p.split_sigma_terms) {
     utils::check(k.gw_full,
                  "lr_driver::lr_setup: split ΔΣ terms require the Σ2 (-G⊙ΔW) component.");
@@ -689,7 +703,17 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   if (p.use_diis()) _lr_diis->reset();
   if (outer_diis_on) _outer_diis->reset();
-  for (auto& kkey : lr_scf_timer_keys) _Timer.reset(kkey);
+  // Both halves of the report: the driver's own SCF clocks and the solvers'
+  // sub-clocks. Resetting only the former leaves print_timers showing a per-mode
+  // total above sub-clocks accumulated over every mode so far.
+  for (auto& k : lr_scf_timer_keys) _Timer.reset(k);
+  _lr_dyson.reset_timers();
+  if (_lr_hf) _lr_hf->reset_timers();
+  if (_lr_gw) _lr_gw->reset_timers();
+  if (_lr_gw_pert) _lr_gw_pert->reset_timers();
+  if (_lr_gw2) _lr_gw2->reset_timers();
+  if (_lr_pi) _lr_pi->reset_timers();
+  if (_lr_scr) _lr_scr->reset_timers();
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
@@ -1084,9 +1108,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _mpi->node_comm.barrier();
       // Each node now holds a valid copy of its own contiguous element run
       // only; one allgatherv among the node roots completes every replica. With
-      // the striping global, each element is mixed exactly once in the whole
-      // job, so the per-node drift the old node-0 broadcast papered over cannot
-      // arise by construction.
+      // the striping global, each element is mixed exactly once in the whole job.
       if (_mpi->node_comm.root()) {
         utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                        sDeltaF_sc_skij.local().data(), _DeltaF.n_flat);
@@ -1114,8 +1136,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         _mpi->comm, _DeltaF.slice(sDeltaF_sc_skij.local()), _DeltaF.prev, stage_iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
-    _mpi->comm.broadcast_n(&norm_DeltaF, 1, 0);
-    _mpi->comm.broadcast_n(&norm_DeltaF_diff, 1, 0);
 
     // Compute norms of the tracked static second quantity (dynamic ΔΣ in the
     // standard path; static ΔV_QPGW in qp mode) for logging/convergence.
@@ -1127,16 +1147,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           stage_iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
-      _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
-      _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     } else if (has_Sigma_sc) {
       auto norms_Sigma = utils::striped_norm(
           _mpi->comm, _DeltaSigma.slice(pDeltaSigma_sc->local()), _DeltaSigma.prev,
           stage_iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
       norm_DeltaSigma_diff = norms_Sigma.second;
-      _mpi->comm.broadcast_n(&norm_DeltaSigma, 1, 0);
-      _mpi->comm.broadcast_n(&norm_DeltaSigma_diff, 1, 0);
     }
     _Timer.stop("LR_CONVERGENCE");
 
@@ -1403,37 +1419,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 }
 
 
-template<THC_ERI THC_t, typename dW_t>
-std::tuple<int, double> lr_driver::run_lr(
-    sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-    sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-    sArray_t<Array_view_4D_t>& sDeltaF_skij,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-    const sArray_t<Array_view_5D_t>& sG_tskij,
-    const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-    THC_t& thc,
-    dW_t* dW_wqPQ_in,
-    lr_params p,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
-    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij,
-    nda::array<ComplexType, 4>* DeltaF_ibc_out,
-    nda::array<ComplexType, 4>* F_PQ_out,
-    nda::array<ComplexType, 4>* DeltaF_PQ_out,
-    int* n_pert_applied_out) {
-
-  // The two output selectors are implied by which outputs the caller asked for.
-  p.split_sigma_terms = (sDeltaSigma_term2_tskij != nullptr);
-  p.keep_F_PQ = (F_PQ_out != nullptr);
-  lr_setup(sG_tskij, thc, dW_wqPQ_in, p);
-
-  return lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
-                      sDeltaSigma_tskij, sG_tskij, sDeltaH0_skij, thc, p,
-                      sDeltaSigma_term2_tskij, sDeltaVcorr_out_skij,
-                      DeltaF_ibc_out, F_PQ_out, DeltaF_PQ_out,
-                      n_pert_applied_out);
-}
-
-
 void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                                       std::vector<std::string> const& extra_sigma,
                                       long n_sigma_prev,
@@ -1485,7 +1470,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   auto shp5a = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nq, NP, NP); };
 
   // --- Persistent, shared (replicated per node), band basis ~ nk·nt·nb² ---
-  // sG_tskij is caller-owned but resident throughout run_lr, so count it here.
+  // sG_tskij is caller-owned but resident throughout the solve, so count it here.
   arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
@@ -1759,21 +1744,5 @@ template std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>*,
     int*);
 
-template std::tuple<int, double> lr_driver::run_lr(
-    sArray_t<Array_view_5D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_5D_t>*,
-    const sArray_t<Array_view_5D_t>&,
-    const sArray_t<Array_view_4D_t>&,
-    thc_reader_t&,
-    dW_concrete_t*,
-    lr_params,
-    sArray_t<Array_view_5D_t>*,
-    sArray_t<Array_view_4D_t>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*,
-    int*);
 
 } // namespace methods

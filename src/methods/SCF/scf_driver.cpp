@@ -75,7 +75,6 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   auto mem_params = make_scf_mem_params(mf, FT, mb_eri, mb_solver, iter_solver,
                                         keep_w, dump_exchange, eval_thermodynamics);
   const double predicted_peak_pn = print_scf_memory_estimate(*mpi, mem_params);
-  print_scf_distribution_summary(*mpi, mem_params);
   utils::memlog("scf_loop: before state alloc");
 
   Timer.start("SCF_TOTAL");
@@ -110,6 +109,8 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   } else {
     input_iter = chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
                                  mb_state.coqui_prefix, input_grp, input_iter);
+    app_log(1, "  Status of the restarted run = {}",
+            chkpt::read_scf_status(mb_state.coqui_prefix+".mbpt.h5"));
   }
   Timer.stop("INIT_FOCK");
 
@@ -284,6 +285,11 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     output_iter++;
   } while (output_iter<output_iter_init+niter and not converged());
   Timer.stop("SCF_TOTAL");
+
+  // Run-status marker, written only once the loop has exited: a run killed
+  // mid-flight leaves no "scf_status" dataset, which readers take as unknown.
+  chkpt::write_scf_status(mpi->comm, mb_state.coqui_prefix,
+                          converged() ? "converged" : "max_iter");
 
   app_log(2, "\n  Dyson-SCF timers");
   app_log(2, "  ----------------");

@@ -379,11 +379,16 @@ private:
 
     auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
     double eig_max = nda::max_element(eig);
-    double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
+    double eig_min_abs = nda::min_element(eig_abs);
 
     const double eig_thresh = 1E-14;
 
-    app_log(3, "    DIIS: Jacobi-scaled B condition number = {:.2e}", cond);
+    // Diagnostic only: a zero smallest |eigenvalue| would print inf/nan.
+    if (eig_min_abs > 0.0)
+      app_log(3, "    DIIS: Jacobi-scaled B condition number = {:.2e}",
+              nda::max_element(eig_abs) / eig_min_abs);
+    else
+      app_log(3, "    DIIS: Jacobi-scaled B is singular (smallest |eigenvalue| = 0)");
 
     // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
     for (long i = 0; i < eig.size(); ++i) {
