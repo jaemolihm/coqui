@@ -720,6 +720,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     utils::check(mask.has_sigma(),
                  "lr_driver::lr_solve_one: eval_sigma_channel called with a Σ-free "
                  "kernel mask ({}).", mask.to_string());
+    // Every branch below reads ΔG(τ), which the Dyson solve leaves distributed.
+    // One call covers them all, and it is a no-op once this iteration's ΔG(τ)
+    // has been replicated. Deliberately outside the channel's clocks: the cost
+    // belongs to the Dyson step that produced the array, and is reported there.
+    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     if (!mask.sigma_G_dW) {
       // Term 1 only: ΔΣ = -ΔG ⊙ W_c
       _Timer.start(clk.sigma);
@@ -966,7 +971,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>* dyson_sigma = has_Sigma ? sDeltaSigma_tskij : nullptr;
     const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
-        sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
+        sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, dyson_sigma,
         p.fix_density, Delta_mu, dyson_vcorr);
     _Timer.stop("LR_DYSON");
@@ -1302,6 +1307,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
+  // Replicate the converged ΔG(τ) unconditionally, whether or not this run's
+  // kernel ever read it. sDeltaG_tskij outlives the solve and is reused by the
+  // next perturbation, so anything less leaves the caller holding either an
+  // earlier iteration's ΔG next to a converged ΔDm/ΔF/ΔΣ in the checkpoint, or
+  // the previous mode's ΔG entirely. Exactly one gather per perturbation.
+  _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
     sDeltaVcorr_out_skij->win().fence();
@@ -1468,6 +1480,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   };
   push_hist(inner_hist, "inner");
   push_hist(outer_hist, "outer");
+
+  // --- Persistent, distributed, band basis ---
+  // ΔG(τ) as lr_dyson hands it over: distributed, and alive from the end of the
+  // solve until the first consumer replicates it. It overlaps neither transient
+  // peak in practice — the next solve drops it before allocating anything, and a
+  // consumer replicates it at the top of eval_sigma_channel, ahead of any ΔΠ/ΔW
+  // — so counting it as persistent is a deliberate over-estimate.
+  arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {

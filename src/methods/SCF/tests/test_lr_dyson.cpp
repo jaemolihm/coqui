@@ -162,8 +162,9 @@ namespace lr_dyson_tests {
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
-    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, DeltaH0, DeltaF,
+    lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+    lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 
     // Compute ΔG using finite difference
@@ -374,8 +375,9 @@ namespace lr_dyson_tests {
 
     auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
-    lr_dys.solve_lr_dyson(DeltaG, DeltaDm, DeltaH0, DeltaF,
+    lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+    lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 
     double nonherm = 0.0, max_dDm = 0.0, dm_err = 0.0;

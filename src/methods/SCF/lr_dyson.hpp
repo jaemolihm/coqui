@@ -22,6 +22,8 @@
 #ifndef COQUI_LR_DYSON_HPP
 #define COQUI_LR_DYSON_HPP
 
+#include <optional>
+
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
 
@@ -143,6 +145,7 @@ public:
   using sArray_t = math::shm::shared_array<Array_base_t>;
   using Array_view_4D_t = nda::array_view<ComplexType, 4>;
   using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+  using dArray_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
 
   /**
    * @brief Constructor from existing simple_dyson
@@ -190,7 +193,11 @@ public:
    *
    * For q≠0, fix_density is ignored (Δμ contribution vanishes).
    *
-   * @param sDeltaG_tskij     - [OUTPUT] LR Green's function (nt, ns, nk, nb, nb)
+   * ΔG(τ) itself is left distributed: the solve retains it and only
+   * materialize_DeltaG_tau() replicates it into shared memory. Callers that read
+   * ΔG(τ) must call that first; ΔDm, which most of them actually want, is
+   * produced here as usual.
+   *
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix (ns, nk, nb, nb)
@@ -201,10 +208,9 @@ public:
    *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
    * @return The Δμ value used (computed if fix_density=true, otherwise the input value)
    */
-  template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
+  template<typename DeltaDm_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
   double solve_lr_dyson(
-      DeltaG_t& sDeltaG_tskij,
       DeltaDm_t& sDeltaDm_skij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
@@ -212,6 +218,20 @@ public:
       bool fix_density = false,
       double Delta_mu = 0.0,
       const DeltaF_t* sDeltaVcorr_skij = nullptr);
+
+  /**
+   * @brief Replicate the ΔG(τ) retained by the last solve into shared memory.
+   *
+   * The gather is the single most expensive step of the LR Dyson solve (a
+   * node-replicating internode all_reduce of the whole nt·ns·nk·nb² array), and
+   * whether anything reads its result is decided by the driver *after* the solve
+   * has run — a Σ-free SCF iteration never touches ΔG(τ) at all. So the solve
+   * hands over the distributed array and this replicates it on the first read.
+   *
+   * Idempotent and collective: with nothing pending it is a no-op, so the shared
+   * copy stays valid until the next solve retains a new one.
+   */
+  void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
   /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
@@ -280,6 +300,11 @@ public:
 
   /// Print only the component clocks, each line prefixed by `indent`.
   /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
+  ///
+  /// "Gather ΔG(τ)" is the one line that is not a component of the LR Dyson
+  /// total above it: the replication is demand-driven and runs wherever the
+  /// first consumer sits (inside the Σ step, or after the SCF loop for the
+  /// checkpoint), not inside the solve.
   inline void print_subclocks(int level, const std::string& indent) {
     app_log(level, "{0}  - Alloc (dist arrays):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_ALLOC"), _Timer.number_of_calls("LR_DYSON_ALLOC"));
     app_log(level, "{0}  - ΔΣ(τ)->ΔΣ(iω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_TAU_TO_W"), _Timer.number_of_calls("LR_DYSON_TAU_TO_W"));
@@ -289,6 +314,7 @@ public:
     app_log(level, "{0}  - Gather ΔG(τ):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
     app_log(level, "{0}      - set_zero:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ZERO"), _Timer.number_of_calls("GATHER_SHM_ZERO"));
     app_log(level, "{0}      - local assign:           {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_ASSIGN"), _Timer.number_of_calls("GATHER_SHM_ASSIGN"));
+    app_log(level, "{0}      - pre-reduce barrier (skew):          {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_SKEW"), _Timer.number_of_calls("GATHER_SHM_SKEW"));
     app_log(level, "{0}      - internode all_reduce:   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_REDUCE"), _Timer.number_of_calls("GATHER_SHM_REDUCE"));
     app_log(level, "{0}      - trailing barrier:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_BARRIER"), _Timer.number_of_calls("GATHER_SHM_BARRIER"));
     print_gather_bandwidth(level, indent);
@@ -302,10 +328,17 @@ public:
   /// is what the rate below is computed from and what is comparable to the fabric's
   /// per-node bandwidth: if it already sits near line rate there is no headroom left
   /// in the reduction itself, and the remaining Gather cost is elsewhere.
+  ///
+  /// The second rate adds the trailing barrier. The reduction is split into
+  /// per-chunk allreduces issued in parallel by the ranks of a node, and they do
+  /// not finish together, so that barrier is part of the transfer's critical path
+  /// and the (reduce + barrier) rate is the honest end-to-end number; the reduce-
+  /// only rate overstates the fabric.
   inline void print_gather_bandwidth(int level, const std::string& indent) {
     int ncalls = _Timer.number_of_calls("GATHER_SHM_REDUCE");
     if (ncalls == 0 or _gather_bytes == 0) return;
     double t = _Timer.elapsed("GATHER_SHM_REDUCE") / double(ncalls);
+    double t_e2e = t + _Timer.elapsed("GATHER_SHM_BARRIER") / double(ncalls);
     double V_MB = double(_gather_bytes) / (1024.0 * 1024.0);
     long nnodes = _context->internode_comm.size();
     if (nnodes < 2 or t <= 0.0) {
@@ -317,6 +350,10 @@ public:
     app_log(level, "{0}      [V = {1:.1f} MB/node, {2:.4f} sec/reduce, {3} nodes "
                    "-> {4:.2f} GB/s/node on the wire]",
             indent, V_MB, t, nnodes, wire / t / 1.0e9);
+    if (t_e2e > 0.0)
+      app_log(level, "{0}      [reduce + trailing barrier: {1:.4f} sec "
+                     "-> {2:.2f} GB/s/node end to end]",
+              indent, t_e2e, wire / t_e2e / 1.0e9);
   }
 
   // Accessors
@@ -331,16 +368,25 @@ private:
   // contraction over τ alone, and the distributed τ array this builds leaves the
   // τ and spin axes undivided, so every rank can form its own (k, i, j) block
   // locally instead of re-reading the gathered replica.
-  template<typename DeltaG_t, typename DeltaDm_t, typename DeltaH0_t,
-           typename DeltaF_t, typename DeltaSigma_t>
+  //
+  // ΔΣ arrives already on the ω grid: it does not depend on Δμ, so the caller
+  // transforms it once and both fix_density passes read the same darray. It is
+  // passed as a pointer-to-optional because the final pass frees it right after
+  // the ω-space loop, ahead of the redistribute that sets the Dyson memory peak.
+  //
+  // last_pass marks the pass whose result survives the solve. That pass is the
+  // one that keeps ΔG(τ) — an earlier pass's ΔG is overwritten before anything
+  // can read it — and equally the one after which ΔΣ(iω) is dead. They are the
+  // same pass by construction, so they share a flag rather than taking one each.
+  template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
   void solve_lr_dyson_impl(
-      DeltaG_t& sDeltaG_tskij,
       DeltaDm_t& sDeltaDm_skij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
-      const DeltaSigma_t* sDeltaSigma_tskij,
+      std::optional<dArray_5D_t>* opt_dDeltaSigma_wskij,
       double Delta_mu,
-      const DeltaF_t* sDeltaVcorr_skij = nullptr);
+      bool last_pass,
+      const DeltaF_t* sDeltaVcorr_skij);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;
@@ -362,6 +408,11 @@ private:
   // Cached dN/dμ — populated by first call to compute_dN_dmu()
   double _cached_dN_dmu = 0.0;
   bool _dN_dmu_cached = false;
+
+  // ΔG(τ) of the last solve, still distributed, awaiting a consumer.
+  // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
+  // of every solve so a solve never inherits the previous one's array.
+  std::optional<dArray_5D_t> _dDeltaG_tau_pending;
 
   // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
   size_t _gather_bytes = 0;
