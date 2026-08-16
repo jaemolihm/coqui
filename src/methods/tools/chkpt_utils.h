@@ -221,6 +221,9 @@ namespace methods {
    *   the only thing on disk that distinguishes a protected-band block from a
    *   full-basis array, so any reader must check for it. The one-time-slice
    *   arrays (DeltaDm_skij, DeltaF_skij, DeltaVcorr_skij) are never trimmed.
+   * @param gw_mode        - [INPUT] GW self-energy mode of the kernel that was
+   *   applied ("none"/"fixed_W"/"full"), written whenever non-empty. It refines
+   *   include_gw_sigma, which cannot tell fixed_W from full.
    * @param lr_two_step        - [INPUT] whether the split-kernel schedule was
    *   used. When true the stored ΔF/ΔΣ are the sums of the two channels, with
    *   the perturbative part evaluated at the previous stage's ΔG — NOT a
@@ -245,9 +248,9 @@ namespace methods {
                std::optional<long> imode = std::nullopt,
                bool save_DeltaG = true,
                std::optional<long> nbnd_save = std::nullopt,
+               std::string const& gw_mode = "",
                bool lr_two_step = false,
-               std::string const& two_step_sc_method = "",
-               std::string const& two_step_pert_method = "",
+               std::string const& two_step_inner_method = "",
                int two_step_order = 0,
                bool two_step_outer_accel = false,
                std::string const& two_step_outer_alg = "",

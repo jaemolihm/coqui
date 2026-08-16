@@ -385,8 +385,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            nbnd_save=None,
            method=None,
            lr_two_step=False,
-           two_step_sc_method=None,
-           two_step_pert_method=None,
+           two_step_inner_method=None,
            two_step_order=1,
            two_step_outer_iter_alg=None,
            two_step_outer_tol=0.0):
@@ -516,24 +515,22 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     method : str or None, optional
         Alias on the kernel ladder — "none", "Hartree", "HF", "GW0" or "GW" —
         that expands to include_hartree / include_exchange / gw_mode. When
-        given it defines all three, so they need not be passed separately.
+        given it defines all three, so they need not be passed separately. It
+        names the TOTAL kernel, for a two-step run as well.
     lr_two_step : bool, optional
         Split the LR kernel into a part resummed by the SCF loop and a
         remainder expanded to finite order (default False):
 
-            K_sc   = kernel(two_step_sc_method)
-            K_pert = kernel(two_step_pert_method) \\ kernel(two_step_sc_method)
+            K_sc   = kernel(two_step_inner_method)
+            K_pert = kernel(method) \\ kernel(two_step_inner_method)
 
         The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW, so K_sc must be a
         proper subset of the total kernel. Costs two_step_order evaluations of
         K_pert instead of one per SCF iteration.
-    two_step_sc_method : str or None, optional
+    two_step_inner_method : str or None, optional
         Method whose kernel is resummed self-consistently. Required with
-        lr_two_step.
-    two_step_pert_method : str or None, optional
-        The **total** method being approximated — not the remainder. Required
-        with lr_two_step, and it must agree with method / include_hartree /
-        include_exchange / gw_mode.
+        lr_two_step. The total kernel comes from method / include_hartree /
+        include_exchange / gw_mode, and K_pert is the difference.
     two_step_order : int, optional
         Truncation order n of the K_pert expansion (default 1). n = 0 runs the
         self-consistent kernel alone. max_iter counts total inner iterations
@@ -552,8 +549,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         required to extrapolate, so 2 extrapolates from the second outer step.
 
         With acceleration on the source is a combination of previous sources,
-        so the result is an accelerated iterate toward the FULL
-        two_step_pert_method fixed point, with no truncation-order meaning.
+        so the result is an accelerated iterate toward the FULL `method` fixed
+        point, with no truncation-order meaning.
     two_step_outer_tol : float, optional
         > 0 turns two_step_order into a cap and stops the outer loop once the
         stage-to-stage change of ΔDm falls below it (default 0.0 = run exactly
@@ -660,10 +657,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if method is not None:
         lr_params["method"] = str(method)
     lr_params["lr_two_step"] = bool(lr_two_step)
-    if two_step_sc_method is not None:
-        lr_params["two_step_sc_method"] = str(two_step_sc_method)
-    if two_step_pert_method is not None:
-        lr_params["two_step_pert_method"] = str(two_step_pert_method)
+    if two_step_inner_method is not None:
+        lr_params["two_step_inner_method"] = str(two_step_inner_method)
     lr_params["two_step_order"] = int(two_step_order)
     # Outer-loop acceleration, flattened to the ptree keys C++ reads. Mirrors
     # the iter_alg dict; type conversion only.

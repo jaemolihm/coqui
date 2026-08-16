@@ -84,8 +84,8 @@ std::string lr_kernel_spec::to_string() const {
   auto add = [&](const char* c) { if (!s.empty()) s += ", "; s += c; };
   if (hartree)    add("H");
   if (exchange)   add("X");
-  if (sigma_dG_W) add("Σ1");
-  if (sigma_G_dW) add("Σ2");
+  if (sigma_dG_W) add("dGW");
+  if (sigma_G_dW) add("GdW");
   return s.empty() ? std::string("-") : s;
 }
 

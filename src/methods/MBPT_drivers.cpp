@@ -1319,13 +1319,13 @@ auto recompute_W_and_eps_inv_head(
  * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
  *
  * Kernel-selection keys read from `pt`:
- *   method               method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
- *                        that expands to include_hartree/include_exchange/gw_mode
- *   lr_two_step          enable the split-kernel schedule (default false)
- *   two_step_sc_method   method whose kernel is resummed self-consistently
- *   two_step_pert_method the TOTAL method being approximated; the perturbative
- *                        kernel is the difference of the two
- *   two_step_order       truncation order n of the K_pert expansion (default 1)
+ *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
+ *                          that expands to include_hartree/include_exchange/gw_mode.
+ *                          Names the TOTAL kernel, for two-step runs as well.
+ *   lr_two_step            enable the split-kernel schedule (default false)
+ *   two_step_inner_method  method whose kernel is resummed self-consistently; the
+ *                          perturbative kernel is the total minus this one
+ *   two_step_order         truncation order n of the K_pert expansion (default 1)
  *
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
@@ -1380,15 +1380,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // the triple and the method name in sync.
   //
   // "lr_two_step" splits the kernel into a part resummed by the SCF loop
-  // (two_step_sc_method) and a remainder applied `two_step_order` times
-  //   K_pert = kernel(two_step_pert_method) \ kernel(two_step_sc_method).
-  // Note that two_step_pert_method names the TOTAL method being approximated,
-  // not the remainder: the remainder ({Σ2} for GW-on-top-of-GW0, say) has no
-  // name on the ladder and can only be expressed as a difference.
+  // (two_step_inner_method) and a remainder applied `two_step_order` times
+  //   K_pert = kernel(method) \ kernel(two_step_inner_method).
+  // "method" is the TOTAL kernel here too; the remainder ({Σ2} for
+  // GW-on-top-of-GW0, say) has no name on the ladder and can only be expressed
+  // as a difference.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto lr_two_step = io::get_value_with_default<bool>(pt, "lr_two_step", false);
-  auto two_step_sc_method = io::get_value_with_default<std::string>(pt, "two_step_sc_method", "");
-  auto two_step_pert_method = io::get_value_with_default<std::string>(pt, "two_step_pert_method", "");
+  auto two_step_inner_method =
+      io::get_value_with_default<std::string>(pt, "two_step_inner_method", "");
   auto two_step_order = io::get_value_with_default<long>(pt, "two_step_order", 1);
 
   // Acceleration of the OUTER (perturbative-source) iteration. The outer
@@ -1419,6 +1419,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto spec_of_flags = [](bool h, bool x, lr_gw_update_mode m) {
     return lr_kernel_spec{h, x, m != lr_gw_update_mode::none,
                           m == lr_gw_update_mode::full};
+  };
+  // The spelling the Python layer accepts, so a checkpoint field can be fed
+  // straight back into a run.
+  auto gw_mode_str = [](lr_gw_update_mode m) -> std::string {
+    return m == lr_gw_update_mode::full    ? "full"
+         : m == lr_gw_update_mode::fixed_W ? "fixed_W"
+                                           : "none";
   };
 
   if (!method.empty()) {
@@ -1499,23 +1506,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   lr_kernel_spec pert_kernel;
   int pert_order = 0;
   if (lr_two_step) {
-    utils::check(!two_step_sc_method.empty() && !two_step_pert_method.empty(),
-                 "run_lr_calc: lr_two_step = true requires both "
-                 "'two_step_sc_method' and 'two_step_pert_method'.");
-    sc_kernel = kernel_spec_from_method(two_step_sc_method);
-    auto pert_total = kernel_spec_from_method(two_step_pert_method);
-    utils::check(!(sc_kernel == pert_total),
-                 "run_lr_calc: two_step_sc_method and two_step_pert_method are "
-                 "both '{}', so lr_two_step is a no-op. Drop lr_two_step, or "
-                 "name a smaller self-consistent kernel.", two_step_sc_method);
-    pert_kernel = kernel_diff(pert_total, sc_kernel);
-    utils::check(total_kernel == pert_total,
-                 "run_lr_calc: the active kernel ({}) does not match "
-                 "two_step_pert_method = '{}' ({}). two_step_pert_method names "
-                 "the TOTAL method; set 'method' (or include_hartree / "
-                 "include_exchange / gw_mode) to match it.",
-                 total_kernel.to_string(), two_step_pert_method,
-                 pert_total.to_string());
+    utils::check(!two_step_inner_method.empty(),
+                 "run_lr_calc: lr_two_step = true requires 'two_step_inner_method'.");
+    sc_kernel = kernel_spec_from_method(two_step_inner_method);
+    utils::check(!(sc_kernel == total_kernel),
+                 "run_lr_calc: two_step_inner_method = '{}' names the whole "
+                 "active kernel ({}), so lr_two_step is a no-op. Drop "
+                 "lr_two_step, or name a smaller self-consistent kernel.",
+                 two_step_inner_method, total_kernel.to_string());
+    pert_kernel = kernel_diff(total_kernel, sc_kernel);
     utils::check(two_step_order >= 0,
                  "run_lr_calc: two_step_order must be >= 0, got {}.", two_step_order);
     utils::check(!split_sigma_terms,
@@ -1534,7 +1533,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "and DeltaV_qPQ perturbations.");
     pert_order = static_cast<int>(two_step_order);
     app_log(2, "LR split kernel: K_sc = {} ('{}'), K_pert = {} (order {})",
-            sc_kernel.to_string(), two_step_sc_method,
+            sc_kernel.to_string(), two_step_inner_method,
             pert_kernel.to_string(), pert_order);
   }
 
@@ -1752,7 +1751,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
   // The kernel actually applied. With two_step_order = 0 the perturbative half
-  // is never evaluated, so the run is a plain two_step_sc_method run: allocating
+  // is never evaluated, so the run is a plain two_step_inner_method run: allocating
   // and persisting datasets for the total method would advertise components
   // (a ΔΣ, an exchange ΔF) that stayed identically zero, and would pay for the
   // W load they need. Everything downstream — allocation, W load, dump_lr — keys
@@ -1995,7 +1994,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    pDeltaSigma2, pDeltaVcorr,
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
-                   lr_two_step, two_step_sc_method, two_step_pert_method,
+                   gw_mode_str(gw_mode_of(run_kernel)),
+                   lr_two_step, two_step_inner_method,
                    static_cast<int>(two_step_order),
                    outer_active, two_step_outer_alg, two_step_outer_tol,
                    n_pert_applied);

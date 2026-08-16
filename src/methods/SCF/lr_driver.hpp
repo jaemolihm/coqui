@@ -58,16 +58,17 @@ enum class lr_gw_update_mode { none, fixed_W, full };
  *
  *   none ⊂ Hartree {H} ⊂ HF {H,X} ⊂ GW0 {H,X,Σ1} ⊂ GW {H,X,Σ1,Σ2}
  *
- * with Σ1 = -ΔG⊙W_c and Σ2 = -G⊙ΔW. A two-step run splits K into a part
- * resummed to all orders (K_sc) and a remainder expanded to finite order
- * (K_pert = kernel(total) \ kernel(sc)), and the remainder has no method name
- * of its own — hence the component mask rather than a method enum.
+ * with Σ1 = -ΔG⊙W_c (label "dGW") and Σ2 = -G⊙ΔW (label "GdW"). A two-step run
+ * splits K into a part resummed to all orders (K_sc) and a remainder expanded
+ * to finite order (K_pert = kernel(total) \ kernel(sc)), and the remainder has
+ * no method name of its own — hence the component mask rather than a method
+ * enum.
  */
 struct lr_kernel_spec {
   bool hartree = false;
   bool exchange = false;
-  bool sigma_dG_W = false;   // Σ1 = -ΔG ⊙ W_c
-  bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW
+  bool sigma_dG_W = false;   // Σ1 = -ΔG ⊙ W_c, label "dGW"
+  bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW,  label "GdW"
 
   bool has_sigma() const { return sigma_dG_W || sigma_G_dW; }
   bool empty()     const { return !hartree && !exchange && !has_sigma(); }
@@ -86,14 +87,14 @@ struct lr_kernel_spec {
            (sigma_dG_W && o.sigma_dG_W) || (sigma_G_dW && o.sigma_G_dW);
   }
 
-  /// Component list for logging, e.g. "H, X, Σ1" ("-" when empty).
+  /// Component list for logging, e.g. "H, X, dGW" ("-" when empty).
   std::string to_string() const;
 };
 
 /**
  * Expand a method name on the ladder ("none", "Hartree", "HF", "GW0", "GW")
- * into its component mask. Single source of truth for the `method`,
- * `two_step_sc_method` and `two_step_pert_method` inputs.
+ * into its component mask. Single source of truth for the `method` and
+ * `two_step_inner_method` inputs.
  */
 lr_kernel_spec kernel_spec_from_method(std::string const& name);
 
@@ -130,7 +131,7 @@ struct lr_qp_static_params {
  *
  * With acceleration on, ORDER COUNTING IS ABANDONED: the source is a
  * combination of previous sources, so the result is an accelerated iterate
- * toward the FULL two_step_pert_method fixed point and `two_step_order` is an
+ * toward the FULL `method` fixed point and `two_step_order` is an
  * iteration cap, not a truncation order.
  */
 struct lr_outer_accel_params {

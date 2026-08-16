@@ -690,9 +690,9 @@ void dump_lr(communicator_t& comm,
              std::optional<long> imode,
              bool save_DeltaG,
              std::optional<long> nbnd_save,
+             std::string const& gw_mode,
              bool lr_two_step,
-             std::string const& two_step_sc_method,
-             std::string const& two_step_pert_method,
+             std::string const& two_step_inner_method,
              int two_step_order,
              bool two_step_outer_accel,
              std::string const& two_step_outer_alg,
@@ -741,6 +741,8 @@ void dump_lr(communicator_t& comm,
     h5::h5_write(lr_grp, "include_hartree", static_cast<int>(include_hartree));
     h5::h5_write(lr_grp, "include_exchange", static_cast<int>(include_exchange));
     h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(include_gw_sigma));
+    // Refines include_gw_sigma, which cannot distinguish fixed_W from full.
+    if (!gw_mode.empty()) h5::h5_write(lr_grp, "gw_mode", gw_mode);
 
     if (include_hartree || include_exchange) {
       auto DeltaF_loc = sDeltaF_skij.local();
@@ -775,8 +777,7 @@ void dump_lr(communicator_t& comm,
     // the ΔG that was written.
     if (lr_two_step) {
       h5::h5_write(lr_grp, "lr_two_step", 1);
-      h5::h5_write(lr_grp, "two_step_sc_method", two_step_sc_method);
-      h5::h5_write(lr_grp, "two_step_pert_method", two_step_pert_method);
+      h5::h5_write(lr_grp, "two_step_inner_method", two_step_inner_method);
       h5::h5_write(lr_grp, "two_step_order", two_step_order);
       // Outer-loop acceleration. Written only when it is actually active, so a
       // plain two-step checkpoint keeps exactly the fields it had before. With
@@ -893,7 +894,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
-                      bool, std::string const&, std::string const&, int,
+                      std::string const&,
+                      bool, std::string const&, int,
                       bool, std::string const&, double, int);
 
   } // chkpt
