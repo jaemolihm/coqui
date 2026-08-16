@@ -124,7 +124,11 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
 
     The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
     returned as a new :class:`Mf`. Because the augmented basis is not an
-    eigenbasis, many-body runs on it must use ``h0_source="compute"``.
+    eigenbasis, its Kohn-Sham Hamiltonian is a full matrix rather than
+    ``diag(eigval)``; the whole matrix is stored (``Orbitals/H_KS_skij``, IBZ
+    only) and used as the one-body seed of any run on this basis, with
+    ``Orbitals/eigval`` keeping its diagonal. Many-body runs on it must use
+    ``h0_source="compute"``.
 
     Parameters
     ----------
@@ -197,7 +201,11 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
 
     The result is written to ``{outdir}/{prefix}.h5`` as a bdft mean-field and
     returned as a new :class:`Mf`. Because the augmented basis is not an
-    eigenbasis, many-body runs on it must use ``h0_source="compute"``. Requires
+    eigenbasis, its Kohn-Sham Hamiltonian is a full matrix rather than
+    ``diag(eigval)``; the whole matrix is stored (``Orbitals/H_KS_skij``, IBZ
+    only) and used as the one-body seed of any run on this basis, with
+    ``Orbitals/eigval`` keeping its diagonal. Many-body runs on it must use
+    ``h0_source="compute"``. Requires
     ``npol == 1`` and a full-BZ k-grid (``nkpts == nkpts_ibz``).
 
     Parameters

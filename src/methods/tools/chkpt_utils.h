@@ -279,6 +279,18 @@ namespace methods {
                              std::string const& hf_div_treatment);
 
   /**
+   * Stash how an augmented mean field's one-body seed was built on the "system"
+   * group: "matrix" when the stored KS matrix Orbitals/H_KS_skij was used,
+   * "diagonal" when it was absent and diag(eigval) was used instead. Written only
+   * for augmented runs, so non-augmented checkpoints are unchanged. Lets an
+   * archived result be classified after the fact, which the log line cannot.
+   * Same first-writer-wins convention as dump_hf_div_treatment.
+   */
+  template<typename communicator_t>
+  void dump_augmented_h_ks(communicator_t& comm, std::string filename,
+                           std::string const& mode);
+
+  /**
    * Read the qpGW AC parameters written by dump_qp_params. Returns true and
    * fills the outputs if "scf/qp_params" is present; returns false (leaving
    * the outputs untouched) otherwise.

@@ -69,6 +69,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   }
   app_log(1, "  Number of processors     = {} cores per node, {} nodes\n",
           mpi->node_comm.size(), mpi->internode_comm.size());
+  hamilt::log_augmented_hks_status(*mf);
   FT.metadata_log();
 
   // Predicted footprint and layout of the large arrays, before anything is allocated.
@@ -131,6 +132,11 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   if (mb_solver.hf != nullptr)
     chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
                                  mb_solver.hf->div_treatment());
+  // ... and which one-body seed an augmented basis supplied, so an archived
+  // result can be classified against the basis vintage it was run with.
+  if (mf->is_augmented())
+    chkpt::dump_augmented_h_ks(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
+                               mf->has_hks_matrix() ? "matrix" : "diagonal");
   Timer.stop("WRITE");
 
   double F_conv, Sigma_conv;
@@ -408,6 +414,7 @@ double qp_scf_loop(
   app_log(1, "  Restart                     = {}", (restart)? "yes" : "no");
   app_log(1, "  Number of processors        = {} cores per node, {} nodes\n",
           mpi->node_comm.size(), mpi->internode_comm.size());
+  hamilt::log_augmented_hks_status(*mf);
   FT.metadata_log();
 
   Timer.start("SCF_TOTAL");
@@ -462,6 +469,11 @@ double qp_scf_loop(
   if (mb_solver.hf != nullptr)
     chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
                                  mb_solver.hf->div_treatment());
+  // ... and which one-body seed an augmented basis supplied, so an archived
+  // result can be classified against the basis vintage it was run with.
+  if (mf->is_augmented())
+    chkpt::dump_augmented_h_ks(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
+                               mf->has_hks_matrix() ? "matrix" : "diagonal");
   Timer.stop("WRITE");
 
   double Heff_conv;

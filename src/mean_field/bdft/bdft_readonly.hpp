@@ -345,12 +345,22 @@ public:
   // weights over the IBZ, same shape (empty -> all ones, e.g. for the
   // no-augmentation baseline). Marks the system augmented and writes the
   // pseudopotential so downstream can recompute H0 (h0_source="compute").
+  // `H_KS_ibz` (optional) is the full Kohn-Sham matrix H0 + V_Hxc in the
+  // augmented basis over the IBZ, (nspin, nkpts_ibz, nbnd, nbnd), of which
+  // eigval_ibz is the diagonal. It is stored as Orbitals/H_KS_skij and marks the
+  // system as carrying a KS matrix, which hamilt::set_fock then uses as the
+  // iter-0 one-body seed instead of diag(eigval). Unlike eigval/occ it is IBZ
+  // only: the reader conjugates orbitals at time-reversal-paired k, so a
+  // full-BZ band x band matrix would need a rotation convention nothing else in
+  // the file carries. nullptr -> no dataset, downstream falls back to
+  // diag(eigval).
   template<class MF>
   bdft_readonly(MF& mf, std::string fn,
                 math::nda::DistributedArray auto const& psi,
                 nda::array<double,3> const& eigval_ibz,
                 std::string augment_type_in,
-                nda::array<double,3> const& band_weights_ibz = {}) :
+                nda::array<double,3> const& band_weights_ibz = {},
+                nda::array_view<ComplexType,4> const* H_KS_ibz = nullptr) :
     sys(mf,fn,false),
     h5file(std::nullopt),
     ecut(sys.ecutrho), fft_mesh(sys.fft_mesh),
@@ -383,6 +393,16 @@ public:
     sys.nbnd = norb;
     sys.augmented = true;
     sys.augment_type = std::move(augment_type_in);
+    // The returned in-memory object must agree with the file it just wrote:
+    // this ctor never goes through initialize_from_h5, so the flag is set here.
+    sys.has_hks_matrix = (H_KS_ibz != nullptr);
+    sys.augment_ks_seed = (H_KS_ibz != nullptr) ? "ks_matrix" : "kinetic";
+    if(H_KS_ibz != nullptr)
+      utils::check( H_KS_ibz->extent(0)==sys.nspin and H_KS_ibz->extent(1)==nkpts_ibz and
+                    H_KS_ibz->extent(2)==norb and H_KS_ibz->extent(3)==norb,
+                    "bdft_readonly(augment): H_KS_ibz shape mismatch: ({},{},{},{}) vs ({},{},{},{}).",
+                    H_KS_ibz->extent(0),H_KS_ibz->extent(1),H_KS_ibz->extent(2),H_KS_ibz->extent(3),
+                    sys.nspin,nkpts_ibz,norb,norb);
     // eigval/occ span the full BZ; fill from IBZ and propagate by symmetry.
     sys.occ    = nda::array<double,3>::zeros({sys.nspin,nkpts,norb});
     sys.eigval = nda::array<double,3>::zeros({sys.nspin,nkpts,norb});
@@ -444,6 +464,9 @@ public:
           sys.mpi->comm.barrier();
         }
       }
+      // full KS matrix over the IBZ; eigval is its diagonal
+      if(H_KS_ibz != nullptr)
+        nda::h5_write(ogrp,"H_KS_skij",*H_KS_ibz,false);
       h5::group hgrp = grp.create_group("Hamiltonian");
       // write pseudopot so H0 can be recomputed in the augmented basis
       if(mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) {

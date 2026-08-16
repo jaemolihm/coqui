@@ -92,6 +92,76 @@ TEST_CASE("add_pgto", "[orbit]")
 }
 */
 
+// Frobenius diagnostics of the stored augmented Kohn-Sham matrix
+// Orbitals/H_KS_skij (IBZ only), all relative and returned on every rank:
+//   [0] ||H[0:n0,0:n0] - diag(eps_QE)||   / ||eps_QE||   protected block
+//   [1] ||H[0:n0,n0:]||                   / ||H||        protected <-> augmented
+//   [2] ||H - H^dag||                     / ||H||        hermiticity residual
+//   [3] ||H - diag(H)||                   / ||H||        size of the off-diagonal
+// [1] is an exact analytic zero: the protected orbitals are KS eigenstates and
+// orthonormalize_augmentation projects the augmentation states off them, so
+// <psi_n|H_KS|phi_a> = eps_n <psi_n|phi_a> = 0. It catches basis-ordering,
+// transposition and conjugation errors that the diagonal alone cannot see.
+// [3] is the magnitude of the defect that storing the matrix repairs -- logged,
+// never asserted.
+std::array<double,4> hks_matrix_metrics(mf::MF& aug_mf, mf::MF& parent,
+                                        std::string const& fn, long n0)
+{
+  REQUIRE(aug_mf.is_augmented());
+  REQUIRE(aug_mf.has_hks_matrix());
+  auto all = nda::range::all;
+  long nspin = parent.nspin();
+  long nkpts_ibz = parent.nkpts_ibz();
+  long norb = aug_mf.nbnd();
+  auto eref = parent.eigval()(all, nda::range(nkpts_ibz), all);
+
+  auto& mpi = *aug_mf.mpi();
+  std::array<double,4> m = {0.0, 0.0, 0.0, 0.0};
+  if (mpi.comm.root()) {
+    nda::array<ComplexType,4> H;
+    {
+      h5::file file(fn, 'r');
+      h5::group grp(file);
+      auto ogrp = grp.open_group("Orbitals");
+      nda::h5_read(ogrp, "H_KS_skij", H);
+    }
+    utils::check(H.extent(0)==nspin and H.extent(1)==nkpts_ibz and
+                 H.extent(2)==norb and H.extent(3)==norb,
+                 "hks_matrix_metrics: H_KS_skij shape ({},{},{},{}) != ({},{},{},{}).",
+                 H.extent(0),H.extent(1),H.extent(2),H.extent(3),
+                 nspin,nkpts_ibz,norb,norb);
+    double n_pro=0.0, d_pro=0.0, n_cpl=0.0, n_her=0.0, n_off=0.0, n_tot=0.0;
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k) {
+        for (long i = 0; i < norb; ++i) {
+          for (long j = 0; j < norb; ++j) {
+            auto h = H(s,k,i,j);
+            double a2 = std::norm(h);
+            n_tot += a2;
+            if (i != j) n_off += a2;
+            n_her += std::norm(h - std::conj(H(s,k,j,i)));
+            if (i < n0 and j < n0) {
+              auto r = h - ((i==j) ? ComplexType(eref(s,k,i)) : ComplexType(0.0));
+              n_pro += std::norm(r);
+            }
+            if ((i < n0) != (j < n0)) n_cpl += a2;
+          }
+          if (i < n0) d_pro += eref(s,k,i)*eref(s,k,i);
+        }
+      }
+    m[0] = std::sqrt(n_pro) / std::sqrt(d_pro);
+    m[1] = std::sqrt(n_cpl) / std::sqrt(n_tot);
+    m[2] = std::sqrt(n_her) / std::sqrt(n_tot);
+    m[3] = std::sqrt(n_off) / std::sqrt(n_tot);
+  }
+  mpi.comm.broadcast_n(m.data(), m.size(), 0);
+  app_log(2, "  H_KS protected block   ||H[p,p] - diag(eps_QE)||/||eps_QE|| = {}", m[0]);
+  app_log(2, "  H_KS protected<->aug   ||H[p,a]||/||H||                     = {}", m[1]);
+  app_log(2, "  H_KS hermiticity       ||H - H^dag||/||H||                  = {}", m[2]);
+  app_log(2, "  H_KS off-diagonal      ||H - diag(H)||/||H||                = {}", m[3]);
+  return m;
+}
+
 // Write-time DFT KS eigval seed for an augmented basis. With nbnd_aug=0 the augmented
 // basis is exactly the parent's DFT eigenstates, so the KS diagonal seed
 //   eps_i = Re[<phi_i|H0 + V_H + V_xc|phi_i>]
@@ -126,6 +196,39 @@ TEST_CASE("aug_ks_seed", "[orbit]")
   double rel = std::sqrt(num) / std::sqrt(den);
   app_log(2, "aug_ks_seed: ||KS_diag - QE_eigval|| / ||QE_eigval|| (IBZ) = {}", rel);
   utils::VALUE_EQUAL(rel, 0.0, 1e-4);
+
+  // The basis IS the parent eigenbasis, so the stored matrix must be diag(eps_QE):
+  // the whole off-diagonal, not only the protected<->augmented block, vanishes.
+  app_log(2, "aug_ks_seed: stored H_KS matrix");
+  auto m = hks_matrix_metrics(aug_mf, qe_mf, "dummy_aug.h5", nbnd);
+  utils::VALUE_EQUAL(m[0], 0.0, 1e-4);
+  utils::VALUE_EQUAL(m[2], 0.0, 1e-12);
+  utils::VALUE_EQUAL(m[3], 0.0, 1e-4);
+
+  // Read path end to end: set_fock must hand back the same matrix, i.e. the
+  // parent eigenvalues on the diagonal.
+  {
+    auto psp = hamilt::make_pseudopot(aug_mf);
+    auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
+        *mpi, {nspin, nkpts_ibz, nbnd, nbnd});
+    hamilt::set_fock(aug_mf, psp.get(), sF, false);
+    double n2 = 0.0, d2 = 0.0;
+    if (mpi->node_comm.root()) {
+      auto F = sF.local();
+      for (long s = 0; s < nspin; ++s)
+        for (long k = 0; k < nkpts_ibz; ++k)
+          for (long i = 0; i < nbnd; ++i) {
+            for (long j = 0; j < nbnd; ++j)
+              n2 += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(ref(s,k,i)) : ComplexType(0.0)));
+            d2 += ref(s,k,i)*ref(s,k,i);
+          }
+    }
+    mpi->comm.broadcast_n(&n2, 1, 0);
+    mpi->comm.broadcast_n(&d2, 1, 0);
+    double rel_F = std::sqrt(n2) / std::sqrt(d2);
+    app_log(2, "aug_ks_seed: ||set_fock - diag(QE_eigval)|| / ||QE_eigval|| = {}", rel_F);
+    utils::VALUE_EQUAL(rel_F, 0.0, 1e-4);
+  }
 
   mpi->comm.barrier();
   if(mpi->comm.root()) remove("dummy_aug.h5");
@@ -176,8 +279,75 @@ TEST_CASE("aug_ks_seed_partial", "[orbit]")
       for (long i = nbnd; i < norb; ++i)
         REQUIRE(std::isfinite(got(s,k,i)));
 
+  // The stored matrix: protected block against the parent eigenvalues, the exact
+  // analytic zero of the protected<->augmented block, and hermiticity. The
+  // off-diagonal norm is only logged -- it is the size of the coupling that the
+  // old diag(eigval)-only seed discarded.
+  app_log(2, "aug_ks_seed_partial: stored H_KS matrix");
+  auto m = hks_matrix_metrics(aug_mf, qe_mf, "dummy_aug_p.h5", nbnd);
+  utils::VALUE_EQUAL(m[0], 0.0, 1e-4);
+  utils::VALUE_EQUAL(m[1], 0.0, 1e-4);
+  utils::VALUE_EQUAL(m[2], 0.0, 1e-12);
+
   mpi->comm.barrier();
   if(mpi->comm.root()) remove("dummy_aug_p.h5");
+  mpi->comm.barrier();
+}
+
+// Graceful fallback when the DFT V_Hxc is unavailable (QE-xml parent: no exported
+// scf_local_potential / vxc_with_nlcc). No H_KS_skij dataset is written, the flag
+// is false, the provenance string reads "kinetic", and set_fock falls back to
+// exactly diag(eigval). Written as a consistency gate so it also holds -- and
+// still exercises the stored-matrix branch -- if the fixture ever gains V_Hxc.
+TEST_CASE("aug_ks_seed_fallback", "[orbit]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto qe_mf = mf::default_MF(mpi,mf::qe_source);
+
+  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug_f.h5", augmenter,
+                                                        0, 1e-6, 1e-2);
+
+  int has_ds = 0;
+  if(mpi->comm.root()) {
+    h5::file file("dummy_aug_f.h5", 'r');
+    h5::group grp(file);
+    has_ds = grp.open_group("Orbitals").has_dataset("H_KS_skij") ? 1 : 0;
+  }
+  mpi->comm.broadcast_n(&has_ds, 1, 0);
+  app_log(2, "aug_ks_seed_fallback: H_KS_skij present = {}, KS seed = {}",
+          has_ds, aug_mf.augment_ks_seed());
+  REQUIRE(aug_mf.is_augmented());
+  REQUIRE(aug_mf.has_hks_matrix() == (has_ds != 0));
+  REQUIRE(aug_mf.augment_ks_seed() == (has_ds ? "ks_matrix" : "kinetic"));
+
+  // set_fock must reproduce diag(eigval) exactly on the fallback path
+  if(!has_ds) {
+    long nspin = aug_mf.nspin();
+    long nkpts_ibz = aug_mf.nkpts_ibz();
+    long nbnd = aug_mf.nbnd();
+    auto all = nda::range::all;
+    auto eig = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
+    auto psp = hamilt::make_pseudopot(aug_mf);
+    auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
+        *mpi, {nspin, nkpts_ibz, nbnd, nbnd});
+    hamilt::set_fock(aug_mf, psp.get(), sF, false);
+    double err = 0.0;
+    if(mpi->node_comm.root()) {
+      auto F = sF.local();
+      for (long s = 0; s < nspin; ++s)
+        for (long k = 0; k < nkpts_ibz; ++k)
+          for (long i = 0; i < nbnd; ++i)
+            for (long j = 0; j < nbnd; ++j)
+              err += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(eig(s,k,i)) : ComplexType(0.0)));
+    }
+    mpi->comm.broadcast_n(&err, 1, 0);
+    app_log(2, "aug_ks_seed_fallback: ||set_fock - diag(eigval)|| = {}", std::sqrt(err));
+    utils::VALUE_EQUAL(std::sqrt(err), 0.0, 1e-14);
+  }
+
+  mpi->comm.barrier();
+  if(mpi->comm.root()) remove("dummy_aug_f.h5");
   mpi->comm.barrier();
 }
 

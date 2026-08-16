@@ -845,6 +845,22 @@ void dump_hf_div_treatment(communicator_t& comm, std::string filename,
 }
 
 template<typename communicator_t>
+void dump_augmented_h_ks(communicator_t& comm, std::string filename,
+                         std::string const& mode) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_augmented_h_ks: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    auto sys_grp = grp.has_subgroup("system") ? grp.open_group("system")
+                                              : grp.create_group("system");
+    if (!sys_grp.has_dataset("augmented_h_ks"))
+      h5::h5_write(sys_grp, "augmented_h_ks", mode);
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
 bool read_qp_params(communicator_t& comm, std::string filename,
                     std::string& off_diag_mode, double& eta,
                     std::string& ac_alg, int& Nfit) {
@@ -893,6 +909,7 @@ template void dump_qp_params(mpi3::communicator&, std::string,
 template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
 template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
+template void dump_augmented_h_ks(mpi3::communicator&, std::string, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,

@@ -28,7 +28,9 @@
 
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
+#include "h5/h5.hpp"
 #include "nda/nda.hpp"
+#include "nda/h5.hpp"
 
 #include "utilities/proc_grid_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -206,8 +208,13 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 /**
- * Fock matrix associated with a MF object. 
+ * Fock matrix associated with a MF object.
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
+ *
+ * This is the pure diag(mf.eigval()) primitive. For an augmented (non-eigenstate)
+ * basis the one-body Hamiltonian is not diagonal, and its stored full matrix is
+ * consumed by set_fock, not here -- call set_fock rather than F to obtain the
+ * one-body seed of an arbitrary mean field.
  * @return - A distributed array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
@@ -288,6 +295,62 @@ auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 /**
+ * Read the full Kohn-Sham matrix of an augmented basis, Orbitals/H_KS_skij, from the
+ * mean-field h5 into a shared memory array. The dataset is stored over the IBZ only,
+ * (nspin, nkpts_ibz, nbnd_stored, nbnd_stored); a run that opens the basis with fewer
+ * bands gets the leading block, which drops the coupling to the discarded states.
+ * Only meaningful when mf.is_augmented() and mf.has_hks_matrix().
+ */
+template<nda::MemoryArrayOfRank<4> Array_4D_t>
+void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
+  long nspin = mf.nspin();
+  long nkpts_ibz = mf.nkpts_ibz();
+  long nbnd = mf.nbnd();
+  utils::check(mf.is_augmented() and mf.has_hks_matrix(),
+               "read_H_KS_aug: mean field carries no augmented H_KS matrix.");
+  utils::check(sH_KS.shape() == std::array<long,4>{nspin, nkpts_ibz, nbnd, nbnd},
+               "read_H_KS_aug: shape ({},{},{},{}) != ({},{},{},{}).",
+               sH_KS.shape()[0], sH_KS.shape()[1], sH_KS.shape()[2], sH_KS.shape()[3],
+               nspin, nkpts_ibz, nbnd, nbnd);
+  if (sH_KS.node_comm()->root()) {
+    h5::file file(mf.filename(), 'r');
+    h5::group grp(file);
+    auto ogrp = grp.open_group("Orbitals");
+    nda::array<ComplexType,4> H;
+    nda::h5_read(ogrp, "H_KS_skij", H);
+    utils::check(H.extent(0) == nspin and H.extent(1) == nkpts_ibz and
+                 H.extent(2) >= nbnd and H.extent(3) >= nbnd,
+                 "read_H_KS_aug: H_KS_skij in {} has shape ({},{},{},{}), incompatible "
+                 "with (nspin, nkpts_ibz, nbnd) = ({},{},{}).", mf.filename(),
+                 H.extent(0), H.extent(1), H.extent(2), H.extent(3), nspin, nkpts_ibz, nbnd);
+    if (H.extent(2) > nbnd)
+      app_log(2, "  read_H_KS_aug: using the leading {} of {} stored bands; the coupling "
+                 "to the discarded states is dropped.", nbnd, H.extent(2));
+    sH_KS.local() = H(nda::range(nspin), nda::range(nkpts_ibz),
+                      nda::range(nbnd), nda::range(nbnd));
+  }
+  sH_KS.node_sync();
+}
+
+/**
+ * Emit which one-body seed an augmented mean field will use. Root-only and
+ * verbosity-gated (app_warning is neither, and goes to stderr while the run banner
+ * goes to stdout), so an archived log records the path taken.
+ */
+inline void log_augmented_hks_status(mf::MF &mf) {
+  if (not mf.is_augmented()) return;
+  if (mf.has_hks_matrix()) {
+    app_log(1, "  Augmented basis one-body seed = full H_KS matrix from {} "
+               "(basis KS seed: {})", mf.filename(), mf.augment_ks_seed());
+  } else {
+    app_log(1, "  [WARNING] Augmented basis {} carries no H_KS matrix (KS seed: {}); the "
+               "one-body seed falls back to diag(eigval), which drops the off-diagonal "
+               "couplings of the non-eigenstate basis. Regenerate the basis to use the "
+               "full Kohn-Sham matrix.", mf.filename(), mf.augment_ks_seed());
+  }
+}
+
+/**
  * One-body Hamiltonian associated with a MF object in a shared memory array
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
  * @param exclude_H0 [INPUT] - exclude kinetic + pseudo/external potential or not
@@ -301,6 +364,30 @@ template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sF_skij,
               bool exclude_H0=false,
               const math::shm::shared_array<Array_4D_t> *sH0_skij=nullptr) {
+  // An augmented basis is not an eigenbasis, so hamilt::F's diag(eigval) is only the
+  // diagonal of its one-body Hamiltonian. When the full matrix was persisted at
+  // augmentation time, use it: this is the single funnel every iter-0 seed goes
+  // through (ground-state SCF, qp SCF, the LR "mf_dft" G0, rpa, downfolding).
+  if (mf.is_augmented() and mf.has_hks_matrix()) {
+    read_H_KS_aug(mf, sF_skij);
+    if (exclude_H0) {
+      if (sH0_skij != nullptr) {
+        if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_skij->local();
+      } else {
+        utils::check(sF_skij.communicator() != nullptr and sF_skij.internode_comm() != nullptr,
+                     "set_fock: recomputing H0 needs a shared array built with a global "
+                     "and internode communicator.");
+        auto sH0_tmp = math::shm::make_shared_array<Array_4D_t>(
+            *sF_skij.communicator(), *sF_skij.internode_comm(), *sF_skij.node_comm(),
+            sF_skij.shape());
+        hamilt::set_H0(mf, psp, sH0_tmp);
+        if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_tmp.local();
+      }
+      sF_skij.node_sync();
+    }
+    return;
+  }
+
   long np = sF_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});

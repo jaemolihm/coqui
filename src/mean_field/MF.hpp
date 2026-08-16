@@ -339,6 +339,23 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
+    // True if the h5 of an augmented basis carries the full Kohn-Sham matrix
+    // Orbitals/H_KS_skij (IBZ only). False for every basis built before the
+    // matrix was persisted, in which case the one-body seed falls back to
+    // diag(eigval). Only the bdft backend can carry it.
+    bool has_hks_matrix() const
+    { return std::holds_alternative<bdft::bdft_readonly>(var)
+          && std::get<bdft::bdft_readonly>(var).get_sys().has_hks_matrix; }
+
+    // Which seed produced an augmented basis's energies: "ks_matrix", "kinetic",
+    // or "unknown (pre-provenance basis)" for a file written before the record.
+    std::string augment_ks_seed() const
+    {
+      if(!is_augmented()) return "";
+      auto const& s = std::get<bdft::bdft_readonly>(var).get_sys().augment_ks_seed;
+      return s.size() > 0 ? s : std::string("unknown (pre-provenance basis)");
+    }
+
     // Per-band THC fit weights over the full BZ, (nspin, nkpts, nbnd): for an
     // augmented basis, min(s,1) for the augmentation states (s = residual
     // singular value of the dtau_step-scaled raw state) and 1 for the original
