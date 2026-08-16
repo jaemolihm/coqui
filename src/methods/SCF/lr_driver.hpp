@@ -316,9 +316,11 @@ public:
    *
    * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW, the previous iterates and
    * the DIIS subspace) on entry, so the result depends only on ΔH0 and not on
-   * whichever perturbation ran before it. The SCF timers are reset per call as
-   * well; the LR_DRIVER_SETUP_* clocks are not, so the one-time cost stays
-   * visible and is never double-counted.
+   * whichever perturbation ran before it. No clock is reset: every timer
+   * accumulates over the whole call, so the table printed after the last
+   * perturbation is the cost of the entire batch and each intermediate one is a
+   * running total. The LR_DRIVER_SETUP_* clocks likewise stay as measured, the
+   * setup being paid once for all perturbations.
    *
    * The output arrays may be the same ones on every call — they are fully
    * overwritten.

@@ -615,16 +615,6 @@ void lr_driver::lr_setup(
 }
 
 
-// SCF keys reset at the top of every lr_solve_one, so each perturbation reports
-// its own timings. The LR_DRIVER_SETUP* keys are deliberately absent: the setup
-// is paid once and stays visible in every per-perturbation report.
-static constexpr const char* lr_scf_timer_keys[] = {
-    "LR_SCF", "LR_SAVE", "LR_DYSON", "LR_HF", "LR_GW_SIGMA", "LR_GW_PI",
-    "LR_GW_W", "LR_GW_SIGMA_TERM2", "LR_QPGW_STATIC", "LR_ITER_ALG",
-    "LR_CONVERGENCE", "LR_TOTALS", "LR_HF_PERT", "LR_GW_SIGMA_PERT",
-    "LR_GW_PI_PERT", "LR_GW_W_PERT", "LR_OUTER_ITER_ALG"};
-
-
 template<THC_ERI THC_t>
 std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -703,17 +693,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   if (p.use_diis()) _lr_diis->reset();
   if (outer_diis_on) _outer_diis->reset();
-  // Both halves of the report: the driver's own SCF clocks and the solvers'
-  // sub-clocks. Resetting only the former leaves print_timers showing a per-mode
-  // total above sub-clocks accumulated over every mode so far.
-  for (auto& kkey : lr_scf_timer_keys) _Timer.reset(kkey);
-  _lr_dyson.reset_timers();
-  if (_lr_hf) _lr_hf->reset_timers();
-  if (_lr_gw) _lr_gw->reset_timers();
-  if (_lr_gw_pert) _lr_gw_pert->reset_timers();
-  if (_lr_gw2) _lr_gw2->reset_timers();
-  if (_lr_pi) _lr_pi->reset_timers();
-  if (_lr_scr) _lr_scr->reset_timers();
+  // No clock is reset here: the SCF timers and the solvers' sub-clocks both
+  // accumulate over every perturbation of the call, so the table printed after
+  // the last one is the cost of the whole batch. Each intermediate table is
+  // therefore a running total, and one perturbation's cost is the difference
+  // between consecutive tables.
   _mpi->comm.barrier();
   _Timer.stop("LR_DRIVER_SETUP_MISC");
 
