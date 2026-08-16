@@ -61,14 +61,11 @@ namespace {
       utils::check(w_pgrid[0]*w_pgrid[2]*w_pgrid[3]*w_pgrid[4] == _context->comm.size(),
                    "solve_dyson: pgrid mismatches!");
 
-      if (not _pgrid_logged) {
-        _pgrid_logged = true;
-        app_log(2, "Dyson equation for Green's function:");
-        app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})",
-                w_pgrid[0], w_pgrid[2], w_pgrid[3], w_pgrid[4]);
-        app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})",
-                w_bsize[0], w_bsize[2], w_bsize[3], w_bsize[4]);
-      }
+      app_log(2, "Dyson equation for Green's function:");
+      app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})",
+              w_pgrid[0], w_pgrid[2], w_pgrid[3], w_pgrid[4]);
+      app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})",
+              w_bsize[0], w_bsize[2], w_bsize[3], w_bsize[4]);
     }
 
     _Timer.start("SIGMA_TAU_TO_W");

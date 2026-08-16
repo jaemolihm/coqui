@@ -165,9 +165,6 @@ private:
 
   utils::TimerManager _Timer;
 
-  /// The processor grid is the same for every solve_dyson call, so it is logged only once.
-  bool _pgrid_logged = false;
-
 public:
   const mf::MF* MF() const { return _MF; }
   auto& mpi() const { return _context; }

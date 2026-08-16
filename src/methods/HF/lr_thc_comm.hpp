@@ -153,9 +153,9 @@ namespace methods {
        * @param Timer     - [INPUT] optional sub-clock manager. When non-null the call is
        *                    split under the clock names SIGMA_A2P_{GEMM,REDUCE,AXPY};
        *                    REDUCE includes the wait for the slowest tile in dim0_comm.
-       * @param O_buf     - [INPUT/OUTPUT] optional caller-owned (dim0, nbnd, nbnd) scratch
-       *                    for the reduction; resized on shape mismatch. Pass a cached
-       *                    buffer to avoid one heap allocation per call.
+       * @param O_buf     - [INPUT/OUTPUT] caller-owned (dim0, nbnd, nbnd) scratch for the
+       *                    reduction; resized on shape mismatch. Caller-owned so a cached
+       *                    buffer survives across calls instead of being reallocated.
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary_local(int ip, int iq,
@@ -165,8 +165,8 @@ namespace methods {
                                        THC_ERI auto& thc,
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       utils::TimerManager* Timer = nullptr,
-                                       nda::array<ComplexType, 3>* O_buf = nullptr) {
+                                       utils::TimerManager* Timer,
+                                       nda::array<ComplexType, 3>& O_buf) {
         static_assert(nda::get_rank<Array_aux_t> == 4,
                       "lr_thc_comm::aux_to_primary_local: aux rank must be 4");
         static_assert(nda::get_rank<Array_primary_t> == 4,
@@ -236,8 +236,11 @@ namespace methods {
         auto k_rng = O_IPQ.local_range(1);
         auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
 
+        // This entry point is not on the Sigma hot path, so it owns the scratch itself
+        // rather than making every caller thread one through.
+        nda::array<ComplexType, 3> O_buf;
         aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
-                             kp_map, kpq_map);
+                             kp_map, kpq_map, nullptr, O_buf);
 
         // reduce
         O_Iab.win().fence();
@@ -528,8 +531,8 @@ namespace methods {
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
                                        long k_offset, long P_offset, long Q_offset,
-                                       utils::TimerManager* Timer = nullptr,
-                                       nda::array<ComplexType, 3>* O_buf = nullptr) {
+                                       utils::TimerManager* Timer,
+                                       nda::array<ComplexType, 3>& O_buf) {
         static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
                       "lr_thc_comm::_aux_to_primary_impl: Rank mismatch");
         static_assert(nda::get_rank<Array_primary_t> >= 4,
@@ -568,17 +571,12 @@ namespace methods {
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
-        // Buffer array to hold local (t,s,k) slices of O_iab for reduction; owned
-        // by the caller when one is supplied. It needs no zeroing: the loop below
-        // closes every (i,·,·) block with a 3-argument gemm, i.e. β = 0, so the
-        // whole buffer is assigned before it is read.
+        // Caller-owned buffer holding local (t,s,k) slices of O_iab for reduction. It
+        // needs no zeroing: the loop below closes every (i,·,·) block with a 3-argument
+        // gemm, i.e. β = 0, so the whole buffer is assigned before it is read.
         auto buf_shape = shape_t<3>{(long)dim0, (long)nbnd, (long)nbnd};
-        nda::array<ComplexType, 3> O_buf_local;
-        if (O_buf == nullptr)
-          O_buf_local.resize(buf_shape);
-        else if (O_buf->shape() != buf_shape)
-          O_buf->resize(buf_shape);
-        nda::array_view<ComplexType, 3> O_buf_iab(O_buf ? *O_buf : O_buf_local);
+        if (O_buf.shape() != buf_shape) O_buf.resize(buf_shape);
+        nda::array_view<ComplexType, 3> O_buf_iab(O_buf);
 
         tic("SIGMA_A2P_GEMM");
         for (size_t i = 0; i < dim0; ++i) {

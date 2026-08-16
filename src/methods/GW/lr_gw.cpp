@@ -547,7 +547,7 @@ namespace methods {
           _Timer.start("SIGMA_AUX_TO_PRIM");
           lr_thc_comm::aux_to_primary_local(0, 0, ComplexType(1.0), dSigma_skPQ,
                                             DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
-                                            &_Timer, &_A2P_buf_iab);
+                                            &_Timer, _A2P_buf_iab);
 
           // Add precomputed IBC correction for this τ-point
           if (add_ibc && tau_comm.rank() == 0) {
