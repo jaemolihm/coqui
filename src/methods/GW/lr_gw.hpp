@@ -214,26 +214,34 @@ namespace methods {
     /// batched run's timing report covers one perturbation, not the running total.
     inline void reset_timers() { _Timer.reset(); }
 
-    /// Print only the component clocks, each line prefixed by `indent`.
-    /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
+    /// Print only this instance's component clocks, each line prefixed by `indent`.
+    inline void print_subclocks(int level, const std::string& indent) {
+      print_subclocks_all(level, indent, {this});
+    }
+
+    /// Print one Σ component table summed over every instance in `solvers`
+    /// (nulls ignored), each line prefixed by `indent`. Embedded (with deeper
+    /// indent) in lr_driver's final hierarchical report.
     /// The R-space total leads; transpose/div-correction siblings live outside
     /// EVALUATE_SIGMA_R, so the R-space components below sum to that line, not
     /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
     /// Aux->Primary is a breakdown of it, not further terms of that sum.
     ///
-    /// `others` are further lr_gw instances evaluating the same ΔΣ for a
-    /// different kernel channel or term; their clocks are added in, so the
-    /// report keeps one Σ table whatever the kernel was split into.
-    inline void print_subclocks(int level, const std::string& indent,
-                                std::initializer_list<lr_gw*> others = {}) {
+    /// Splitting the kernel splits ΔΣ across several instances (self-consistent
+    /// channel, perturbative channel, split-term second evaluator); summing them
+    /// keeps one Σ table whatever the kernel was split into. Static rather than a
+    /// member, because a run whose Σ lives only in the perturbative channel leaves
+    /// the self-consistent instance null and the table must still print.
+    static void print_subclocks_all(int level, const std::string& indent,
+                                    std::initializer_list<lr_gw*> solvers) {
       auto sec = [&](const char* key) {
-        double v = _Timer.elapsed(key);
-        for (auto* o : others) if (o) v += o->_Timer.elapsed(key);
+        double v = 0.0;
+        for (auto* o : solvers) if (o) v += o->_Timer.elapsed(key);
         return v;
       };
       auto cnt = [&](const char* key) {
-        int v = _Timer.number_of_calls(key);
-        for (auto* o : others) if (o) v += o->_Timer.number_of_calls(key);
+        int v = 0;
+        for (auto* o : solvers) if (o) v += o->_Timer.number_of_calls(key);
         return v;
       };
       app_log(level, "{0}  - Sigma R-space (total):      {1:8.3f} sec  {2:4d} calls", indent, sec("EVALUATE_SIGMA_R"), cnt("EVALUATE_SIGMA_R"));
