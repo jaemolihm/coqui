@@ -229,7 +229,11 @@ public:
    * hands over the distributed array and this replicates it on the first read.
    *
    * Idempotent and collective: with nothing pending it is a no-op, so the shared
-   * copy stays valid until the next solve retains a new one.
+   * copy stays valid until the next solve retains a new one. Nothing is pending
+   * in exactly two cases — this iteration's ΔG(τ) was already replicated by an
+   * earlier call, or no call was made at all and the next solve dropped it. The
+   * latter is where the gather is genuinely skipped: an SCF iteration whose
+   * kernel never reads ΔG(τ) pays for none of it.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 

@@ -88,12 +88,14 @@ double lr_dyson::solve_lr_dyson(
   auto [w_pgrid, w_bsize] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
 
-  // ΔΣ(τ) → ΔΣ(iω) once per solve, not once per pass. distributed_tau_to_w is a
-  // pure function of (ΔΣ(τ), FT, grid) and Δμ never reaches it, so the two
-  // fix_density passes would otherwise transform the same input to the same
-  // result twice. Handed to _impl by pointer, not by value: _impl frees it after
-  // its ω-space loop on the final pass, which is where the single-pass code used
-  // to free it and is before the redistribute that sets the Dyson memory peak.
+  // ΔΣ(iω) is computed here, outside solve_lr_dyson_impl, so it can be reused
+  // when solve_lr_dyson_impl is called twice (at q=0 with fix_density: first to
+  // compute Δμ, then to apply it). distributed_tau_to_w is a pure function of
+  // (ΔΣ(τ), FT, grid) and Δμ never reaches it, so both passes would otherwise
+  // transform the same input to the same result. Handed to _impl by pointer, not
+  // by value: _impl frees it after its ω-space loop on the final pass, which is
+  // where the single-pass code used to free it and is before the redistribute
+  // that sets the Dyson memory peak.
   // A local rather than a member — ΔΣ changes every SCF iteration.
   std::optional<dArray_5D_t> opt_dDeltaSigma_wskij;
   if (sDeltaSigma_tskij) {
@@ -105,66 +107,68 @@ double lr_dyson::solve_lr_dyson(
     _Timer.stop("LR_DYSON_TAU_TO_W");
   }
 
-  // For fix_density mode at q=0, we need to compute Δμ
-  // The LR Dyson equation is linear in Δμ, so we solve twice:
-  // 1. ΔG(0) with Δμ=0 to get ΔN(0)
-  // 2. Use cached dN/dμ to compute Δμ = -ΔN(0) / (dN/dμ)
-  // 3. ΔG_final with the computed Δμ
-  if (fix_density && _is_q_gamma) {
+  // At q≠0 the Δμ·S term vanishes and Δμ is meaningless — force it to zero so a
+  // caller's value cannot silently pollute the RHS.
+  if (!_is_q_gamma) {
+    if (fix_density)
+      app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
+    Delta_mu = 0.0;
+  }
+
+  // Enforcing ΔN=0 at q=0 takes two passes, because the LR Dyson equation is
+  // linear in Δμ: one at Δμ=0 to get ΔN(0), then Δμ = -ΔN(0)/(dN/dμ) — exact,
+  // not iterative — applied in a second. dN/dμ is cached, so whether that closed
+  // form is usable is known before any pass runs: at dN/dμ ≈ 0 it is singular,
+  // Δμ=0 is the answer, and the solve collapses onto the single final pass below
+  // that every other mode also takes.
+  const bool fix_density_q0 = fix_density and _is_q_gamma;
+  bool two_pass = false;
+  double dN_dmu = 0.0;
+  if (fix_density_q0) {
     utils::check(_dN_dmu_cached,
                  "solve_lr_dyson: fix_density=true but dN/dμ not cached. "
                  "Call compute_dN_dmu() before the SCF loop.");
 
     app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
 
-    // dN/dμ is already cached, so whether the Δμ step is degenerate is known
-    // before any pass runs. When it is, Δμ=0 is the answer and pass 1 is the
-    // only pass — which makes it the final one.
-    const bool degenerate = std::abs(_cached_dN_dmu) < 1e-15;
-
-    // First pass: solve with Δμ=0. Unless degenerate, only ΔN is taken from it,
-    // and ΔN comes from ΔDm, so its ΔG(τ) is dropped rather than kept for a
-    // consumer the second pass would overwrite before anyone could read it.
-    solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                        &opt_dDeltaSigma_wskij, 0.0, /*last_pass=*/degenerate,
-                        sDeltaVcorr_skij);
-
-    // Compute ΔN at Δμ=0
-    _Timer.start("LR_DYSON_NELEC");
-    double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
-    _Timer.stop("LR_DYSON_NELEC");
-
-    if (degenerate) {
+    dN_dmu = _cached_dN_dmu;
+    if (std::abs(dN_dmu) < 1e-15) {
       app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
       Delta_mu = 0.0;
     } else {
-      // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
-      // (The LR Dyson equation is linear in Δμ, so this is exact)
-      Delta_mu = -DeltaN_0 / _cached_dN_dmu;
-      app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, _cached_dN_dmu);
-      app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
-
-      // Second pass: solve with computed Δμ
-      solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                          &opt_dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
-                          sDeltaVcorr_skij);
-
-      // Verify ΔN ≈ 0
-      _Timer.start("LR_DYSON_NELEC");
-      double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
-      _Timer.stop("LR_DYSON_NELEC");
-      app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
+      two_pass = true;
     }
-  } else {
-    // Standard mode: use provided Delta_mu
-    if (fix_density && !_is_q_gamma) {
-      app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
-    }
-    // For q≠0, Δμ is meaningless — force to zero to prevent silent pollution
-    if (!_is_q_gamma) Delta_mu = 0.0;
+  }
+
+  if (two_pass) {
+    // Δμ-probing pass. Only ΔN is taken from it, and ΔN comes from ΔDm, so its
+    // ΔG(τ) is dropped rather than kept for a consumer the final pass would
+    // overwrite before anyone could read it.
     solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                        &opt_dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
+                        &opt_dDeltaSigma_wskij, 0.0, /*last_pass=*/false,
                         sDeltaVcorr_skij);
+
+    _Timer.start("LR_DYSON_NELEC");
+    const double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
+    _Timer.stop("LR_DYSON_NELEC");
+
+    Delta_mu = -DeltaN_0 / dN_dmu;
+    app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
+    app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
+  }
+
+  // Final pass — the only one, unless the Δμ-probing pass above ran.
+  solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                      &opt_dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
+                      sDeltaVcorr_skij);
+
+  if (fix_density_q0) {
+    // ~0 once Δμ was applied; the residual ΔN of the dN/dμ ≈ 0 case is exactly
+    // the error the warning above is about, so report it there too.
+    _Timer.start("LR_DYSON_NELEC");
+    const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
+    _Timer.stop("LR_DYSON_NELEC");
+    app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
   }
 
   _Timer.stop("LR_DYSON");
