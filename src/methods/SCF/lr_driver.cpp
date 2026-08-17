@@ -62,7 +62,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_SCF", "LR_DRIVER_SETUP",
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
-                  "LR_DRIVER_SETUP_DN_DMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
+                  "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
                    "LR_ITER_ALG", "LR_SAVE", "LR_CONVERGENCE", "LR_TOTALS",
@@ -505,11 +505,11 @@ void lr_driver::lr_setup(
   _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
   utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
 
-  // Precompute dN/dμ if needed for fix_density mode at q=0
+  // Precompute the Δμ response if needed for fix_density mode at q=0
   if (p.fix_density && _lr_dyson.is_q_gamma()) {
-    _Timer.start("LR_DRIVER_SETUP_DN_DMU");
-    _lr_dyson.compute_dN_dmu();
-    _Timer.stop("LR_DRIVER_SETUP_DN_DMU");
+    _Timer.start("LR_DRIVER_SETUP_DELTAMU");
+    _lr_dyson.build_dmu_response();
+    _Timer.stop("LR_DRIVER_SETUP_DELTAMU");
   }
 
   _Timer.start("LR_DRIVER_SETUP_MISC");
@@ -1411,7 +1411,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
                                       long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
                                       lr_diis_hist_t outer_hist,
-                                      bool affine_dmu) {
+                                      bool need_Delta_mu) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1506,9 +1506,9 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // built once from the reference G(iω) and resident for the run. It is exactly one
   // more ΔG(τ) — the largest single distributed array here — so it is listed even
   // though only this one path allocates it.
-  if (affine_dmu) {
+  if (need_Delta_mu) {
     arrays.push_back({"dG_dmu(τ) = ∂ΔG/∂Δμ (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
-    arrays.push_back({"∂ΔDm/∂Δμ (lr_dyson)",
+    arrays.push_back({"∂Dm/∂μ (lr_dyson)",
                       fmt::format("({},{},{},{})", ns, nki, nb, nb),
                       band5(1), false, PERSIST});
   }
@@ -1668,7 +1668,7 @@ void lr_driver::print_setup_timers() {
   app_log(2, "      - W_tRPQ:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_TRPQ"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_TRPQ"));
   app_log(2, "      - G(iω) precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_OMEGA"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_OMEGA"));
   app_log(2, "      - G^R pair precompute:    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_R"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_R"));
-  app_log(2, "      - dN/dμ precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DN_DMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DN_DMU"));
+  app_log(2, "      - Δμ response precompute: {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DELTAMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DELTAMU"));
   app_log(2, "      - Alloc:                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_ALLOC"), _Timer.number_of_calls("LR_DRIVER_SETUP_ALLOC"));
   app_log(2, "      - Build IBC (DeltaX):     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_IBC"), _Timer.number_of_calls("LR_DRIVER_SETUP_IBC"));
   app_log(2, "      - Misc:                   {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DRIVER_SETUP_MISC"), _Timer.number_of_calls("LR_DRIVER_SETUP_MISC"));

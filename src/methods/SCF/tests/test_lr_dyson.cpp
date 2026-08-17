@@ -536,7 +536,8 @@ namespace lr_dyson_tests {
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // --- under test: dN/dmu from the Delta_mu response ---
-    double dN_dmu = lr_dys.compute_dN_dmu();
+    lr_dys.build_dmu_response();
+    double dN_dmu = lr_dys.dN_dmu();
 
     // --- reference: Tr[S . (G.S.G)(beta-)], serial per (s, k) ---
     auto k_weight = mf.k_weight();
@@ -578,8 +579,9 @@ namespace lr_dyson_tests {
             dN_dmu, dN_dmu_ref.real(), rel_err);
     REQUIRE(rel_err < 1e-10);
 
-    // compute_dN_dmu() is cached: a second call must not rebuild or drift.
-    VALUE_EQUAL(lr_dys.compute_dN_dmu(), dN_dmu, 1e-14);
+    // build_dmu_response() is cached: a second call must not rebuild or drift.
+    lr_dys.build_dmu_response();
+    VALUE_EQUAL(lr_dys.dN_dmu(), dN_dmu, 1e-14);
   }
 
 } // lr_dyson_tests

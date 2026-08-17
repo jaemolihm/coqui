@@ -54,7 +54,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
                   "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
-                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_DMU_SHIFT", "LR_DYSON_MISC",
+                  "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_DELTAMU", "LR_DYSON_MISC",
                   "GATHER_SHM_ZERO", "GATHER_SHM_ASSIGN", "GATHER_SHM_SKEW",
                   "GATHER_SHM_REDUCE", "GATHER_SHM_BARRIER"}) {
     _Timer.add(v);
@@ -111,25 +111,24 @@ double lr_dyson::solve_lr_dyson(
     Delta_mu = 0.0;
   }
 
-  // For fix_density mode at q=0, we need to compute Δμ:
-  // 1. ΔG(0) with Δμ=0 to get ΔN(0)
-  // 2. Use cached dN/dμ to compute Δμ = -ΔN(0) / (dN/dμ)
-  // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dΔDm/dΔμ
+  // fix_density at q=0 takes three steps:
+  // 1. the single Dyson pass below, run at Δμ=0, giving ΔG(0) and ΔN(0)
+  // 2. Δμ = -ΔN(0) / (dN/dμ), with dN/dμ from the cached Δμ response
+  // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dDm/dμ
   //
-  // Step 3 used to be a second Dyson pass. Δμ reaches the RHS only through the
-  // −Δμ·S term, so ΔG is affine in it and dG/dμ is a function of the reference
-  // G(iω) and S alone — the same statement the closed form in step 2 already
-  // rests on. build_dmu_response() builds it once, and step 3 becomes a local
-  // axpy: exact in exact arithmetic, and a different rounding path from the
-  // recomputed G·X·G + FT chain it replaces (~1e-15 relative on ΔG and ΔDm).
+  // Δμ reaches the RHS only through the −Δμ·S term, so ΔG is affine in it and
+  // dG/dμ is a function of the reference G(iω) and S alone — the same statement
+  // the closed form in step 2 rests on. build_dmu_response() builds that response
+  // once, before the SCF loop, which makes step 3 a local axpy (exact in exact
+  // arithmetic) rather than a second Dyson pass.
   //
-  // So there is one Dyson pass in every mode; only the Δμ it runs at differs,
-  // and only steps 2-3 are conditional.
+  // There is therefore one Dyson pass in every mode; only the Δμ it runs at
+  // differs, and only steps 2-3 are conditional.
   double dN_dmu = 0.0;
   if (fix_density and _is_q_gamma) {
     utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
                  "solve_lr_dyson: fix_density=true but the Δμ response is not cached. "
-                 "Call compute_dN_dmu() before the SCF loop.");
+                 "Call build_dmu_response() before the SCF loop.");
 
     app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
     dN_dmu = _cached_dN_dmu;
@@ -161,10 +160,10 @@ double lr_dyson::solve_lr_dyson(
 
       // Step 3, as a local axpy on the Δμ=0 solution:
       //   ΔG(τ; Δμ) = ΔG(τ; 0) + Δμ·(dG/dμ)(τ)
-      //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dΔDm/dΔμ)
-      _Timer.start("LR_DYSON_DMU_SHIFT");
+      //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dDm/dμ)
+      _Timer.start("LR_DYSON_DELTAMU");
       apply_dmu_shift(sDeltaDm_skij, Delta_mu);
-      _Timer.stop("LR_DYSON_DMU_SHIFT");
+      _Timer.stop("LR_DYSON_DELTAMU");
 
       // Verify ΔN ≈ 0
       _Timer.start("LR_DYSON_NELEC");
@@ -393,7 +392,7 @@ void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
 
   _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dG_dmu_tskij->local();
 
-  // ΔDm and dΔDm/dΔμ are both node-replicated, so the add runs once per node.
+  // ΔDm and dDm/dμ are both node-replicated, so the add runs once per node.
   sDeltaDm_skij.win().fence();
   if (_context->node_comm.root())
     sDeltaDm_skij.local() += ComplexType(Delta_mu) * _sdDm_dmu_skij->local();
@@ -435,7 +434,7 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
   ComplexType DeltaN(0.0);
 
   // (s, k) is distributed over the whole communicator — ΔDm and S are both shared
-  // per node, so any rank can evaluate any item. Same striding as compute_dN_dmu.
+  // per node, so any rank can evaluate any item.
   int rank = _context->comm.rank();
   int size = _context->comm.size();
   nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
@@ -463,27 +462,26 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
 }
 
 
-double lr_dyson::compute_dN_dmu() {
-  if (!_dN_dmu_cached) build_dmu_response();
-  return _cached_dN_dmu;
-}
-
-
 void lr_dyson::build_dmu_response() {
-  // Builds the whole Δμ-response cache: dG/dμ(τ), dΔDm/dΔμ and dN/dμ. They all
+  // Builds the whole Δμ-response cache: dG/dμ(τ), dDm/dμ and dN/dμ. They all
   // come from one Dyson pass, so they are produced together and never separately.
   //
   // ΔG(k,iω) = G_{k+q}·[ΔH0 + ΔF + ΔΣ + ΔV_QPGW − Δμ·S]·G_k is affine in Δμ:
   //   ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ,   dG/dμ(k,iω) = −G_{k+q}(iω)·S(k)·G_k(iω),
   // and w_to_tau / tau_to_beta are linear, so ΔDm = −ΔG(β⁻) obeys the same
-  // relation with dΔDm/dΔμ = −(dG/dμ)(β⁻). fix_density therefore needs one Dyson
+  // relation with dDm/dμ = −(dG/dμ)(β⁻). fix_density therefore needs one Dyson
   // pass and an axpy, not two passes.
   //
   // dG/dμ is built by the Dyson kernel itself, with a zero one-body perturbation,
   // no ΔΣ/ΔV_QPGW and Δμ = 1 ⇒ X = −S. Then ΔG(0) = 0 and the pass returns
-  // exactly ΔG(Δμ=1) = dG/dμ and ΔDm(Δμ=1) = dΔDm/dΔμ, with no post-hoc sign to
+  // exactly ΔG(Δμ=1) = dG/dμ and ΔDm(Δμ=1) = dDm/dμ, with no post-hoc sign to
   // get wrong, and laid out the way the real solve lays out its ΔG(τ) by
   // construction.
+  //
+  // Idempotent, so lr_driver can call it as the fix_density setup hook without
+  // tracking whether the current G(iω) has already been through it.
+  if (_dN_dmu_cached) return;
+
   utils::check(_is_q_gamma,
                "build_dmu_response: the Δμ response is not meaningful for q≠0. "
                "This should only be called for q=0 perturbations.");
@@ -508,7 +506,7 @@ void lr_dyson::build_dmu_response() {
   _sdDm_dmu_skij.emplace(std::move(sdDm_dmu_skij));
 
   // N = Tr[S·Dm] summed over k with the spin factor, so differentiating at fixed
-  // everything-else gives dN/dμ = spin·Σ_k w_k Tr[S(k)·(dΔDm/dΔμ)(k)] — exactly
+  // everything-else gives dN/dμ = spin·Σ_k w_k Tr[S(k)·(dDm/dμ)(k)] — exactly
   // compute_lr_Nelec of the response matrix. Taking it from the response rather
   // than from a separate (G·S·G)(β⁻) loop keeps one definition of dN/dμ, and it
   // is the one the Δμ = -ΔN(0)/(dN/dμ) closed form must be consistent with for
@@ -518,36 +516,9 @@ void lr_dyson::build_dmu_response() {
   app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached)", _cached_dN_dmu);
 
   // This ran one full Dyson pass through the shared sub-clocks. It happens once,
-  // before any solve, and lr_driver already bills it to LR_DRIVER_SETUP_DN_DMU,
+  // before any solve, and lr_driver already bills it to LR_DRIVER_SETUP_DELTAMU,
   // so clear them here and leave the LR Dyson report counting SCF-loop work only.
   _Timer.reset();
-}
-
-
-template<typename DeltaDm_t>
-double lr_dyson::compute_Delta_mu(const DeltaDm_t& sDeltaDm_skij) {
-  utils::check(_is_q_gamma,
-               "compute_Delta_mu: Δμ adjustment is not meaningful for q≠0. "
-               "This function should only be called for q=0 perturbations.");
-
-  // Compute ΔN at Δμ=0
-  double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
-
-  // Compute dN/dμ (uses cached G(iω))
-  double dN_dmu = compute_dN_dmu();
-
-  if (std::abs(dN_dmu) < 1e-15) {
-    app_log(1, "[WARNING] compute_Delta_mu: dN/dμ ≈ 0, cannot compute Δμ. Returning 0.");
-    return 0.0;
-  }
-
-  // Closed-form solution: Δμ = -ΔN_0 / (dN/dμ)
-  double Delta_mu = -DeltaN_0 / dN_dmu;
-
-  app_log(2, "compute_Delta_mu: ΔN_0 = {:.6e}, dN/dμ = {:.6e}, Δμ = {:.6e}",
-          DeltaN_0, dN_dmu, Delta_mu);
-
-  return Delta_mu;
 }
 
 
@@ -570,9 +541,6 @@ template void lr_dyson::solve_lr_dyson_impl(
     const sArray_t<Array_view_4D_t>*);
 
 template double lr_dyson::compute_lr_Nelec(
-    const sArray_t<Array_view_4D_t>&);
-
-template double lr_dyson::compute_Delta_mu(
     const sArray_t<Array_view_4D_t>&);
 
 } // namespace methods

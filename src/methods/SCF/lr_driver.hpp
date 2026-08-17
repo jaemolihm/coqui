@@ -377,15 +377,15 @@ public:
    * array at production sizes, which is why it is listed rather than left
    * implicit.
    *
-   * `affine_dmu` marks the fix_density, q=Γ path — the only one that allocates
-   * lr_dyson's Δμ response R(τ), a second ΔG(τ)-sized distributed array.
+   * `need_Delta_mu` marks the fix_density, q=Γ path — the only one that allocates
+   * lr_dyson's Δμ response dG/dμ(τ), a second ΔG(τ)-sized distributed array.
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                              std::vector<std::string> const& extra_sigma = {},
                              long n_sigma_prev = 0,
                              lr_diis_hist_t inner_hist = {},
                              lr_diis_hist_t outer_hist = {},
-                             bool affine_dmu = false);
+                             bool need_Delta_mu = false);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
