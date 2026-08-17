@@ -1501,13 +1501,13 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // — so counting it as persistent is a deliberate over-estimate.
   arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
 
-  // R(τ) = ∂ΔG(τ)/∂Δμ and the matching ΔDm response. ΔG is affine in Δμ, so
-  // fix_density at q=Γ adds Δμ·R instead of running a second Dyson pass; both are
-  // built once from the reference G(iω) and resident for the run. R is exactly one
+  // dG/dμ(τ) = ∂ΔG(τ)/∂Δμ and the matching ΔDm response. ΔG is affine in Δμ, so
+  // fix_density at q=Γ adds Δμ·dG/dμ instead of a second Dyson pass; both are
+  // built once from the reference G(iω) and resident for the run. It is exactly one
   // more ΔG(τ) — the largest single distributed array here — so it is listed even
   // though only this one path allocates it.
   if (affine_dmu) {
-    arrays.push_back({"R(τ) = ∂ΔG/∂Δμ (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
+    arrays.push_back({"dG_dmu(τ) = ∂ΔG/∂Δμ (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
     arrays.push_back({"∂ΔDm/∂Δμ (lr_dyson)",
                       fmt::format("({},{},{},{})", ns, nki, nb, nb),
                       band5(1), false, PERSIST});

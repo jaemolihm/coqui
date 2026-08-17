@@ -114,12 +114,12 @@ double lr_dyson::solve_lr_dyson(
   // For fix_density mode at q=0, we need to compute Δμ:
   // 1. ΔG(0) with Δμ=0 to get ΔN(0)
   // 2. Use cached dN/dμ to compute Δμ = -ΔN(0) / (dN/dμ)
-  // 3. ΔG(Δμ) = ΔG(0) + Δμ·R and ΔDm(Δμ) = ΔDm(0) + Δμ·dΔDm/dΔμ
+  // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dΔDm/dΔμ
   //
   // Step 3 used to be a second Dyson pass. Δμ reaches the RHS only through the
-  // −Δμ·S term, so ΔG is affine in it and the response R is a function of the
-  // reference G(iω) and S alone — the same statement the closed form in step 2
-  // already rests on. compute_dN_dmu() builds R once, and step 3 becomes a local
+  // −Δμ·S term, so ΔG is affine in it and dG/dμ is a function of the reference
+  // G(iω) and S alone — the same statement the closed form in step 2 already
+  // rests on. build_dmu_response() builds it once, and step 3 becomes a local
   // axpy: exact in exact arithmetic, and a different rounding path from the
   // recomputed G·X·G + FT chain it replaces (~1e-15 relative on ΔG and ΔDm).
   //
@@ -127,7 +127,7 @@ double lr_dyson::solve_lr_dyson(
   // and only steps 2-3 are conditional.
   double dN_dmu = 0.0;
   if (fix_density and _is_q_gamma) {
-    utils::check(_dN_dmu_cached and _dR_tskij and _sdDmdmu_skij,
+    utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
                  "solve_lr_dyson: fix_density=true but the Δμ response is not cached. "
                  "Call compute_dN_dmu() before the SCF loop.");
 
@@ -159,6 +159,9 @@ double lr_dyson::solve_lr_dyson(
       app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
       app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
 
+      // Step 3, as a local axpy on the Δμ=0 solution:
+      //   ΔG(τ; Δμ) = ΔG(τ; 0) + Δμ·(dG/dμ)(τ)
+      //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dΔDm/dΔμ)
       _Timer.start("LR_DYSON_DMU_SHIFT");
       apply_dmu_shift(sDeltaDm_skij, Delta_mu);
       _Timer.stop("LR_DYSON_DMU_SHIFT");
@@ -378,22 +381,22 @@ void lr_dyson::solve_lr_dyson_impl(
 
 template<typename DeltaDm_t>
 void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
-  // R(τ) came out of solve_lr_dyson_impl, so its grid is derived from the same
+  // dG/dμ(τ) came out of solve_lr_dyson_impl, so its grid is derived from the same
   // (comm.size(), nkpts_ibz, nbnd) as the ΔG(τ) sitting in _dDeltaG_tau_buffer
   // and the two blocks coincide. Checked rather than assumed: a mismatch would
   // add one rank's block to another's, which is silent and wrong everywhere.
   utils::check(bool(_dDeltaG_tau_buffer),
                "apply_dmu_shift: no ΔG(τ) retained — the Δμ=0 pass must run first.");
-  utils::check(_dDeltaG_tau_buffer->origin() == _dR_tskij->origin() and
-               _dDeltaG_tau_buffer->local_shape() == _dR_tskij->local_shape(),
-               "apply_dmu_shift: ΔG(τ) and R(τ) are distributed differently.");
+  utils::check(_dDeltaG_tau_buffer->origin() == _dG_dmu_tskij->origin() and
+               _dDeltaG_tau_buffer->local_shape() == _dG_dmu_tskij->local_shape(),
+               "apply_dmu_shift: ΔG(τ) and dG/dμ(τ) are distributed differently.");
 
-  _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dR_tskij->local();
+  _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dG_dmu_tskij->local();
 
   // ΔDm and dΔDm/dΔμ are both node-replicated, so the add runs once per node.
   sDeltaDm_skij.win().fence();
   if (_context->node_comm.root())
-    sDeltaDm_skij.local() += ComplexType(Delta_mu) * _sdDmdmu_skij->local();
+    sDeltaDm_skij.local() += ComplexType(Delta_mu) * _sdDm_dmu_skij->local();
   sDeltaDm_skij.win().fence();
 }
 
@@ -461,140 +464,58 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
 
 
 double lr_dyson::compute_dN_dmu() {
-  // Return cached value if already computed
-  if (_dN_dmu_cached) {
-    app_log(2, "compute_dN_dmu: returning cached dN/dμ = {:.6e}", _cached_dN_dmu);
-    return _cached_dN_dmu;
-  }
-
-  // dN/dμ = Tr[S · (G·S·G)(τ=β⁻)]
-  // This is the response of particle number to chemical potential shift.
-  //
-  // NOTE: dN/dμ depends ONLY on the unperturbed Green's function G, NOT on any
-  // LR quantities (ΔH0, ΔF, ΔΣ). It can be precomputed once and reused for all
-  // perturbations at the same reference point.
-  //
-  // The LR Dyson equation in FREQUENCY space is:
-  //   ΔG(k,iω) = G(k,iω) · [ΔH0 - Δμ·S] · G(k,iω)
-  //
-  // So the Δμ response is computed in frequency space:
-  //   δΔG(k,iω)/δΔμ = -G(k,iω) · S · G(k,iω)
-  //
-  // To get the density matrix response:
-  //   (G·S·G)(τ) = IFFT[G(iω) · S · G(iω)]
-  //   δΔDm/δΔμ = (G·S·G)(β⁻)  (positive contribution)
-  //
-  // IMPORTANT: Must compute G·S·G in frequency space, then transform to tau!
-  // Computing G(τ)·S·G(τ) directly is WRONG (not equivalent).
-  //
-  // Uses cached G(iω) in shared memory.
-
-  utils::check(_is_q_gamma,
-               "compute_dN_dmu: dN/dμ is not meaningful for q≠0. "
-               "This function should only be called for q=0 perturbations.");
-  utils::check(_cached_G_wskij != nullptr,
-               "compute_dN_dmu: cached G(iω) not set. Call set_cached_G_omega() first.");
-
-  auto k_weight = _dyson.MF()->k_weight();
-  auto S_loc = _dyson.sS_skij().local();
-  double spin_factor = (_ns == 1 && _dyson.MF()->npol() == 1) ? 2.0 : 1.0;
-
-  // Distribute (s, k) work over _context->comm. Output is a scalar, so each
-  // rank computes its partial sum and we all_reduce the scalar at the end.
-  decltype(nda::range::all) all;
-  auto G_w = _cached_G_wskij->local();  // (nw, ns, nk, nb, nb), shared memory
-
-  ComplexType dN_dmu(0.0);
-
-  int rank = _context->comm.rank();
-  int size = _context->comm.size();
-  nda::array<ComplexType, 3> GSG_w_buf(_nw, _nbnd, _nbnd);
-  nda::array<ComplexType, 3> GSG_t_buf(_nts, _nbnd, _nbnd);
-  nda::matrix<ComplexType> GSG_beta_buf(_nbnd, _nbnd);
-  nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
-  nda::matrix<ComplexType> buffer(_nbnd, _nbnd);
-
-  for (int i = rank; i < _ns * _nkpts_ibz; i += size) {
-    int is = i / _nkpts_ibz;
-    int ik = i % _nkpts_ibz;
-    auto S_k = S_loc(is, ik, all, all);
-
-    // GSG(iω) = G(iω) · S · G(iω) for all iω at this (is, ik)
-    for (int n = 0; n < _nw; ++n) {
-      auto G_w_k = G_w(n, is, ik, all, all);
-      auto GSG_w_k = GSG_w_buf(n, all, all);
-      nda::blas::gemm(ComplexType(1.0), S_k, G_w_k, ComplexType(0.0), tmp);
-      nda::blas::gemm(ComplexType(1.0), G_w_k, tmp, ComplexType(0.0), GSG_w_k);
-    }
-
-    // FT: GSG(iω) → GSG(τ) → GSG(β⁻)
-    _dyson.FT()->w_to_tau(GSG_w_buf, GSG_t_buf, imag_axes_ft::fermion);
-    _dyson.FT()->tau_to_beta(GSG_t_buf, GSG_beta_buf);
-
-    // Tr[S · GSG(β⁻)]
-    nda::blas::gemm(ComplexType(1.0), S_k, GSG_beta_buf, ComplexType(0.0), buffer);
-    dN_dmu += k_weight(ik) * nda::trace(buffer);
-  }
-  dN_dmu *= spin_factor;
-
-  // Sum partial contributions across ranks
-  dN_dmu = _context->comm.all_reduce_value(dN_dmu);
-
-  _cached_dN_dmu = dN_dmu.real();
-  _dN_dmu_cached = true;
-  app_log(2, "compute_dN_dmu: dN/dμ = {:.6e} (cached)", _cached_dN_dmu);
-
-  build_dmu_response();
-
+  if (!_dN_dmu_cached) build_dmu_response();
   return _cached_dN_dmu;
 }
 
 
 void lr_dyson::build_dmu_response() {
-  // ΔG(k,iω) = G_{k+q}·[ΔH0 + ΔF + ΔΣ + ΔV_QPGW − Δμ·S]·G_k is affine in Δμ:
-  //   ΔG(Δμ) = ΔG(0) + Δμ·R,   R(k,iω) = −G_{k+q}(iω)·S(k)·G_k(iω),
-  // and w_to_tau / tau_to_beta are linear, so ΔDm = −ΔG(β⁻) obeys the same
-  // relation with dΔDm/dΔμ = −R(β⁻). fix_density therefore needs one Dyson pass
-  // and an axpy, not two passes.
+  // Builds the whole Δμ-response cache: dG/dμ(τ), dΔDm/dΔμ and dN/dμ. They all
+  // come from one Dyson pass, so they are produced together and never separately.
   //
-  // R is built by the Dyson kernel itself, with a zero one-body perturbation, no
-  // ΔΣ/ΔV_QPGW and Δμ = 1 ⇒ X = −S. Then ΔG(0) = 0 and the pass returns exactly
-  // ΔG(Δμ=1) = R and ΔDm(Δμ=1) = dΔDm/dΔμ, with no post-hoc sign to get wrong,
-  // and with R laid out the way the real solve lays out its ΔG(τ) by construction.
+  // ΔG(k,iω) = G_{k+q}·[ΔH0 + ΔF + ΔΣ + ΔV_QPGW − Δμ·S]·G_k is affine in Δμ:
+  //   ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ,   dG/dμ(k,iω) = −G_{k+q}(iω)·S(k)·G_k(iω),
+  // and w_to_tau / tau_to_beta are linear, so ΔDm = −ΔG(β⁻) obeys the same
+  // relation with dΔDm/dΔμ = −(dG/dμ)(β⁻). fix_density therefore needs one Dyson
+  // pass and an axpy, not two passes.
+  //
+  // dG/dμ is built by the Dyson kernel itself, with a zero one-body perturbation,
+  // no ΔΣ/ΔV_QPGW and Δμ = 1 ⇒ X = −S. Then ΔG(0) = 0 and the pass returns
+  // exactly ΔG(Δμ=1) = dG/dμ and ΔDm(Δμ=1) = dΔDm/dΔμ, with no post-hoc sign to
+  // get wrong, and laid out the way the real solve lays out its ΔG(τ) by
+  // construction.
+  utils::check(_is_q_gamma,
+               "build_dmu_response: the Δμ response is not meaningful for q≠0. "
+               "This should only be called for q=0 perturbations.");
+  utils::check(_cached_G_wskij != nullptr,
+               "build_dmu_response: cached G(iω) not set. "
+               "Call set_cached_G_omega() first.");
+
   auto sZero_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *_context, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-  auto sdDmdmu_skij = math::shm::make_shared_array<Array_view_4D_t>(
+  auto sdDm_dmu_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *_context, {_ns, _nkpts_ibz, _nbnd, _nbnd});
 
-  app_log(3, "compute_dN_dmu: building the Δμ response R(τ) = ∂ΔG(τ)/∂Δμ");
-  solve_lr_dyson_impl(sdDmdmu_skij, sZero_skij, sZero_skij,
+  app_log(3, "build_dmu_response: building dG/dμ(τ) = ∂ΔG(τ)/∂Δμ");
+  solve_lr_dyson_impl(sdDm_dmu_skij, sZero_skij, sZero_skij,
                       /*opt_dDeltaSigma_wskij=*/nullptr, /*Delta_mu=*/1.0,
                       static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
 
   utils::check(bool(_dDeltaG_tau_buffer),
                "build_dmu_response: the Dyson pass retained no ΔG(τ).");
-  _dR_tskij.emplace(std::move(*_dDeltaG_tau_buffer));
+  _dG_dmu_tskij.emplace(std::move(*_dDeltaG_tau_buffer));
   _dDeltaG_tau_buffer.reset();
-  _sdDmdmu_skij.emplace(std::move(sdDmdmu_skij));
+  _sdDm_dmu_skij.emplace(std::move(sdDm_dmu_skij));
 
-  // Cross-check: N is Tr[S·Dm] summed over k with the spin factor, so
-  // dN/dμ = spin·Σ_k w_k Tr[S(k)·(dΔDm/dΔμ)(k)] — which is compute_lr_Nelec of
-  // the response matrix. It reproduces the value the (G·S·G)(β⁻) loop above just
-  // produced along an independent path (distributed Dyson kernel + distributed
-  // FT + gather, vs. a serial per-k FT), so it validates the layout, the FT and
-  // the sign of the whole shortcut at runtime.
-  double dN_dmu_from_R = compute_lr_Nelec(*_sdDmdmu_skij);
-  double denom = std::max(std::abs(_cached_dN_dmu), 1e-30);
-  double rel_err = std::abs(dN_dmu_from_R - _cached_dN_dmu) / denom;
-  app_log(2, "compute_dN_dmu: dN/dμ from the Δμ response = {:.12e} "
-             "(direct {:.12e}, rel. err {:.3e})",
-          dN_dmu_from_R, _cached_dN_dmu, rel_err);
-  utils::check(rel_err < 1e-10,
-               "build_dmu_response: the Δμ response disagrees with dN/dμ. "
-               "Tr[S·dΔDm/dΔμ] = {:.12e} vs dN/dμ = {:.12e} (rel. err {:.3e}). "
-               "ΔG is affine in Δμ, so these must agree; a mismatch means R(τ) "
-               "or its density-matrix contraction is wrong.",
-               dN_dmu_from_R, _cached_dN_dmu, rel_err);
+  // N = Tr[S·Dm] summed over k with the spin factor, so differentiating at fixed
+  // everything-else gives dN/dμ = spin·Σ_k w_k Tr[S(k)·(dΔDm/dΔμ)(k)] — exactly
+  // compute_lr_Nelec of the response matrix. Taking it from the response rather
+  // than from a separate (G·S·G)(β⁻) loop keeps one definition of dN/dμ, and it
+  // is the one the Δμ = -ΔN(0)/(dN/dμ) closed form must be consistent with for
+  // the axpy to land on ΔN = 0.
+  _cached_dN_dmu = compute_lr_Nelec(*_sdDm_dmu_skij);
+  _dN_dmu_cached = true;
+  app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached)", _cached_dN_dmu);
 
   // This ran one full Dyson pass through the shared sub-clocks. It happens once,
   // before any solve, and lr_driver already bills it to LR_DRIVER_SETUP_DN_DMU,
