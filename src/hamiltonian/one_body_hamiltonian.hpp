@@ -351,7 +351,8 @@ inline void log_augmented_hks_status(mf::MF &mf) {
  * @param sH0_skij   [INPUT, optional] - when exclude_H0 is set, subtract this
  *        precomputed H0 (global shape (nspin, nkpts_ibz, nbnd, nbnd)) instead of
  *        recomputing it. Lets callers that already hold H0 (e.g. the dyson solver)
- *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute.
+ *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute,
+ *        except for an augmented basis with a stored H_KS, where it is required.
  * @return - A shared memory array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
@@ -367,30 +368,17 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
   if (mf.is_augmented() and mf.has_hks_matrix()) {
     read_H_KS_aug(mf, sF_skij);
     if (exclude_H0) {
-      if (sH0_skij != nullptr) {
-        // whole-array subtraction: unlike the distributed fallback below there is no
-        // local_range to slice by, so the shapes must agree exactly
-        utils::check(sH0_skij->shape() == sF_skij.shape(),
-                     "set_fock: sH0_skij shape ({},{},{},{}) != sF_skij shape ({},{},{},{}).",
-                     sH0_skij->shape()[0], sH0_skij->shape()[1], sH0_skij->shape()[2],
-                     sH0_skij->shape()[3], sF_skij.shape()[0], sF_skij.shape()[1],
-                     sF_skij.shape()[2], sF_skij.shape()[3]);
-        if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_skij->local();
-      } else {
-        // Costs one extra node-replicated (nspin, nkpts_ibz, nbnd, nbnd) buffer,
-        // where the distributed fallback below subtracts H0 block by block. Every
-        // production caller that reaches here already holds H0 and passes it, so
-        // this is the convenience path (tests, ad-hoc calls) -- pass sH0_skij to
-        // avoid the allocation.
-        utils::check(sF_skij.communicator() != nullptr and sF_skij.internode_comm() != nullptr,
-                     "set_fock: recomputing H0 needs a shared array built with a global "
-                     "and internode communicator.");
-        auto sH0_tmp = math::shm::make_shared_array<Array_4D_t>(
-            *sF_skij.communicator(), *sF_skij.internode_comm(), *sF_skij.node_comm(),
-            sF_skij.shape());
-        hamilt::set_H0(mf, psp, sH0_tmp);
-        if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_tmp.local();
-      }
+      utils::check(sH0_skij != nullptr,
+                   "set_fock: the augmented H_KS seed with exclude_H0 requires the caller "
+                   "to provide sH0_skij.");
+      // whole-array subtraction: unlike the distributed fallback below there is no
+      // local_range to slice by, so the shapes must agree exactly
+      utils::check(sH0_skij->shape() == sF_skij.shape(),
+                   "set_fock: sH0_skij shape ({},{},{},{}) != sF_skij shape ({},{},{},{}).",
+                   sH0_skij->shape()[0], sH0_skij->shape()[1], sH0_skij->shape()[2],
+                   sH0_skij->shape()[3], sF_skij.shape()[0], sF_skij.shape()[1],
+                   sF_skij.shape()[2], sF_skij.shape()[3]);
+      if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_skij->local();
       sF_skij.node_sync();
     }
     return;

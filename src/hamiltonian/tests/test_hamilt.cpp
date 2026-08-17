@@ -718,41 +718,37 @@ TEST_CASE("aug_hks_set_fock", "[hamilt]") {
 
   auto sF = make_shared_array<array_view_4d_t>(*mpi, sh);
   hamilt::set_fock(aug_mf, psp.get(), sF, false);
-  // exclude_H0 with H0 recomputed inside, and with H0 supplied by the caller
+  // exclude_H0 subtracts the caller-supplied H0 from the stored matrix, and the
+  // result is visible on every rank of the node (node_sync)
   auto sH0 = make_shared_array<array_view_4d_t>(*mpi, sh);
   hamilt::set_H0(aug_mf, psp.get(), sH0);
   auto sFx = make_shared_array<array_view_4d_t>(*mpi, sh);
-  hamilt::set_fock(aug_mf, psp.get(), sFx, true);
-  auto sFx2 = make_shared_array<array_view_4d_t>(*mpi, sh);
-  hamilt::set_fock(aug_mf, psp.get(), sFx2, true, &sH0);
+  hamilt::set_fock(aug_mf, psp.get(), sFx, true, &sH0);
 
-  // e_x2 compares the two exclude_H0 branches: the caller-supplied whole-array
-  // subtraction against the internally recomputed H0. (Comparing F - H0 to the
-  // exclude_H0 result would only re-test set_H0's determinism, since both sides
-  // would come from the same call.)
-  double e_diag = 0.0, e_x2 = 0.0, den = 0.0;
-  if (mpi->node_comm.root()) {
-    auto F = sF.local(); auto Fx = sFx.local(); auto Fx2 = sFx2.local();
+  double e_diag = 0.0, e_x = 0.0, den = 0.0;
+  {
+    auto F = sF.local(); auto Fx = sFx.local(); auto H0 = sH0.local();
     for (long s = 0; s < nspin; ++s)
       for (long k = 0; k < nkpts_ibz; ++k)
         for (long i = 0; i < nbnd; ++i) {
           for (long j = 0; j < nbnd; ++j) {
-            e_diag += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(ref(s,k,i)) : ComplexType(0.0)));
-            e_x2   += std::norm(Fx2(s,k,i,j) - Fx(s,k,i,j));
+            if (mpi->node_comm.root())
+              e_diag += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(ref(s,k,i)) : ComplexType(0.0)));
+            e_x += std::norm(Fx(s,k,i,j) - (F(s,k,i,j) - H0(s,k,i,j)));
           }
-          den += ref(s,k,i)*ref(s,k,i);
+          if (mpi->node_comm.root()) den += ref(s,k,i)*ref(s,k,i);
         }
   }
   mpi->comm.broadcast_n(&e_diag, 1, 0);
-  mpi->comm.broadcast_n(&e_x2, 1, 0);
   mpi->comm.broadcast_n(&den, 1, 0);
+  mpi->comm.all_reduce_in_place_n(&e_x, 1, boost::mpi3::max<>{});
   double nrm = std::sqrt(den);
   app_log(2, "aug_hks_set_fock: ||set_fock - diag(eps_QE)||/||eps_QE||      = {}",
           std::sqrt(e_diag)/nrm);
-  app_log(2, "aug_hks_set_fock: ||F_noH0(given H0) - F_noH0(recomputed)||   = {}",
-          std::sqrt(e_x2)/nrm);
+  app_log(2, "aug_hks_set_fock: ||F_noH0 - (F - H0)||/||eps_QE||            = {}",
+          std::sqrt(e_x)/nrm);
   utils::VALUE_EQUAL(std::sqrt(e_diag)/nrm, 0.0, 1e-4);
-  utils::VALUE_EQUAL(std::sqrt(e_x2)/nrm, 0.0, 1e-8);
+  utils::VALUE_EQUAL(std::sqrt(e_x)/nrm, 0.0, 1e-8);
 
   // LR "mf_dft" seed: the MO energies of the stored matrix are the parent eigenvalues
   {

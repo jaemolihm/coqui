@@ -422,39 +422,29 @@ try_ks_eigval_ibz(mf::MF& mf, std::string const& fn, DArr const& psi,
   math::nda::gather_to_shm(dVHxc, sVHxc);
   mpi.comm.barrier();
 
-  // H <- (H + H^dag)/2 on every node's window: set_H0 is not hermitized and
-  // gen_V_Hxc_aug is hermitian only to round-off, while every consumer of the
-  // stored matrix (update_MOs' hermitian generalized eigensolver, update_G)
-  // reads a single triangle. The diagonal is unchanged in exact arithmetic and
-  // in floating point, so the eigval seed below is untouched by this. The
-  // asymmetry discarded here bounds the V_Hxc projection error, so it is
-  // reported: once the matrix is stored it is hermitian by construction and no
-  // longer measurable downstream.
-  double asym2 = 0.0, tot2 = 0.0;
+  // H <- (H + H^dag)/2: set_H0 is not hermitized and gen_V_Hxc_aug is hermitian
+  // only to round-off, while every consumer of the stored matrix (update_MOs'
+  // hermitian generalized eigensolver, update_G) reads a single triangle. The
+  // discarded part bounds the V_Hxc projection error, so it is reported here --
+  // once stored, the matrix is hermitian and the asymmetry is unmeasurable.
+  auto all = nda::range::all;
+  double diff2 = 0.0, tot2 = 0.0;
   if (sH_KS.node_comm()->root()) {
     auto H = sH_KS.local();
     H += sVHxc.local();
     for (long s = 0; s < nspin; ++s)
       for (long k = 0; k < nkpts_ibz; ++k) {
-        for (long i = 0; i < norb; ++i) {
-          for (long j = 0; j < i; ++j) {
-            auto h = 0.5*(H(s,k,i,j) + std::conj(H(s,k,j,i)));
-            asym2 += 2.0*std::norm(H(s,k,i,j) - std::conj(H(s,k,j,i)));
-            tot2  += std::norm(H(s,k,i,j)) + std::norm(H(s,k,j,i));
-            H(s,k,i,j) = h;
-            H(s,k,j,i) = std::conj(h);
-          }
-          asym2 += std::norm(ComplexType(0.0, 2.0*std::imag(H(s,k,i,i))));
-          tot2  += std::norm(H(s,k,i,i));
-          H(s,k,i,i) = ComplexType(std::real(H(s,k,i,i)), 0.0);
-        }
+        nda::array<ComplexType,2> H0k = H(s,k,all,all);
+        H(s,k,all,all) = 0.5*(H0k + nda::dagger(H0k));
+        diff2 += std::pow(nda::frobenius_norm(H(s,k,all,all) - H0k), 2);
+        tot2  += std::pow(nda::frobenius_norm(H0k), 2);
       }
   }
   sH_KS.node_sync();
-  mpi.comm.broadcast_n(&asym2, 1, 0);
+  mpi.comm.broadcast_n(&diff2, 1, 0);
   mpi.comm.broadcast_n(&tot2, 1, 0);
-  app_log(2, "  - H_KS asymmetry before hermitization: ||H - H^dag||/||H|| = {:.3e}",
-          (tot2 > 0.0) ? std::sqrt(asym2/tot2) : 0.0);
+  app_log(2, "  - H_KS change from hermitization: ||H_herm - H||/||H|| = {:.3e}",
+          (tot2 > 0.0) ? std::sqrt(diff2/tot2) : 0.0);
 
   auto ks_eig_ibz = nda::array<double,3>::zeros({nspin, nkpts_ibz, norb});
   if (mpi.comm.root()) {
