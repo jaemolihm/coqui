@@ -1628,8 +1628,8 @@ void scatter_slow(int p, ::nda::MemoryArray auto const& A, dArrG_t& G)
 /**
  * Replicate a distributed array into a shared-memory array, one full copy per node.
  *
- * Optional `Timer` splits the call into its four phases under the clock names
- * GATHER_SHM_{ZERO,ASSIGN,REDUCE,BARRIER}. The internode reduction is the only
+ * Optional `Timer` splits the call into its five phases under the clock names
+ * GATHER_SHM_{ZERO,ASSIGN,SKEW,REDUCE,BARRIER}. The internode reduction is the only
  * phase that touches the fabric, and it is spread over the ranks of a node
  * (shared_array::all_reduce_parallel), so attributing the cost between it and the
  * node-local phases is what the breakdown is for.
@@ -1657,8 +1657,17 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   for(int r=0; r<rank; ++r)
     rng_v[r] = dA.local_range(r);
   ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
-  sA.communicator()->barrier();
   toc("GATHER_SHM_ASSIGN");
+
+  // The store above is purely local, so this barrier absorbs whatever imbalance
+  // the ranks arrived with, keeping upstream skew out of the reduce clock below.
+  // It is not needed for correctness: all_reduce_parallel opens and closes with
+  // node_sync(), which publishes these stores and matches the collective by node
+  // rank. Timed separately rather than added — charging it to the local store
+  // reported skew as gather cost.
+  tic("GATHER_SHM_SKEW");
+  sA.communicator()->barrier();
+  toc("GATHER_SHM_SKEW");
 
   // MAM Note: In some MPI implementations/systems, the first call to a collective can be very
   //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory.

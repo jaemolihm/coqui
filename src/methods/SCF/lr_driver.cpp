@@ -64,7 +64,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
                   "LR_DRIVER_SETUP_DN_DMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
-                   "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA_TERM2", "LR_QPGW_STATIC",
+                   "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
                    "LR_ITER_ALG", "LR_SAVE", "LR_CONVERGENCE", "LR_TOTALS",
                    // Perturbative channel of a split-kernel run. Separate clocks
                    // because both channels call the same evaluators and the cost
@@ -338,6 +338,10 @@ void lr_driver::lr_setup(
                  "correlation response, so the two together double-count it. "
                  "include_xc works only in the Hartree mode.");
   }
+  // The SCF loop must run at least once: every output downstream, ΔG(τ)
+  // included, is produced by the solve inside it.
+  utils::check(p.max_iter >= 1,
+               "lr_driver::lr_setup: max_iter must be >= 1, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
     utils::check(k.gw_full,
                  "lr_driver::lr_setup: split ΔΣ terms require the Σ2 (-G⊙ΔW) component.");
@@ -966,9 +970,17 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>* dyson_sigma = has_Sigma ? sDeltaSigma_tskij : nullptr;
     const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
-        sDeltaG_tskij, sDeltaDm_skij, sDeltaH0_skij,
+        sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, dyson_sigma,
         p.fix_density, Delta_mu, dyson_vcorr);
+
+    // The solve leaves ΔG(τ) distributed; replicating it is the single most
+    // expensive step of the Dyson phase, so it happens only where something
+    // reads it. k.include_gw_sigma is loop-invariant, so which iterations
+    // replicate is fixed before the loop starts, not discovered inside it —
+    // the Σ evaluators can assume sDeltaG_tskij is current, and the tail below
+    // knows from the same flag whether the converged ΔG(τ) still needs one.
+    if (k.include_gw_sigma) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -1302,6 +1314,16 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
+  // A Σ-free run never replicated ΔG(τ) inside the loop, so if the caller is
+  // going to read the converged one it has to be replicated now: sDeltaG_tskij
+  // outlives the solve and is reused by the next perturbation, so leaving it
+  // would hand the caller the previous perturbation's ΔG next to this one's
+  // ΔDm/ΔF. With Σ the last iteration already replicated it and nothing is
+  // pending; with save_DeltaG off nobody reads it and the gather is skipped
+  // outright — the only case where ΔG(τ) is never replicated at all.
+  if (!k.include_gw_sigma and p.save_DeltaG)
+    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
     sDeltaVcorr_out_skij->win().fence();
@@ -1468,6 +1490,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   };
   push_hist(inner_hist, "inner");
   push_hist(outer_hist, "outer");
+
+  // --- Persistent, distributed, band basis ---
+  // ΔG(τ) as lr_dyson hands it over: distributed, and alive from the end of the
+  // solve until the first consumer replicates it. It overlaps neither transient
+  // peak in practice — the next solve drops it before allocating anything, and a
+  // consumer replicates it at the top of eval_sigma_channel, ahead of any ΔΠ/ΔW
+  // — so counting it as persistent is a deliberate over-estimate.
+  arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {
@@ -1671,8 +1701,12 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", sec("LR_GW_W", "LR_GW_W_PERT"), cnt("LR_GW_W", "LR_GW_W_PERT"));
   if (scr_solver) scr_solver->print_subclocks(2, sub_indent);
   app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", sec("LR_GW_SIGMA", "LR_GW_SIGMA_PERT"), cnt("LR_GW_SIGMA", "LR_GW_SIGMA_PERT"));
-  if (gw_solver) gw_solver->print_subclocks(2, sub_indent, {gw_solver_pert, gw_solver_term2});
-  app_log(2, "      - LR GW Sig T2 (total):   {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA_TERM2"), _Timer.number_of_calls("LR_GW_SIGMA_TERM2"));
+  // Summed over all three Σ evaluators, and gated on any of them existing rather
+  // than on the self-consistent one: a kernel whose Σ sits entirely in the
+  // perturbative channel (pGW0 over a Hartree K_sc) never builds gw_solver.
+  if (gw_solver or gw_solver_pert or gw_solver_term2)
+    solvers::lr_gw::print_subclocks_all(2, sub_indent,
+                                        {gw_solver, gw_solver_pert, gw_solver_term2});
   app_log(2, "      - LR qpGW static (total): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_QPGW_STATIC"), _Timer.number_of_calls("LR_QPGW_STATIC"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", sec("LR_ITER_ALG", "LR_OUTER_ITER_ALG"), cnt("LR_ITER_ALG", "LR_OUTER_ITER_ALG"));
   app_log(2, "      - LR Totals (ΔF/ΔΣ):      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_TOTALS"), _Timer.number_of_calls("LR_TOTALS"));
