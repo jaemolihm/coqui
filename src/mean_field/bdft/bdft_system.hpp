@@ -177,6 +177,10 @@ namespace mf {
       // singular value of the dtau_step-scaled raw state), 1 for the original
       // bands. Sized only when augmented; empty otherwise.
       nda::array<double, 3> aug_band_weight;
+      // true when the augmented h5 carries the full Kohn-Sham matrix
+      // Orbitals/H_KS_skij over the IBZ. The dataset's presence is the flag; the
+      // matrix itself is read lazily (hamilt::read_H_KS_aug), never stored here.
+      bool has_hks_matrix = false;
 
       public:
       // dummy members, just to be consistent with qe_readonly class...
@@ -384,6 +388,8 @@ namespace mf {
         }
 
         if(augmented) {
+          // the dataset's presence is the flag; it is read on demand, not here
+          has_hks_matrix = ogrp.has_dataset("H_KS_skij");
           // per-band THC fit weights; all ones for files predating them
           aug_band_weight = nda::array<double, 3>(nspin, nkpts, nbnd);
           aug_band_weight() = 1.0;

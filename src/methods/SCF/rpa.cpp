@@ -58,7 +58,7 @@ double rpa_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_
   auto& sDm_skij = mb_state.sDm_skij.value();
   auto& sG_tskij = mb_state.sG_tskij.value();
   auto& sSigma_tskij = mb_state.sSigma_tskij.value();
-  hamilt::set_fock(*mf, dyson.PSP(), sF_skij, true);
+  hamilt::set_fock(*mf, dyson.PSP(), sF_skij, true, &dyson.sH0_skij());
   double mu = 0.0;
 
   Timer.start("WRITE");

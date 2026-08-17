@@ -339,6 +339,23 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
+    // True if the h5 of an augmented basis carries the full Kohn-Sham matrix
+    // Orbitals/H_KS_skij (IBZ only). False for every basis built before the
+    // matrix was persisted, in which case the one-body seed falls back to
+    // diag(eigval). Only the bdft backend can carry it.
+    bool has_hks_matrix() const
+    { return std::holds_alternative<bdft::bdft_readonly>(var)
+          && std::get<bdft::bdft_readonly>(var).get_sys().has_hks_matrix; }
+
+    // Read the stored Kohn-Sham matrix Orbitals/H_KS_skij (IBZ only) into `H`,
+    // band-sliced to H's band extent. The calling rank performs the h5 read on
+    // its own; node-root gating and window synchronization belong to the caller.
+    long read_hks_matrix(nda::array_view<ComplexType,4> H) const
+    {
+      utils::check(has_hks_matrix(), "MF::read_hks_matrix: no H_KS matrix in {}.", filename());
+      return std::get<bdft::bdft_readonly>(var).read_hks_matrix(H);
+    }
+
     // Per-band THC fit weights over the full BZ, (nspin, nkpts, nbnd): for an
     // augmented basis, min(s,1) for the augmentation states (s = residual
     // singular value of the dtau_step-scaled raw state) and 1 for the original

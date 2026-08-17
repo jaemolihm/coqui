@@ -28,7 +28,9 @@
 
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
+#include "h5/h5.hpp"
 #include "nda/nda.hpp"
+#include "nda/h5.hpp"
 
 #include "utilities/proc_grid_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -206,8 +208,13 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 /**
- * Fock matrix associated with a MF object. 
+ * Fock matrix associated with a MF object.
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
+ *
+ * This is the pure diag(mf.eigval()) primitive. For an augmented (non-eigenstate)
+ * basis the one-body Hamiltonian is not diagonal, and its stored full matrix is
+ * consumed by set_fock, not here -- call set_fock rather than F to obtain the
+ * one-body seed of an arbitrary mean field.
  * @return - A distributed array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
@@ -288,19 +295,95 @@ auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 }
 
 /**
+ * Read the full Kohn-Sham matrix of an augmented basis, Orbitals/H_KS_skij, into a
+ * shared memory array. The dataset is stored over the IBZ only, (nspin, nkpts_ibz,
+ * nbnd_stored, nbnd_stored); a run that opens the basis with fewer bands gets the
+ * leading block as an h5 hyperslab, which drops the coupling to the discarded states.
+ * The h5 schema belongs to the mean-field backend (MF::read_hks_matrix); this owns
+ * only the node-root gating and the window synchronization.
+ * Only meaningful when mf.is_augmented() and mf.has_hks_matrix().
+ */
+template<nda::MemoryArrayOfRank<4> Array_4D_t>
+void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
+  long nspin = mf.nspin();
+  long nkpts_ibz = mf.nkpts_ibz();
+  long nbnd = mf.nbnd();
+  utils::check(mf.is_augmented() and mf.has_hks_matrix(),
+               "read_H_KS_aug: mean field carries no augmented H_KS matrix.");
+  utils::check(sH_KS.shape() == std::array<long,4>{nspin, nkpts_ibz, nbnd, nbnd},
+               "read_H_KS_aug: shape ({},{},{},{}) != ({},{},{},{}).",
+               sH_KS.shape()[0], sH_KS.shape()[1], sH_KS.shape()[2], sH_KS.shape()[3],
+               nspin, nkpts_ibz, nbnd, nbnd);
+  long nbnd_stored = nbnd;
+  if (sH_KS.node_comm()->root())
+    nbnd_stored = mf.read_hks_matrix(sH_KS.local());
+  sH_KS.node_sync();
+  // broadcast so the notice is emitted by every rank and the logger's own root
+  // gating decides who prints it, rather than by whichever node root read the file
+  sH_KS.node_comm()->broadcast_n(&nbnd_stored, 1, 0);
+  if (nbnd_stored > nbnd)
+    app_log(1, "  [WARNING] Augmented H_KS: using the leading {} of {} stored bands; the "
+               "coupling to the discarded states is dropped.", nbnd, nbnd_stored);
+}
+
+/**
+ * Emit which one-body seed an augmented mean field is about to use. Called from
+ * set_fock -- the single funnel every seed site goes through -- so no call site has
+ * to remember it. Root-only and verbosity-gated (app_warning is neither, and goes to
+ * stderr while the run banner goes to stdout), so an archived log records the path.
+ */
+inline void log_augmented_hks_status(mf::MF &mf) {
+  if (not mf.is_augmented()) return;
+  if (mf.has_hks_matrix()) {
+    app_log(1, "  Augmented basis one-body seed = full H_KS matrix from {}", mf.filename());
+  } else {
+    app_log(1, "  [WARNING] Augmented basis one-body seed = diag(eigval) (basis predates "
+               "H_KS): {} stores no Kohn-Sham matrix, so the off-diagonal couplings of "
+               "the non-eigenstate basis are dropped. Regenerate the basis to use the "
+               "full Kohn-Sham matrix.", mf.filename());
+  }
+}
+
+/**
  * One-body Hamiltonian associated with a MF object in a shared memory array
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
  * @param exclude_H0 [INPUT] - exclude kinetic + pseudo/external potential or not
  * @param sH0_skij   [INPUT, optional] - when exclude_H0 is set, subtract this
  *        precomputed H0 (global shape (nspin, nkpts_ibz, nbnd, nbnd)) instead of
  *        recomputing it. Lets callers that already hold H0 (e.g. the dyson solver)
- *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute.
+ *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute,
+ *        except for an augmented basis with a stored H_KS, where it is required.
  * @return - A shared memory array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sF_skij,
               bool exclude_H0=false,
               const math::shm::shared_array<Array_4D_t> *sH0_skij=nullptr) {
+  // An augmented basis is not an eigenbasis, so hamilt::F's diag(eigval) is only the
+  // diagonal of its one-body Hamiltonian. When the full matrix was persisted at
+  // augmentation time, use it: this is the single funnel every iter-0 seed goes
+  // through (ground-state SCF, qp SCF, the LR "mf_dft" G0, rpa, downfolding), so
+  // reporting the path taken here covers all of them.
+  log_augmented_hks_status(mf);
+  if (mf.is_augmented() and mf.has_hks_matrix()) {
+    read_H_KS_aug(mf, sF_skij);
+    if (exclude_H0) {
+      utils::check(sH0_skij != nullptr,
+                   "set_fock: the augmented H_KS seed with exclude_H0 requires the caller "
+                   "to provide sH0_skij.");
+      // whole-array subtraction: unlike the distributed fallback below there is no
+      // local_range to slice by, so the shapes must agree exactly
+      utils::check(sH0_skij->shape() == sF_skij.shape(),
+                   "set_fock: sH0_skij shape ({},{},{},{}) != sF_skij shape ({},{},{},{}).",
+                   sH0_skij->shape()[0], sH0_skij->shape()[1], sH0_skij->shape()[2],
+                   sH0_skij->shape()[3], sF_skij.shape()[0], sF_skij.shape()[1],
+                   sF_skij.shape()[2], sF_skij.shape()[3]);
+      if (sF_skij.node_comm()->root()) sF_skij.local() -= sH0_skij->local();
+      sF_skij.node_sync();
+    }
+    return;
+  }
+
   long np = sF_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});

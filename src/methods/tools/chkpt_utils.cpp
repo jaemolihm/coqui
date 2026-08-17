@@ -59,6 +59,13 @@ void write_metadata(communicator_t &comm, const mf::MF &mf, const imag_axes_ft::
     nda::h5_write(sys_grp, "H0_skij", sH0_loc, false);
     auto sSloc = sS_skij.local();
     nda::h5_write(sys_grp, "S_skij", sSloc, false);
+    // Which one-body seed an augmented mean field supplied, so an archived result
+    // can be classified against the basis vintage it ran with. Written here so
+    // every driver that creates a checkpoint records it; absent for non-augmented
+    // runs, whose checkpoints are unchanged.
+    if (mf.is_augmented())
+      h5::h5_write(sys_grp, "augmented_h_ks",
+                   std::string(mf.has_hks_matrix() ? "matrix" : "diagonal"));
 
     auto mf_grp = grp.create_group("mean_field");
     nda::h5_write(mf_grp, "eigvals", mf.eigval(), false);
@@ -845,6 +852,22 @@ void dump_hf_div_treatment(communicator_t& comm, std::string filename,
 }
 
 template<typename communicator_t>
+void dump_augmented_h_ks(communicator_t& comm, std::string filename,
+                         std::string const& mode) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_augmented_h_ks: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    auto sys_grp = grp.has_subgroup("system") ? grp.open_group("system")
+                                              : grp.create_group("system");
+    // overwrite: a restart against a regenerated basis must not keep the stale value
+    h5::h5_write(sys_grp, "augmented_h_ks", mode);
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
 bool read_qp_params(communicator_t& comm, std::string filename,
                     std::string& off_diag_mode, double& eta,
                     std::string& ac_alg, int& Nfit) {
@@ -893,6 +916,7 @@ template void dump_qp_params(mpi3::communicator&, std::string,
 template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
 template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
+template void dump_augmented_h_ks(mpi3::communicator&, std::string, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,

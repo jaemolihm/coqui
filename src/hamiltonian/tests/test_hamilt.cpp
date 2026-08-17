@@ -51,6 +51,7 @@
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/SCF/mb_solver_t.h"
 #include "methods/SCF/scf_common.hpp"
+#include "orbitals/orbital_augmenter.h"
 
 namespace bdft_tests
 {
@@ -690,6 +691,85 @@ TEST_CASE("ks_seed", "[hamilt]") {
   test_ks_seed_impl<DEVICE_MEMORY>(mpi);
   test_ks_seed_impl<UNIFIED_MEMORY>(mpi);
 #endif
+}
+
+// Read path of the augmented Kohn-Sham matrix, through set_fock and its two
+// exclude_H0 branches. The fixture is a zero-augmentation basis, which IS the
+// parent eigenbasis, so the stored matrix has an external ground truth:
+// diag(eps_QE). This also covers the LR "mf_dft" G0 seed, which is get_mf_MOs on
+// top of the same set_fock call.
+TEST_CASE("aug_hks_set_fock", "[hamilt]") {
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto qe_mf = mf::default_MF(mpi, "qe_lih223", mf::h5_input_type);
+
+  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_hks.h5", augmenter,
+                                                        0, 1e-6, 1e-2);
+  REQUIRE(aug_mf.is_augmented());
+  REQUIRE(aug_mf.has_hks_matrix());
+
+  long nspin = qe_mf.nspin();
+  long nkpts_ibz = qe_mf.nkpts_ibz();
+  long nbnd = qe_mf.nbnd();
+  auto all = nda::range::all;
+  auto ref = qe_mf.eigval()(all, nda::range(nkpts_ibz), all);
+  auto psp = hamilt::make_pseudopot(aug_mf);
+  shape_t<4> sh = {nspin, nkpts_ibz, nbnd, nbnd};
+
+  auto sF = make_shared_array<array_view_4d_t>(*mpi, sh);
+  hamilt::set_fock(aug_mf, psp.get(), sF, false);
+  // exclude_H0 subtracts the caller-supplied H0 from the stored matrix, and the
+  // result is visible on every rank of the node (node_sync)
+  auto sH0 = make_shared_array<array_view_4d_t>(*mpi, sh);
+  hamilt::set_H0(aug_mf, psp.get(), sH0);
+  auto sFx = make_shared_array<array_view_4d_t>(*mpi, sh);
+  hamilt::set_fock(aug_mf, psp.get(), sFx, true, &sH0);
+
+  double e_diag = 0.0, e_x = 0.0, den = 0.0;
+  {
+    auto F = sF.local(); auto Fx = sFx.local(); auto H0 = sH0.local();
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k)
+        for (long i = 0; i < nbnd; ++i) {
+          for (long j = 0; j < nbnd; ++j) {
+            if (mpi->node_comm.root())
+              e_diag += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(ref(s,k,i)) : ComplexType(0.0)));
+            e_x += std::norm(Fx(s,k,i,j) - (F(s,k,i,j) - H0(s,k,i,j)));
+          }
+          if (mpi->node_comm.root()) den += ref(s,k,i)*ref(s,k,i);
+        }
+  }
+  mpi->comm.broadcast_n(&e_diag, 1, 0);
+  mpi->comm.broadcast_n(&den, 1, 0);
+  mpi->comm.all_reduce_in_place_n(&e_x, 1, boost::mpi3::max<>{});
+  double nrm = std::sqrt(den);
+  app_log(2, "aug_hks_set_fock: ||set_fock - diag(eps_QE)||/||eps_QE||      = {}",
+          std::sqrt(e_diag)/nrm);
+  app_log(2, "aug_hks_set_fock: ||F_noH0 - (F - H0)||/||eps_QE||            = {}",
+          std::sqrt(e_x)/nrm);
+  utils::VALUE_EQUAL(std::sqrt(e_diag)/nrm, 0.0, 1e-4);
+  utils::VALUE_EQUAL(std::sqrt(e_x)/nrm, 0.0, 1e-8);
+
+  // LR "mf_dft" seed: the MO energies of the stored matrix are the parent eigenvalues
+  {
+    auto [sMO_skia, sE_ska] = methods::get_mf_MOs(*mpi, aug_mf, *psp);
+    double e_mo = 0.0;
+    if (mpi->node_comm.root()) {
+      auto E = sE_ska.local();
+      for (long s = 0; s < nspin; ++s)
+        for (long k = 0; k < nkpts_ibz; ++k)
+          for (long i = 0; i < nbnd; ++i)
+            e_mo += std::norm(E(s,k,i) - ref(s,k,i));
+    }
+    mpi->comm.broadcast_n(&e_mo, 1, 0);
+    app_log(2, "aug_hks_set_fock: ||get_mf_MOs energies - eps_QE||/||eps_QE|| = {}",
+            std::sqrt(e_mo)/nrm);
+    utils::VALUE_EQUAL(std::sqrt(e_mo)/nrm, 0.0, 1e-4);
+  }
+
+  mpi->comm.barrier();
+  if(mpi->comm.root()) remove("dummy_hks.h5");
+  mpi->comm.barrier();
 }
 
 template<MEMORY_SPACE MEM>

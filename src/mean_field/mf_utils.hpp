@@ -23,9 +23,12 @@
 #define MEANFIELD_MF_UTILS_HPP 
 
 #include <algorithm>
+#include <cmath>
 #include <map>
+#include <string_view>
 
 #include "IO/AppAbort.hpp"
+#include "IO/app_loggers.h"
 #include "utilities/check.hpp"
 #include "utilities/concepts.hpp"
 #include "IO/ptree/ptree_utilities.hpp"
@@ -200,6 +203,41 @@ inline double wmax_from_mf(const MF& mf, double padding_factor = 1.5)
     utils::check(false, "Error in wmax_from_mf: non-positive bandwidth detected. Cannot determine wmax from the spectrum of the MF object.");
   }
   return padding_factor * wmax;
+}
+
+/**
+ * Report the one-body spectrum a run is actually using against the bound
+ * wmax_from_mf derives from eigval.
+ *
+ * For an augmented basis eigval is only diag(H_KS), and the extreme eigenvalues of a
+ * matrix are not bounded by the range of its diagonal, so wmax_from_mf's padding can
+ * silently fail to cover the spectrum. This logs the gap; it does not close it --
+ * wmax stays defined by eigval by design. Silent for every non-augmented mean field
+ * and for augmented bases with no stored matrix, where eigval is the spectrum.
+ *
+ * Parameters:
+ *   mf        : mean field whose eigval defines wmax.
+ *   max_abs_E : max |E - efermi| over the one-body spectrum in use.
+ *   where     : short tag naming the caller, for the log line.
+ */
+inline void log_spectrum_vs_wmax(const MF& mf, double max_abs_E, std::string_view where)
+{
+  if (not (mf.is_augmented() and mf.has_hks_matrix())) return;
+  auto ev = mf.eigval();
+  double ef = mf.efermi();
+  double diag_max = 0.0;
+  for (auto it = ev.data(); it != ev.data() + ev.size(); ++it)
+    diag_max = std::max(diag_max, std::abs(*it - ef));
+  double wmax = 1.5 * diag_max;   // what wmax_from_mf would return at its default padding
+  app_log(1, "  Augmented H_KS spectrum ({}): max|E - ef| = {:.6f} a.u., "
+             "max|eigval - ef| = {:.6f} a.u. (wmax from eigval = {:.6f} a.u.)",
+          where, max_abs_E, diag_max, wmax);
+  if (max_abs_E > wmax)
+    app_log(1, "  [WARNING] the one-body spectrum reaches beyond the wmax implied by the "
+               "eigval diagonal ({:.6f} > {:.6f} a.u.). eigval is only diag(H_KS) for an "
+               "augmented basis, so an IAFT grid sized from it need not cover the "
+               "spectrum; set wmax explicitly if the imaginary-axis fit degrades.",
+            max_abs_E, wmax);
 }
 
 } // mf
