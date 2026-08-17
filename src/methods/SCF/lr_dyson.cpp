@@ -88,14 +88,11 @@ double lr_dyson::solve_lr_dyson(
   auto [w_pgrid, w_bsize] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
 
-  // ΔΣ(iω) is computed here, outside solve_lr_dyson_impl, so it can be reused
-  // when solve_lr_dyson_impl is called twice (at q=0 with fix_density: first to
-  // compute Δμ, then to apply it). distributed_tau_to_w is a pure function of
-  // (ΔΣ(τ), FT, grid) and Δμ never reaches it, so both passes would otherwise
-  // transform the same input to the same result. Handed to _impl by pointer, not
-  // by value: _impl frees it after its ω-space loop on the final pass, which is
-  // where the single-pass code used to free it and is before the redistribute
-  // that sets the Dyson memory peak.
+  // ΔΣ(τ) → ΔΣ(iω) is done here, outside solve_lr_dyson_impl, so it can be
+  // reused when solve_lr_dyson_impl is called twice (at q=0 with fix_density:
+  // first to compute Δμ, then to apply it). distributed_tau_to_w is a pure
+  // function of (ΔΣ(τ), FT, grid) and Δμ never reaches it, so both passes would
+  // otherwise transform the same input to the same result.
   // A local rather than a member — ΔΣ changes every SCF iteration.
   std::optional<dArray_5D_t> opt_dDeltaSigma_wskij;
   if (sDeltaSigma_tskij) {
@@ -106,6 +103,8 @@ double lr_dyson::solve_lr_dyson(
                              __app_verbosity__ >= 3));
     _Timer.stop("LR_DYSON_TAU_TO_W");
   }
+  const dArray_5D_t* dDeltaSigma_wskij =
+      opt_dDeltaSigma_wskij ? &(*opt_dDeltaSigma_wskij) : nullptr;
 
   // At q≠0 the Δμ·S term vanishes and Δμ is meaningless — force it to zero so a
   // caller's value cannot silently pollute the RHS.
@@ -121,10 +120,9 @@ double lr_dyson::solve_lr_dyson(
   // form is usable is known before any pass runs: at dN/dμ ≈ 0 it is singular,
   // Δμ=0 is the answer, and the solve collapses onto the single final pass below
   // that every other mode also takes.
-  const bool fix_density_q0 = fix_density and _is_q_gamma;
-  bool two_pass = false;
+  bool nonzero_Delta_mu = false;
   double dN_dmu = 0.0;
-  if (fix_density_q0) {
+  if (fix_density and _is_q_gamma) {
     utils::check(_dN_dmu_cached,
                  "solve_lr_dyson: fix_density=true but dN/dμ not cached. "
                  "Call compute_dN_dmu() before the SCF loop.");
@@ -136,16 +134,16 @@ double lr_dyson::solve_lr_dyson(
       app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
       Delta_mu = 0.0;
     } else {
-      two_pass = true;
+      nonzero_Delta_mu = true;
     }
   }
 
-  if (two_pass) {
+  if (nonzero_Delta_mu) {
     // Δμ-probing pass. Only ΔN is taken from it, and ΔN comes from ΔDm, so its
     // ΔG(τ) is dropped rather than kept for a consumer the final pass would
     // overwrite before anyone could read it.
     solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                        &opt_dDeltaSigma_wskij, 0.0, /*last_pass=*/false,
+                        dDeltaSigma_wskij, 0.0, /*last_pass=*/false,
                         sDeltaVcorr_skij);
 
     _Timer.start("LR_DYSON_NELEC");
@@ -159,10 +157,10 @@ double lr_dyson::solve_lr_dyson(
 
   // Final pass — the only one, unless the Δμ-probing pass above ran.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                      &opt_dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
+                      dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
                       sDeltaVcorr_skij);
 
-  if (fix_density_q0) {
+  if (fix_density and _is_q_gamma) {
     // ~0 once Δμ was applied; the residual ΔN of the dN/dμ ≈ 0 case is exactly
     // the error the warning above is about, so report it there too.
     _Timer.start("LR_DYSON_NELEC");
@@ -183,7 +181,7 @@ void lr_dyson::solve_lr_dyson_impl(
     DeltaDm_t& sDeltaDm_skij,
     const DeltaH0_t& sDeltaH0_skij,
     const DeltaF_t& sDeltaF_skij,
-    std::optional<dArray_5D_t>* opt_dDeltaSigma_wskij,
+    const dArray_5D_t* dDeltaSigma_wskij,
     double Delta_mu,
     bool last_pass,
     const DeltaF_t* sDeltaVcorr_skij) {
@@ -191,10 +189,6 @@ void lr_dyson::solve_lr_dyson_impl(
   using math::nda::make_distributed_array;
   using Array_5D_t = nda::array<ComplexType, 5>;
   using Array_4D_t = nda::array<ComplexType, 4>;
-
-  const dArray_5D_t* dDeltaSigma_wskij =
-      (opt_dDeltaSigma_wskij and *opt_dDeltaSigma_wskij)
-          ? &(**opt_dDeltaSigma_wskij) : nullptr;
 
   // Δμ·S term is only meaningful at q=0; assert no accidental nonzero value at q≠0
   utils::check(_is_q_gamma || std::abs(Delta_mu) < 1e-15,
@@ -293,11 +287,6 @@ void lr_dyson::solve_lr_dyson_impl(
   _Timer.stop("LR_DYSON_LOOP");
 
   _Timer.start("LR_DYSON_MISC");
-  // ΔΣ(iω) is dead once the final pass has consumed it, and freeing it here
-  // rather than at the end of the solve keeps it out of the redistribute below,
-  // which is where the Dyson phase takes its memory peak. An earlier pass must
-  // keep it: the next pass transforms nothing and reads this same array.
-  if (last_pass and opt_dDeltaSigma_wskij) opt_dDeltaSigma_wskij->reset();
   _context->comm.barrier();
   _Timer.stop("LR_DYSON_MISC");
 
@@ -387,12 +376,13 @@ void lr_dyson::solve_lr_dyson_impl(
 
 
 void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) {
-  // Collective, and safe to call with nothing pending: the branch is uniform
-  // because last_pass is fixed by fix_density/_is_q_gamma (identical arguments
-  // on every rank) and by _cached_dN_dmu, which compute_dN_dmu closes with an
-  // all_reduce_value. Making that reduce root-only would turn a numerical
-  // inconsistency into a deadlock here.
-  if (!_dDeltaG_tau_pending) return;
+  // Unconditional, not idempotent: every solve leaves exactly one ΔG(τ) and the
+  // caller replicates it exactly once. Checked rather than silently skipped, so
+  // a caller that loses track fails here instead of reading a stale ΔG(τ).
+  utils::check(bool(_dDeltaG_tau_pending),
+               "lr_dyson::materialize_DeltaG_tau: no ΔG(τ) to replicate. Either "
+               "solve_lr_dyson() has not run since the last call, or ΔG(τ) was "
+               "already replicated.");
 
   _Timer.start("LR_DYSON_GATHER");
   math::nda::gather_to_shm(*_dDeltaG_tau_pending, sDeltaG_tskij, &_Timer);
@@ -575,7 +565,7 @@ template void lr_dyson::solve_lr_dyson_impl(
     sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_4D_t>&,
-    std::optional<lr_dyson::dArray_5D_t>*,
+    const lr_dyson::dArray_5D_t*,
     double,
     bool,
     const sArray_t<Array_view_4D_t>*);

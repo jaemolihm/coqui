@@ -193,10 +193,9 @@ public:
    *
    * For q≠0, fix_density is ignored (Δμ contribution vanishes).
    *
-   * ΔG(τ) itself is left distributed: the solve retains it and only
-   * materialize_DeltaG_tau() replicates it into shared memory. Callers that read
-   * ΔG(τ) must call that first; ΔDm, which most of them actually want, is
-   * produced here as usual.
+   * ΔG(τ) itself is left distributed: the solve retains it and the caller must
+   * call materialize_DeltaG_tau() exactly once to replicate it into shared
+   * memory. ΔDm, which most callers actually want, is produced here as usual.
    *
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
@@ -222,18 +221,18 @@ public:
   /**
    * @brief Replicate the ΔG(τ) retained by the last solve into shared memory.
    *
-   * The gather is the single most expensive step of the LR Dyson solve (a
-   * node-replicating internode all_reduce of the whole nt·ns·nk·nb² array), and
-   * whether anything reads its result is decided by the driver *after* the solve
-   * has run — a Σ-free SCF iteration never touches ΔG(τ) at all. So the solve
-   * hands over the distributed array and this replicates it on the first read.
+   * The gather is the single most expensive step of the LR Dyson solve — a
+   * node-replicating internode all_reduce of the whole nt·ns·nk·nb² array — and
+   * a Σ-free SCF iteration never reads ΔG(τ), so the solve hands over the
+   * distributed array and the caller decides whether to pay for it.
    *
-   * Idempotent and collective: with nothing pending it is a no-op, so the shared
-   * copy stays valid until the next solve retains a new one. Nothing is pending
-   * in exactly two cases — this iteration's ΔG(τ) was already replicated by an
-   * earlier call, or no call was made at all and the next solve dropped it. The
-   * latter is where the gather is genuinely skipped: an SCF iteration whose
-   * kernel never reads ΔG(τ) pays for none of it.
+   * The caller owns that decision outright: this throws if nothing is pending
+   * rather than skipping quietly, so "has ΔG(τ) been replicated?" is answered by
+   * the call sites and never by state inside lr_dyson. A ΔG(τ) nobody claims is
+   * dropped by the next solve.
+   *
+   * Collective: every rank must call it, or none. In lr_driver that follows from
+   * k.include_gw_sigma, which is loop-invariant and identical on every rank.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
@@ -374,20 +373,16 @@ private:
   // locally instead of re-reading the gathered replica.
   //
   // ΔΣ arrives already on the ω grid: it does not depend on Δμ, so the caller
-  // transforms it once and both fix_density passes read the same darray. It is
-  // passed as a pointer-to-optional because the final pass frees it right after
-  // the ω-space loop, ahead of the redistribute that sets the Dyson memory peak.
+  // transforms it once and both fix_density passes read the same darray.
   //
-  // last_pass marks the pass whose result survives the solve. That pass is the
-  // one that keeps ΔG(τ) — an earlier pass's ΔG is overwritten before anything
-  // can read it — and equally the one after which ΔΣ(iω) is dead. They are the
-  // same pass by construction, so they share a flag rather than taking one each.
+  // last_pass marks the pass whose ΔG(τ) survives the solve; an earlier pass's
+  // ΔG is overwritten before anything can read it, so only the last is retained.
   template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
   void solve_lr_dyson_impl(
       DeltaDm_t& sDeltaDm_skij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
-      std::optional<dArray_5D_t>* opt_dDeltaSigma_wskij,
+      const dArray_5D_t* dDeltaSigma_wskij,
       double Delta_mu,
       bool last_pass,
       const DeltaF_t* sDeltaVcorr_skij);

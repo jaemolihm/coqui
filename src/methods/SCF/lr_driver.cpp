@@ -338,6 +338,10 @@ void lr_driver::lr_setup(
                  "correlation response, so the two together double-count it. "
                  "include_xc works only in the Hartree mode.");
   }
+  // The SCF loop must run at least once: every output downstream, ΔG(τ)
+  // included, is produced by the solve inside it.
+  utils::check(p.max_iter >= 1,
+               "lr_driver::lr_setup: max_iter must be >= 1, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
     utils::check(k.gw_full,
                  "lr_driver::lr_setup: split ΔΣ terms require the Σ2 (-G⊙ΔW) component.");
@@ -720,11 +724,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     utils::check(mask.has_sigma(),
                  "lr_driver::lr_solve_one: eval_sigma_channel called with a Σ-free "
                  "kernel mask ({}).", mask.to_string());
-    // Every branch below reads ΔG(τ), which the Dyson solve leaves distributed.
-    // One call covers them all, and it is a no-op once this iteration's ΔG(τ)
-    // has been replicated. Deliberately outside the channel's clocks: the cost
-    // belongs to the Dyson step that produced the array, and is reported there.
-    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     if (!mask.sigma_G_dW) {
       // Term 1 only: ΔΣ = -ΔG ⊙ W_c
       _Timer.start(clk.sigma);
@@ -974,6 +973,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, dyson_sigma,
         p.fix_density, Delta_mu, dyson_vcorr);
+
+    // The solve leaves ΔG(τ) distributed; replicating it is the single most
+    // expensive step of the Dyson phase, so it happens only where something
+    // reads it. k.include_gw_sigma is loop-invariant, so which iterations
+    // replicate is fixed before the loop starts, not discovered inside it —
+    // the Σ evaluators can assume sDeltaG_tskij is current, and the tail below
+    // knows from the same flag whether the converged ΔG(τ) still needs one.
+    if (k.include_gw_sigma) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -1307,12 +1314,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
-  // Replicate the converged ΔG(τ) unconditionally, whether or not this run's
-  // kernel ever read it. sDeltaG_tskij outlives the solve and is reused by the
-  // next perturbation, so anything less leaves the caller holding either an
-  // earlier iteration's ΔG next to a converged ΔDm/ΔF/ΔΣ in the checkpoint, or
-  // the previous mode's ΔG entirely. Exactly one gather per perturbation.
-  _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+  // A Σ-free run never replicated ΔG(τ) inside the loop, so the converged one is
+  // still distributed and the checkpoint needs it: sDeltaG_tskij outlives the
+  // solve and is reused by the next perturbation, so leaving it would hand the
+  // caller the previous perturbation's ΔG next to this one's ΔDm/ΔF. With Σ the
+  // last iteration already replicated it and there is nothing left pending.
+  if (!k.include_gw_sigma) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
