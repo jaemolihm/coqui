@@ -75,8 +75,10 @@ auto make_grid(utils::Communicator auto&& comm, double ecut, mf::MF& mf)
 // matrix S = Z*dagger(Z) is exactly singular; its LU inverse in thc::evaluate() still
 // returns info==0 on roundoff-sized pivots, so the integrals come out silently wrong
 // rather than failing. Refuse to build in that regime.
-void check_npts_vs_pw(long nIpts, long npw, double ecut)
+void check_npts_vs_pw(long nIpts, long npw, double ecut, bool has_pw_basis)
 {
+  // rho_g.size() bounds nothing without a plane-wave basis.
+  if (not has_pw_basis) return;
   utils::check( nIpts <= npw,
                 "thc::interpolating_points: number of interpolating points ({}) exceeds the "
                 "number of plane waves in the auxiliary basis ({}) at ecut = {} a.u.\n"
@@ -409,12 +411,12 @@ auto thc::interpolating_points(int iq, int max, nda::range a_range, nda::range b
   bool gamma = (Q(0)*Q(0)+Q(1)*Q(1)+Q(2)*Q(2) < 1e-8);
   if((a_range==b_range) and gamma and (mf->nkpts()!=mf->nkpts_ibz()) ) {
       auto return_v = chol_metric_impl_ibz<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size);
-      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
+      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut, mf->has_wfc_grid());
       Timer.stop("TOTAL");
       return return_v;
   } else {
       auto return_v = chol_metric_impl<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size, C_skai);
-      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
+      detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut, mf->has_wfc_grid());
       Timer.stop("TOTAL");
       return return_v;
   }
@@ -446,7 +448,7 @@ auto thc::interpolating_points(nda::MemoryArrayOfRank<4> auto const& C_skai, int
   nda::range a_range(C_skai.extent(2));
   nda::range b_range(mf->nbnd());
   auto return_v = chol_metric_impl<MEM,true,true>(iq,max,a_range,b_range,default_cholesky_block_size,std::addressof(C_skai));
-  detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut);
+  detail::check_npts_vs_pw(std::get<0>(return_v).size(), rho_g.size(), ecut, mf->has_wfc_grid());
   Timer.stop("TOTAL");
   return return_v;
 }
