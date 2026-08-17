@@ -331,7 +331,57 @@ def dump_hartree(mf, params):
     pproc_mod.dump_hartree(mf, json.dumps(params))
 
 
-def pade(g_iw, iaft, stats, wmin, wmax, Nw, *, 
+def add_augmented_h_ks(mf, params):
+    """
+    Retrofit the augmented-basis Kohn-Sham matrix into an existing augmented basis HDF5.
+
+    Assembles ``H_KS(i,j) = <phi_i|H0|phi_j> + <phi_i|V_H + V_xc|phi_j>`` in the
+    augmented basis stored in the mean-field file, using that file's own orbitals and
+    its own copy of the DFT local potential, and adds it as ``Orbitals/H_KS_skij``
+    (IBZ only). Nothing is re-augmented and no orbital is regenerated, so a THC fit
+    built on the basis stays valid.
+
+    This exists for bases written before the Kohn-Sham matrix was persisted: without
+    the dataset, ``hamilt::set_fock`` seeds the one-body Hamiltonian with
+    ``diag(eigval)`` and the off-diagonal couplings of the non-eigenstate basis are
+    silently dropped. Adding the dataset therefore **changes what every subsequent
+    calculation on that basis computes**.
+
+    The mean field must be opened with the file's full band count (``nbnd = -1``) and
+    must carry a QE-derived DFT local potential.
+
+    **Nothing is written unless** ``write=True``; the default is a dry run that only
+    reports the validation block (verbosity level 1 or above, see
+    ``coqui.set_verbosity``).
+
+    Parameters
+    ----------
+    mf : Mf
+        Augmented mean-field object, obtained from ``make_mf(..., "bdft")``.
+    params : dict
+        Supported keys:
+
+        - ``write`` *(bool, optional, default ``False``)* — add
+          ``Orbitals/H_KS_skij`` to the mean-field HDF5. ``False`` computes and
+          reports without touching the file.
+        - ``overwrite`` *(bool, optional, default ``False``)* — replace an existing
+          ``Orbitals/H_KS_skij`` instead of aborting.
+        - ``nbnd_protected`` *(int, optional, default ``-1``)* — number of leading
+          protected (parent-eigenstate) orbitals. Enables the
+          protected-to-augmentation off-diagonal block report, which vanishes
+          analytically and is a free basis-ordering check. ``-1`` skips it.
+
+    Returns
+    -------
+    None
+        With ``write=True`` the matrix ``H_KS_skij`` (shape:
+        ``[nspin, nkpts_ibz, nbnd, nbnd]``) is added to the mean-field HDF5 under
+        ``Orbitals/``.
+    """
+    pproc_mod.add_augmented_h_ks(mf, json.dumps(params))
+
+
+def pade(g_iw, iaft, stats, wmin, wmax, Nw, *,
          Nfit=-1, eta=None, ph_sym=False, causal_projection=False):
     """
     Perform Padé analytic continuation from the Matsubara to the real frequency axis.

@@ -80,11 +80,30 @@ namespace methods {
    *   - Nw: number of real frequency points
    *   - eta: shift above the real-frequency axis
    * Optional arguments for pp_type = unfold_bz (unfold BZ from irreducible to the 1st BZ)
+   * Optional arguments for pp_type = add_augmented_h_ks (retrofit the augmented-basis
+   * Kohn-Sham matrix into the mean-field h5; needs no prefix/outdir):
+   *   - write: add Orbitals/H_KS_skij to the mean-field h5. Default: false (dry run)
+   *   - overwrite: replace an existing Orbitals/H_KS_skij. Default: false
+   *   - nbnd_protected: number of leading protected orbitals, enables the
+   *     protected <-> augmentation block report. Default: -1 (skip)
    */
   void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt) {
     auto mpi = mf->mpi();
     if (mpi->comm.size()%mpi->node_comm.size()!=0) {
       APP_ABORT("pproc: number of processors on each node should be the same.");
+    }
+
+    // Reads and writes the mean-field h5 itself, so it needs neither a checkpoint
+    // prefix nor an IAFT grid -- hence the short-circuit ahead of the required
+    // "prefix" lookup below.
+    if (pp_type == "add_augmented_h_ks") {
+      auto write          = io::get_value_with_default<bool>(pt, "write", false);
+      auto overwrite      = io::get_value_with_default<bool>(pt, "overwrite", false);
+      auto nbnd_protected = io::get_value_with_default<long>(pt, "nbnd_protected", -1l);
+
+      auto psp = hamilt::make_pseudopot(*mf);
+      hamilt::add_augmented_h_ks(*mpi, *mf, psp.get(), write, overwrite, nbnd_protected);
+      return;
     }
 
     std::string err = std::string("pproc - Incorrect input - ");

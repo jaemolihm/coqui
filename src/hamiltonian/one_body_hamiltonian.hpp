@@ -31,9 +31,11 @@
 #include "h5/h5.hpp"
 #include "nda/nda.hpp"
 #include "nda/h5.hpp"
+#include "nda/linalg.hpp"
 
 #include "utilities/proc_grid_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/distributed_array/nda_utils.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "mean_field/MF.hpp"
 
@@ -342,6 +344,210 @@ inline void log_augmented_hks_status(mf::MF &mf) {
                "the non-eigenstate basis are dropped. Regenerate the basis to use the "
                "full Kohn-Sham matrix.", mf.filename());
   }
+}
+
+/**
+ * Add the augmented-basis Kohn-Sham matrix
+ *   H_KS(i,j) = <phi_i|H0|phi_j> + <phi_i|V_H + V_xc|phi_j>
+ * to an augmented basis h5 that was written before the matrix was persisted. The
+ * matrix is assembled from that file's own orbitals and its own copy of the DFT
+ * local potential (V_Hxc = scf_local_potential - pp_local_component), so nothing is
+ * re-augmented and no orbital -- hence no THC fit on top of them -- is regenerated.
+ * Numerically the same object as orbitals::try_ks_eigval_ibz builds at augmentation
+ * time; the only difference is that `mf` is opened from the existing h5 instead of
+ * being constructed from a parent mean field plus psi.
+ *
+ * Stored IBZ only, (nspin, nkpts_ibz, nbnd, nbnd): the reader conjugates orbitals at
+ * time-reversal-paired k, so a full-BZ band x band matrix would need a rotation
+ * convention nothing else in the file carries (see bdft_readonly::read_hks_matrix).
+ *
+ * A validation block is always reported, whether or not the matrix is written. The
+ * comparison of Re[diag(H_KS)] against the stored Orbitals/eigval is a hard gate: the
+ * augmenter seeds eigval with exactly that diagonal, so a mismatch means the
+ * recomputed matrix is not the object the file was built with (wrong potential, units
+ * or band ordering).
+ *
+ * @param mpi            [INPUT] - mpi context
+ * @param mf             [INPUT] - augmented mean field, opened with the file's full
+ *                                 band count
+ * @param psp            [INPUT] - pseudopotential of `mf` (hamilt::make_pseudopot)
+ * @param write          [INPUT] - add Orbitals/H_KS_skij to mf.filename().
+ *                                 false = compute and report only
+ * @param overwrite      [INPUT] - replace an existing Orbitals/H_KS_skij
+ * @param nbnd_protected [INPUT] - number of leading protected (parent-eigenstate)
+ *        orbitals, when known. Enables the protected <-> augmentation off-diagonal
+ *        report, which vanishes analytically and is therefore a free ordering and
+ *        conjugation check. Not stored in the h5 (it belongs to the run that built
+ *        the basis), so it must be supplied; -1 skips the report.
+ */
+template<typename MPI_t>
+void add_augmented_h_ks(MPI_t &mpi, mf::MF &mf, pseudopot *psp,
+                        bool write = false, bool overwrite = false,
+                        long nbnd_protected = -1)
+{
+  utils::check(mf.is_augmented(),
+               "add_augmented_h_ks: {} is not an augmented basis (no System/augmented "
+               "attribute), so the mean-field reader never looks for Orbitals/H_KS_skij "
+               "and adding it would have no effect.", mf.filename());
+  utils::check(psp != nullptr, "add_augmented_h_ks: Missing pseudopot object.");
+  utils::check(psp->has_local_vhxc(),
+               "add_augmented_h_ks: {} carries no multiplicative DFT V_Hxc (missing "
+               "scf_local_potential / vxc_with_nlcc), so the Kohn-Sham matrix cannot be "
+               "reconstructed from it. Expected for pyscf parents, QE-xml parents and "
+               "meta-GGA/hybrid functionals.", mf.filename());
+
+  long nspin = mf.nspin();
+  long nkpts_ibz = mf.nkpts_ibz();
+  long nbnd = mf.nbnd();
+
+  // Band-window guard and existing-dataset check, in one h5 open on the root.
+  std::array<long,2> file_info = {0, 0};
+  if (mpi.comm.root()) {
+    h5::file file(mf.filename(), 'r');
+    h5::group grp(file);
+    auto ogrp = grp.open_group("Orbitals");
+    int nbnd_file = 0;
+    h5::h5_read_attribute(ogrp, "number_of_bands", nbnd_file);
+    file_info[0] = nbnd_file;
+    file_info[1] = ogrp.has_dataset("H_KS_skij") ? 1 : 0;
+  }
+  mpi.comm.broadcast_n(file_info.data(), file_info.size(), 0);
+  bool has_ds = (file_info[1] == 1);
+  // A matrix written from a truncated band window would be smaller than the basis,
+  // and every later reader would silently take the truncated coupling.
+  utils::check(file_info[0] == nbnd,
+               "add_augmented_h_ks: the mean field was opened with {} of the {} bands in "
+               "{}. Reopen it with the full band count (nbnd = -1); a matrix written from "
+               "a band window drops the coupling to the remaining states.",
+               nbnd, file_info[0], mf.filename());
+  utils::check(not write or overwrite or not has_ds,
+               "add_augmented_h_ks: {} already carries Orbitals/H_KS_skij. Pass "
+               "overwrite = true to replace it.", mf.filename());
+  utils::check(nbnd_protected < nbnd,
+               "add_augmented_h_ks: nbnd_protected = {} must be smaller than nbnd = {}.",
+               nbnd_protected, nbnd);
+
+  app_log(1, "Augmented-basis Kohn-Sham matrix (retrofit):");
+  app_log(1, "  - h5 file                       = {}", mf.filename());
+  app_log(1, "  - (nspin, nkpts_ibz, nbnd)      = ({}, {}, {})", nspin, nkpts_ibz, nbnd);
+  app_log(1, "  - Orbitals/H_KS_skij present    = {}", has_ds);
+  app_log(1, "  - write / overwrite             = {} / {}", write, overwrite);
+  app_log(1, "  - protected orbitals            = {}", nbnd_protected);
+
+  using array_view_4d_t = nda::array_view<ComplexType,4>;
+  std::array<long,4> sh = {nspin, nkpts_ibz, nbnd, nbnd};
+  auto sH_KS = math::shm::make_shared_array<array_view_4d_t>(mpi, sh);
+  set_H0(mf, psp, sH_KS);
+
+  auto dVHxc = V_Hxc_aug<HOST_MEMORY>(mf, mpi.comm, psp);
+  auto sVHxc = math::shm::make_shared_array<array_view_4d_t>(mpi, sh);
+  math::nda::gather_to_shm(dVHxc, sVHxc);
+  mpi.comm.barrier();
+
+  // H <- (H + H^dag)/2, on every node root: assemble_one_body ends in an all_reduce,
+  // so each node's window holds the complete array. set_H0 is not hermitized and
+  // gen_V_Hxc_aug is hermitian only to round-off, while every consumer of the stored
+  // matrix reads a single triangle. The discarded part bounds the V_Hxc projection
+  // error, hence the report.
+  auto all = nda::range::all;
+  double diff2 = 0.0, tot2 = 0.0;
+  if (sH_KS.node_comm()->root()) {
+    auto H = sH_KS.local();
+    H += sVHxc.local();
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k) {
+        nda::array<ComplexType,2> Hk = H(s,k,all,all);
+        H(s,k,all,all) = 0.5*(Hk + nda::dagger(Hk));
+        diff2 += std::pow(nda::frobenius_norm(H(s,k,all,all) - Hk), 2);
+        tot2  += std::pow(nda::frobenius_norm(Hk), 2);
+      }
+  }
+  sH_KS.node_sync();
+
+  // Validation metrics, evaluated on the global root (which is a node root, so its
+  // window is complete) and broadcast so the logger's own gating decides who prints.
+  //   [0] ||H_herm - H||/||H||           [1] ||Re diag - eigval||/||eigval||
+  //   [2] max |Re diag - eigval|         [3] ||Im diag||
+  //   [4] ||H||                          [5] ||H - diag(H)||/||H||
+  //   [6] ||H[0:np, np:]||/||H||
+  std::array<double,7> m = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  if (mpi.comm.root()) {
+    auto H = sH_KS.local();
+    auto eig = mf.eigval();
+    double n_dia = 0.0, d_dia = 0.0, n_im = 0.0, n_tot = 0.0, n_off = 0.0, n_cpl = 0.0;
+    for (long s = 0; s < nspin; ++s)
+      for (long k = 0; k < nkpts_ibz; ++k)
+        for (long i = 0; i < nbnd; ++i) {
+          double d = std::real(H(s,k,i,i)) - eig(s,k,i);
+          n_dia += d*d;
+          d_dia += eig(s,k,i)*eig(s,k,i);
+          m[2] = std::max(m[2], std::abs(d));
+          double im = std::imag(H(s,k,i,i));
+          n_im += im*im;
+          for (long j = 0; j < nbnd; ++j) {
+            n_tot += std::norm(H(s,k,i,j));
+            if (i != j) n_off += std::norm(H(s,k,i,j));
+            if (nbnd_protected > 0 and i < nbnd_protected and j >= nbnd_protected)
+              n_cpl += std::norm(H(s,k,i,j));
+          }
+        }
+    m[0] = (tot2 > 0.0) ? std::sqrt(diff2/tot2) : 0.0;
+    m[1] = (d_dia > 0.0) ? std::sqrt(n_dia/d_dia) : std::sqrt(n_dia);
+    m[3] = std::sqrt(n_im);
+    m[4] = std::sqrt(n_tot);
+    m[5] = (n_tot > 0.0) ? std::sqrt(n_off/n_tot) : 0.0;
+    m[6] = (n_tot > 0.0) ? std::sqrt(n_cpl/n_tot) : 0.0;
+  }
+  mpi.comm.broadcast_n(m.data(), m.size(), 0);
+
+  app_log(1, "  - hermitization  ||H_herm - H||/||H||             = {:.3e}", m[0]);
+  app_log(1, "  - ||Re diag(H_KS) - eigval||/||eigval||           = {:.3e}", m[1]);
+  app_log(1, "  - max |Re diag(H_KS) - eigval|                    = {:.3e} a.u.", m[2]);
+  app_log(1, "  - ||Im diag(H_KS)||                              = {:.3e}", m[3]);
+  app_log(1, "  - ||H_KS||                                       = {:.6e}", m[4]);
+  app_log(1, "  - ||H_KS - diag(H_KS)||/||H_KS||                 = {:.3e}", m[5]);
+  if (nbnd_protected > 0) {
+    // Analytically zero: the protected orbitals are KS eigenstates and
+    // orthonormalize_augmentation projects the augmentation states off them. Reported,
+    // not gated -- on a dpsi basis the first-order residual of the reconstructed H0
+    // leaves it at ~1e-8.
+    app_log(1, "  - protected<->augmentation  ||H[0:{},{}:]||/||H_KS|| = {:.3e}",
+            nbnd_protected, nbnd_protected, m[6]);
+  }
+
+  // The one cheap external check that the recomputed matrix is the object the file was
+  // built with: since the augmenter seeds Orbitals/eigval with Re[diag(H_KS)], a basis
+  // built with the KS seed must agree to round-off. Reported, not gated, so a dry run
+  // can always show the number -- inspect it before writing.
+  constexpr double diag_tol = 1e-6;
+  if (m[1] >= diag_tol)
+    app_log(1, "  [WARNING] Re[diag(H_KS)] disagrees with Orbitals/eigval of {} at relative "
+               "{:.3e} > {:.1e}. The augmenter seeds eigval with exactly this diagonal, so "
+               "the recomputed matrix may not be the object the file was built with -- "
+               "suspect the DFT potential, the units or the band ordering. (A basis written "
+               "before the Kohn-Sham eigval seed carries the kinetic Rayleigh diagonal "
+               "instead, for which this check does not apply.)", mf.filename(), m[1],
+            diag_tol);
+
+  if (not write) {
+    app_log(1, "  - dry run: nothing written to {}\n", mf.filename());
+    mpi.comm.barrier();
+    return;
+  }
+
+  // Every rank holds a lazily opened read handle on the same file from the orbital
+  // reads above (bdft_readonly::open_if_needed); HDF5 file locking rejects the
+  // read-write open while any of them is alive.
+  mf.close();
+  mpi.comm.barrier();
+  if (mpi.comm.root()) {
+    h5::file file(mf.filename(), 'a');
+    h5::group grp(file);
+    auto ogrp = grp.open_group("Orbitals");
+    nda::h5_write(ogrp, "H_KS_skij", sH_KS.local(), false);
+  }
+  mpi.comm.barrier();
+  app_log(1, "  - wrote Orbitals/H_KS_skij to {}\n", mf.filename());
 }
 
 /**

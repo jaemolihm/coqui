@@ -772,6 +772,155 @@ TEST_CASE("aug_hks_set_fock", "[hamilt]") {
   mpi->comm.barrier();
 }
 
+// Retrofit path (hamilt::add_augmented_h_ks): recompute the augmented Kohn-Sham
+// matrix from an already-written basis h5 and require it to reproduce, to round-off,
+// the matrix the augmenter stored when it wrote that same file. Two bases:
+//   - nbnd_aug=2: a real augmentation, whose stored matrix is not diagonal;
+//   - nbnd_aug=0: the parent eigenbasis, whose diagonal is diag(eps_QE) -- an external
+//     ground truth independent of the code under test.
+// Both have nkpts == nkpts_ibz, because no augmented basis with symmetry exists to test
+// against: add_augmentation on a symmetric parent (qe_lih223_sym) aborts inside
+// utils::generate_dmatrix, which requires the stored eigval to be sorted per k while an
+// augmented basis stores Re[diag(H_KS)] in [orig | aug] order. The IBZ-only storage is
+// instead pinned by construction (the shared array is allocated with nkpts_ibz) and by
+// the dataset-shape check in read_hks below.
+TEST_CASE("aug_hks_retrofit", "[hamilt]") {
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto all = nda::range::all;
+
+  long nspin = 0, nkpts_ibz = 0, nbnd_par = 0;
+  // The stored matrix of `fn`, materialized on the global root (zero elsewhere).
+  auto read_hks = [&](std::string const& fn, long norb) {
+    nda::array<ComplexType,4> H(nspin, nkpts_ibz, norb, norb);
+    H() = ComplexType(0.0);
+    if (mpi->comm.root()) {
+      h5::file file(fn, 'r');
+      h5::group grp(file);
+      // the stored dataset must be IBZ only -- a full-BZ write would trip this read
+      auto info = h5::array_interface::get_dataset_info(grp.open_group("Orbitals"),
+                                                       "H_KS_skij");
+      utils::check(long(info.lengths[1]) == nkpts_ibz,
+                   "aug_hks_retrofit: H_KS_skij has {} k-points, expected nkpts_ibz = {}.",
+                   long(info.lengths[1]), nkpts_ibz);
+      nda::h5_read(grp.open_group("Orbitals"), "H_KS_skij", H);
+    }
+    return H;
+  };
+  auto has_hks_ds = [&](std::string const& fn) {
+    long flag = 0;
+    if (mpi->comm.root()) {
+      h5::file file(fn, 'r');
+      flag = h5::group(file).open_group("Orbitals").has_dataset("H_KS_skij") ? 1 : 0;
+    }
+    mpi->comm.broadcast_n(&flag, 1, 0);
+    return flag == 1;
+  };
+  // Copy `fn` and strip the stored matrix from the copy, so the retrofit has to
+  // rebuild it from the file's own orbitals and DFT potential.
+  auto copy_without_hks = [&](std::string const& fn, std::string const& fn_copy) {
+    if (mpi->comm.root()) {
+      std::filesystem::copy_file(fn, fn_copy,
+                                 std::filesystem::copy_options::overwrite_existing);
+      h5::file file(fn_copy, 'a');
+      h5::group(file).open_group("Orbitals").unlink("H_KS_skij", true);
+    }
+    mpi->comm.barrier();
+  };
+
+  for (auto [src, nbnd_aug] : {std::pair{"qe_lih223", 2l}, std::pair{"qe_lih223", 0l}}) {
+    auto qe_mf = mf::default_MF(mpi, src, mf::h5_input_type);
+    nspin = qe_mf.nspin();
+    nkpts_ibz = qe_mf.nkpts_ibz();
+    nbnd_par = qe_mf.nbnd();
+    app_log(2, "aug_hks_retrofit: {} nbnd_aug={} nkpts={} nkpts_ibz={}",
+            src, nbnd_aug, qe_mf.nkpts(), nkpts_ibz);
+
+    std::string tag = std::string(src) + "_a" + std::to_string(nbnd_aug);
+    std::string fn = "dummy_hks_retro_" + tag + ".h5";
+    std::string prefix_copy = "dummy_hks_retro_" + tag + "_copy";
+    std::string fn_copy = prefix_copy + ".h5";
+    long norb = 0;
+    {
+      auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+      auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, fn, augmenter,
+                                                            nbnd_aug, 1e-6, 1e-2);
+      REQUIRE(aug_mf.has_hks_matrix());
+      norb = aug_mf.nbnd();
+    }
+    auto H_ref = read_hks(fn, norb);
+    copy_without_hks(fn, fn_copy);
+    REQUIRE(not has_hks_ds(fn_copy));
+
+    // orthonormalize_augmentation emits [orig | aug], so the leading nbnd_par
+    // orbitals are the protected ones
+    long nprot = (nbnd_aug > 0) ? nbnd_par : -1;
+
+    // dry run: reports, writes nothing
+    {
+      auto cp_mf = mf::make_MF(mpi, mf::bdft_source, "./", prefix_copy);
+      REQUIRE(cp_mf.is_augmented());
+      REQUIRE(not cp_mf.has_hks_matrix());
+      REQUIRE(cp_mf.nbnd() == norb);
+      auto psp = hamilt::make_pseudopot(cp_mf);
+      hamilt::add_augmented_h_ks(*mpi, cp_mf, psp.get(), false, false, nprot);
+    }
+    REQUIRE(not has_hks_ds(fn_copy));
+
+    // write, then compare against the matrix the augmenter stored
+    {
+      auto cp_mf = mf::make_MF(mpi, mf::bdft_source, "./", prefix_copy);
+      auto psp = hamilt::make_pseudopot(cp_mf);
+      hamilt::add_augmented_h_ks(*mpi, cp_mf, psp.get(), true, false, nprot);
+    }
+    REQUIRE(has_hks_ds(fn_copy));
+    auto H_new = read_hks(fn_copy, norb);
+
+    std::array<double,4> m = {0.0, 0.0, 0.0, 0.0};
+    if (mpi->comm.root()) {
+      double n2 = 0.0, d2 = 0.0, e_dia = 0.0, d_dia = 0.0, n_off = 0.0;
+      auto eref = qe_mf.eigval()(all, nda::range(nkpts_ibz), all);
+      for (long s = 0; s < nspin; ++s)
+        for (long k = 0; k < nkpts_ibz; ++k)
+          for (long i = 0; i < norb; ++i) {
+            for (long j = 0; j < norb; ++j) {
+              n2 += std::norm(H_new(s,k,i,j) - H_ref(s,k,i,j));
+              d2 += std::norm(H_ref(s,k,i,j));
+              m[1] = std::max(m[1], std::abs(H_new(s,k,i,j) - H_ref(s,k,i,j)));
+              if (i != j) n_off += std::norm(H_new(s,k,i,j));
+            }
+            if (nbnd_aug == 0) {
+              double d = std::real(H_new(s,k,i,i)) - eref(s,k,i);
+              e_dia += d*d;
+              d_dia += eref(s,k,i)*eref(s,k,i);
+            }
+          }
+      m[0] = std::sqrt(n2/d2);
+      m[2] = (d_dia > 0.0) ? std::sqrt(e_dia/d_dia) : 0.0;
+      m[3] = std::sqrt(n_off/d2);
+    }
+    mpi->comm.broadcast_n(m.data(), m.size(), 0);
+    app_log(2, "aug_hks_retrofit[{}]: ||H_retro - H_aug||/||H_aug|| = {}", tag, m[0]);
+    app_log(2, "aug_hks_retrofit[{}]: max |H_retro - H_aug|         = {}", tag, m[1]);
+    app_log(2, "aug_hks_retrofit[{}]: ||H_retro - diag||/||H||      = {}", tag, m[3]);
+    utils::VALUE_EQUAL(m[0], 0.0, 1e-10);
+    if (nbnd_aug == 0) {
+      // the basis IS the parent eigenbasis: external ground truth
+      app_log(2, "aug_hks_retrofit[{}]: ||diag(H_retro) - eps_QE||/||eps_QE|| = {}",
+              tag, m[2]);
+      utils::VALUE_EQUAL(m[2], 0.0, 1e-4);
+      utils::VALUE_EQUAL(m[3], 0.0, 1e-4);
+    } else {
+      // a real augmentation is not an eigenbasis, so the retrofitted matrix must carry
+      // the off-diagonal coupling the diag(eigval) fallback would have dropped
+      REQUIRE(m[3] > 1e-4);
+    }
+
+    mpi->comm.barrier();
+    if (mpi->comm.root()) { remove(fn.c_str()); remove(fn_copy.c_str()); }
+    mpi->comm.barrier();
+  }
+}
+
 template<MEMORY_SPACE MEM>
 void test_exx_impl(std::shared_ptr<mpi_context_t> &mpi)
 {

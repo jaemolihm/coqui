@@ -58,6 +58,11 @@ namespace coqui_py::post_proc {
     methods::post_processing("dump_hartree", mf.get_mf(), parser.get_root());
   }
 
+  void add_augmented_h_ks(const Mf &mf, const std::string &params) {
+    auto parser = InputParser(params);
+    methods::post_processing("add_augmented_h_ks", mf.get_mf(), parser.get_root());
+  }
+
   auto pade(nda::array<ComplexType, 2> A_iw, nda::array<ComplexType, 1> iw_mesh,
             double w_min, double w_max, long Nw, int Nfit, double eta, bool is_iw_pos_only)
   -> std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 1>> {
