@@ -219,20 +219,26 @@ public:
       const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   /**
-   * @brief Replicate the ΔG(τ) retained by the last solve into shared memory.
+   * @brief Gather the distributed _dDeltaG_tau_buffer left by the last solve
+   *        into the shared-memory array sDeltaG_tskij.
    *
-   * The gather is the single most expensive step of the LR Dyson solve — a
-   * node-replicating internode all_reduce of the whole nt·ns·nk·nb² array — and
-   * a Σ-free SCF iteration never reads ΔG(τ), so the solve hands over the
-   * distributed array and the caller decides whether to pay for it.
+   * Call this before using sDeltaG_tskij for anything — the GW self-energy
+   * evaluators, the checkpoint dump. Until it runs, the solve's ΔG(τ) exists
+   * only as the distributed buffer and sDeltaG_tskij still holds whatever was
+   * there before.
    *
-   * The caller owns that decision outright: this throws if nothing is pending
+   * The gather is the single most expensive step of the LR Dyson solve (a
+   * node-replicating internode all_reduce of the whole nt·ns·nk·nb² array), so
+   * the solve does not do it: a Σ-free run that never writes ΔG(τ) skips it
+   * entirely, and its buffer is dropped by the next solve.
+   *
+   * The caller owns that decision outright: this throws if the buffer is empty
    * rather than skipping quietly, so "has ΔG(τ) been replicated?" is answered by
-   * the call sites and never by state inside lr_dyson. A ΔG(τ) nobody claims is
-   * dropped by the next solve.
+   * the call sites and never by state inside lr_dyson.
    *
    * Collective: every rank must call it, or none. In lr_driver that follows from
-   * k.include_gw_sigma, which is loop-invariant and identical on every rank.
+   * k.include_gw_sigma and p.save_DeltaG, both loop-invariant and identical on
+   * every rank.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
@@ -375,8 +381,9 @@ private:
   // ΔΣ arrives already on the ω grid: it does not depend on Δμ, so the caller
   // transforms it once and both fix_density passes read the same darray.
   //
-  // last_pass marks the pass whose ΔG(τ) survives the solve; an earlier pass's
-  // ΔG is overwritten before anything can read it, so only the last is retained.
+  // set_dDeltaG_tau_buffer stores this pass's ΔG(τ) in _dDeltaG_tau_buffer for
+  // materialize_DeltaG_tau() to replicate. Only the last pass sets it: an
+  // earlier pass's ΔG is overwritten before anything can read it.
   template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
   void solve_lr_dyson_impl(
       DeltaDm_t& sDeltaDm_skij,
@@ -384,7 +391,7 @@ private:
       const DeltaF_t& sDeltaF_skij,
       const dArray_5D_t* dDeltaSigma_wskij,
       double Delta_mu,
-      bool last_pass,
+      bool set_dDeltaG_tau_buffer,
       const DeltaF_t* sDeltaVcorr_skij);
 
   simple_dyson& _dyson;
@@ -411,7 +418,7 @@ private:
   // ΔG(τ) of the last solve, still distributed, awaiting a consumer.
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
   // of every solve so a solve never inherits the previous one's array.
-  std::optional<dArray_5D_t> _dDeltaG_tau_pending;
+  std::optional<dArray_5D_t> _dDeltaG_tau_buffer;
 
   // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
   size_t _gather_bytes = 0;

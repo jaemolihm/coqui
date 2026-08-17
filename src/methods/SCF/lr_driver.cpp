@@ -1314,12 +1314,15 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
-  // A Σ-free run never replicated ΔG(τ) inside the loop, so the converged one is
-  // still distributed and the checkpoint needs it: sDeltaG_tskij outlives the
-  // solve and is reused by the next perturbation, so leaving it would hand the
-  // caller the previous perturbation's ΔG next to this one's ΔDm/ΔF. With Σ the
-  // last iteration already replicated it and there is nothing left pending.
-  if (!k.include_gw_sigma) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+  // A Σ-free run never replicated ΔG(τ) inside the loop, so if the caller is
+  // going to read the converged one it has to be replicated now: sDeltaG_tskij
+  // outlives the solve and is reused by the next perturbation, so leaving it
+  // would hand the caller the previous perturbation's ΔG next to this one's
+  // ΔDm/ΔF. With Σ the last iteration already replicated it and nothing is
+  // pending; with save_DeltaG off nobody reads it and the gather is skipped
+  // outright — the only case where ΔG(τ) is never replicated at all.
+  if (!k.include_gw_sigma and p.save_DeltaG)
+    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {

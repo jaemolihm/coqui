@@ -79,9 +79,9 @@ double lr_dyson::solve_lr_dyson(
 
   _Timer.start("LR_DYSON");
 
-  // A ΔG(τ) nobody asked for before this solve is dead by definition. Dropped
+  // A ΔG(τ) nobody gathered before this solve is dead by definition. Dropped
   // before anything is allocated, so the in-solve memory peak is unchanged.
-  _dDeltaG_tau_pending.reset();
+  _dDeltaG_tau_buffer.reset();
 
   // Processor grid of the ω-side arrays. A pure function of the sizes, so
   // solve_lr_dyson_impl derives the same one and the two agree by construction.
@@ -143,7 +143,7 @@ double lr_dyson::solve_lr_dyson(
     // ΔG(τ) is dropped rather than kept for a consumer the final pass would
     // overwrite before anyone could read it.
     solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                        dDeltaSigma_wskij, 0.0, /*last_pass=*/false,
+                        dDeltaSigma_wskij, 0.0, /*set_dDeltaG_tau_buffer=*/false,
                         sDeltaVcorr_skij);
 
     _Timer.start("LR_DYSON_NELEC");
@@ -157,7 +157,7 @@ double lr_dyson::solve_lr_dyson(
 
   // Final pass — the only one, unless the Δμ-probing pass above ran.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                      dDeltaSigma_wskij, Delta_mu, /*last_pass=*/true,
+                      dDeltaSigma_wskij, Delta_mu, /*set_dDeltaG_tau_buffer=*/true,
                       sDeltaVcorr_skij);
 
   if (fix_density and _is_q_gamma) {
@@ -183,7 +183,7 @@ void lr_dyson::solve_lr_dyson_impl(
     const DeltaF_t& sDeltaF_skij,
     const dArray_5D_t* dDeltaSigma_wskij,
     double Delta_mu,
-    bool last_pass,
+    bool set_dDeltaG_tau_buffer,
     const DeltaF_t* sDeltaVcorr_skij) {
 
   using math::nda::make_distributed_array;
@@ -362,9 +362,9 @@ void lr_dyson::solve_lr_dyson_impl(
     }
     _Timer.stop("LR_DYSON_DM");
 
-    // ΔG(τ) is handed over distributed; materialize_DeltaG_tau() replicates it
-    // if and when something reads it.
-    if (last_pass) _dDeltaG_tau_pending.emplace(std::move(dDeltaG_tskij));
+    // Handed over distributed; materialize_DeltaG_tau() replicates it into the
+    // caller's shared array if and when something reads it.
+    if (set_dDeltaG_tau_buffer) _dDeltaG_tau_buffer.emplace(std::move(dDeltaG_tskij));
 
     _gather_bytes = sizeof(ComplexType) * _nts * _ns * _nkpts_ibz * _nbnd * _nbnd;
   }
@@ -376,19 +376,19 @@ void lr_dyson::solve_lr_dyson_impl(
 
 
 void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) {
-  // Unconditional, not idempotent: every solve leaves exactly one ΔG(τ) and the
-  // caller replicates it exactly once. Checked rather than silently skipped, so
-  // a caller that loses track fails here instead of reading a stale ΔG(τ).
-  utils::check(bool(_dDeltaG_tau_pending),
+  // Unconditional, not idempotent: a solve leaves one ΔG(τ) in the buffer and
+  // the caller gathers it at most once. Checked rather than silently skipped,
+  // so a caller that loses track fails here instead of reading a stale ΔG(τ).
+  utils::check(bool(_dDeltaG_tau_buffer),
                "lr_dyson::materialize_DeltaG_tau: no ΔG(τ) to replicate. Either "
                "solve_lr_dyson() has not run since the last call, or ΔG(τ) was "
                "already replicated.");
 
   _Timer.start("LR_DYSON_GATHER");
-  math::nda::gather_to_shm(*_dDeltaG_tau_pending, sDeltaG_tskij, &_Timer);
+  math::nda::gather_to_shm(*_dDeltaG_tau_buffer, sDeltaG_tskij, &_Timer);
   _Timer.stop("LR_DYSON_GATHER");
 
-  _dDeltaG_tau_pending.reset();
+  _dDeltaG_tau_buffer.reset();
 }
 
 

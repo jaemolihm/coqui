@@ -189,6 +189,11 @@ struct lr_params {
   int max_iter = 1;               ///< 1 = one-shot
   double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
+  /// Whether the caller will read sDeltaG_tskij after the solve (it is the
+  /// checkpoint's save_DeltaG). Replicating ΔG(τ) is the most expensive step of
+  /// the Dyson phase, so a Σ-free run that is not going to write it never pays:
+  /// see the sDeltaG_tskij note on lr_solve_one for what that means for callers.
+  bool save_DeltaG = true;
   lr_iter_params iter_params{};   ///< damping / DIIS
 
   // --- Split-kernel (two-step) schedule ---
@@ -326,6 +331,11 @@ public:
    *
    * The output arrays may be the same ones on every call — they are fully
    * overwritten.
+   *
+   * sDeltaG_tskij is the one exception: it is written only when something asks
+   * for it, i.e. when the kernel carries a Σ or p.save_DeltaG is set. Otherwise
+   * ΔG(τ) is left distributed inside lr_dyson and this array keeps whatever it
+   * held before. A caller that reads it must set p.save_DeltaG.
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
