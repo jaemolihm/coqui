@@ -1647,7 +1647,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
-                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W"}) {
+                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP"}) {
     lr_init_timer.add(v);
   }
   lr_init_timer.start("LR_INIT");
@@ -2054,6 +2054,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     // Write results. A single-perturbation run keeps writing into
     // "linear_response/" so its checkpoint layout is unchanged.
+    lr_init_timer.start("LR_DUMP");
     chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
                    lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
                    lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -2067,6 +2068,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    static_cast<int>(two_step_order),
                    outer_active, two_step_outer_alg, two_step_outer_tol,
                    n_pert_applied);
+    mpi->comm.barrier();
+    lr_init_timer.stop("LR_DUMP");
 
     // Persist the IBC aux→primary correction and the aux-basis Fock matrices
     // alongside the LR results. Hellmann-Feynman-style δX gradient consumers
@@ -2106,6 +2109,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     }
     mpi->comm.barrier();
   }
+
+  // Reported here, not with the LR_INIT block, because it accumulates over the mode loop.
+  app_log(2, "\n  LR checkpoint write: {0:8.3f} sec  {1:4d} calls\n",
+          lr_init_timer.elapsed("LR_DUMP"), lr_init_timer.number_of_calls("LR_DUMP"));
+
   utils::memlog("run_lr_calc: exit (before RAII)");
   return std::make_tuple(std::move(niter_m), std::move(Delta_mu_m));
 }
