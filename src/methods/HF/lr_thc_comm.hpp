@@ -248,6 +248,141 @@ namespace methods {
       }
 
       /**
+       * LR primary→aux contraction for only the diagonal aux elements:
+       *   n_P += Σ_(s,k) diag_P[ X(k+q) · O_ab(k) · X(k)† ]
+       * over the flattened (s,k) indices in sk_rng, with k running over the full BZ.
+       *
+       * Deliberately not a mode of _primary_to_aux_impl: that routine is built around
+       * a distributed (P,Q) tile and the reduction over it, which is exactly what an
+       * operator diagonal in (P,Q) does not need. Here the outer product X·O·X† is
+       * never formed — only its diagonal, through a row dot — so the NP×NQ gemm, the
+       * (P,Q) distribution and its reduction all disappear. Reusing the dense impl
+       * would keep every one of them.
+       *
+       * No MPI inside: the caller owns the (s,k) split and the reduction of n_P.
+       *
+       * @param ip        - [INPUT] left polarization index
+       * @param iq        - [INPUT] right polarization index
+       * @param O_skab    - [INPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd)
+       * @param sk_rng    - [INPUT] flattened (s,k) indices, i = s*nkpts + k
+       * @param P_rng     - [INPUT] aux-basis rows to accumulate
+       * @param n_P       - [INPUT/OUTPUT] length-|P_rng| accumulator
+       * @param thc       - [INPUT] THC-ERI handler
+       * @param kp_to_ibz - [INPUT] full BZ k → IBZ k mapping (nkpts,)
+       * @param kp_trev   - [INPUT] time-reversal flag per full BZ k-point (nkpts,)
+       * @param kpq_map   - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       */
+      template<nda::MemoryArray Array_primary_t>
+      static void primary_to_aux_diagonal(int ip, int iq,
+                                          const Array_primary_t& O_skab,
+                                          nda::range sk_rng,
+                                          nda::range P_rng,
+                                          nda::array<ComplexType, 1>& n_P,
+                                          THC_ERI auto& thc,
+                                          nda::ArrayOfRank<1> auto const& kp_to_ibz,
+                                          nda::ArrayOfRank<1> auto const& kp_trev,
+                                          nda::ArrayOfRank<1> auto const& kpq_map) {
+        static_assert(nda::get_rank<Array_primary_t> == 4,
+                      "lr_thc_comm::primary_to_aux_diagonal: rank must be 4");
+        decltype(nda::range::all) all;
+
+        long nkpts = kpq_map.extent(0);
+        long nbnd  = O_skab.extent(2);
+        long NP_loc = P_rng.size();
+        utils::check(n_P.extent(0) == NP_loc,
+                     "lr_thc_comm::primary_to_aux_diagonal: n_P size {} != |P_rng| {}",
+                     n_P.extent(0), NP_loc);
+        utils::check(P_rng.last() <= thc.Np(),
+                     "lr_thc_comm::primary_to_aux_diagonal: P_rng.last() > thc.Np()");
+
+        nda::array<ComplexType, 2> Ask_Pb(NP_loc, nbnd);
+        for (auto i : sk_rng) {
+          long s = i / nkpts;
+          long k = i % nkpts;
+
+          // Left X at k+q, right X at k — the LR convention of _primary_to_aux_impl.
+          auto Xsk_Pa_l = thc.X(s, ip, kpq_map(k));
+          auto Xsk_Pa_r = thc.X(s, iq, k);
+
+          if (kp_trev(k)) {
+            nda::blas::gemm(Xsk_Pa_l(P_rng, all), nda::transpose(O_skab(s, kp_to_ibz(k), all, all)), Ask_Pb);
+          } else {
+            nda::blas::gemm(Xsk_Pa_l(P_rng, all), O_skab(s, kp_to_ibz(k), all, all), Ask_Pb);
+          }
+
+          // diag_P[A · X(k)†] = Σ_b A_Pb · conj(X(k)_Pb)
+          for (long iP = 0; iP < NP_loc; ++iP) {
+            auto A_b = Ask_Pb(iP, all);
+            auto X_b = Xsk_Pa_r(iP + P_rng.first(), all);
+            ComplexType acc(0.0, 0.0);
+            for (long b = 0; b < nbnd; ++b) acc += A_b(b) * std::conj(X_b(b));
+            n_P(iP) += acc;
+          }
+        }
+      }
+
+      /**
+       * LR aux→primary contraction for an aux operator with only diagonal elements,
+       * independent of (s,k):
+       *   O_ab(k) += scl · Σ_P conj(X(k+q)_Pa) · J_P · X(k)_Pb
+       * for the flattened (s,k_ibz) indices in sk_rng.
+       *
+       * Deliberately not a mode of _aux_to_primary_impl, for the mirror-image reason
+       * of primary_to_aux_diagonal: that routine contracts a distributed (P,Q) tile
+       * and reduces over the tile grid, whereas a diagonal operator is replicated, so
+       * each (s,k) block can be produced whole by a single rank with no reduction at
+       * all. J_P carries the full P range on every rank.
+       *
+       * No MPI inside. The destination is accumulated in place, so the caller owns
+       * both the (s,k) split (each block must be written by exactly one rank) and any
+       * synchronisation of the shared window it lives in.
+       *
+       * @param ip      - [INPUT] left polarization index
+       * @param iq      - [INPUT] right polarization index
+       * @param scl     - [INPUT] scaling factor for accumulation
+       * @param J_P     - [INPUT] the (P,P) diagonal, length thc.Np(), replicated
+       * @param O_skab  - [OUTPUT] tensor in primary basis (ns, nkpts_ibz, nbnd, nbnd)
+       * @param sk_rng  - [INPUT] flattened (s,k_ibz) indices, i = s*nkpts_ibz + k_ibz
+       * @param thc     - [INPUT] THC-ERI handler
+       * @param kp_map  - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
+       * @param kpq_map - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       */
+      template<nda::MemoryArray Array_primary_t>
+      static void aux_to_primary_diagonal(int ip, int iq,
+                                      ComplexType scl,
+                                      nda::ArrayOfRank<1> auto const& J_P,
+                                      Array_primary_t& O_skab,
+                                      nda::range sk_rng,
+                                      THC_ERI auto& thc,
+                                      nda::ArrayOfRank<1> auto const& kp_map,
+                                      nda::ArrayOfRank<1> auto const& kpq_map) {
+        static_assert(nda::get_rank<Array_primary_t> == 4,
+                      "lr_thc_comm::aux_to_primary_diagonal: rank must be 4");
+        decltype(nda::range::all) all;
+
+        long nkpts_ibz = O_skab.extent(1);
+        long nbnd      = O_skab.extent(2);
+        long NP        = J_P.extent(0);
+        utils::check(NP == thc.Np(),
+                     "lr_thc_comm::aux_to_primary_diagonal: J_P size {} != thc.Np() {}", NP, thc.Np());
+        nda::range P_rng(0, NP);
+
+        nda::array<ComplexType, 2> Bsk_Pb(NP, nbnd);
+        for (auto i : sk_rng) {
+          long s  = i / nkpts_ibz;
+          long ik = i % nkpts_ibz;
+          long k  = kp_map(ik);
+
+          auto Xsk_Pa_l = thc.X(s, ip, kpq_map(k));
+          auto Xsk_Pa_r = thc.X(s, iq, k);
+
+          for (long P = 0; P < NP; ++P) Bsk_Pb(P, all) = J_P(P) * Xsk_Pa_r(P, all);
+          nda::blas::gemm(scl, nda::dagger(Xsk_Pa_l(P_rng, all)), Bsk_Pb,
+                          ComplexType(1.0), O_skab(s, ik, all, all));
+        }
+      }
+
+      /**
        * LR primary→aux transposed: computes [O_PQ]^T directly.
        *
        * Uses the identity: [O_PQ]^T = conj( X_R @ O^H @ X_L^H )

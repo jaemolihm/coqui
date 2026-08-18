@@ -182,6 +182,15 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   _Timer.stop("MISC");
   if (not compute_hartree and not compute_exchange) return;
 
+  // Hartree-only fast path. Dispatched here rather than at the Hartree branch below
+  // so that none of the dense path's (P,Q)-distributed arrays or FT buffers are
+  // allocated at all. IBC and δV fall through to the dense branch.
+  if (compute_hartree and not compute_exchange and
+      ibc == nullptr and DeltaV_qPQ == nullptr) {
+    thc_lr_hartree_only(sDeltaDm_skij, sDeltaF_skij, thc, DeltaF_PQ_out, compute_xc);
+    return;
+  }
+
   // Extract unperturbed Dm for primary→aux DeltaX correction
   const nda::array<ComplexType, 4>* Dm_unpert = ibc ? ibc->Dm_ab : nullptr;
 
@@ -637,6 +646,119 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
   dU_qPQ.reset();
   dDeltaDm_skPQ.reset();
+  _mpi->comm.barrier();
+  _Timer.stop("MISC");
+}
+
+
+template<nda::MemoryArray AF_t>
+void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
+                                sArray_t<AF_t>& sDeltaF_skij,
+                                THC_ERI auto& thc,
+                                nda::array<ComplexType, 4>* DeltaF_PQ_out,
+                                bool compute_xc) {
+  long NP = thc.Np();
+  long ns = sDeltaDm_skij.shape()[0];
+  long npol = _npol;
+  long nkpts = _MF->nkpts();
+  long nkpts_ibz = _MF->nkpts_ibz();
+
+  int np = _mpi->comm.size();
+  int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
+  int np_Q = np / np_P;
+
+  app_log(3, "  LR-HF J evaluation (diagonal Hartree kernel):");
+  app_log(3, "    - processor grid for V(q): (P, Q) = ({}, {})\n", np_P, np_Q);
+
+  // Coulomb kernel V(q)_PQ on the same (P,Q) tiling the dense path uses. Only the
+  // one q block the Hartree channel contracts is kept.
+  _Timer.start("Z_FETCH");
+  auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+  _Timer.stop("Z_FETCH");
+  auto P_rng = dU_qPQ.local_range(1);
+  auto Q_rng = dU_qPQ.local_range(2);
+  nda::array<ComplexType, 2> Uq_PQ(P_rng.size(), Q_rng.size());
+  Uq_PQ() = dU_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
+
+  // LR-DFT: the direct channel uses (V + Vxc)(q). See thc_lr_hf for why the xc
+  // kernel structurally cannot reach the exchange channel.
+  if (compute_xc) {
+    utils::check(thc.has_Vxc(),
+                 "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
+                 "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
+                 "THC checkpoint), or set include_xc = false.");
+    _Timer.start("Z_FETCH");
+    auto dVxc_qPQ = thc.dVxc({1, np_P, np_Q});
+    _Timer.stop("Z_FETCH");
+    utils::check(dVxc_qPQ.local_shape() == dU_qPQ.local_shape() and
+                 dVxc_qPQ.origin() == dU_qPQ.origin(),
+                 "lr_hf: Vxc and Coulomb distributions differ.");
+    Uq_PQ() += dVxc_qPQ.local()(_q_ibz_idx, nda::ellipsis{});
+    app_log(2, "  LR-DFT: direct channel uses V(q) + Vxc(q) at q index {}.", _q_ibz_idx);
+  }
+  dU_qPQ.reset();
+
+  // (1) aux-basis density diagonal, averaged over the full BZ and summed over the
+  //     diagonal polarization blocks — the only ones the direct channel sees.
+  //     n_P = (factor/nk) Σ_(s,k,p) diag_P[ X_p(k+q) ΔDm(k) X_p(k)† ]
+  _Timer.start("PRIM_TO_AUX");
+  nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
+  // Strided (s,k) split: with more ranks than blocks the surplus ranks get an empty
+  // range, hence the clamp of the first index.
+  long nsk = ns * nkpts;
+  nda::range sk_rng(std::min<long>(_mpi->comm.rank(), nsk), nsk, np);
+  for (auto ip : nda::range(npol))
+    lr_thc_comm::primary_to_aux_diagonal(ip, ip, sDeltaDm_skij.local(), sk_rng,
+                                         nda::range(0, NP), DeltaDm_QQ, thc,
+                                         _MF->kp_to_ibz(), _MF->kp_trev(), _kpq_map);
+  _Timer.stop("PRIM_TO_AUX");
+
+  _Timer.start("COULOMB");
+  _mpi->comm.all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
+  double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
+  DeltaDm_QQ *= ComplexType(factor / double(nkpts));
+
+  // (2) ΔJ_P = Σ_Q [V(q) + Vxc(q)]_PQ n_Q
+  nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
+  nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
+  _mpi->comm.all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
+  _Timer.stop("COULOMB");
+
+  // (3) ΔF_ij(k) = Σ_(p,P) conj(X_p(k+q)_Pi) ΔJ_P X_p(k)_Pj, one (s,k) block per rank.
+  //     Each block is written by exactly one rank — the polarization blocks accumulate
+  //     on the same one — so the closing reduction sums a value with zeros and
+  //     all_reduce_parallel is bit-identical to all_reduce.
+  _Timer.start("AUX_TO_PRIM");
+  auto& F_comm = *sDeltaF_skij.communicator();
+  sDeltaF_skij.win().fence();
+  auto DeltaF_loc = sDeltaF_skij.local();
+  long nsk_ibz = ns * nkpts_ibz;
+  nda::range sk_ibz_rng(std::min<long>(F_comm.rank(), nsk_ibz), nsk_ibz, F_comm.size());
+  for (auto ip : nda::range(npol))
+    lr_thc_comm::aux_to_primary_diagonal(ip, ip, ComplexType(1.0), DeltaJ_PP, DeltaF_loc,
+                                         sk_ibz_rng, thc, _MF->ks_to_k(0), _kpq_map);
+  sDeltaF_skij.win().fence();
+  sDeltaF_skij.all_reduce_parallel();
+  _Timer.stop("AUX_TO_PRIM");
+
+  // Root-only ΔF_PQ for the Python phonon post-processors. Built directly from the
+  // diagonal instead of gathering a distributed (ns, nk_ibz, NP, NP) array. Restricted
+  // to npol = 1 so that output_aux_fock has one contract on both branches, even though
+  // ΔJ_P is polarization-independent and would be complete here for any npol.
+  _Timer.start("MISC");
+  if (DeltaF_PQ_out) {
+    utils::check(npol == 1,
+                 "lr_hf: the aux-basis ΔF_PQ output is implemented for npol = 1 only "
+                 "(npol = {}). Set output_aux_fock = false.", npol);
+  }
+  if (DeltaF_PQ_out and _mpi->comm.rank() == 0) {
+    *DeltaF_PQ_out = nda::array<ComplexType, 4>({ns, nkpts_ibz, NP, NP});
+    (*DeltaF_PQ_out)() = ComplexType(0.0);
+    for (long is = 0; is < ns; ++is)
+      for (long ik = 0; ik < nkpts_ibz; ++ik)
+        for (long P = 0; P < NP; ++P)
+          (*DeltaF_PQ_out)(is, ik, P, P) = DeltaJ_PP(P);
+  }
   _mpi->comm.barrier();
   _Timer.stop("MISC");
 }
