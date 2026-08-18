@@ -161,9 +161,9 @@ namespace lr_dyson_tests {
     auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
 
-    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
+    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
-                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 
@@ -376,7 +376,7 @@ namespace lr_dyson_tests {
     auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
-                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 
@@ -481,6 +481,107 @@ namespace lr_dyson_tests {
     CHECK(pgrid2[0] == 30);
     CHECK(pgrid2[2] == 64);
     CHECK(pgrid2[3] * pgrid2[4] == 1);
+  }
+
+  TEST_CASE("lr_dyson_dN_dmu_q0", "[methods_scf]") {
+    /**
+     * dN/dmu is taken from the Delta_mu response of the LR solution:
+     *   dN/dmu = spin * sum_k w_k Tr[S(k) . (dDeltaDm/dDelta_mu)(k)],
+     * with dDeltaDm/dDelta_mu produced by one Dyson pass at X = -S.
+     *
+     * Validation: the independent closed form in frequency space,
+     *   dN/dmu = spin * sum_k w_k Tr[S . (G.S.G)(beta-)],
+     * evaluated here per k with a serial FT. The two share no code path: the
+     * solver route goes through the distributed Dyson kernel, the distributed
+     * w_to_tau/tau_to_beta and a gather; this one is a local loop.
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+    int nw = ft.nw_f();
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    nda::array<double, 1> q_vec{0.0, 0.0, 0.0};
+    lr_dyson lr_dys(dyson, q_vec);
+
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm(math::shm::make_shared_array<Array_view_4D_t>(
+        *context, {ns, nk, nb, nb}));
+
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+    if (context->node_comm.root()) Sigma.local()() = 0.0;
+    context->comm.barrier();
+
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    context->comm.barrier();
+
+    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    lr_dys.set_cached_G_omega(&sG_wskij);
+
+    // --- under test: dN/dmu from the Delta_mu response ---
+    lr_dys.build_dmu_response();
+    double dN_dmu = lr_dys.dN_dmu();
+
+    // --- reference: Tr[S . (G.S.G)(beta-)], serial per (s, k) ---
+    auto k_weight = mf.k_weight();
+    auto S_loc = dyson.sS_skij().local();
+    auto G_w = sG_wskij.local();
+    double spin_factor = (ns == 1 && mf.npol() == 1) ? 2.0 : 1.0;
+    decltype(nda::range::all) all;
+
+    ComplexType dN_dmu_ref(0.0);
+    nda::array<ComplexType, 3> GSG_w(nw, nb, nb);
+    nda::array<ComplexType, 3> GSG_t(nt, nb, nb);
+    nda::matrix<ComplexType> GSG_beta(nb, nb), tmp(nb, nb), buf(nb, nb);
+
+    int rank = context->comm.rank();
+    int size = context->comm.size();
+    for (int i = rank; i < ns * nk; i += size) {
+      int is = i / nk;
+      int ik = i % nk;
+      auto S_k = S_loc(is, ik, all, all);
+      for (int n = 0; n < nw; ++n) {
+        auto G_w_k = G_w(n, is, ik, all, all);
+        auto GSG_w_k = GSG_w(n, all, all);
+        nda::blas::gemm(ComplexType(1.0), S_k, G_w_k, ComplexType(0.0), tmp);
+        nda::blas::gemm(ComplexType(1.0), G_w_k, tmp, ComplexType(0.0), GSG_w_k);
+      }
+      ft.w_to_tau(GSG_w, GSG_t, imag_axes_ft::fermion);
+      ft.tau_to_beta(GSG_t, GSG_beta);
+      nda::blas::gemm(ComplexType(1.0), S_k, GSG_beta, ComplexType(0.0), buf);
+      dN_dmu_ref += k_weight(ik) * nda::trace(buf);
+    }
+    dN_dmu_ref *= spin_factor;
+    dN_dmu_ref = context->comm.all_reduce_value(dN_dmu_ref);
+
+    // Si at beta = 100 is gapped, so dN/dmu is small; guard against the test
+    // passing by comparing two zeros, then compare relatively.
+    REQUIRE(std::abs(dN_dmu_ref.real()) > 1e-8);
+    double rel_err = std::abs(dN_dmu - dN_dmu_ref.real()) / std::abs(dN_dmu_ref.real());
+    app_log(2, "[TEST] dN/dmu: response = {:.12e}, reference = {:.12e}, rel. err = {:.3e}",
+            dN_dmu, dN_dmu_ref.real(), rel_err);
+    REQUIRE(rel_err < 1e-10);
+
+    // build_dmu_response() is cached: a second call must not rebuild or drift.
+    lr_dys.build_dmu_response();
+    VALUE_EQUAL(lr_dys.dN_dmu(), dN_dmu, 1e-14);
   }
 
 } // lr_dyson_tests
