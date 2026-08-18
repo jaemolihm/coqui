@@ -190,9 +190,9 @@ public:
    * Requires: set_cached_G_omega() must have been called first.
    * For fix_density mode at q=0: build_dmu_response() must have been called first.
    *
-   * Two modes are available:
-   * - fix_density=false (default): Use the provided Delta_mu value
-   * - fix_density=true: Automatically compute Δμ to enforce ΔN=0 (particle conservation)
+   * Δμ is not an input: the perturbation is solved at fixed μ (Δμ = 0) unless
+   * fix_density=true, in which case Δμ is computed here to enforce ΔN=0
+   * (particle conservation) and returned.
    *
    * For q≠0, fix_density is ignored (Δμ contribution vanishes).
    *
@@ -205,10 +205,9 @@ public:
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix (ns, nk, nb, nb)
    * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
-   * @param Delta_mu          - [INPUT] Chemical potential shift (used only if fix_density=false)
    * @param sDeltaVcorr_skij  - [INPUT] static ΔV_QPGW (ns, nk, nb, nb), nullptr if not used.
    *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
-   * @return The Δμ value used (computed if fix_density=true, otherwise the input value)
+   * @return The Δμ used: computed if fix_density=true at q=Γ, zero otherwise
    */
   template<typename DeltaDm_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
@@ -218,7 +217,6 @@ public:
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
       bool fix_density = false,
-      double Delta_mu = 0.0,
       const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   /**
@@ -405,9 +403,6 @@ private:
   // Cached G(iω) in shared memory — set via set_cached_G_omega().
   // Non-owning pointer; caller (lr_driver) owns the array.
   const sArray_t<Array_view_5D_t>* _cached_G_wskij = nullptr;
-  // Cached dN/dμ — populated by build_dmu_response()
-  double _cached_dN_dmu = 0.0;
-  bool _dN_dmu_cached = false;
 
   // ΔG(τ) of the last solve, still distributed, awaiting a consumer.
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
@@ -424,6 +419,12 @@ private:
   // builds them once and then adds Δμ·dG/dμ instead of a second Dyson pass.
   // dG/dμ(τ) carries the same layout as the solve's own ΔG(τ) — it is produced by the
   // same kernel — and so is one ΔG-sized distributed array resident for the run.
+  //
+  // dN/dμ = Tr[S·dDm/dμ] belongs to the same cache: build_dmu_response() fills all
+  // three in one pass and set_cached_G_omega() drops all three together, so
+  // _dN_dmu_cached is the flag for the whole group, not for dN/dμ alone.
+  bool _dN_dmu_cached = false;
+  double _cached_dN_dmu = 0.0;
   std::optional<dArray_5D_t> _dG_dmu_tskij;
   std::optional<sArray_t<Array_view_4D_t>> _sdDm_dmu_skij;
 

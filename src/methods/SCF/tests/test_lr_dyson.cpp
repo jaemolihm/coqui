@@ -161,9 +161,9 @@ namespace lr_dyson_tests {
     auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
 
-    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false, Delta_mu=0.0)
+    // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
-                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 
@@ -376,7 +376,7 @@ namespace lr_dyson_tests {
     auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
-                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false, 0.0);
+                          static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
 

@@ -973,7 +973,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, dyson_sigma,
-        p.fix_density, Delta_mu, dyson_vcorr);
+        p.fix_density, dyson_vcorr);
 
     // The solve leaves ΔG(τ) distributed; replicating it is the single most
     // expensive step of the Dyson phase, so it happens only where something

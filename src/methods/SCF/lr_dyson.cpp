@@ -71,7 +71,6 @@ double lr_dyson::solve_lr_dyson(
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
     bool fix_density,
-    double Delta_mu,
     const DeltaF_t* sDeltaVcorr_skij) {
 
   utils::check(_cached_G_wskij != nullptr,
@@ -103,16 +102,13 @@ double lr_dyson::solve_lr_dyson(
   const dArray_5D_t* dDeltaSigma_wskij =
       opt_dDeltaSigma_wskij ? &(*opt_dDeltaSigma_wskij) : nullptr;
 
-  // At q≠0 the Δμ·S term vanishes and Δμ is meaningless — force it to zero so a
-  // caller's value cannot silently pollute the RHS.
-  if (!_is_q_gamma) {
-    if (fix_density)
-      app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
-    Delta_mu = 0.0;
-  }
+  // At q≠0 the Δμ·S term vanishes and Δμ is meaningless.
+  if (!_is_q_gamma and fix_density)
+    app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
 
-  // fix_density at q=0 takes three steps:
-  // 1. the single Dyson pass below, run at Δμ=0, giving ΔG(0) and ΔN(0)
+  // The perturbation is solved at fixed μ, so the Dyson pass always runs at
+  // Δμ = 0; only fix_density at q=0 shifts off it, in three steps:
+  // 1. the single Dyson pass below, giving ΔG(0) and ΔN(0)
   // 2. Δμ = -ΔN(0) / (dN/dμ), with dN/dμ from the cached Δμ response
   // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dDm/dμ
   //
@@ -122,8 +118,9 @@ double lr_dyson::solve_lr_dyson(
   // once, before the SCF loop, which makes step 3 a local axpy (exact in exact
   // arithmetic) rather than a second Dyson pass.
   //
-  // There is therefore one Dyson pass in every mode; only the Δμ it runs at
-  // differs, and only steps 2-3 are conditional.
+  // There is therefore one Dyson pass in every mode, always at Δμ = 0; only
+  // steps 2-3 are conditional.
+  double Delta_mu = 0.0;
   double dN_dmu = 0.0;
   if (fix_density and _is_q_gamma) {
     utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
@@ -136,8 +133,7 @@ double lr_dyson::solve_lr_dyson(
 
   // Step 1 in fix_density mode, the whole solve otherwise.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                      dDeltaSigma_wskij,
-                      (fix_density and _is_q_gamma) ? 0.0 : Delta_mu,
+                      dDeltaSigma_wskij, /*Delta_mu=*/0.0,
                       sDeltaVcorr_skij);
 
   if (fix_density and _is_q_gamma) {
@@ -146,10 +142,9 @@ double lr_dyson::solve_lr_dyson(
     _Timer.stop("LR_DYSON_NELEC");
 
     if (std::abs(dN_dmu) < 1e-15) {
-      // Δμ=0 leaves ΔDm untouched, so ΔN(Δμ=0) is already the final ΔN — and it
-      // is exactly the density error the warning is about.
+      // Δμ stays 0, which leaves ΔDm untouched, so ΔN(Δμ=0) is already the final
+      // ΔN — and it is exactly the density error the warning is about.
       app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
-      Delta_mu = 0.0;
       app_log(3, "  Final ΔN = {:.6e} (density not restored)", DeltaN_0);
     } else {
       // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
@@ -529,7 +524,6 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
-    double,
     const sArray_t<Array_view_4D_t>*);
 
 template void lr_dyson::solve_lr_dyson_impl(
