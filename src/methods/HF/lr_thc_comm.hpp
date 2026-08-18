@@ -248,7 +248,7 @@ namespace methods {
       }
 
       /**
-       * Diagonal LR primary→aux contraction:
+       * LR primary→aux contraction for only the diagonal aux elements:
        *   n_P += Σ_(s,k) diag_P[ X(k+q) · O_ab(k) · X(k)† ]
        * over the flattened (s,k) indices in sk_rng, with k running over the full BZ.
        *
@@ -322,8 +322,8 @@ namespace methods {
       }
 
       /**
-       * Aux→primary accumulation for an operator diagonal in (P,Q) and independent
-       * of (s,k):
+       * LR aux→primary contraction for an aux operator with only diagonal elements,
+       * independent of (s,k):
        *   O_ab(k) += scl · Σ_P conj(X(k+q)_Pa) · J_P · X(k)_Pb
        * for the flattened (s,k_ibz) indices in sk_rng.
        *
@@ -348,7 +348,7 @@ namespace methods {
        * @param kpq_map - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        */
       template<nda::MemoryArray Array_primary_t>
-      static void diagonal_to_primary(int ip, int iq,
+      static void aux_to_primary_diagonal(int ip, int iq,
                                       ComplexType scl,
                                       nda::ArrayOfRank<1> auto const& J_P,
                                       Array_primary_t& O_skab,
@@ -357,14 +357,14 @@ namespace methods {
                                       nda::ArrayOfRank<1> auto const& kp_map,
                                       nda::ArrayOfRank<1> auto const& kpq_map) {
         static_assert(nda::get_rank<Array_primary_t> == 4,
-                      "lr_thc_comm::diagonal_to_primary: rank must be 4");
+                      "lr_thc_comm::aux_to_primary_diagonal: rank must be 4");
         decltype(nda::range::all) all;
 
         long nkpts_ibz = O_skab.extent(1);
         long nbnd      = O_skab.extent(2);
         long NP        = J_P.extent(0);
         utils::check(NP == thc.Np(),
-                     "lr_thc_comm::diagonal_to_primary: J_P size {} != thc.Np() {}", NP, thc.Np());
+                     "lr_thc_comm::aux_to_primary_diagonal: J_P size {} != thc.Np() {}", NP, thc.Np());
         nda::range P_rng(0, NP);
 
         nda::array<ComplexType, 2> Bsk_Pb(NP, nbnd);

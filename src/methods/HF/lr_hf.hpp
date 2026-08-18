@@ -205,9 +205,12 @@ private:
    * diagonal at R = 0 and writes back an operator that is δ_PQ times a k-independent
    * vector. This routine evaluates that contraction directly:
    *
-   *   n_P   = (factor/nk) Σ_(s,k) diag_P[ X(k+q) ΔDm(k) X(k)† ]
+   *   n_P   = (factor/nk) Σ_(s,k,p) diag_P[ X_p(k+q) ΔDm(k) X_p(k)† ]
    *   ΔJ_P  = Σ_Q [V(q) + Vxc(q)]_PQ n_Q
-   *   ΔF_ij(k) = Σ_P conj(X(k+q)_Pi) ΔJ_P X(k)_Pj
+   *   ΔF_ij(k) = Σ_(p,P) conj(X_p(k+q)_Pi) ΔJ_P X_p(k)_Pj
+   *
+   * p runs over the npol diagonal polarization blocks, the only ones the direct
+   * channel sees; ΔJ_P is common to all of them.
    *
    * The k-average in the first line is what the dense path's k→R transform does at
    * R = 0: k_to_R_coefficients gives f_Rk(0,k) = 1/nk exactly.
@@ -216,14 +219,13 @@ private:
    * is one gemm over the full P range instead of a tiled MPI reduction, and the k sum
    * applies the same weights in a different order.
    *
-   * Selected by thc_lr_hf only for the Hartree-only, npol = 1 case with no IBC and no
-   * δV; every other configuration takes the dense branch, which stays the reference
-   * implementation. Extending it to IBC (three more row dots, one per DeltaX term) or
+   * Selected by thc_lr_hf for the Hartree-only case with no IBC and no δV; every other
+   * configuration takes the dense branch, which stays the reference implementation. Extending it to IBC (three more row dots, one per DeltaX term) or
    * to δV (one more cached diagonal) is mechanical, and worth doing only if such a
    * configuration ever shows up in a profile.
    */
   template<nda::MemoryArray AF_t>
-  void thc_lr_hartree_diag(const sArray_t<AF_t>& sDeltaDm_skij,
+  void thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
                            sArray_t<AF_t>& sDeltaF_skij,
                            THC_ERI auto& thc,
                            nda::array<ComplexType, 4>* DeltaF_PQ_out,
