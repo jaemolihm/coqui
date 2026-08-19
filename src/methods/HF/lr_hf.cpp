@@ -830,7 +830,6 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
   int rank = sDelta_skij.communicator()->rank();
   int size = sDelta_skij.communicator()->size();
   nda::matrix<ComplexType> buffer(nbnd, nbnd);
-  sDelta_skij.win().fence();
   for (int i = rank; i < ns * nkpts_ibz; i += size) {
     int is = i / nkpts_ibz;
     int ik = i % nkpts_ibz;
@@ -851,10 +850,6 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
     }
     nda::blas::gemm(ComplexType(1.0), buffer, S_k, ComplexType(0.0), Delta_sk);
   }
-  sDelta_skij.win().fence();
-  // The strided loop assigns each (is,ik) block with a beta = 0 gemm on exactly one
-  // rank, and the array is zero-initialized, so every element is contributed by one
-  // node: splitting the reduction across the node's ranks is bit-identical here.
   sDelta_skij.all_reduce_parallel();
 
   if (sDeltaF_skij.node_comm()->root())
