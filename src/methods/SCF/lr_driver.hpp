@@ -184,6 +184,25 @@ struct lr_params {
   /// (V + Vxc)(q) in ΔJ. Requires include_hartree and a THC carrying Vxc;
   /// rejected together with include_exchange.
   bool include_xc = false;
+  /// HSEX: evaluate the exchange channel with the statically screened kernel
+  /// V + W_c(iν=0) instead of the bare V, i.e.
+  ///   ΔF_x + ΔΣ_SEX = -ΔDm ⊙ W(iν=0).
+  /// A kernel substitution inside the existing exchange path, not a new
+  /// self-energy channel: no τ axis, no ΔΣ buffer, one aux<->primary transform
+  /// pair per iteration exactly as bare-exchange LR-HF has. Requires
+  /// include_exchange and a W_c on the ω axis handed to lr_setup.
+  ///
+  /// Deliberately a flag on the exchange channel rather than a component of
+  /// lr_kernel_spec: X_sex is not on the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder, so
+  /// kernel_diff() cannot express the remainder K_GW \ K_HSEX (it would give
+  /// {Σ1, Σ2} and silently drop the static counter-term ΔDm ⊙ W_c(0)). Keeping
+  /// it off lr_kernel_spec makes that composition unrepresentable rather than
+  /// wrong.
+  /// The aux-basis arrays carry no G=0 component, so the head of the contracted
+  /// kernel enters as a Madelung term; W(iν=0)'s is -madelung·ε⁻¹(iν=0) against
+  /// bare exchange's -madelung·1. It is taken from eps_inv_head_w, the same
+  /// head the GW Σ uses, so exchange and correlation are treated consistently.
+  bool exchange_static_W = false;
 
   // --- SCF control ---
   int max_iter = 1;               ///< 1 = one-shot
@@ -220,6 +239,12 @@ struct lr_params {
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.
   const nda::array<ComplexType, 1>* eps_inv_head = nullptr;
+  /// The same head (ε⁻¹ - 1) on the ω axis, q→0 extrapolated. Required when
+  /// exchange_static_W, which reads its ν = 0 component. Supplied on the ω axis
+  /// rather than transformed back from eps_inv_head: for a "*_metal"
+  /// div_treatment, extrapolate_eps_inv_q0 hand-sets the ν = 0 entry, and a τ
+  /// round trip smears exactly that value.
+  const nda::array<ComplexType, 1>* eps_inv_head_w = nullptr;
   /// Divergence treatments the unperturbed run used, read from the checkpoint.
   std::string div_treatment = "gygi";       ///< correlation / GW head
   std::string hf_div_treatment = "gygi";    ///< HF exchange Madelung term
@@ -379,13 +404,16 @@ public:
    *
    * `need_Delta_mu` marks the fix_density, q=Γ path — the only one that allocates
    * lr_dyson's Δμ response dG/dμ(τ), a second ΔG(τ)-sized distributed array.
+   *
+   * `exchange_static_W` marks the HSEX kernel, which keeps W_c(iν=0) resident.
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                              std::vector<std::string> const& extra_sigma = {},
                              long n_sigma_prev = 0,
                              lr_diis_hist_t inner_hist = {},
                              lr_diis_hist_t outer_hist = {},
-                             bool need_Delta_mu = false);
+                             bool need_Delta_mu = false,
+                             bool exchange_static_W = false);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -418,11 +446,15 @@ public:
   const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }
   const nda::array<double, 1>& q_vec() const { return _lr_dyson.q_vec(); }
   bool is_q_gamma() const { return _lr_dyson.is_q_gamma(); }
+  /// ε⁻¹(iν=0), the HSEX exchange Madelung scale. Only meaningful when
+  /// exchange_static_W is set.
+  double hsex_head_factor() const { return _hsex_head_factor; }
 
 private:
   // Concrete distributed-array types of the cached aux-basis operands. The LR
   // path is instantiated for THC + host mpi3 only (see lr_gw / lr_scr_coulomb_t),
   // so naming them concretely here costs no generality.
+  using dArr_3D_t = memory::darray_t<nda::array<ComplexType, 3>, mpi3::communicator>;
   using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
   using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
 
@@ -445,11 +477,13 @@ private:
   lr_dyson _lr_dyson;
 
   // --- Solvers, built once by lr_setup and reused by every lr_solve_one. Each
-  //     latches the perturbation q and (for lr_gw) a workspace keyed on its
-  //     (term1, term2) usage, which is why the split-kernel path needs two.
+  //     latches the perturbation q and a cache keyed on its usage — the exchange
+  //     kernel for lr_hf, the (term1, term2) combination for lr_gw — which is why
+  //     the split-kernel path needs two of each.
   //     Declared before the arrays below: darray_t stores a raw communicator_t*,
   //     so communicator-owning objects must outlive the arrays built on them.
-  std::unique_ptr<solvers::lr_hf> _lr_hf;
+  std::unique_ptr<solvers::lr_hf> _lr_hf;        // ΔF of K_sc, and the total ΔF_PQ output
+  std::unique_ptr<solvers::lr_hf> _lr_hf_pert;   // ΔF of K_pert, split-kernel path only
   std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of K_sc (fused, or term 1 when split)
   std::unique_ptr<solvers::lr_gw> _lr_gw_pert;   // ΔΣ of K_pert, split-kernel path only
   std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
@@ -467,6 +501,8 @@ private:
   std::optional<sArray_t<Array_view_5D_t>> _sG_wskij;
   std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), ω-side
   std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist
+  std::optional<dArr_3D_t> _opt_dWc0_qPQ;        // W_c(iν=0)(q,P,Q), HSEX kernel
+  double _hsex_head_factor = 1.0;                // ... and its q→0 Madelung scale
   std::optional<dArr_5D_t> _opt_dG_tsRPQ, _opt_dG_mtau_tsRPQ;  // G^R(τ)/G^R(β−τ)
   std::optional<lr_ibc_DeltaX> _opt_ibc;
 

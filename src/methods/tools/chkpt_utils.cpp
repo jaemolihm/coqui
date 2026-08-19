@@ -704,7 +704,8 @@ void dump_lr(communicator_t& comm,
              bool two_step_outer_accel,
              std::string const& two_step_outer_alg,
              double two_step_outer_tol,
-             int two_step_stages_applied) {
+             int two_step_stages_applied,
+             std::optional<double> exchange_static_W_head) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -750,6 +751,12 @@ void dump_lr(communicator_t& comm,
     h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(include_gw_sigma));
     // Refines include_gw_sigma, which cannot distinguish fixed_W from full.
     if (!gw_mode.empty()) h5::h5_write(lr_grp, "gw_mode", gw_mode);
+    // HSEX: include_exchange alone cannot say which interaction ΔK contracted.
+    // Additive, so a bare-exchange checkpoint keeps exactly the fields it had.
+    if (exchange_static_W_head) {
+      h5::h5_write(lr_grp, "exchange_static_W", 1);
+      h5::h5_write(lr_grp, "exchange_static_W_head", *exchange_static_W_head);
+    }
 
     if (include_hartree || include_exchange) {
       auto DeltaF_loc = sDeltaF_skij.local();
@@ -938,7 +945,8 @@ template void dump_lr(mpi3::communicator&, std::string,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&,
                       bool, std::string const&, int,
-                      bool, std::string const&, double, int);
+                      bool, std::string const&, double, int,
+                      std::optional<double>);
 
   } // chkpt
 } // methods

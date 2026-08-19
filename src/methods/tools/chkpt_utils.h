@@ -255,7 +255,8 @@ namespace methods {
                bool two_step_outer_accel = false,
                std::string const& two_step_outer_alg = "",
                double two_step_outer_tol = 0.0,
-               int two_step_stages_applied = 0);
+               int two_step_stages_applied = 0,
+               std::optional<double> exchange_static_W_head = std::nullopt);
 
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint

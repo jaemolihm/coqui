@@ -22,6 +22,9 @@
 #ifndef COQUI_LR_HF_HPP
 #define COQUI_LR_HF_HPP
 
+#include <initializer_list>
+#include <optional>
+
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
 
@@ -92,6 +95,36 @@ public:
 
   ~lr_hf() = default;
 
+  using dArray_4D_t = dArray_t<nda::array<ComplexType, 4>>;
+  using dArray_3D_t = dArray_t<nda::array<ComplexType, 3>>;
+
+  /**
+   * Static screened-exchange (HSEX) kernel: the exchange channel contracts
+   * W(iν=0) = V + W_c(iν=0) in place of the bare V.
+   *
+   * The q→0 head rides along: the aux-basis arrays carry no G=0 component, so
+   * the head enters as a separate Madelung term, and the one W(iν=0) needs is
+   * -madelung·ε⁻¹(iν=0) — the same decomposition lr_gw uses, where bare
+   * exchange contributes -madelung·1 and Σ_c contributes -madelung·(ε⁻¹-1).
+   * `head_factor` carries that ε⁻¹(iν=0).
+   */
+  struct hsex_kernel_t {
+    /// Which kernel the exchange contraction installs. Named after the kernel
+    /// itself, since that is all that differs:
+    ///   V_plus_Wc0 = V + W_c(iν=0), the HSEX kernel;
+    ///   minus_Wc0  =   − W_c(iν=0), the counter-term a split run whose K_sc is
+    ///                  HSEX owes its remainder, so that the two channels sum
+    ///                  back to bare exchange.
+    enum class kernel_e { V_plus_Wc0, minus_Wc0 };
+
+    /// W_c(q, iν=0), (nq, NP, NP) on utils::lr_aux_kernel_pgrid(comm.size()).
+    const dArray_3D_t* Wc0_qPQ;
+    /// Scales the exchange Madelung term: ε⁻¹(iν=0) for V_plus_Wc0,
+    /// 1 − ε⁻¹(iν=0) for minus_Wc0, so the two sum to bare exchange's 1.
+    double head_factor;
+    kernel_e kernel;
+  };
+
   /**
    * @brief Compute LR Fock matrix from LR density matrix using THC-ERI
    *
@@ -111,9 +144,11 @@ public:
    *                           channel, i.e. use (V + Vxc)(q) in ΔJ. Requires a
    *                           THC carrying Vxc and compute_exchange = false; see
    *                           thc_lr_hf for why it cannot reach ΔK.
+   * @param hsex             - [INPUT] Static screened exchange. Non-null replaces
+   *                           the exchange kernel V(q) by V(q) + W_c(q, iν=0),
+   *                           i.e. ΔK = -ΔDm ⊙ W(iν=0). The direct (ΔJ) channel
+   *                           is untouched.
    */
-  using dArray_4D_t = dArray_t<nda::array<ComplexType, 4>>;
-
   template<nda::MemoryArray AF_t>
   void evaluate(sArray_t<AF_t>& sDeltaF_skij,
                 const sArray_t<AF_t>& sDeltaDm_skij,
@@ -125,7 +160,8 @@ public:
                 const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
                 nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-                bool compute_xc = false);
+                bool compute_xc = false,
+                const hsex_kernel_t* hsex = nullptr);
 
   /// Print the LR HF timer block (header + total + subclocks) at log level `level`.
   inline void print_timers(int level = 2) {
@@ -143,15 +179,39 @@ public:
   /// Print only the component clocks, each line prefixed by `indent`.
   /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
   inline void print_subclocks(int level, const std::string& indent) {
-    app_log(level, "{0}  - Misc (init/cleanup):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("MISC"), _Timer.number_of_calls("MISC"));
-    app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("ALLOC"), _Timer.number_of_calls("ALLOC"));
-    app_log(level, "{0}  - Z fetch (U(q)):             {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("Z_FETCH"), _Timer.number_of_calls("Z_FETCH"));
-    app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("PRIM_TO_AUX"), _Timer.number_of_calls("PRIM_TO_AUX"));
-    app_log(level, "{0}  - U(q)->U(R) FT:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("UQ_TO_UR"), _Timer.number_of_calls("UQ_TO_UR"));
-    app_log(level, "{0}  - Coulomb (J):                {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("COULOMB"), _Timer.number_of_calls("COULOMB"));
-    app_log(level, "{0}  - Exchange (K):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("EXCHANGE"), _Timer.number_of_calls("EXCHANGE"));
-    app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("AUX_TO_PRIM"), _Timer.number_of_calls("AUX_TO_PRIM"));
-    app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("MADELUNG"), _Timer.number_of_calls("MADELUNG"));
+    print_subclocks_all(level, indent, {this});
+  }
+
+  /// Print one ΔF component table summed over every instance in `solvers`
+  /// (nulls ignored), each line prefixed by `indent`.
+  ///
+  /// A split kernel splits ΔF across two instances — the self-consistent channel
+  /// and the perturbative one — so summing them keeps one table whatever the
+  /// kernel was split into. Static rather than a member, because a run whose ΔF
+  /// lives only in the perturbative channel leaves the self-consistent instance
+  /// null and the table must still print.
+  static void print_subclocks_all(int level, const std::string& indent,
+                                  std::initializer_list<lr_hf*> solvers) {
+    auto sec = [&](const char* key) {
+      double v = 0.0;
+      for (auto* o : solvers) if (o) v += o->_Timer.elapsed(key);
+      return v;
+    };
+    auto cnt = [&](const char* key) {
+      int v = 0;
+      for (auto* o : solvers) if (o) v += o->_Timer.number_of_calls(key);
+      return v;
+    };
+    app_log(level, "{0}  - Misc (init/cleanup):        {1:8.3f} sec  {2:4d} calls", indent, sec("MISC"), cnt("MISC"));
+    app_log(level, "{0}  - Alloc:                      {1:8.3f} sec  {2:4d} calls", indent, sec("ALLOC"), cnt("ALLOC"));
+    app_log(level, "{0}  - Z fetch (U(q)):             {1:8.3f} sec  {2:4d} calls", indent, sec("Z_FETCH"), cnt("Z_FETCH"));
+    app_log(level, "{0}  - Primary->Aux:               {1:8.3f} sec  {2:4d} calls", indent, sec("PRIM_TO_AUX"), cnt("PRIM_TO_AUX"));
+    app_log(level, "{0}  - U(q)->U(R) FT:              {1:8.3f} sec  {2:4d} calls", indent, sec("UQ_TO_UR"), cnt("UQ_TO_UR"));
+    app_log(level, "{0}  - Coulomb (J):                {1:8.3f} sec  {2:4d} calls", indent, sec("COULOMB"), cnt("COULOMB"));
+    app_log(level, "{0}  - Exchange (K):               {1:8.3f} sec  {2:4d} calls", indent, sec("EXCHANGE"), cnt("EXCHANGE"));
+    app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("AUX_TO_PRIM"), cnt("AUX_TO_PRIM"));
+    app_log(level, "{0}  - Final reduce (ΔF):          {1:8.3f} sec  {2:4d} calls", indent, sec("FINAL_REDUCE"), cnt("FINAL_REDUCE"));
+    app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, sec("MADELUNG"), cnt("MADELUNG"));
   }
 
   // Accessors
@@ -183,7 +243,8 @@ private:
 
   // --- Data cached across evaluate() calls ---------------------------------
   // lr_hf is constructed per (q, THC handler) and lives for the whole LR SCF, so
-  // the Coulomb kernel is the same on every call. Fetching and transforming it
+  // the Coulomb kernel is the same on every call — including its HSEX form, since
+  // one instance is only ever handed one `hsex` kernel. Fetching and transforming it
   // once is the trade hf_t::_dZ_cache already makes in the ground state, and the
   // caches die with the solver at the end of the run.
   //
@@ -198,6 +259,8 @@ private:
   nda::array<ComplexType, 2> _Vxc_q_PQ;   // Vxc(q)_PQ tile at _q_ibz_idx
   bool _U_RPQ_cached = false;
   nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
+  /// The HSEX kernel _U_RPQ was built for (nullopt = bare V), checked on reuse.
+  std::optional<hsex_kernel_t::kernel_e> _U_RPQ_hsex;
 
   /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
   /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.
@@ -218,7 +281,8 @@ private:
                  const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr,
                  const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
                  nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-                 bool compute_xc = false);
+                 bool compute_xc = false,
+                 const hsex_kernel_t* hsex = nullptr);
 
   /**
    * @brief Hartree-only LR Fock, exploiting that ΔF is diagonal in the THC

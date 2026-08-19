@@ -522,6 +522,33 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         that expands to include_hartree / include_exchange / gw_mode. When
         given it defines all three, so they need not be passed separately. It
         names the TOTAL kernel, for a two-step run as well.
+
+        "HSEX" is additionally accepted, and is *not* a rung of that ladder: it
+        is Hartree + exchange with the bare interaction replaced by the
+        statically screened one,
+
+            ΔF_x + ΔΣ_SEX = -ΔDm ⊙ [ V + W_c(iν=0) ] = -ΔDm ⊙ W(iν=0),
+
+        i.e. one kernel substitution inside the existing exchange path — no τ
+        axis, no ΔΣ, one aux<->primary transform pair per iteration, exactly
+        like "HF". It needs a screened interaction (the same W an "HF" run does
+        not load). Checkpoints of such a run carry
+        ``linear_response/exchange_static_W = 1`` and the head factor
+        ``exchange_static_W_head`` = ε⁻¹(iν=0), which scales the exchange
+        Madelung term (the aux-basis arrays carry no G=0 component, so the q→0
+        head of the contracted kernel enters there).
+
+        "HSEX" is also accepted as ``two_step_inner_method`` — the composition
+        the split-kernel machinery is most useful for. Because X_sex is off the
+        {H, X, Σ1, Σ2} component mask, the remainder cannot be a mask
+        difference alone: it carries the static counter-term
+        ``+ΔDm ⊙ W_c(iν=0)``, which the driver supplies for itself, so that
+
+            K_sc + K_pert = [H + X_sex] + [Σ1 + Σ2 + ΔDm ⊙ W_c(0)] = K_GW
+
+        exactly. Nothing extra to pass; ``method="GW"`` (or ``"GW0"``) with
+        ``two_step_inner_method="HSEX"`` is the whole request.
+
     lr_two_step : bool, optional
         Split the LR kernel into a part resummed by the SCF loop and a
         remainder expanded to finite order (default False):

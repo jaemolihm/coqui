@@ -61,7 +61,8 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
   app_log(1, "  q is Gamma point: {}\n", _lr_dyson.is_q_gamma() ? "yes" : "no");
 
   for (auto& v : {"LR_SCF", "LR_DRIVER_SETUP",
-                  "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
+                  "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_WC0",
+                  "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
                   "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
@@ -144,6 +145,10 @@ struct lr_kernel_split {
   bool has_Vcorr = false;     ///< the static ΔV_QPGW is the mixed/tracked quantity
   bool has_Sigma = false;     ///< the dynamic ΔΣ enters the Dyson RHS
   bool has_Sigma_sc = false;  ///< ... and the sc channel's copy is the tracked one
+
+  /// The perturbative channel owes the static counter-term +ΔDm ⊙ W_c(0) on
+  /// top of its mask, because K_sc is HSEX. See lr_params::exchange_static_W.
+  bool pert_sex_counterterm = false;
 };
 
 lr_kernel_split make_kernel_split(lr_params const& p) {
@@ -159,8 +164,14 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
   k.sc   = (split_requested || !p.sc_kernel.empty()) ? p.sc_kernel : total;
   k.pert = k.do_pert ? p.pert_kernel : lr_kernel_spec{};
 
+  // A split run whose K_sc is HSEX owes the remainder the static counter-term
+  // +ΔDm ⊙ W_c(0), which is an exchange-shaped evaluation the pert mask does
+  // not carry. It exists exactly when the screened kernel sits in K_sc and the
+  // total kernel it is being subtracted from is the bare-exchange one.
+  k.pert_sex_counterterm = k.do_pert && p.exchange_static_W && k.sc.exchange;
+
   k.sc_hf      = k.sc.hartree || k.sc.exchange || p.include_xc;
-  k.pert_hf    = k.pert.hartree || k.pert.exchange;
+  k.pert_hf    = k.pert.hartree || k.pert.exchange || k.pert_sex_counterterm;
   k.sc_sigma   = k.sc.has_sigma();
   k.pert_sigma = k.pert.has_sigma();
 
@@ -352,6 +363,46 @@ void lr_driver::lr_setup(
                  "lr_driver::lr_setup: split ΔΣ terms do not support the DeltaX IBC "
                  "correction (term 2 has no IBC path).");
   }
+  if (p.exchange_static_W) {
+    utils::check(p.include_exchange,
+                 "lr_driver::lr_setup: exchange_static_W = true requires "
+                 "include_exchange = true. HSEX substitutes V -> V + W_c(iν=0) in "
+                 "the exchange contraction; there is nothing to substitute without "
+                 "an exchange channel.");
+    utils::check(dW_wqPQ_in != nullptr,
+                 "lr_driver::lr_setup: exchange_static_W = true needs W_c(iω); "
+                 "dW is null.");
+    // Per-channel, not global: a split run deliberately puts Σ in K_pert.
+    utils::check(!k.sc.has_sigma(),
+                 "lr_driver::lr_setup: exchange_static_W puts W_c(iν=0) in the "
+                 "exchange kernel, and the self-consistent channel also carries "
+                 "Σ ({}), whose W_c(τ) contains the same ν=0 plane. That "
+                 "double-counts the static screening. Use HSEX as a standalone "
+                 "kernel, or as two_step_inner_method with Σ in K_pert.",
+                 k.sc.to_string());
+    if (k.do_pert) {
+      // The counter-term is defined against the whole exchange operator, so it
+      // only closes if the bare-exchange slot is wholly inside K_sc.
+      utils::check(k.sc.exchange && !k.pert.exchange,
+                   "lr_driver::lr_setup: with exchange_static_W the exchange "
+                   "channel must be wholly self-consistent (K_sc = {}, K_pert = "
+                   "{}). The static counter-term that makes K_sc + K_pert sum "
+                   "back to bare exchange is defined against the whole exchange "
+                   "operator, not a share of it.",
+                   k.sc.to_string(), k.pert.to_string());
+    }
+    // The IBC ΔX correction is built against the bare V_HF in the aux basis
+    // (build_lr_ibc's exchange branch); pairing it with a screened exchange
+    // kernel would mix two different interactions in one ΔF.
+    utils::check(!p.has_deltax(),
+                 "lr_driver::lr_setup: exchange_static_W is incompatible with the "
+                 "DeltaX (IBC) correction, which is built from the bare-exchange "
+                 "V_HF.");
+    utils::check(p.DeltaV_qPQ == nullptr,
+                 "lr_driver::lr_setup: exchange_static_W is incompatible with the "
+                 "DeltaV_qPQ perturbation, whose exchange term contracts the bare "
+                 "δV against the unperturbed Dm.");
+  }
   if (k.qp_mode) {
     utils::check(k.include_gw_sigma,
                  "lr_driver::lr_setup: qp_static mode requires a GW self-energy.");
@@ -386,6 +437,12 @@ void lr_driver::lr_setup(
             p.pert_order, p.pert_order + 1);
   }
   app_log(1, "  include_xc = {}", p.include_xc ? "true" : "false");
+  if (p.exchange_static_W) {
+    app_log(1, "  exchange kernel = V + W_c(iν=0)  [static screened exchange]");
+    if (k.pert_sex_counterterm)
+      app_log(1, "    K_pert additionally carries the static counter-term "
+                 "+ΔDm ⊙ W_c(iν=0), so K_sc + K_pert restores bare exchange");
+  }
   app_log(1, "  qp_static_sigma = {}", k.qp_mode ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.mixing());
@@ -448,7 +505,7 @@ void lr_driver::lr_setup(
   // summarize the MPI distribution patterns the large arrays use.
   print_memory_estimate(thc.Np(), k.include_gw_sigma, k.gw_full, extra_sigma,
                         n_sigma_prev, inner_hist, outer_hist,
-                        p.fix_density && _lr_dyson.is_q_gamma());
+                        p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W);
   print_distribution_summary(thc.Np(), k.include_gw_sigma, k.gw_full);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -457,6 +514,12 @@ void lr_driver::lr_setup(
   // workspace, so they are built once here and reused by every lr_solve_one.
   if (k.need_hf && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
+  }
+  // The perturbative channel gets its own lr_hf for the same reason lr_gw does:
+  // lr_hf caches U(R) keyed on the exchange kernel it was first built with, and an
+  // HSEX split run contracts V + W_c(0) in K_sc but -W_c(0) in K_pert.
+  if (k.pert_hf && !_lr_hf_pert) {
+    _lr_hf_pert = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   if (k.sc_sigma) {
     _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
@@ -477,9 +540,30 @@ void lr_driver::lr_setup(
     _lr_scr = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT(), _lr_dyson.q_vec());
   }
 
+  // HSEX kernel, taken BEFORE lr_setup_W: that call consumes dW_wqPQ_in (it is
+  // either moved into W_full or released by the ω→τ transform), and it also adds
+  // Z(q) to the ω array in place, which would double-count the bare V here.
+  if (p.exchange_static_W) {
+    _Timer.start("LR_DRIVER_SETUP_WC0");
+    _opt_dWc0_qPQ.emplace(lr_precompute_Wc_static(*dW_wqPQ_in));
+    // eps_inv_head_w holds ε⁻¹ - 1, q→0 extrapolated, on the PH-symmetric ω
+    // half-axis whose index 0 is ν = 0.
+    utils::check(p.eps_inv_head_w != nullptr,
+                 "lr_driver::lr_setup: exchange_static_W needs eps_inv_head_w; "
+                 "it is null.");
+    _hsex_head_factor = 1.0 + (*p.eps_inv_head_w)(0).real();
+    app_log(1, "  HSEX ε⁻¹(iν=0) = {:.6f}", _hsex_head_factor);
+    _Timer.stop("LR_DRIVER_SETUP_WC0");
+  }
+
   if (k.include_gw_sigma) {
     lr_setup_W(dW_wqPQ_in, thc, k.gw_full, _lr_scr.get(),
                _opt_dW_full_wqPQ, _opt_dW_tRPQ);
+  } else if (p.exchange_static_W) {
+    // W was loaded only for the ν=0 slice taken above, and the caller keeps it
+    // alive to the end of the call; release it rather than carry the whole ω W
+    // through the SCF loop.
+    dW_wqPQ_in->reset();
   }
 
   // Precompute the unperturbed G^R(τ)/G^R(β−τ) pair in aux basis (constant
@@ -655,6 +739,18 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
   auto& sS_skij            = _dyson.sS_skij();
+  // The kernels lr_hf contracts under HSEX, empty otherwise: V + W_c(iν=0) in
+  // the self-consistent channel, -W_c(iν=0) in a split run's remainder. Their
+  // heads ε⁻¹(0) and 1 - ε⁻¹(0) sum back to bare exchange's 1.
+  using hsex_kernel_t = solvers::lr_hf::hsex_kernel_t;
+  std::optional<hsex_kernel_t> hsex, hsex_ct;
+  if (_opt_dWc0_qPQ) {
+    hsex = hsex_kernel_t{&(*_opt_dWc0_qPQ), _hsex_head_factor,
+                         hsex_kernel_t::kernel_e::V_plus_Wc0};
+    if (k.pert_sex_counterterm)
+      hsex_ct = hsex_kernel_t{&(*_opt_dWc0_qPQ), 1.0 - _hsex_head_factor,
+                              hsex_kernel_t::kernel_e::minus_Wc0};
+  }
 
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
@@ -1004,7 +1100,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
       _lr_hf->evaluate(sDeltaF_sc_skij, sDeltaDm_skij, thc, sS_skij.local(),
                        k.sc.hartree, k.sc.exchange, ibc_ptr,
-                       p.DeltaV_qPQ, p.Dm_ab, nullptr, p.include_xc);
+                       p.DeltaV_qPQ, p.Dm_ab, nullptr, p.include_xc,
+                       hsex ? &(*hsex) : nullptr);
       _Timer.stop("LR_HF");
       _mpi->comm.barrier();
     }
@@ -1191,9 +1288,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
         if (k.pert_hf) {
           _Timer.start("LR_HF_PERT");
-          _lr_hf->evaluate(sDeltaF_pert_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                           k.pert.hartree, k.pert.exchange, nullptr,
-                           nullptr, nullptr, nullptr, false);
+          // The counter-term IS an exchange contraction, just with the kernel
+          // -W_c(0), so it turns the exchange branch on even when the component
+          // mask leaves exchange wholly in K_sc.
+          _lr_hf_pert->evaluate(sDeltaF_pert_skij, sDeltaDm_skij, thc, sS_skij.local(),
+                                k.pert.hartree, k.pert.exchange || hsex_ct.has_value(),
+                                nullptr, nullptr, nullptr, nullptr, false,
+                                hsex_ct ? &(*hsex_ct) : nullptr);
           _Timer.stop("LR_HF_PERT");
           _mpi->comm.barrier();
         }
@@ -1381,6 +1482,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     *F_PQ_out = std::move(opt_ibc->F_PQ_skij);
   }
   if (DeltaF_PQ_out && k.need_hf) {
+    // The harvest is ONE lr_hf call on the union mask, so it cannot represent a
+    // kernel the two channels only add up to. HSEX + split is exactly that: the
+    // sc channel contracted V + W_c(0) and the pert channel -W_c(0).
+    utils::check(!k.pert_sex_counterterm,
+                 "lr_driver::lr_solve_one: the aux-basis ΔF_PQ output cannot be "
+                 "produced for a split run whose K_sc is HSEX — the total "
+                 "exchange kernel is the sum of two channels, and this is a "
+                 "single evaluation. Set output_aux_fock = false.");
     // One extra lr_hf::evaluate on the converged ΔDm just to capture ΔF_PQ. It writes
     // into a scratch ΔF rather than sDeltaF_skij: the converged sDeltaF_skij is the
     // mixed (DIIS/damped) iterate the caller persists, and re-evaluating from ΔDm
@@ -1394,7 +1503,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                      k.sc.hartree || k.pert.hartree,
                      k.sc.exchange || k.pert.exchange, ibc_ptr,
                      p.DeltaV_qPQ, p.Dm_ab,
-                     DeltaF_PQ_out, p.include_xc);
+                     DeltaF_PQ_out, p.include_xc, hsex ? &(*hsex) : nullptr);
   }
 
   // Hierarchical timer report for this perturbation (verbosity >= 2). Per-step
@@ -1411,7 +1520,8 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
                                       long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
                                       lr_diis_hist_t outer_hist,
-                                      bool need_Delta_mu) {
+                                      bool need_Delta_mu,
+                                      bool exchange_static_W) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1516,6 +1626,10 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
   if (include_gw_sigma) {
     arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true, PERSIST});
+  }
+  if (exchange_static_W) {
+    arrays.push_back({"dWc0_qPQ (HSEX)", fmt::format("({},{},{})", nq, NP, NP),
+                      aux4(1), true, PERSIST});
   }
   if (gw_full) {
     arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true, PERSIST});
@@ -1666,6 +1780,7 @@ void lr_driver::print_setup_timers() {
   app_log(2, "    LR Driver Setup:            {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP"), _Timer.number_of_calls("LR_DRIVER_SETUP"));
   app_log(2, "      - W_full(iω):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_FULL"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_FULL"));
   app_log(2, "      - W_tRPQ:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_TRPQ"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_TRPQ"));
+  app_log(2, "      - W_c(iν=0) (HSEX):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_WC0"), _Timer.number_of_calls("LR_DRIVER_SETUP_WC0"));
   app_log(2, "      - G(iω) precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_OMEGA"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_OMEGA"));
   app_log(2, "      - G^R pair precompute:    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_R"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_R"));
   app_log(2, "      - Δμ response precompute: {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DELTAMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DELTAMU"));
@@ -1709,7 +1824,8 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "      - LR Dyson (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
   _lr_dyson.print_subclocks(2, sub_indent);
   app_log(2, "      - LR HF (total):          {0:8.3f} sec  {1:4d} calls", sec("LR_HF", "LR_HF_PERT"), cnt("LR_HF", "LR_HF_PERT"));
-  if (_lr_hf) _lr_hf->print_subclocks(2, sub_indent);
+  if (_lr_hf or _lr_hf_pert)
+    solvers::lr_hf::print_subclocks_all(2, sub_indent, {_lr_hf.get(), _lr_hf_pert.get()});
   app_log(2, "      - LR GW Pi (total):       {0:8.3f} sec  {1:4d} calls", sec("LR_GW_PI", "LR_GW_PI_PERT"), cnt("LR_GW_PI", "LR_GW_PI_PERT"));
   if (pi_solver) pi_solver->print_subclocks(2, sub_indent);
   app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", sec("LR_GW_W", "LR_GW_W_PERT"), cnt("LR_GW_W", "LR_GW_W_PERT"));
