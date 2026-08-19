@@ -173,11 +173,9 @@ namespace math {
        * node_comm.rank(), so every rank — not only the root — belongs to a communicator
        * that spans the nodes, and rank r cooperates with rank r of every other node.
        *
-       * Post-condition is identical to all_reduce(). It is bit-identical to it whenever
-       * each element is contributed by at most one node (the gather_to_shm case, where
-       * the sum is x + 0 + ... and independent of grouping); with genuinely nonzero
-       * partial sums on several nodes the reduction order differs and last-bit drift is
-       * possible, so prefer all_reduce() there.
+       * Numerically equivalent to all_reduce(). Use all_reduce() instead only if the
+       * internode communicator is not set up as comm.split(node_comm.rank(), ...),
+       * which this routine requires and checks below.
        */
       void all_reduce_parallel() {
         utils::check(_internode_comm != nullptr and _gcomm != nullptr,

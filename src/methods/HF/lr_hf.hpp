@@ -181,6 +181,30 @@ private:
 
   utils::TimerManager _Timer;
 
+  // --- Data cached across evaluate() calls ---------------------------------
+  // lr_hf is constructed per (q, THC handler) and lives for the whole LR SCF, so
+  // the Coulomb kernel is the same on every call. Fetching and transforming it
+  // once is the trade hf_t::_dZ_cache already makes in the ground state, and the
+  // caches die with the solver at the end of the run.
+  //
+  // Filled on first use rather than at construction: lr_hf never holds thc (it is
+  // a template parameter of evaluate), and which of the three a run touches
+  // depends on the per-call channel flags — V(q) only in the direct channel, U(R)
+  // only in the exchange channel, Vxc only when compute_xc.
+
+  bool _Vq_cached = false;
+  nda::array<ComplexType, 2> _Vq_PQ;      // V(q)_PQ tile at _q_ibz_idx
+  bool _Vxc_q_cached = false;
+  nda::array<ComplexType, 2> _Vxc_q_PQ;   // Vxc(q)_PQ tile at _q_ibz_idx
+  bool _U_RPQ_cached = false;
+  nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
+
+  /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
+  /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.
+  void build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
+                   nda::range P_rng, nda::range Q_rng, bool compute_xc,
+                   nda::array<ComplexType, 2>& Uq_PQ);
+
   /**
    * @brief Internal THC-based LR-HF implementation
    */
