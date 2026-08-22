@@ -559,10 +559,12 @@ void lr_driver::lr_setup(
   if (k.include_gw_sigma) {
     lr_setup_W(dW_wqPQ_in, thc, k.gw_full, _lr_scr.get(),
                _opt_dW_full_wqPQ, _opt_dW_tRPQ);
-  } else if (p.exchange_static_W) {
-    // W was loaded only for the ν=0 slice taken above, and the caller keeps it
-    // alive to the end of the call; release it rather than carry the whole ω W
-    // through the SCF loop.
+  } else if (dW_wqPQ_in != nullptr) {
+    // Nothing below reads the ω-axis W; whatever wanted it above has taken its
+    // slice (today that is only HSEX's ν=0 one). Keyed on the array still being
+    // there rather than on which option asked for it, so a future borrower needs
+    // no change here. The caller keeps it alive to the end of the call, so
+    // release it rather than carry the whole ω W through the SCF loop.
     dW_wqPQ_in->reset();
   }
 
