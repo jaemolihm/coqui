@@ -195,23 +195,27 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
 
 
 // Distribution flow through the LR-GW pipeline
-// Three distribution patterns:
+// Two distribution patterns:
 //   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
-//   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
-//   ω-side:            pgrid = {nwpools, nqpools, np_P, np_Q}  — distributed over (w, q, P, Q)
+//   FT buffer:         pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided
 //
-//   W_c in:              (w,q,P,Q), ω-side (solvers::lr_scr_coulomb_t::W_omega_dist)
+// Everything on the ω axis lives on the FT buffer as well
+// (solvers::lr_scr_coulomb_t::W_omega_dist returns it), which is what lets both
+// Fourier transforms write straight into their output with no staging buffer.
+//
+//   W_c in:              (w,q,P,Q), FT buffer (solvers::lr_scr_coulomb_t::W_omega_dist)
 //   lr_setup_W:
-//     w_to_tau:          ω-side → (t,q,P,Q) straight onto the τ-dist tiling
+//     w_to_tau:          FT buffer → (t,q,P,Q) straight onto the τ-dist tiling
 //     lr_Wc_to_Wfull:    + Z(q) in place on the ω copy → W_full(iω) [cached]
 //     lr_precompute_W_tRPQ: q→R in place on the τ copy → (t,R,P,Q), τ-dist [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
 //   solve_lr_dyson_W (in-place):
-//     tau_to_w:          τ-dist → ω-side (via q-distributed FT buffer)
-//     lr_dyson_W_in_place: ω-side; SLATE GEMM batched over (iw, iq).
+//     tau_to_w:          τ-dist → FT buffer
+//     lr_dyson_W_in_place: FT buffer; SLATE GEMM batched over (iw, iq) on the
+//                          (P, Q) subgrid.
 //                          For Q≠Γ, gathers W_full(kpq_map(iq)) via Alltoallv on q_pool_comm.
-//     w_to_tau:          ω-side → τ-dist (via q-distributed FT buffer)
+//     w_to_tau:          FT buffer → τ-dist
 //     output:            τ-dist (overwrites input)
 //   evaluate_sigma_*:    τ-dist in (t,q) order, i.e. ΔW is consumed as produced
 

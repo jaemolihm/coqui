@@ -288,14 +288,17 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   // Only above one rank: there tau_to_w's fast path hands back the input's block
   // size rather than the requested one, and the mismatch is inert anyway because
   // multiply_impl short-circuits to nda::blas::gemm without a tile map.
-  if (comm.size() > 1)
-    utils::check(bsize == dW_full_wqPQ.block_size() and
-                 bsize == dW_full_qpQ_wqPQ.block_size(),
-                 "lr_dyson_W_in_place: (P, Q) block size mismatch. "
-                 "ΔΠ ({}, {}), W_full ({}, {}), W_full(q+Q) ({}, {})",
-                 bsize[2], bsize[3],
-                 dW_full_wqPQ.block_size()[2], dW_full_wqPQ.block_size()[3],
-                 dW_full_qpQ_wqPQ.block_size()[2], dW_full_qpQ_wqPQ.block_size()[3]);
+  if (comm.size() > 1) {
+    auto w_bs   = dW_full_wqPQ.block_size();
+    auto qpq_bs = dW_full_qpQ_wqPQ.block_size();
+    utils::check(bsize == w_bs and bsize == qpq_bs,
+                 "lr_dyson_W_in_place: block size mismatch between ΔΠ and the "
+                 "W_full operands. ΔΠ ({}, {}, {}, {}); W_full ({}, {}, {}, {}); "
+                 "W_full(q+Q) ({}, {}, {}, {}).",
+                 bsize[0], bsize[1], bsize[2], bsize[3],
+                 w_bs[0], w_bs[1], w_bs[2], w_bs[3],
+                 qpq_bs[0], qpq_bs[1], qpq_bs[2], qpq_bs[3]);
+  }
 
   app_log(3, "  Evaluation of the LR screened interaction:");
   app_log(3, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
@@ -327,8 +330,8 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
  * Input: dDeltaPi_tqPQ in q-local (τ-dist) distribution.
  * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
  *
- * Uses precomputed W_full(iω) in the LR ω-side distribution. The FT functions
- * handle the redistribute internally.
+ * Uses precomputed W_full(iω) on W_omega_dist = the FT-buffer distribution. The
+ * FT functions handle the redistribute internally.
  */
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
          typename dW_full_t>
@@ -368,10 +371,14 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // distribution and passes the input's block size through, so at one rank
   // W_full carries whatever its τ-side producer had. gshape[0] is not read by
   // ft_buffer_dist, hence the 1.
-  if (nproc > 1) {
+  //
+  // Both the gate and the recomputed layout use W_full's OWN communicator, since
+  // that is what the fast path and ft_buffer_dist inside the transform key on.
+  const long w_nproc = dW_full_wqPQ.communicator()->size();
+  if (w_nproc > 1) {
     auto [b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist(
-        nproc, {1L, dW_full_wqPQ.global_shape()[1],
-                dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
+        w_nproc, {1L, dW_full_wqPQ.global_shape()[1],
+                  dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
     utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
                  "solve_lr_dyson_W: W_full is not on the FT-buffer distribution, "
                  "so both Fourier transforms pay an extra global redistribute. "
@@ -383,7 +390,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
                  b_bsize[0], b_bsize[1], b_bsize[2], b_bsize[3]);
   }
 
-  // FT ΔΠ: τ → ω, output in the LR ω-side distribution.
+  // FT ΔΠ: τ → ω, output on W_omega_dist = the FT-buffer distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
   auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true, chk_leak);
   _Timer.stop("LR_W_FT_TAU_TO_W");

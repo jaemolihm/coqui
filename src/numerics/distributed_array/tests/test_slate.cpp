@@ -418,9 +418,11 @@ std::cout<<" nx: " <<nx <<std::endl;
 
 // slate_ops::inverse over the processor grids simple_dyson can pick: the band
 // axis is split over the run's rank count. SLATE only accepts the distribution
-// when every non-final block along an axis has the full block size, and needs
-// square tiles, so the block size is floor(N/np) on the finer axis — the same
-// formula the ω-side W grid uses (see "lr_W_omega_dist" below).
+// when every non-final block along an axis has the full block size, so the block
+// size is min(floor(N/np_i), floor(N/np_j)) — floor, and the minimum over BOTH
+// axes. That is the same formula the ω-side W grid uses (see "lr_W_omega_dist"
+// below), where it additionally has to be square because the multiply needs
+// Bs.nt() == As.mt(); getrf/getri only need this divisibility.
 TEST_CASE("distributed_inverse", "[math]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
@@ -606,11 +608,13 @@ TEST_CASE("lr_W_omega_dist", "[math]")
   // nq >= nproc: every rank owns one q, (P,Q) is local and multiply_impl takes
   // its rank-local gemm short circuit.
   check_grid(nproc, 41);
-  // nq < nproc: (P,Q) is split and the multiplies are real SLATE SUMMAs. NP = 41
-  // does not divide the P/Q rank counts, so the tiles are ragged.
+  // nq = 2: (P,Q) gets nproc/2 ranks, so this is a real SLATE SUMMA from 4 ranks
+  // up (at nproc = 2 it is still the rank-local short circuit). NP = 41 does not
+  // divide the P/Q rank counts, so the tiles are ragged.
   check_grid(2, 40);
   check_grid(2, 41);
-  // nq = 1: the whole rank count goes into (P,Q) — the widest SUMMA available.
+  // nq = 1: the whole rank count goes into (P,Q) — the widest SUMMA available,
+  // and the one arm guaranteed to be a real SUMMA at any nproc > 1.
   check_grid(1, 41);
 }
 
