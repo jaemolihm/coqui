@@ -1735,20 +1735,18 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
     app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
             pg4(tau_pg, "(t,q,P,Q)"), arrs);
   }
-  // Aux FT-buffer + ω-side — only the full-GW W Dyson pipeline (mirrors the
-  // distribution choice in solvers::lr_scr_coulomb_t::W_omega_dist).
+  // Aux FT-buffer / ω-side — only the full-GW W Dyson pipeline. One row: the FT
+  // staging buffers and W(iω) share a distribution, which is what lets both
+  // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
+  // ω-side Dyson runs on.
   if (gw_full) {
-    auto [ftb_pg, ftb_bs] =
-        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nth, nq, NP, NP});
-    (void)ftb_bs;
     auto [w_pg, w_bs] =
         solvers::lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwbh, NP);
-    (void)w_bs;
-    app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer",
-            pg4(ftb_pg, "(·,q,P,Q)"), "FT staging buffers (τ, ω)");
-    app_log(2, "    {:<22s}{:<30s}{}", "aux ω-side",
+    const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
+                                    : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
+    app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer / ω-side",
             pg4(w_pg, "(w,q,P,Q)"),
-            is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ");
+            fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]));
   }
 
   // Band-basis Dyson grids — the ω-side comes from the same helper
