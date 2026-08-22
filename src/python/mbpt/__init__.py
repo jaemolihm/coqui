@@ -34,6 +34,7 @@ from .lr_driver import (
     read_DeltaH0,
     write_DeltaH0,
     read_lr_results,
+    read_lr_c1,
 )
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "read_DeltaH0",
     "write_DeltaH0",
     "read_lr_results",
+    "read_lr_c1",
 ]

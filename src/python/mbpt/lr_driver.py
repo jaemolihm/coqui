@@ -250,3 +250,74 @@ def read_lr_results(filename: str,
     return q_vec, DeltaG_tskij, DeltaDm_skij
 
 
+def read_lr_c1(filename: str) -> dict:
+    """
+    Read the stationary-C_term1 (energy-curvature) datasets from an LR checkpoint.
+
+    These are mode-PAIR matrices, so they live in the TOP-LEVEL
+    ``linear_response/`` group rather than in the per-perturbation ``mode{m}/``
+    subgroups, and they are written only by a run made with
+    ``run_lr(..., energy_curvature=True)``.
+
+    Parameters
+    ----------
+    filename : str
+        HDF5 file path
+
+    Returns
+    -------
+    dict
+        ``C_term1`` (the plain estimator), ``C_term1_sym`` (the stationary one),
+        the diagnostics ``C_term1_N`` / ``C_term1_M2`` / ``C_term1_static2``, the
+        ``C_term1_call_index`` list, ``Delta_mu_improved``, the scalar
+        ``C_term1_herm_dev`` / ``C_term1_sym_herm_dev`` / ``C_term1_N_herm_dev``
+        residuals and the ``C_term1_convention`` string.
+
+    Raises
+    ------
+    KeyError
+        If the file carries no C_term1 block, i.e. the run did not set
+        ``energy_curvature=True``.
+
+    Notes
+    -----
+    Every matrix is ``(npert, npert)`` over the perturbations the run actually
+    solved — never padded to a full mode count. A partial batch is a sub-block
+    for inspection, not a dynamical matrix.
+
+    ``C_term1_call_index`` is the 0-based perturbation index WITHIN the run_lr
+    call, which is all the C++ knows: it is handed a bare DeltaH0 stack and no
+    mode numbering. It is not a phonon mode number, and deliberately not named
+    like the ``C_term1_modes`` dataset the phonon drivers write (1-based phonon
+    modes) — mapping one to the other is the caller's job.
+
+    Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the same
+    file can contend on the file lock.
+    """
+    complex_keys = ("C_term1", "C_term1_sym", "C_term1_N", "C_term1_M2",
+                    "C_term1_static2")
+    real_keys = ("C_term1_call_index", "Delta_mu_improved")
+    scalar_keys = ("C_term1_herm_dev", "C_term1_sym_herm_dev", "C_term1_N_herm_dev")
+
+    with h5py.File(filename, 'r') as f:
+        if 'linear_response' not in f:
+            raise KeyError(f"{filename} holds no 'linear_response' group.")
+        lr_grp = f['linear_response']
+        if 'C_term1_sym' not in lr_grp:
+            raise KeyError(
+                f"{filename} holds no C_term1 block; rerun with "
+                f"run_lr(..., energy_curvature=True).")
+
+        out = {}
+        for key in complex_keys:
+            a = lr_grp[key][()]
+            # CoQui writes complex as a trailing (..., 2) real/imag axis.
+            out[key] = a[..., 0] + 1j * a[..., 1]
+        for key in real_keys:
+            out[key] = lr_grp[key][()]
+        for key in scalar_keys:
+            out[key] = float(lr_grp[key][()])
+        conv = lr_grp['C_term1_convention'][()]
+        out['C_term1_convention'] = (conv.decode() if isinstance(conv, bytes)
+                                     else str(conv))
+    return out

@@ -119,7 +119,6 @@ public:
     _head = 0;
     _B = nda::matrix<ComplexType>(0, 0);
   }
-
   /**
    * @brief True when this accelerator can never extrapolate.
    *
@@ -251,6 +250,33 @@ public:
     app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
   }
 
+  /// Whether the ring holds anything, i.e. whether next_step_combined has run
+  /// since the last reset().
+  bool has_raw() const { return _n > 0; }
+
+
+  /**
+   * @brief This rank's slice of the newest step's ΔF / ΔΣ, as it was BEFORE any
+   *        mixing.
+   *
+   * next_step_combined stores the incoming iterate into the ring ahead of both
+   * the extrapolation and the damping write, so this is the raw kernel output of
+   * the step just taken — the one quantity the caller's shared arrays no longer
+   * hold once mixing has run. Invalidated by reset(), and by the next
+   * next_step_combined call.
+   *
+   * newest_xS() is meaningful only when the second slot actually carried a
+   * quantity; a ΔF-only call leaves it empty.
+   */
+  Vec1D const& newest_xF() const {
+    utils::check(_n > 0, "lr_diis::newest_xF: the subspace is empty.");
+    return _xF[slot(_n - 1)];
+  }
+  Vec1D const& newest_xS() const {
+    utils::check(_n > 0, "lr_diis::newest_xS: the subspace is empty.");
+    return _xS[slot(_n - 1)];
+  }
+
 private:
   size_t _max_subsp_size;
   size_t _warmup_iter;
@@ -346,7 +372,7 @@ private:
    */
   void purge_oldest() {
     // B is empty when it is never built (never_extrapolates()); there is then
-    // nothing to shift, and forming an (n-1) x (n-1) matrix from n = 0 would be
+    // nothing to shift, and forming a (n-1) x (n-1) matrix from n = 0 would be
     // a negative extent.
     size_t n = _B.shape()[0];
     if (n > 0) {
