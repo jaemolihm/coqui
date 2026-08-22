@@ -1258,8 +1258,17 @@ auto lr_load_W_omega(
                                    __app_verbosity__ >= 3);
   mpi.comm.barrier();
 
+  // The same q→0 head on the ω axis. A consumer wanting one Matsubara component
+  // (HSEX reads ν = 0) must not recover it by transforming the τ array back:
+  // for div_treatment "*_metal", extrapolate_eps_inv_q0 hand-sets
+  // eps_inv_q0_w(0) = -1, and a hand-poked point is not generally
+  // IR-representable, so the round trip smears exactly that value.
+  auto MF = thc.MF();
+  auto [eps_inv_head_wq, eps_inv_head_w] =
+      solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *MF, div_treatment);
+
   return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
-                         std::move(div_treatment));
+                         std::move(eps_inv_head_w), std::move(div_treatment));
 }
 
 /**
@@ -1332,7 +1341,8 @@ auto recompute_W_and_eps_inv_head(
   auto head_t_2D = nda::reshape(eps_inv_head, std::array<long, 2>{nt_half, 1});
   ft.w_to_tau_PHsym(head_w_2D, head_t_2D);
 
-  return std::make_pair(std::move(dW_wqPQ), std::move(eps_inv_head));
+  return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
+                         std::move(eps_inv_head_q0_w));
 }
 
 /**
@@ -1470,6 +1480,21 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                            : "none";
   };
 
+  // "HSEX" expands to the HF mask plus lr_params::exchange_static_W rather than
+  // to a kernel_spec_from_method name; see that flag for why it cannot be a
+  // mask component. It may name the TOTAL kernel (a standalone run) or the
+  // self-consistent half of a split one, but not both — the counter-term that
+  // makes a split sum back to bare exchange is defined against a
+  // self-consistent screened exchange.
+  bool exchange_static_W = (method == "HSEX") || (two_step_inner_method == "HSEX");
+  utils::check(!lr_two_step || method != "HSEX",
+               "run_lr_calc: with lr_two_step, HSEX must be the "
+               "two_step_inner_method (the kernel that is resummed), not the "
+               "total 'method'.");
+  // The spelling is kept for the checkpoint, since the mask cannot carry it.
+  const std::string two_step_inner_method_in = two_step_inner_method;
+  if (method == "HSEX") method = "HF";
+  if (two_step_inner_method == "HSEX") two_step_inner_method = "HF";
   if (!method.empty()) {
     auto s = kernel_spec_from_method(method);
     include_hartree = s.hartree;
@@ -1575,7 +1600,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "and DeltaV_qPQ perturbations.");
     pert_order = static_cast<int>(two_step_order);
     app_log(2, "LR split kernel: K_sc = {} ('{}'), K_pert = {} (order {})",
-            sc_kernel.to_string(), two_step_inner_method,
+            sc_kernel.to_string(), two_step_inner_method_in,
             pert_kernel.to_string(), pert_order);
   }
 
@@ -1826,6 +1851,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter))>;
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
+  /// The same head on the ω axis; HSEX reads its ν = 0 component.
+  std::optional<nda::array<ComplexType, 1>> opt_eps_inv_w;
   std::string div_treatment = "gygi";
   // An LR run must reproduce the divergence treatment of the ground state it
   // linearizes: the q→0 head of Σ_GW is the exchange Madelung term screened by
@@ -1843,7 +1870,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // Exchange side: needed whenever ΔF carries exchange, independently of W.
   // Absent on pre-stash checkpoints, in which case this falls back to "gygi".
   std::string hf_div_treatment = read_hf_div_treatment(*mpi, input_file, input_grp);
-  if (include_gw_sigma) {
+  // HSEX needs W too, for the single ν=0 slice its exchange kernel adds to V.
+  // The ω array is released inside lr_setup once that slice is taken.
+  if (include_gw_sigma || exchange_static_W) {
     lr_init_timer.start("LR_INIT_LOAD_W");
     bool div_from_chkpt = false;
     if (unperturbed == "mf_dft") {
@@ -1866,16 +1895,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     }
     if (recompute_W) {
       app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
-      auto [dW, eps_inv] = recompute_W_and_eps_inv_head(
+      auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
           *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
+      opt_eps_inv_w.emplace(std::move(eps_inv_w));
     } else {
-      auto [dW, eps_inv, div_str] = lr_load_W_omega(
+      auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
           *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter,
           screened_interaction_file);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
+      opt_eps_inv_w.emplace(std::move(eps_inv_w));
       // W carries its own stash; a disagreement means the W file and the
       // checkpoint came from different runs, and Σ would mix two treatments.
       utils::check(!div_from_chkpt or div_str == div_treatment,
@@ -1988,6 +2019,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.include_exchange = include_exchange;
   p.gw_mode          = gw_mode;
   p.include_xc       = include_xc;
+  p.exchange_static_W  = exchange_static_W;
   p.max_iter         = max_iter;
   p.tol              = tol;
   p.fix_density      = fix_density;
@@ -1996,6 +2028,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.save_DeltaG      = save_DeltaG;
   p.iter_params      = iter_params;
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
+  p.eps_inv_head_w   = opt_eps_inv_w ? &(*opt_eps_inv_w) : nullptr;
   p.div_treatment    = div_treatment;
   p.hf_div_treatment = hf_div_treatment;
   p.sDeltaX_left     = pDeltaX_left;
@@ -2058,6 +2091,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // Write results. A single-perturbation run keeps writing into
     // "linear_response/" so its checkpoint layout is unchanged.
     lr_init_timer.start("LR_DUMP");
+    // ε⁻¹(iν=0) for an HSEX run, absent otherwise. dump_lr keys the whole HSEX
+    // provenance block off whether this is engaged.
+    std::optional<double> hsex_head;
+    if (exchange_static_W) hsex_head = driver.hsex_head_factor();
     chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
                    lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
                    lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -2067,10 +2104,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
                    gw_mode_str(gw_mode_of(run_kernel)),
-                   lr_two_step, two_step_inner_method,
+                   lr_two_step, two_step_inner_method_in,
                    static_cast<int>(two_step_order),
                    outer_active, two_step_outer_alg, two_step_outer_tol,
-                   n_pert_applied);
+                   n_pert_applied, hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
@@ -2490,7 +2527,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   // Load W_c from thc_screened_interaction.h5 and take it in ω, the axis the LR
   // W Dyson works on.
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_wqPQ, eps_inv_head, div_treatment] = lr_load_W_omega(
+  auto [dW_wqPQ, eps_inv_head, eps_inv_head_w, div_treatment] = lr_load_W_omega(
       *mpi, thc, ft, input_file, input_grp, input_iter);
   (void)div_treatment;
 

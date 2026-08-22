@@ -22,6 +22,8 @@
 #ifndef COQUI_LR_PRECOMPUTE_HPP
 #define COQUI_LR_PRECOMPUTE_HPP
 
+#include <functional>
+
 #include "IO/app_loggers.h"
 #include "nda/blas.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -151,6 +153,66 @@ auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_tqPQ_
   mpi->comm.barrier();
   app_log(2, "lr_precompute_W_tRPQ: done");
   return dW_tqPQ;
+}
+
+/**
+ * @brief The ν = 0 bosonic component of W_c, on a caller-chosen (q, P, Q)
+ *        processor grid.
+ *
+ * Index 0 of the PH-symmetric ω-half axis IS ν = 0: tau_to_w_PHsym maps the
+ * half-grid index n to iw = nw_b/2 + n, and n = 0 is the self-conjugate node
+ * (IAFT.icc:64-69). So no imaginary-axis transform is needed here — never sum
+ * over τ instead, the IAFT grids are non-uniform.
+ *
+ * Only the change of distribution costs anything, and it is not
+ * math::nda::redistribute: that requires both arrays to carry the same global
+ * shape, which a single-ω target has not. So it goes one q at a time through a
+ * replicated (NP, NQ) buffer — setup-time, and one aux-basis matrix.
+ *
+ * @param dW_wqPQ - [INPUT] W_c on the PH-symmetric ω half-axis, (nw, nq, NP, NQ)
+ * @return W_c(iν=0) as (nq, NP, NQ) on utils::lr_aux_kernel_pgrid, the tiling
+ *         lr_hf's exchange path fetches its Coulomb kernel on
+ */
+template<nda::MemoryArray Array_4D_t, typename communicator_t>
+auto lr_precompute_Wc_static(memory::darray_t<Array_4D_t, communicator_t> const& dW_wqPQ) {
+  using local_Array_3D_t = nda::array<ComplexType, 3>;
+  decltype(nda::range::all) all;
+
+  auto* comm = dW_wqPQ.communicator();
+  auto [nw, nq, NP, NQ] = dW_wqPQ.global_shape();
+  (void)nw;
+  auto pgrid = utils::lr_aux_kernel_pgrid(comm->size());
+
+  app_log(2, "lr_precompute_Wc_static: extracting W_c(iν=0) ({}, {}, {})",
+          nq, NP, NQ);
+
+  auto dWc0_qPQ = math::nda::make_distributed_array<local_Array_3D_t>(
+      *comm, pgrid, {nq, NP, NQ});
+
+  // The ν = 0 plane sits on the ranks whose ω tile starts at 0. Between them
+  // they tile (q, P, Q) exactly once, so summing their blocks into a zeroed
+  // buffer reconstructs the plane with nothing double-counted and nothing
+  // missing; every other rank contributes zeros.
+  auto src_q = dW_wqPQ.local_range(1);
+  auto src_P = dW_wqPQ.local_range(2);
+  auto src_Q = dW_wqPQ.local_range(3);
+  const bool holds_nu0 = (dW_wqPQ.origin()[0] == 0);
+
+  auto out_P = dWc0_qPQ.local_range(1);
+  auto out_Q = dWc0_qPQ.local_range(2);
+  auto out_loc = dWc0_qPQ.local();
+
+  nda::array<ComplexType, 2> buf_PQ(NP, NQ);
+  for (long iq = 0; iq < nq; ++iq) {
+    buf_PQ() = ComplexType(0.0);
+    if (holds_nu0 and src_q.first() <= iq and iq < src_q.last())
+      buf_PQ(src_P, src_Q) = dW_wqPQ.local()(0, iq - src_q.first(), all, all);
+    comm->all_reduce_in_place_n(buf_PQ.data(), buf_PQ.size(), std::plus<>{});
+    out_loc(iq, all, all) = buf_PQ(out_P, out_Q);
+  }
+  comm->barrier();
+
+  return dWc0_qPQ;
 }
 
 /**

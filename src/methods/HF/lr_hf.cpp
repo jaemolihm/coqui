@@ -86,7 +86,7 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
-                  "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC"}) {
+                  "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -152,11 +152,13 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
                      const nda::array<ComplexType, 4>* Dm_skij_unpert,
                      nda::array<ComplexType, 4>* DeltaF_PQ_out,
-                     bool compute_xc) {
+                     bool compute_xc,
+                     const hsex_kernel_t* hsex) {
   _Timer.start("LR_HF");
   app_log(3, "Evaluating LR Fock matrix (ΔF from ΔDm):");
   app_log(3, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
   app_log(3, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
+  app_log(3, "  - Static screened exchange: {}", hsex ? "yes" : "no");
   app_log(3, "  - Semilocal xc kernel in ΔJ: {}", compute_xc ? "yes" : "no");
   app_log(3, "  - DeltaX correction: {}", ibc ? "yes" : "no");
   app_log(3, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
@@ -180,14 +182,26 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                "The semilocal xc kernel contracts with the diagonal density "
                "response only; v + f_xc + Fock is not a defined theory here. "
                "LR-DFT is include_hartree = true, include_exchange = false.");
+  // HSEX substitutes the exchange kernel; with no exchange channel there is
+  // nothing for it to substitute, and silently ignoring it would make an HSEX
+  // run indistinguishable from a Hartree one.
+  utils::check(!hsex || compute_exchange,
+               "lr_hf::evaluate: the static screened kernel W_c(iν=0) was supplied "
+               "but compute_exchange = false. HSEX replaces V by V + W_c(0) in the "
+               "exchange contraction; it does not enter the direct channel.");
 
   thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange,
-            ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc);
+            ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc, hsex);
 
-  // Add LR finite-size correction for exchange
+  // Add LR finite-size correction for exchange. Under HSEX the contracted
+  // kernel is W(iν=0), whose q→0 head is ε⁻¹(iν=0) times the bare one — the
+  // same split lr_gw applies to Σ_c (-madelung·(ε⁻¹-1)) on top of exchange's
+  // -madelung·1.
   if (compute_exchange) {
     _Timer.start("MADELUNG");
-    LR_HF_K_correction(sDeltaF_skij, sDeltaDm_skij.local(), S_skij, _MF->madelung());
+    const double head = hsex ? hsex->head_factor : 1.0;
+    LR_HF_K_correction(sDeltaF_skij, sDeltaDm_skij.local(), S_skij,
+                       _MF->madelung() * head);
     _Timer.stop("MADELUNG");
   }
 
@@ -206,7 +220,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                       const nda::array_view<ComplexType, 3>* DeltaV_qPQ,
                       const nda::array<ComplexType, 4>* Dm_skij_unpert,
                       nda::array<ComplexType, 4>* DeltaF_PQ_out,
-                      bool compute_xc) {
+                      bool compute_xc,
+                      const hsex_kernel_t* hsex) {
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
   // V(q) at _q_ibz_idx instead of q=0, and _MF->Qpts() for U FT.
@@ -243,9 +258,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   const nda::array<ComplexType, 4>* Dm_unpert = ibc ? ibc->Dm_ab : nullptr;
 
   // Determine processor grid
-  int np = _mpi->comm.size();
-  int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
-  int np_Q = np / np_P;
+  auto kernel_pgrid = utils::lr_aux_kernel_pgrid(_mpi->comm.size());
+  long np_P = kernel_pgrid[1];
+  long np_Q = kernel_pgrid[2];
   nda::array<long, 1> R_grid = _MF->kp_grid();
 
   _Timer.start("ALLOC");
@@ -451,17 +466,23 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                               dDeltaF_skPQ, sDeltaF_skij, thc,
                                               _MF->ks_to_k(0), _kpq_map);
-    // One reduction over the polarization blocks, which accumulated node-locally.
-    sDeltaF_skij.all_reduce_parallel();
     _Timer.stop("AUX_TO_PRIM");
+
+    // One reduction over the polarization blocks, which accumulated node-locally.
+    _Timer.start("FINAL_REDUCE");
+    sDeltaF_skij.all_reduce_parallel();
+    _Timer.stop("FINAL_REDUCE");
 
   } else {
     // === EXCHANGE (+ optional HARTREE) PATH ===
 
     utils::check(compute_exchange, "lr_hf::thc_lr_hf: entered exchange path but compute_exchange=false");
 
-    // U(R)_PQ for exchange: fetch U(q) and FT it q→R once, then keep it. Neither
-    // the kernel nor the transform depends on ΔDm, so both are pure setup.
+    // U(R)_PQ for exchange: fetch U(q), substitute the HSEX kernel and FT the
+    // result q→R once, then keep it. None of the three depends on ΔDm, so all of
+    // it is pure setup. `hsex` is fixed for the lifetime of one lr_hf — lr_driver
+    // gives the counter-term channel its own instance — so the cached U(R) is
+    // valid on every call.
     if (not _U_RPQ_cached) {
       _Timer.start("Z_FETCH");
       auto dU_qPQ = thc.dZ({1, np_P, np_Q});
@@ -476,6 +497,22 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                    "lr_hf: the exchange q→R transform needs one Coulomb q per k-point "
                    "(got {} q, {} k).", dU_qPQ_loc.extent(0), nkpts);
 
+      // HSEX. Applied after Uq_PQ was copied out above, so the direct (ΔJ)
+      // channel keeps the bare V(q), and before the q→R FT, so the Hadamard
+      // below contracts the substituted kernel in real space. V + W_c(0) is the
+      // object GF2's get_static_W returns.
+      if (hsex) {
+        auto const& dWc0 = *hsex->Wc0_qPQ;
+        utils::check(dWc0.local_shape() == dU_qPQ.local_shape() and
+                     dWc0.origin() == dU_qPQ.origin(),
+                     "lr_hf: W_c(iν=0) and Coulomb distributions differ. Build it on "
+                     "utils::lr_aux_kernel_pgrid(comm.size()).");
+        if (hsex->kernel == hsex_kernel_t::kernel_e::V_plus_Wc0)
+          dU_qPQ_loc += dWc0.local();       // W(iν=0) = V + W_c(iν=0)
+        else
+          dU_qPQ_loc = ComplexType(-1.0) * dWc0.local();   // -W_c(iν=0), counter-term
+      }
+
       _Timer.start("UQ_TO_UR");
       if (nkpts != 1) {
         buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
@@ -487,10 +524,17 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         U_2D = buffer;
       }
       _U_RPQ = dU_qPQ_loc;
+      _U_RPQ_hsex = hsex ? std::optional{hsex->kernel} : std::nullopt;
       _U_RPQ_cached = true;
       dU_qPQ.reset();
       _Timer.stop("UQ_TO_UR");
     }
+    // Filled once and never refreshed, so a call asking for a different exchange
+    // kernel would silently be served the cached one.
+    utils::check(_U_RPQ_hsex.has_value() == (hsex != nullptr) and
+                 (!hsex or *_U_RPQ_hsex == hsex->kernel),
+                 "lr_hf: this solver cached U(R) for a different exchange kernel. "
+                 "Each HSEX channel needs its own lr_hf instance.");
     auto U_RPQ_loc = _U_RPQ();
 
     // aux_to_primary needs to be called for each {ip,iq} block.
@@ -643,9 +687,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // Every (ip, iq) block above, and the npol > 1 Hartree block, accumulated into
     // sDeltaF_skij node-locally. Reduce once here, before the symmetrization reads
     // the transposed element and before the caller sees ΔF.
-    _Timer.start("AUX_TO_PRIM");
+    _Timer.start("FINAL_REDUCE");
     sDeltaF_skij.all_reduce_parallel();
-    _Timer.stop("AUX_TO_PRIM");
+    _Timer.stop("FINAL_REDUCE");
 
     if (npol > 1) {
       // Symmetrize: the (ip, iq) loop only processes upper-triangle blocks (iq >= ip)
@@ -774,8 +818,11 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
     lr_thc_comm::aux_to_primary_diagonal(ip, ip, ComplexType(1.0), DeltaJ_PP, DeltaF_loc,
                                          sk_ibz_rng, thc, _MF->ks_to_k(0), _kpq_map);
   sDeltaF_skij.win().fence();
-  sDeltaF_skij.all_reduce_parallel();
   _Timer.stop("AUX_TO_PRIM");
+
+  _Timer.start("FINAL_REDUCE");
+  sDeltaF_skij.all_reduce_parallel();
+  _Timer.stop("FINAL_REDUCE");
 
   // Root-only ΔF_PQ for the Python phonon post-processors. Built directly from the
   // diagonal instead of gathering a distributed (ns, nk_ibz, NP, NP) array. Restricted
@@ -871,7 +918,8 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const nda::array_view<ComplexType, 3>*,
                                const nda::array<ComplexType, 4>*,
                                nda::array<ComplexType, 4>*,
-                               bool);
+                               bool,
+                               const lr_hf::hsex_kernel_t*);
 
 template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const sArray_t<Arrv4D>&,
@@ -882,7 +930,8 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const nda::array_view<ComplexType, 3>*,
                                const nda::array<ComplexType, 4>*,
                                nda::array<ComplexType, 4>*,
-                               bool);
+                               bool,
+                               const lr_hf::hsex_kernel_t*);
 
 template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
                                          Arrv4D const&,

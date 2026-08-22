@@ -265,6 +265,16 @@ inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
   return {pgrid, bsize};
 }
 
+/// Aux-basis kernel distribution: pgrid = {1, np_P, np_Q} over (q, P, Q), q
+/// undivided. The tiling lr_hf's exchange path fetches the Coulomb kernel on;
+/// any kernel meant to be added to it (the static screened W of HSEX) has to be
+/// built on the same one.
+inline auto lr_aux_kernel_pgrid(long nproc) -> std::array<long, 3>
+{
+  long np_P = find_proc_grid_min_diff(nproc, 1, 1);
+  return {1, np_P, nproc / np_P};
+}
+
 /// τ-local distribution: pgrid = {1, qpools, np_P, np_Q}
 /// First axis (τ or ω) is local (undivided). Distributes over q and PQ.
 /// Used as intermediate distribution for tau_to_w / lr_dyson_W_in_place / w_to_tau.
