@@ -276,6 +276,11 @@ struct lr_params {
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
   bool use_diis() const { return iter_params.alg == "DIIS"; }
   double mixing() const { return iter_params.mixing; }
+  /// Whether the inner SCF loop mixes at all, i.e. whether the returned ΔF/ΔΣ
+  /// can differ from the last kernel evaluation. Both algorithms go through
+  /// lr_diis, so this is also the predicate for building its ring: damping with
+  /// mixing >= 1 is the identity and needs neither.
+  bool inner_mixes() const { return use_diis() || mixing() < 1.0; }
 };
 
 /**

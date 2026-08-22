@@ -121,6 +121,16 @@ public:
   }
 
   /**
+   * @brief True when this accelerator can never extrapolate.
+   *
+   * The subspace is capped at _max_subsp_size, so a _min_subsp above that makes
+   * the warmup gate `_n < _min_subsp` fire on every step for the lifetime of the
+   * object: every call takes the damping write. It is how a damping run is
+   * expressed as an lr_diis, and it is what lets the B-matrix work be skipped.
+   */
+  bool never_extrapolates() const { return _min_subsp > _max_subsp_size; }
+
+  /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
    *
    * SPMD: called on every rank of `comm`. Each rank owns the contiguous element
@@ -199,7 +209,12 @@ public:
     const bool warmup =
         (iter <= static_cast<int>(_warmup_iter) + 1 || _n < _min_subsp);
 
-    update_B(comm, has_sigma);
+    // A subspace that can never reach _min_subsp never extrapolates, so B is
+    // dead work: two full-slice dotc's per history entry plus an all_reduce
+    // every iteration, feeding a matrix nothing reads. That is exactly the
+    // depth-1 ring a damping run builds. Any configuration that CAN extrapolate
+    // takes the branch unchanged, so DIIS is untouched.
+    if (!never_extrapolates()) update_B(comm, has_sigma);
 
     if (_n > _max_subsp_size) purge_oldest();
 
@@ -330,14 +345,19 @@ private:
    * shift — it is (S+1)² and costs nothing.
    */
   void purge_oldest() {
+    // B is empty when it is never built (never_extrapolates()); there is then
+    // nothing to shift, and forming an (n-1) x (n-1) matrix from n = 0 would be
+    // a negative extent.
     size_t n = _B.shape()[0];
-    nda::matrix<ComplexType> Bnew(n - 1, n - 1);
-    for (size_t i = 0; i < n - 1; ++i) {
-      for (size_t j = 0; j < n - 1; ++j) {
-        Bnew(i, j) = _B(i + 1, j + 1);
+    if (n > 0) {
+      nda::matrix<ComplexType> Bnew(n - 1, n - 1);
+      for (size_t i = 0; i < n - 1; ++i) {
+        for (size_t j = 0; j < n - 1; ++j) {
+          Bnew(i, j) = _B(i + 1, j + 1);
+        }
       }
+      _B = Bnew;
     }
-    _B = Bnew;
 
     _head = (_head + 1) % _xF.size();
     --_n;

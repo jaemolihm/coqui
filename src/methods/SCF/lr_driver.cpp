@@ -489,9 +489,11 @@ void lr_driver::lr_setup(
 
   // DIIS histories, for the memory report. Each subspace entry stores a trial
   // AND a residual vector of every quantity the accelerator mixes.
+  // A damping run goes through the same accelerator (with a depth-1 subspace it
+  // never extrapolates from), so it carries a history too.
   lr_diis_hist_t inner_hist, outer_hist;
-  if (p.use_diis() && (k.sc_hf || k.sc_sigma || k.has_Vcorr)) {
-    inner_hist.depth = static_cast<long>(p.iter_params.max_subsp_size);
+  if (p.inner_mixes() && (k.sc_hf || k.sc_sigma || k.has_Vcorr)) {
+    inner_hist.depth = static_cast<long>(p.use_diis() ? p.iter_params.max_subsp_size : 1);
     inner_hist.n_F = k.has_Vcorr ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = k.has_Sigma_sc ? 1 : 0;
   }
@@ -599,12 +601,27 @@ void lr_driver::lr_setup(
   }
 
   _Timer.start("LR_DRIVER_SETUP_MISC");
-  // Initialize DIIS if requested. Built once: lr_solve_one reset()s the subspace
-  // rather than rebuilding it, so the (job-wide, striped) history is allocated
-  // exactly once no matter how many perturbations follow.
-  if (p.use_diis()) {
-    _lr_diis = std::make_unique<lr_diis>(
-        p.iter_params.max_subsp_size, p.iter_params.diis_warmup, p.mixing());
+  // The inner accelerator, built once: lr_solve_one reset()s the subspace rather
+  // than rebuilding it, so the (job-wide, striped) history is allocated exactly
+  // once no matter how many perturbations follow.
+  //
+  // Damping with mixing < 1 goes through it as well, rather than through an
+  // inline elementwise update: lr_diis::next_step_combined already implements
+  // exactly that update (the same striped expression, hence the same rounding),
+  // and routing through it removes a code path and makes the RAW pre-mixing
+  // slice available in every mixing configuration.
+  if (p.inner_mixes()) {
+    const size_t depth  = p.use_diis() ? p.iter_params.max_subsp_size : size_t(1);
+    const size_t warmup = p.use_diis() ? p.iter_params.diis_warmup : size_t(0);
+    _lr_diis = std::make_unique<lr_diis>(depth, warmup, p.mixing());
+    // What keeps a damping run on the damping write is the SUBSPACE, not the
+    // warmup count: the default min_subsp of 3 can never be reached by a depth-1
+    // ring, so `_n < _min_subsp` gates every step. Asserted rather than assumed,
+    // because it is also what lets lr_diis skip its dead B-matrix work.
+    utils::check(p.use_diis() or _lr_diis->never_extrapolates(),
+                 "lr_driver::lr_setup: the damping accelerator could extrapolate "
+                 "(subspace depth {} >= min_subsp); a damping run must never.",
+                 depth);
   }
   // The outer accelerator is a separate object with its own subspace, history
   // and warmup: it is keyed on the outer step index while the inner one restarts
@@ -732,11 +749,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   const bool has_Sigma   = k.has_Sigma;
   const bool has_Sigma_sc = k.has_Sigma_sc;
   const bool do_pert     = k.do_pert;
-  const double mixing    = p.mixing();
   const std::string& outer_alg = p.outer_accel.iter.alg;
   const double outer_tol   = p.outer_accel.tol;
   const bool outer_diis_on = (outer_alg == "DIIS");
   const bool outer_track   = p.outer_accel.active();
+  // The inner loop mixes at all: DIIS, or damping with mixing < 1. Both go
+  // through lr_diis, so this is also what decides whether its ring exists.
+  const bool inner_mix = p.inner_mixes();
   auto& sDeltaDm_prev_skij = *_sDeltaDm_prev_skij;
   auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
@@ -794,7 +813,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // but it makes a solve depend on nothing but its own ΔH0.
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
-  if (p.use_diis()) _lr_diis->reset();
+  if (_lr_diis) _lr_diis->reset();
   if (outer_diis_on) _outer_diis->reset();
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
@@ -1138,11 +1157,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     if (stage_iter > 1 && (k.sc_hf || k.sc_sigma || has_Vcorr)) {
       // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
       // standard path, or the static ΔV_QPGW in qp mode.
-      if (p.use_diis()) {
-        // Striped DIIS: every rank of the global comm participates, each
-        // operating on its `_pmap` element-slice of the shared ΔF/ΔΣ and writing
-        // the mixed result back in place. Pass .local() views directly (in/out);
-        // the "prev" arguments are already this rank's slice.
+      if (inner_mix) {
+        // Striped, for damping and DIIS alike: every rank of the global comm
+        // participates, each operating on its `_pmap` element-slice of the shared
+        // ΔF/ΔΣ and writing the mixed result back in place. Pass .local() views
+        // directly (in/out); the "prev" arguments are already this rank's slice.
+        // A damping-only run takes the accelerator's own damping write, which is
+        // the same striped expression the loop used to inline.
         if (has_Vcorr) {
           _lr_diis->next_step_combined(
               _mpi->comm, _pmap,
@@ -1160,18 +1181,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
               _mpi->comm, _pmap,
               sDeltaF_sc_skij.local(), _DeltaF.prev,
               empty_sigma, empty_prev, stage_iter);
-        }
-      } else if (mixing < 1.0) {
-        // Damping is elementwise too, so stripe it over the same partition —
-        // one completion path then covers both algorithms.
-        auto F_loc = _DeltaF.slice(sDeltaF_sc_skij.local());
-        F_loc = mixing * F_loc + (1.0 - mixing) * _DeltaF.prev;
-        if (has_Vcorr) {
-          auto V_loc = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
-          V_loc = mixing * V_loc + (1.0 - mixing) * _DeltaVcorr.prev;
-        } else if (has_Sigma_sc) {
-          auto S_loc = _DeltaSigma.slice(pDeltaSigma_sc->local());
-          S_loc = mixing * S_loc + (1.0 - mixing) * _DeltaSigma.prev;
         }
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
@@ -1385,7 +1394,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // this one is invalid and its warmup keys off the stage-local iteration
         // index. ΔF_sc/ΔΣ_sc are deliberately kept as the warm start for the
         // next stage.
-        if (p.use_diis()) _lr_diis->reset();
+        if (_lr_diis) _lr_diis->reset();
       } else {
         app_log(1, "    [outer] converged after {} K_pert evaluation(s): "
                    "||ΔDm - ΔDm_stage_prev|| = {:.6e} < {:.2e}",
@@ -1595,11 +1604,16 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // and the residual is not reconstructible from the trials once extrapolation
   // is active, so a depth-d history is 2d arrays. The history is striped over
   // the global comm, so the whole job stores it once.
+  // The ring holds max_subsp_size + 1 slots, not max_subsp_size: push_slot()
+  // grows to that before the first eviction and the capacity never shrinks.
+  // Counting only `depth` under-reports every history by (d+1)/d — a flat factor
+  // 2 for the depth-1 ring a damping run now allocates.
   auto push_hist = [&](lr_diis_hist_t const& h, const char* who) {
     if (h.depth <= 0 || (h.n_F == 0 && h.n_Sigma == 0)) return;
-    const double nelem = 2.0 * h.depth * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
+    const long slots = h.depth + 1;
+    const double nelem = 2.0 * slots * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
     arrays.push_back({fmt::format("{} DIIS history", who),
-                      fmt::format("2x{}x[{}xΔF + {}xΔΣ]", h.depth, h.n_F, h.n_Sigma),
+                      fmt::format("2x{}x[{}xΔF + {}xΔΣ]", slots, h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
   push_hist(inner_hist, "inner");
