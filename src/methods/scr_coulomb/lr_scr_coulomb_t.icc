@@ -256,9 +256,10 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
  * LR W Dyson in Matsubara frequency space (in-place):
  *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
  *
- * Both arrays use the LR ω-side distribution {nwpools, nqpools, np_P, np_Q}
- * (matched grids). For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the
- * required W_full slices from peers within q_pool_comm via Alltoallv.
+ * All operands are on W_omega_dist = the FT-buffer distribution
+ * {1, nqpools, np_P, np_Q}, with matched grids and matched (P, Q) block sizes.
+ * For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the required W_full slices
+ * from peers within q_pool_comm via Alltoallv.
  *
  * The two PQ multiplies are routed through nda::slate_ops::multiply, which
  * batches over the (iw, iq) leading axes and dispatches a SLATE GEMM on the
@@ -338,10 +339,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
   // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
-  // so just adopt W_full's distribution. W_omega_dist already chose it
-  // (fused FT-buffer layout when nproc ≤ nq, else the LR ω-side grid); tau_to_w
-  // / w_to_tau then fuse away the matching redistribute automatically whenever
-  // that layout is the FT-buffer one.
+  // so just adopt W_full's distribution. W_omega_dist made that the FT-buffer
+  // layout, so both transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
 
