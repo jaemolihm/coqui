@@ -275,68 +275,6 @@ inline auto lr_aux_kernel_pgrid(long nproc) -> std::array<long, 3>
   return {1, np_P, nproc / np_P};
 }
 
-/// τ-local distribution: pgrid = {1, qpools, np_P, np_Q}
-/// First axis (τ or ω) is local (undivided). Distributes over q and PQ.
-/// Used as intermediate distribution for tau_to_w / lr_dyson_W_in_place / w_to_tau.
-inline auto lr_W_tau_local_dist(long nproc, long nq, long NP)
-    -> std::tuple<std::array<long,4>, std::array<long,4>>
-{
-  long np = nproc;
-
-  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
-  np /= nqpools;
-  long np_P = find_proc_grid_min_diff(np, 1, 1);
-  long np_Q = np / np_P;
-
-  std::array<long, 4> pgrid = {1, nqpools, np_P, np_Q};
-  // Per-dimension block sizes: each rank gets 1 SLATE tile per PQ dimension.
-  // This ensures the block distribution is recognized as 2D cyclic by SLATE.
-  long P_bs = std::max(NP / std::max(np_P, 1L), 1L);
-  long Q_bs = std::max(NP / std::max(np_Q, 1L), 1L);
-  std::array<long, 4> bsize = {1, 1, P_bs, Q_bs};
-
-  return {pgrid, bsize};
-}
-
-/// LR ω-side distribution: pgrid = {nwpools, nqpools, np_P, np_Q}.
-/// Mirrors scr_coulomb_t::W_omega_proc_grid: maximize nqpools, then nwpools,
-/// then split the remainder between np_P and np_Q. Used by lr_dyson_W_in_place
-/// and the W_full(iω) buffer it reads.
-///
-/// Assumes the (P, Q) global axes have the same length (THC: NP==NQ); the
-/// returned PQ block sizes are derived from NP for both axes.
-inline auto lr_W_proc_grid(long nproc, long nq, long nw_half, long NP)
-    -> std::tuple<std::array<long,4>, std::array<long,4>>
-{
-  long np = nproc;
-  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
-  np /= nqpools;
-  long nwpools = find_proc_grid_max_npools(np, nw_half, 0.2);
-  np /= nwpools;
-  long np_P = find_proc_grid_min_diff(np, 1, 1);
-  long np_Q = np / np_P;
-
-  check(nqpools > 0 && nqpools <= nq,
-        "lr_W_proc_grid: nqpools <= 0 or nqpools > nq. nqpools={}", nqpools);
-  check(nwpools > 0 && nwpools <= nw_half,
-        "lr_W_proc_grid: nwpools <= 0 or nwpools > nw_half. nwpools={}", nwpools);
-  check(nwpools * nqpools * np_P * np_Q == nproc,
-        "lr_W_proc_grid: pgrid product != nproc ({} * {} * {} * {} != {})",
-        nwpools, nqpools, np_P, np_Q, nproc);
-
-  std::array<long, 4> pgrid = {nwpools, nqpools, np_P, np_Q};
-  std::array<long, 4> bsize = {1, 1, 1, 1};
-  // The block size must divide the LARGEST local block: make_distributed_array
-  // hands the leading grid rows/columns the extra element, and is_slate_compatible
-  // rejects local_shape % block_size != 0 on every non-last row/column.
-  long lp = (NP + np_P - 1) / np_P;
-  long lq = (NP + np_Q - 1) / np_Q;
-  bsize[2] = std::min({1024L, lp, lq});
-  if (bsize[2] < 1) bsize[2] = 1;
-  bsize[3] = bsize[2];
-  return {pgrid, bsize};
-}
-
 /// Validate that a distributed 4D array follows the lr_W_q_local_dist pattern:
 /// pgrid[1] == 1 (q undivided).
 template<typename darray_t>
