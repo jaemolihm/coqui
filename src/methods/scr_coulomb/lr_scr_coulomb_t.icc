@@ -282,6 +282,20 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
                "lr_dyson_W_in_place: pgrid mismatch between ΔΠ and W_full operands");
   utils::check(bsize[1] == 1,
                "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
+  // The batched multiply cross-checks block_size only on the leading axes, but
+  // each operand's SLATE tile map is built from its own (P, Q) block size, so the
+  // same grid with a different PQ blocking is a silent tile-map mismatch.
+  // Only above one rank: there tau_to_w's fast path hands back the input's block
+  // size rather than the requested one, and the mismatch is inert anyway because
+  // multiply_impl short-circuits to nda::blas::gemm without a tile map.
+  if (comm.size() > 1)
+    utils::check(bsize == dW_full_wqPQ.block_size() and
+                 bsize == dW_full_qpQ_wqPQ.block_size(),
+                 "lr_dyson_W_in_place: (P, Q) block size mismatch. "
+                 "ΔΠ ({}, {}), W_full ({}, {}), W_full(q+Q) ({}, {})",
+                 bsize[2], bsize[3],
+                 dW_full_wqPQ.block_size()[2], dW_full_wqPQ.block_size()[3],
+                 dW_full_qpQ_wqPQ.block_size()[2], dW_full_qpQ_wqPQ.block_size()[3]);
 
   app_log(3, "  Evaluation of the LR screened interaction:");
   app_log(3, "    - processor grid for ΔW: (w, q, P, Q) = ({}, {}, {}, {})",
@@ -343,6 +357,31 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // layout, so both transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
+
+  // Guard the fusion: if W_full is not on the FT-buffer distribution, both
+  // transforms below silently pay an extra global redistribute (~24% of the
+  // LR-GW run). Every producer of W(iω) goes through W_omega_dist, so a
+  // mismatch here is a programming error, not a configuration.
+  //
+  // Only above one rank, for the same reason as the block-size check in
+  // lr_dyson_W_in_place: tau_to_w's single-rank fast path ignores the requested
+  // distribution and passes the input's block size through, so at one rank
+  // W_full carries whatever its τ-side producer had. gshape[0] is not read by
+  // ft_buffer_dist, hence the 1.
+  if (nproc > 1) {
+    auto [b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist(
+        nproc, {1L, dW_full_wqPQ.global_shape()[1],
+                dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
+    utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
+                 "solve_lr_dyson_W: W_full is not on the FT-buffer distribution, "
+                 "so both Fourier transforms pay an extra global redistribute. "
+                 "W_full pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}); "
+                 "FT buffer pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}).",
+                 w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3],
+                 w_bsize[0], w_bsize[1], w_bsize[2], w_bsize[3],
+                 b_pgrid[0], b_pgrid[1], b_pgrid[2], b_pgrid[3],
+                 b_bsize[0], b_bsize[1], b_bsize[2], b_bsize[3]);
+  }
 
   // FT ΔΠ: τ → ω, output in the LR ω-side distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
