@@ -381,11 +381,12 @@ void inverse(DistributedMatrix auto&& A)
 	,{ { slate::Option::Target, slate::Target::HostBatch} }
 #endif
 	);
+    // A singular A is reported here: slate::getri returns void, so the
+    // factorization's info is the only status the inversion produces.
     utils::check(info == 0, "inverse: getrf info: {}.", info);
-    slate::getri ( As , pivots 
+    slate::getri ( As , pivots
 #if defined(USE_SLATE_HOSTBATCH)
 	,{ { slate::Option::Target, slate::Target::HostBatch} }
-    utils::check(info == 0, "inverse: getri info: {}.", info);
 #endif
 	);
   } else {
