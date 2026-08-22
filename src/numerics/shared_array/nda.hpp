@@ -173,9 +173,8 @@ namespace math {
        * node_comm.rank(), so every rank — not only the root — belongs to a communicator
        * that spans the nodes, and rank r cooperates with rank r of every other node.
        *
-       * Numerically equivalent to all_reduce(). Use all_reduce() instead only if the
-       * internode communicator is not set up as comm.split(node_comm.rank(), ...),
-       * which this routine requires and checks below.
+       * Equivalent to all_reduce(); only performance differs. Requires the internode
+       * communicator to be comm.split(node_comm.rank(), ...), checked below.
        */
       void all_reduce_parallel() {
         utils::check(_internode_comm != nullptr and _gcomm != nullptr,

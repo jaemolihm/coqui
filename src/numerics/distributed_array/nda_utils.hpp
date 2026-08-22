@@ -1672,8 +1672,7 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   // MAM Note: In some MPI implementations/systems, the first call to a collective can be very
   //           slow (e.g. x100 slower). Not clear why, seems to happen more in shared memory.
   //           If this problem persist, reduce on regular memory and copy to shm locally
-  // All_reduce among all nodes. Blocks are disjoint, so each element is summed as
-  // x + 0 + ... and splitting the reduction across node ranks is bit-identical.
+  // All_reduce among all nodes, split across the ranks of a node.
   tic("GATHER_SHM_REDUCE");
   sA.all_reduce_parallel();
   toc("GATHER_SHM_REDUCE");
