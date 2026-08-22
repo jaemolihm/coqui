@@ -28,7 +28,10 @@ endif()
 
 add_executable(test_${TEST_ID} ${TEST_SRCS} )
 if(ENABLE_SLATE)
-target_link_libraries(test_${TEST_ID} PRIVATE catch_main utils nda_c h5_c slate_lapack_api slate)
+# iaft_utils_lib: test_slate.cpp checks the ω-side W distribution against the
+# helpers that produce it (scr_coulomb_fourier_t / lr_scr_coulomb_t), whose
+# headers reach the IAFT and hence the DLR backend's include path.
+target_link_libraries(test_${TEST_ID} PRIVATE catch_main utils nda_c h5_c iaft_utils_lib slate_lapack_api slate)
 else(ENABLE_SLATE)
 target_link_libraries(test_${TEST_ID} PRIVATE catch_main utils nda_c h5_c)
 endif(ENABLE_SLATE)
