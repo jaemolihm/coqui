@@ -68,30 +68,6 @@ namespace solvers {
     ~lr_scr_coulomb_t() {}
 
     /**
-     * Processor grid and block size W(iω) is carried on for the LR path.
-     *
-     * ft_buffer_dist keeps ω local and distributes over q, then P and Q;
-     * lr_W_proc_grid distributes over ω and q, then P and Q. When the FT buffer
-     * already has P and Q local it is reused, so the τ→ω transform lands
-     * directly on the output grid and the redundant redistribute disappears.
-     *
-     * Static, and not just an implementation detail of one producer, because
-     * every W(iω) reaching lr_dyson_W_in_place must be on the same grid and there
-     * are three independent producers: the scGW W Dyson on the recompute path
-     * (asked to emit W here instead of on Π's τ grid), the τ→ω transform in
-     * lr_load_W_omega on the from-file path, and run_lr_gw_W. A fourth reader,
-     * lr_driver::print_distribution_summary, reports it.
-     */
-    static auto W_omega_dist(long nproc, long nq, long nw_half, long NP)
-    -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
-      auto [b_pgrid, b_bsize] =
-          scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nw_half, nq, NP, NP});
-      if (b_pgrid[2] == 1 && b_pgrid[3] == 1)
-        return std::make_tuple(b_pgrid, b_bsize);
-      return utils::lr_W_proc_grid(nproc, nq, nw_half, NP);
-    }
-
-    /**
      * Add the bare interaction: W_c(iω) → W_full(iω) = W_c(iω) + Z(q) in place,
      * then build the Q≠Γ (q+Q) Dyson operand from the result.
      *
@@ -103,7 +79,7 @@ namespace solvers {
      * _build_W_full_qpQ: it touches the concrete member cache directly.
      *
      * @param dW_c_wqPQ - [IN/OUT] W_c(iω) on entry, W_full(iω) on exit. Must be
-     *                    on W_omega_dist.
+     *                    on the q-dist distribution (utils::lr_W_tau_local_dist).
      * @param thc       - [IN] THC-ERI handler (supplies Z(q))
      */
     void lr_Wc_to_Wfull(dArr4D_concrete_t& dW_c_wqPQ, THC_ERI auto& thc);
@@ -115,7 +91,8 @@ namespace solvers {
      * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
      *
      * @param dDeltaPi_tqPQ   - [IN/OUT] ΔΠ(τ) on input, ΔW_c(τ) on output (τ-dist)
-     * @param dW_full_wqPQ    - [IN] W_c(iω) + V in PQ-local distribution (not consumed)
+     * @param dW_full_wqPQ    - [IN] W_c(iω) + V on the q-dist distribution
+     *                          (utils::lr_W_tau_local_dist), not consumed
      * @param thc             - [IN] THC-ERI handler
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
@@ -131,8 +108,10 @@ namespace solvers {
      *   Δ^Q W^{q}(iω) = W_full^{q+Q}(iω) · Δ^Q Π^{q}(iω) · W_full^{q}(iω)
      * where q is the bosonic wavevector of Coulomb interaction and Q is the perturbation wavevector.
      *
-     * Both arrays must be in PQ-local distribution (pgrid[2]==1, pgrid[3]==1).
-     * On output, dDeltaPi_wqPQ contains ΔW_c(iω).
+     * All operands must be on the q-dist distribution (utils::lr_W_tau_local_dist) —
+     * same processor grid and same (P, Q)
+     * block size, since each one's SLATE tile map is built from its own block
+     * size. On output, dDeltaPi_wqPQ contains ΔW_c(iω).
      *
      * Stateless: both W operands are passed in (not read from a member), so the
      * function is a pure function of its arguments. solve_lr_dyson_W supplies the
@@ -140,7 +119,7 @@ namespace solvers {
      * for Q=Γ it passes dW_full_wqPQ for both, since W_full(q+Q) = W_full(q).
      *
      * @param dDeltaPi_wqPQ    - [IN/OUT] ΔΠ on input, ΔW_c on output
-     * @param dW_full_wqPQ     - [IN] W_full(q) = W_c(iω) + V in PQ-local distribution
+     * @param dW_full_wqPQ     - [IN] W_full(q) = W_c(iω) + V on the q-dist distribution
      * @param dW_full_qpQ_wqPQ - [IN] W_full(q+Q) left operand (== dW_full_wqPQ for Q=Γ)
      */
     template<nda::MemoryArray Array_4D_t, typename communicator_t,

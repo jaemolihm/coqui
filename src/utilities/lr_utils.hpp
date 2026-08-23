@@ -265,6 +265,62 @@ inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
   return {pgrid, bsize};
 }
 
+/**
+ * The q-dist distribution for W(iω) on the LR path: pgrid = {1, nqpools, np_P,
+ * np_Q}, i.e. the ω axis local, distributed over q and then (P, Q). Square,
+ * 1024-capped (P, Q) block.
+ *
+ * This is *the* distribution every LR W(iω) is carried on, and that is an
+ * invariant rather than any one producer's preference: it is what makes both
+ * Fourier transforms fuse — tau_to_w writes straight into W(iω) and w_to_tau
+ * reads straight out of it, one global redistribute each instead of two — at the
+ * price of the ω-side W Dyson running as a SLATE SUMMA on the (P, Q) subgrid
+ * instead of a rank-local gemm. Square is what makes that legal: the C-order
+ * branch of slate_ops::multiply issues slate::multiply(a, Bs, As, b, Cs), which
+ * requires Bs.nt() == As.mt().
+ *
+ * Deliberately a DUPLICATE of solvers::scr_coulomb_fourier_t::ft_buffer_dist
+ * (user, 2026-08-23), rather than a call to it: the LR and ground-state
+ * distribution helpers stay separate for now. The consequence is a hard
+ * constraint — this function MUST stay value-identical to ft_buffer_dist. The FT
+ * engine decides internally whether to fuse by comparing the requested layout
+ * against its own ft_buffer_dist, so the moment the two drift, fusion silently
+ * stops firing and the LR-GW run pays two extra global redistributes per
+ * iteration (~24% of it) with nothing in the output to say so. Two things enforce
+ * the equality: the guard at the top of lr_scr_coulomb_t::solve_lr_dyson_W, which
+ * compares against ft_buffer_dist at runtime, and the equality sweep in
+ * test_slate.cpp ("ft_buffer_dist" test case) at build time.
+ *
+ * Planned direction: fold this and ft_buffer_dist into one distribution_utils
+ * that owns every distribution pattern, at which point the duplication goes away.
+ *
+ * Returns a std::pair, mirroring ft_buffer_dist, so the two can be compared
+ * directly. nw_half does not enter the layout (the ω axis is undivided); it is in
+ * the signature to name the array's shape. Argument order follows the gshape
+ * order {nw_half, nq, NP, NP}.
+ */
+inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
+                                [[maybe_unused]] long nw_half, long nq, long NP)
+    -> std::pair<std::array<long,4>, std::array<long,4>>
+{
+  std::array<long, 4> b_pgrid = {1, 1, 1, 1};
+  std::array<long, 4> b_bsize = {1, 1, 1, 1};
+  b_pgrid[1] = find_proc_grid_max_npools(nproc, nq, 0.2);
+  long np_PQ = nproc / b_pgrid[1];
+  if (NP * NP >= np_PQ) {
+    b_pgrid[2] = find_proc_grid_min_diff(np_PQ, NP, NP);
+    b_pgrid[3] = np_PQ / b_pgrid[2];
+  } else {
+    check(np_PQ == 1,
+          "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
+  }
+  b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
+                                NP / std::max(b_pgrid[3], 1L)});
+  b_bsize[2] = std::max(b_bsize[2], 1L);
+  b_bsize[3] = b_bsize[2];
+  return {b_pgrid, b_bsize};
+}
+
 /// Aux-basis kernel distribution: pgrid = {1, np_P, np_Q} over (q, P, Q), q
 /// undivided. The tiling lr_hf's exchange path fetches the Coulomb kernel on;
 /// any kernel meant to be added to it (the static screened W of HSEX) has to be
@@ -273,68 +329,6 @@ inline auto lr_aux_kernel_pgrid(long nproc) -> std::array<long, 3>
 {
   long np_P = find_proc_grid_min_diff(nproc, 1, 1);
   return {1, np_P, nproc / np_P};
-}
-
-/// τ-local distribution: pgrid = {1, qpools, np_P, np_Q}
-/// First axis (τ or ω) is local (undivided). Distributes over q and PQ.
-/// Used as intermediate distribution for tau_to_w / lr_dyson_W_in_place / w_to_tau.
-inline auto lr_W_tau_local_dist(long nproc, long nq, long NP)
-    -> std::tuple<std::array<long,4>, std::array<long,4>>
-{
-  long np = nproc;
-
-  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
-  np /= nqpools;
-  long np_P = find_proc_grid_min_diff(np, 1, 1);
-  long np_Q = np / np_P;
-
-  std::array<long, 4> pgrid = {1, nqpools, np_P, np_Q};
-  // Per-dimension block sizes: each rank gets 1 SLATE tile per PQ dimension.
-  // This ensures the block distribution is recognized as 2D cyclic by SLATE.
-  long P_bs = std::max(NP / std::max(np_P, 1L), 1L);
-  long Q_bs = std::max(NP / std::max(np_Q, 1L), 1L);
-  std::array<long, 4> bsize = {1, 1, P_bs, Q_bs};
-
-  return {pgrid, bsize};
-}
-
-/// LR ω-side distribution: pgrid = {nwpools, nqpools, np_P, np_Q}.
-/// Mirrors scr_coulomb_t::W_omega_proc_grid: maximize nqpools, then nwpools,
-/// then split the remainder between np_P and np_Q. Used by lr_dyson_W_in_place
-/// and the W_full(iω) buffer it reads.
-///
-/// Assumes the (P, Q) global axes have the same length (THC: NP==NQ); the
-/// returned PQ block sizes are derived from NP for both axes.
-inline auto lr_W_proc_grid(long nproc, long nq, long nw_half, long NP)
-    -> std::tuple<std::array<long,4>, std::array<long,4>>
-{
-  long np = nproc;
-  long nqpools = find_proc_grid_max_npools(np, nq, 0.2);
-  np /= nqpools;
-  long nwpools = find_proc_grid_max_npools(np, nw_half, 0.2);
-  np /= nwpools;
-  long np_P = find_proc_grid_min_diff(np, 1, 1);
-  long np_Q = np / np_P;
-
-  check(nqpools > 0 && nqpools <= nq,
-        "lr_W_proc_grid: nqpools <= 0 or nqpools > nq. nqpools={}", nqpools);
-  check(nwpools > 0 && nwpools <= nw_half,
-        "lr_W_proc_grid: nwpools <= 0 or nwpools > nw_half. nwpools={}", nwpools);
-  check(nwpools * nqpools * np_P * np_Q == nproc,
-        "lr_W_proc_grid: pgrid product != nproc ({} * {} * {} * {} != {})",
-        nwpools, nqpools, np_P, np_Q, nproc);
-
-  std::array<long, 4> pgrid = {nwpools, nqpools, np_P, np_Q};
-  std::array<long, 4> bsize = {1, 1, 1, 1};
-  // The block size must divide the LARGEST local block: make_distributed_array
-  // hands the leading grid rows/columns the extra element, and is_slate_compatible
-  // rejects local_shape % block_size != 0 on every non-last row/column.
-  long lp = (NP + np_P - 1) / np_P;
-  long lq = (NP + np_Q - 1) / np_Q;
-  bsize[2] = std::min({1024L, lp, lq});
-  if (bsize[2] < 1) bsize[2] = 1;
-  bsize[3] = bsize[2];
-  return {pgrid, bsize};
 }
 
 /// Validate that a distributed 4D array follows the lr_W_q_local_dist pattern:

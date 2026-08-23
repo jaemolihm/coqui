@@ -97,11 +97,24 @@ namespace solvers {
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     /**
-     * Internal FT-buffer distribution used by tau_to_w / w_to_tau:
-     * axis 0 (τ/ω) local, q and (P, Q) distributed. Exposed so LR callers can
-     * request the FT output directly in this distribution (the FT then skips
-     * the matching redistribute) and build W_full(iω) to match.
+     * The q-dist distribution: axis 0 (τ/ω) local, q and (P, Q) distributed.
+     * Used internally by tau_to_w / w_to_tau for their staging buffers, and
+     * exposed so callers can request the FT output directly in it (the FT then
+     * skips the matching redistribute) and build W_full(iω) to match.
      * Only gshape[1..3] (q, P, Q) are read; τ/ω extent is irrelevant.
+     *
+     * On the LR path this is *the* distribution every W(iω) is carried on, which
+     * is an invariant rather than any one producer's preference: it is what makes
+     * both transforms fuse — tau_to_w writes straight into W(iω) and w_to_tau
+     * reads straight out of it, one global redistribute each instead of two — at
+     * the price of the ω-side W Dyson running as a SLATE SUMMA on the (P, Q)
+     * subgrid instead of a rank-local gemm. solve_lr_dyson_W asserts it, since
+     * losing it costs ~24% of the LR-GW run and is otherwise silent.
+     *
+     * The returned (P, Q) block is square, and that is load-bearing rather than
+     * cosmetic: the fused branches of tau_to_w / w_to_tau compare block size as
+     * well as processor grid, and the W Dyson runs SLATE on whatever this
+     * returns (see below).
      */
     static std::pair<std::array<long, 4>, std::array<long, 4>>
     ft_buffer_dist(long np, std::array<long, 4> gshape) {
@@ -117,8 +130,15 @@ namespace solvers {
         utils::check(np_PQ == 1,
             "scr_coulomb_fourier_t::ft_buffer_dist: PQ too small for proc count (NP*NQ < np_PQ)");
       }
-      b_bsize[2] = std::max(gshape[2] / std::max(b_pgrid[2], 1L), 1L);
-      b_bsize[3] = std::max(gshape[3] / std::max(b_pgrid[3], 1L), 1L);
+      // Square block size, the same formula as scr_coulomb_t::W_omega_proc_grid:
+      // make sure block sizes produce at least one full block per task. Square is
+      // required because the W Dyson runs slate_ops::multiply on this
+      // distribution, and its C-order branch issues slate::multiply(a,Bs,As,b,Cs),
+      // which needs Bs.nt() == As.mt() — with NP == NQ that is bsize[2] == bsize[3].
+      b_bsize[2] = std::min({1024L, gshape[2] / std::max(b_pgrid[2], 1L),
+                                    gshape[3] / std::max(b_pgrid[3], 1L)});
+      b_bsize[2] = std::max(b_bsize[2], 1L);
+      b_bsize[3] = b_bsize[2];
       return {b_pgrid, b_bsize};
     }
 

@@ -38,6 +38,8 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/h5.hpp"
 #include "utilities/test_common.hpp"
+#include "utilities/lr_utils.hpp"
+#include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 
 namespace bdft_tests
 {
@@ -416,58 +418,210 @@ std::cout<<" nx: " <<nx <<std::endl;
 }
 
 // slate_ops::inverse over the processor grids simple_dyson can pick: the band
-// axis is split over the run's rank count, with a block size as small as
-// ceil(nbnd/np_i). SLATE only accepts the distribution when every non-final
-// block along an axis has the full block size, so the grids exercised below
-// require the rank count to divide N (or to leave the remainder on the last
-// rank alone).
+// axis is split over the run's rank count. SLATE only accepts the distribution
+// when every non-final block along an axis has the full block size, so the block
+// size is min(floor(N/np_i), floor(N/np_j)) — floor, and the minimum over BOTH
+// axes. That is the same formula the q-dist W grid uses (see the "ft_buffer_dist"
+// case), where it additionally has to be square because the multiply needs
+// Bs.nt() == As.mt(); getrf/getri only need this divisibility.
 TEST_CASE("distributed_inverse", "[math]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
-  const long N = 40;
 
-  nda::array<ComplexType, 2> A(N, N);
-  for (long i = 0; i < N; ++i)
-    for (long j = 0; j < N; ++j)
-      A(i, j) = ComplexType(std::sin(0.3*i + 0.7*j + 1.0), std::cos(0.2*i - 0.5*j))
-                + (i == j ? ComplexType(2*N) : ComplexType(0));
+  auto run = [&](const long N) {
+    nda::array<ComplexType, 2> A(N, N);
+    for (long i = 0; i < N; ++i)
+      for (long j = 0; j < N; ++j)
+        A(i, j) = ComplexType(std::sin(0.3*i + 0.7*j + 1.0), std::cos(0.2*i - 0.5*j))
+                  + (i == j ? ComplexType(2*N) : ComplexType(0));
 
-  nda::array<ComplexType, 2> Ainv_ref(A);
-  {
-    nda::matrix_view<ComplexType> Am(Ainv_ref);
-    Ainv_ref = nda::inverse(Am);
-  }
+    nda::array<ComplexType, 2> Ainv_ref(A);
+    {
+      nda::matrix_view<ComplexType> Am(Ainv_ref);
+      Ainv_ref = nda::inverse(Am);
+    }
 
-  auto check = [&](long np_i, long np_j) {
-    if (np_i*np_j != world.size()) return;
-    // Same ceil rule as the LR production grids: the block size has to divide
-    // the largest local block, which is the ceiling of N/np.
-    long bsize = std::min({1024l, (N + np_i - 1)/np_i, (N + np_j - 1)/np_j});
-    if (bsize < 1) return;
+    auto check = [&](long np_i, long np_j) {
+      if (np_i*np_j != world.size()) return;
+      if (N < np_i or N < np_j) return;
+      long bsize = std::min({1024l, N/np_i, N/np_j});
+      if (bsize < 1) return;
 
-    auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
-                  shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
-    dA.local() = A(dA.local_range(0), dA.local_range(1));
+      auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
+                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
 
-    math::nda::slate_ops::inverse(dA);
+      math::nda::slate_ops::inverse(dA);
 
-    double err = 0.0;
-    auto Aloc = dA.local();
-    for (auto [i, in] : itertools::enumerate(dA.local_range(0)))
-      for (auto [j, jn] : itertools::enumerate(dA.local_range(1)))
-        err = std::max(err, std::abs(Aloc(i, j) - Ainv_ref(in, jn)));
-    // Identical on every rank after the reduction, so CHECK cannot diverge.
-    err = world.all_reduce_value(err, boost::mpi3::max<>{});
-    app_log(2, "  inverse: pgrid = ({}, {}), bsize = {}, max error = {:.3e}",
-            np_i, np_j, bsize, err);
-    INFO("pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize);
-    CHECK(err < 1e-10);
+      double err = 0.0;
+      auto Aloc = dA.local();
+      for (auto [i, in] : itertools::enumerate(dA.local_range(0)))
+        for (auto [j, jn] : itertools::enumerate(dA.local_range(1)))
+          err = std::max(err, std::abs(Aloc(i, j) - Ainv_ref(in, jn)));
+      // Identical on every rank after the reduction, so CHECK cannot diverge.
+      err = world.all_reduce_value(err, boost::mpi3::max<>{});
+      app_log(2, "  inverse: N = {}, pgrid = ({}, {}), bsize = {}, max error = {:.3e}",
+              N, np_i, np_j, bsize, err);
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize);
+      CHECK(err < 1e-10);
+    };
+
+    check(world.size(), 1);
+    check(1, world.size());
+    long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
+    check(nx, world.size()/nx);
   };
 
-  check(world.size(), 1);
-  check(1, world.size());
-  long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
-  check(nx, world.size()/nx);
+  run(40);
+  // Not divisible by the rank counts ctest uses: ragged last local block and a
+  // short trailing tile on both axes, which is the production geometry (THC
+  // nIpts 1687 split over 3 P ranks).
+  run(41);
+}
+
+// scr_coulomb_fourier_t::ft_buffer_dist — the q-dist distribution, which on the
+// LR path is the one every W(iω) is carried on.
+// Three properties are load-bearing on that path: the (P,Q) block is square
+// (the C-order branch of multiply_impl issues slate::multiply(a,Bs,As,b,Cs),
+// which needs Bs.nt() == As.mt()), the array still stores that square block
+// after make_distributed_array's min(bsize, shape/grid) clamp — that clamp is
+// what the fused FT branches and SLATE both read — and the two rank-4
+// multiplies of lr_dyson_W_in_place are numerically right on the grid.
+TEST_CASE("ft_buffer_dist", "[math]")
+{
+  using methods::solvers::scr_coulomb_fourier_t;
+  using grid_t = std::array<long, 4>;
+
+  auto world = boost::mpi3::environment::get_world_instance();
+  auto all = nda::range::all;
+
+  // --- pure function: square (P,Q) block, and the LR duplicate agrees ---
+  // utils::lr_W_tau_local_dist deliberately duplicates ft_buffer_dist's body (the LR
+  // and ground-state distribution helpers stay separate for now). It has to stay
+  // value-identical, or the FT stops fusing silently — the FT engine decides
+  // whether to fuse by comparing against its OWN ft_buffer_dist. This sweep is the
+  // build-time tripwire for that drift; solve_lr_dyson_W's guard is the runtime one.
+  // (nproc, nq, nw_half, NP). The last row is the production point of record:
+  // BaBiO3 nk8, 768 ranks, nq = 512, THC nIpts = 1687.
+  const std::array<grid_t, 10> sweep = {{
+      {1, 8, 4, 98},   {8, 8, 18, 98},   {16, 8, 18, 98},  {24, 8, 18, 98},
+      {32, 8, 18, 98}, {64, 8, 18, 98},  {24, 8, 18, 41},  {32, 8, 18, 41},
+      {96, 512, 36, 1687}, {768, 512, 36, 1687}}};
+
+  for (auto s : sweep) {
+    const long nproc = s[0], nq = s[1], nwh = s[2], NP = s[3];
+    auto [b_pgrid, b_bsize] =
+        scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP});
+    INFO("nproc = " << nproc << ", nq = " << nq << ", nw_half = " << nwh
+         << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
+         << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
+    CHECK(b_bsize[2] == b_bsize[3]);
+    CHECK((utils::lr_W_tau_local_dist(nproc, nwh, nq, NP) ==
+           scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP})));
+  }
+
+  // The production point, spelled out: the P-split grid whose SUMMA was
+  // measured, with the 1024-capped square tile min(1024, 1687/3, 1687/1).
+  {
+    auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
+    CHECK((pg == grid_t{1, 256, 3, 1}));
+    CHECK((bs == grid_t{1, 1, 562, 562}));
+    CHECK((utils::lr_W_tau_local_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
+  }
+
+  // --- the stored block size, and the two Dyson multiplies on the grid ---
+  const long nproc = world.size();
+
+  auto check_grid = [&](long nq, long NP) {
+    const long nwh = 2;
+    auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP});
+    if (nwh < pg[0] or nq < pg[1] or NP < pg[2] or NP < pg[3]) return;
+    INFO("nproc = " << nproc << ", nq = " << nq << ", NP = " << NP
+         << ", pgrid = (" << pg[0] << "," << pg[1] << "," << pg[2] << ","
+         << pg[3] << "), bsize = (" << bs[2] << "," << bs[3] << ")");
+
+    const shape_t<4> gshape{nwh, nq, NP, NP};
+    using local_Array_t = nda::array<ComplexType, 4>;
+    auto dPi  = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
+    auto dW1  = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
+    auto dW2  = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
+    auto dTmp = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
+
+    CHECK(dPi.block_size()[2] == dPi.block_size()[3]);
+    CHECK((dPi.block_size() == bs));
+
+    // Replicated operands; the reference below is formed from them rank-locally,
+    // so it is independent of the distributed path under test.
+    auto val = [NP](long o, long w, long q, long i, long j) {
+      double x = 0.31*double(i) + 0.17*double(j) + 0.7*double(w)
+               + 1.3*double(q) + double(o);
+      return ComplexType(std::sin(x), std::cos(0.5*x)) / double(NP)
+             + (i == j ? ComplexType(1.0) : ComplexType(0.0));
+    };
+    nda::array<ComplexType, 4> Pi(gshape), W1(gshape), W2(gshape), Ref(gshape);
+    for (long w = 0; w < nwh; ++w)
+      for (long q = 0; q < nq; ++q)
+        for (long i = 0; i < NP; ++i)
+          for (long j = 0; j < NP; ++j) {
+            Pi(w, q, i, j) = val(0, w, q, i, j);
+            W1(w, q, i, j) = val(1, w, q, i, j);
+            W2(w, q, i, j) = val(2, w, q, i, j);
+          }
+
+    // ΔW = W(q+Q) · ΔΠ · W(q): the two multiplies of lr_dyson_W_in_place, in
+    // the same order.
+    for (long w = 0; w < nwh; ++w)
+      for (long q = 0; q < nq; ++q) {
+        nda::array<ComplexType, 2> a = W2(w, q, all, all);
+        nda::array<ComplexType, 2> b = Pi(w, q, all, all);
+        nda::array<ComplexType, 2> c = W1(w, q, all, all);
+        Ref(w, q, all, all) = nda::matmul(nda::matmul(a, b), c);
+      }
+
+    auto copy_in = [](auto& d, nda::array<ComplexType, 4> const& g) {
+      auto loc = d.local();
+      for (auto [i0, n0] : itertools::enumerate(d.local_range(0)))
+        for (auto [i1, n1] : itertools::enumerate(d.local_range(1)))
+          for (auto [i2, n2] : itertools::enumerate(d.local_range(2)))
+            for (auto [i3, n3] : itertools::enumerate(d.local_range(3)))
+              loc(i0, i1, i2, i3) = g(n0, n1, n2, n3);
+    };
+    copy_in(dPi, Pi);
+    copy_in(dW1, W1);
+    copy_in(dW2, W2);
+
+    math::nda::slate_ops::multiply(dW2, dPi, dTmp);
+    math::nda::slate_ops::multiply(dTmp, dW1, dPi);
+
+    double err = 0.0, nrm = 0.0;
+    auto loc = dPi.local();
+    for (auto [i0, n0] : itertools::enumerate(dPi.local_range(0)))
+      for (auto [i1, n1] : itertools::enumerate(dPi.local_range(1)))
+        for (auto [i2, n2] : itertools::enumerate(dPi.local_range(2)))
+          for (auto [i3, n3] : itertools::enumerate(dPi.local_range(3))) {
+            err = std::max(err, std::abs(loc(i0, i1, i2, i3) - Ref(n0, n1, n2, n3)));
+            nrm = std::max(nrm, std::abs(Ref(n0, n1, n2, n3)));
+          }
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    nrm = world.all_reduce_value(nrm, boost::mpi3::max<>{});
+    app_log(2, "  ft_buffer_dist: nq = {}, NP = {}, pgrid = ({},{},{},{}), "
+               "bsize = ({},{}), max rel error = {:.3e}",
+            nq, NP, pg[0], pg[1], pg[2], pg[3],
+            dPi.block_size()[2], dPi.block_size()[3], err/nrm);
+    CHECK(err < 1e-12 * nrm);
+  };
+
+  // nq >= nproc: every rank owns one q, (P,Q) is local and multiply_impl takes
+  // its rank-local gemm short circuit.
+  check_grid(nproc, 41);
+  // nq = 2: (P,Q) gets nproc/2 ranks, so this is a real SLATE SUMMA from 4 ranks
+  // up (at nproc = 2 it is still the rank-local short circuit). NP = 41 does not
+  // divide the P/Q rank counts, so the tiles are ragged.
+  check_grid(2, 40);
+  check_grid(2, 41);
+  // nq = 1: the whole rank count goes into (P,Q) — the widest SUMMA available,
+  // and the one arm guaranteed to be a real SUMMA at any nproc > 1.
+  check_grid(1, 41);
 }
 
 /*

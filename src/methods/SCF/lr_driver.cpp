@@ -195,23 +195,27 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
 
 
 // Distribution flow through the LR-GW pipeline
-// Three distribution patterns:
+// Two distribution patterns:
 //   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
-//   τ-local:           pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided (FT buffer)
-//   ω-side:            pgrid = {nwpools, nqpools, np_P, np_Q}  — distributed over (w, q, P, Q)
+//   q-dist (τ-local):  pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided
 //
-//   W_c in:              (w,q,P,Q), ω-side (solvers::lr_scr_coulomb_t::W_omega_dist)
+// Everything on the ω axis lives on q-dist as well
+// (utils::lr_W_tau_local_dist returns it), which is what lets both
+// Fourier transforms write straight into their output with no staging buffer.
+//
+//   W_c in:              (w,q,P,Q), q-dist (utils::lr_W_tau_local_dist)
 //   lr_setup_W:
-//     w_to_tau:          ω-side → (t,q,P,Q) straight onto the τ-dist tiling
+//     w_to_tau:          q-dist → (t,q,P,Q) straight onto the τ-dist tiling
 //     lr_Wc_to_Wfull:    + Z(q) in place on the ω copy → W_full(iω) [cached]
 //     lr_precompute_W_tRPQ: q→R in place on the τ copy → (t,R,P,Q), τ-dist [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
 //   solve_lr_dyson_W (in-place):
-//     tau_to_w:          τ-dist → ω-side (via q-distributed FT buffer)
-//     lr_dyson_W_in_place: ω-side; SLATE GEMM batched over (iw, iq).
+//     tau_to_w:          τ-dist → q-dist
+//     lr_dyson_W_in_place: q-dist; SLATE GEMM batched over (iw, iq) on the
+//                          (P, Q) subgrid.
 //                          For Q≠Γ, gathers W_full(kpq_map(iq)) via Alltoallv on q_pool_comm.
-//     w_to_tau:          ω-side → τ-dist (via q-distributed FT buffer)
+//     w_to_tau:          q-dist → τ-dist
 //     output:            τ-dist (overwrites input)
 //   evaluate_sigma_*:    τ-dist in (t,q) order, i.e. ΔW is consumed as produced
 
@@ -1655,7 +1659,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     arrays.push_back({"ΔΠ/ΔW(τ)",       shp4a(nth), aux4(nth), true, T_GWSIG});
     // FT staging buffers, allocated and released inside each tau_to_w/w_to_tau.
     arrays.push_back({"FT buffer (τ)",   shp4a(nth),  aux4(nth),  true, T_GWSIG});
-    arrays.push_back({"FT buffer (ω)",   shp4a(nwbh), aux4(nwbh), true, T_GWSIG});
+    arrays.push_back({"ΔΠ/ΔW(iω)",       shp4a(nwbh), aux4(nwbh), true, T_GWSIG});
   }
 
   // Shared / distributed totals, per lifetime.
@@ -1735,20 +1739,17 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
     app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
             pg4(tau_pg, "(t,q,P,Q)"), arrs);
   }
-  // Aux FT-buffer + ω-side — only the full-GW W Dyson pipeline (mirrors the
-  // distribution choice in solvers::lr_scr_coulomb_t::W_omega_dist).
+  // Aux q-dist (ω-side) — only the full-GW W Dyson pipeline. One row: the FT
+  // staging buffers and W(iω) share a distribution, which is what lets both
+  // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
+  // ω-side Dyson runs on.
   if (gw_full) {
-    auto [ftb_pg, ftb_bs] =
-        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nth, nq, NP, NP});
-    (void)ftb_bs;
-    auto [w_pg, w_bs] =
-        solvers::lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwbh, NP);
-    (void)w_bs;
-    app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer",
-            pg4(ftb_pg, "(·,q,P,Q)"), "FT staging buffers (τ, ω)");
-    app_log(2, "    {:<22s}{:<30s}{}", "aux ω-side",
+    auto [w_pg, w_bs] = utils::lr_W_tau_local_dist(nproc, nwbh, nq, NP);
+    const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
+                                    : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
+    app_log(2, "    {:<22s}{:<30s}{}", "aux q-dist (ω-side)",
             pg4(w_pg, "(w,q,P,Q)"),
-            is_q_gamma() ? "dW_full_wqPQ" : "dW_full_wqPQ, _dW_full_qpQ");
+            fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]));
   }
 
   // Band-basis Dyson grids — the ω-side comes from the same helper
