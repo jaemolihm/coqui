@@ -69,8 +69,8 @@ namespace solvers {
 
     /**
      * Processor grid and block size W(iω) is carried on for the LR path: always
-     * the FT-buffer distribution, which keeps ω local and distributes over q,
-     * then P and Q.
+     * the q-dist distribution (scr_coulomb_fourier_t::ft_buffer_dist), which
+     * keeps ω local and distributes over q, then P and Q.
      *
      * Always, so that both transforms fuse: tau_to_w then Fourier-transforms
      * straight into W(iω) and w_to_tau straight out of it, each doing one global

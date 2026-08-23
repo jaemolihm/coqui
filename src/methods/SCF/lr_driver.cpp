@@ -197,25 +197,25 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
 // Distribution flow through the LR-GW pipeline
 // Two distribution patterns:
 //   τ-dist (q-local):  pgrid = {tpools, 1, np_P, np_Q}  — q undivided
-//   FT buffer:         pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided
+//   q-dist (τ-local):  pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided
 //
-// Everything on the ω axis lives on the FT buffer as well
+// Everything on the ω axis lives on q-dist as well
 // (solvers::lr_scr_coulomb_t::W_omega_dist returns it), which is what lets both
 // Fourier transforms write straight into their output with no staging buffer.
 //
-//   W_c in:              (w,q,P,Q), FT buffer (solvers::lr_scr_coulomb_t::W_omega_dist)
+//   W_c in:              (w,q,P,Q), q-dist (solvers::lr_scr_coulomb_t::W_omega_dist)
 //   lr_setup_W:
-//     w_to_tau:          FT buffer → (t,q,P,Q) straight onto the τ-dist tiling
+//     w_to_tau:          q-dist → (t,q,P,Q) straight onto the τ-dist tiling
 //     lr_Wc_to_Wfull:    + Z(q) in place on the ω copy → W_full(iω) [cached]
 //     lr_precompute_W_tRPQ: q→R in place on the τ copy → (t,R,P,Q), τ-dist [cached]
 //
 //   evaluate_lr_Pi:      → (t,q,P,Q), τ-dist
 //   solve_lr_dyson_W (in-place):
-//     tau_to_w:          τ-dist → FT buffer
-//     lr_dyson_W_in_place: FT buffer; SLATE GEMM batched over (iw, iq) on the
+//     tau_to_w:          τ-dist → q-dist
+//     lr_dyson_W_in_place: q-dist; SLATE GEMM batched over (iw, iq) on the
 //                          (P, Q) subgrid.
 //                          For Q≠Γ, gathers W_full(kpq_map(iq)) via Alltoallv on q_pool_comm.
-//     w_to_tau:          FT buffer → τ-dist
+//     w_to_tau:          q-dist → τ-dist
 //     output:            τ-dist (overwrites input)
 //   evaluate_sigma_*:    τ-dist in (t,q) order, i.e. ΔW is consumed as produced
 
@@ -1739,7 +1739,7 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
     app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
             pg4(tau_pg, "(t,q,P,Q)"), arrs);
   }
-  // Aux FT-buffer / ω-side — only the full-GW W Dyson pipeline. One row: the FT
+  // Aux q-dist (ω-side) — only the full-GW W Dyson pipeline. One row: the FT
   // staging buffers and W(iω) share a distribution, which is what lets both
   // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
   // ω-side Dyson runs on.
@@ -1748,7 +1748,7 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
         solvers::lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwbh, NP);
     const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
                                     : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
-    app_log(2, "    {:<22s}{:<30s}{}", "aux FT-buffer / ω-side",
+    app_log(2, "    {:<22s}{:<30s}{}", "aux q-dist (ω-side)",
             pg4(w_pg, "(w,q,P,Q)"),
             fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]));
   }

@@ -256,7 +256,7 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
  * LR W Dyson in Matsubara frequency space (in-place):
  *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
  *
- * All operands are on W_omega_dist = the FT-buffer distribution
+ * All operands are on W_omega_dist = the q-dist distribution
  * {1, nqpools, np_P, np_Q}, with matched grids and matched (P, Q) block sizes.
  * For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the required W_full slices
  * from peers within q_pool_comm via Alltoallv.
@@ -330,7 +330,7 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
  * Input: dDeltaPi_tqPQ in q-local (τ-dist) distribution.
  * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
  *
- * Uses precomputed W_full(iω) on W_omega_dist = the FT-buffer distribution. The
+ * Uses precomputed W_full(iω) on W_omega_dist = the q-dist distribution. The
  * FT functions handle the redistribute internally.
  */
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
@@ -356,12 +356,12 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
   // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
-  // so just adopt W_full's distribution. W_omega_dist made that the FT-buffer
+  // so just adopt W_full's distribution. W_omega_dist made that the q-dist
   // layout, so both transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
 
-  // Guard the fusion: if W_full is not on the FT-buffer distribution, both
+  // Guard the fusion: if W_full is not on the q-dist distribution, both
   // transforms below silently pay an extra global redistribute (~24% of the
   // LR-GW run). Every producer of W(iω) goes through W_omega_dist, so a
   // mismatch here is a programming error, not a configuration.
@@ -380,17 +380,17 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
         w_nproc, {1L, dW_full_wqPQ.global_shape()[1],
                   dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
     utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
-                 "solve_lr_dyson_W: W_full is not on the FT-buffer distribution, "
+                 "solve_lr_dyson_W: W_full is not on the q-dist distribution, "
                  "so both Fourier transforms pay an extra global redistribute. "
                  "W_full pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}); "
-                 "FT buffer pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}).",
+                 "q-dist pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}).",
                  w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3],
                  w_bsize[0], w_bsize[1], w_bsize[2], w_bsize[3],
                  b_pgrid[0], b_pgrid[1], b_pgrid[2], b_pgrid[3],
                  b_bsize[0], b_bsize[1], b_bsize[2], b_bsize[3]);
   }
 
-  // FT ΔΠ: τ → ω, output on W_omega_dist = the FT-buffer distribution.
+  // FT ΔΠ: τ → ω, output on W_omega_dist = the q-dist distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
   auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true, chk_leak);
   _Timer.stop("LR_W_FT_TAU_TO_W");

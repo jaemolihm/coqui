@@ -495,7 +495,7 @@ TEST_CASE("lr_W_omega_dist", "[math]")
   auto world = boost::mpi3::environment::get_world_instance();
   auto all = nda::range::all;
 
-  // --- pure function: square (P,Q) block, and W_omega_dist == the FT buffer ---
+  // --- pure function: square (P,Q) block, and W_omega_dist == ft_buffer_dist ---
   // (nproc, nq, nw_half, NP). The last row is the production point of record:
   // BaBiO3 nk8, 768 ranks, nq = 512, THC nIpts = 1687.
   const std::array<grid_t, 10> sweep = {{
