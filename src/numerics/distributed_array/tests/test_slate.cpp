@@ -38,6 +38,7 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/h5.hpp"
 #include "utilities/test_common.hpp"
+#include "utilities/lr_utils.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 
 namespace bdft_tests
@@ -494,7 +495,12 @@ TEST_CASE("ft_buffer_dist", "[math]")
   auto world = boost::mpi3::environment::get_world_instance();
   auto all = nda::range::all;
 
-  // --- pure function: the (P,Q) block is square at every rank count ---
+  // --- pure function: square (P,Q) block, and the LR duplicate agrees ---
+  // utils::lr_W_omega_dist deliberately duplicates ft_buffer_dist's body (the LR
+  // and ground-state distribution helpers stay separate for now). It has to stay
+  // value-identical, or the FT stops fusing silently — the FT engine decides
+  // whether to fuse by comparing against its OWN ft_buffer_dist. This sweep is the
+  // build-time tripwire for that drift; solve_lr_dyson_W's guard is the runtime one.
   // (nproc, nq, nw_half, NP). The last row is the production point of record:
   // BaBiO3 nk8, 768 ranks, nq = 512, THC nIpts = 1687.
   const std::array<grid_t, 10> sweep = {{
@@ -510,6 +516,8 @@ TEST_CASE("ft_buffer_dist", "[math]")
          << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
          << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
     CHECK(b_bsize[2] == b_bsize[3]);
+    CHECK((utils::lr_W_omega_dist(nproc, nwh, nq, NP) ==
+           scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP})));
   }
 
   // The production point, spelled out: the P-split grid whose SUMMA was
@@ -518,6 +526,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
     auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
     CHECK((pg == grid_t{1, 256, 3, 1}));
     CHECK((bs == grid_t{1, 1, 562, 562}));
+    CHECK((utils::lr_W_omega_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
   }
 
   // --- the stored block size, and the two Dyson multiplies on the grid ---

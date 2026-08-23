@@ -256,7 +256,7 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
  * LR W Dyson in Matsubara frequency space (in-place):
  *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
  *
- * All operands are on the q-dist distribution (scr_coulomb_fourier_t::ft_buffer_dist)
+ * All operands are on the q-dist distribution (utils::lr_W_omega_dist)
  * {1, nqpools, np_P, np_Q}, with matched grids and matched (P, Q) block sizes.
  * For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the required W_full slices
  * from peers within q_pool_comm via Alltoallv.
@@ -330,8 +330,7 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
  * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
  *
  * Uses precomputed W_full(iω) on the q-dist distribution
- * (scr_coulomb_fourier_t::ft_buffer_dist). The FT functions handle the
- * redistribute internally.
+ * (utils::lr_W_omega_dist). The FT functions handle the redistribute internally.
  */
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
          typename dW_full_t>
@@ -363,8 +362,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // Guard the fusion: if W_full is not on the q-dist distribution, both
   // transforms below silently pay an extra global redistribute (~24% of the
-  // LR-GW run). Every LR W(iω) is built on ft_buffer_dist, so a mismatch here
-  // is a programming error, not a configuration.
+  // LR-GW run). Every LR W(iω) is built on utils::lr_W_omega_dist, so a mismatch
+  // here is a programming error, not a configuration.
   //
   // Only above one rank, for the same reason as the block-size check in
   // lr_dyson_W_in_place: tau_to_w's single-rank fast path ignores the requested
@@ -374,14 +373,22 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   //
   // Both the gate and the recomputed layout use W_full's OWN communicator, since
   // that is what the fast path and ft_buffer_dist inside the transform key on.
+  //
+  // The comparison is deliberately against the FT engine's OWN ft_buffer_dist and
+  // not against utils::lr_W_omega_dist: that equality IS the definition of fusion,
+  // because ft_buffer_dist is what tau_to_w / w_to_tau compare the requested
+  // layout against internally. So this check doubles as the runtime tripwire for
+  // drift between lr_W_omega_dist and the ft_buffer_dist it duplicates.
   const long w_nproc = dW_full_wqPQ.communicator()->size();
   if (w_nproc > 1) {
     auto [b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist(
         w_nproc, {1L, dW_full_wqPQ.global_shape()[1],
                   dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
     utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
-                 "solve_lr_dyson_W: W_full is not on the q-dist distribution, "
-                 "so both Fourier transforms pay an extra global redistribute. "
+                 "solve_lr_dyson_W: W_full is not on the q-dist distribution, so "
+                 "both Fourier transforms pay an extra global redistribute (has "
+                 "utils::lr_W_omega_dist drifted from "
+                 "scr_coulomb_fourier_t::ft_buffer_dist?). "
                  "W_full pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}); "
                  "q-dist pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}).",
                  w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3],
