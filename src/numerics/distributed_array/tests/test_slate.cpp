@@ -496,7 +496,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
   auto all = nda::range::all;
 
   // --- pure function: square (P,Q) block, and the LR duplicate agrees ---
-  // utils::lr_W_omega_dist deliberately duplicates ft_buffer_dist's body (the LR
+  // utils::lr_W_tau_local_dist deliberately duplicates ft_buffer_dist's body (the LR
   // and ground-state distribution helpers stay separate for now). It has to stay
   // value-identical, or the FT stops fusing silently — the FT engine decides
   // whether to fuse by comparing against its OWN ft_buffer_dist. This sweep is the
@@ -516,7 +516,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
          << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
          << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
     CHECK(b_bsize[2] == b_bsize[3]);
-    CHECK((utils::lr_W_omega_dist(nproc, nwh, nq, NP) ==
+    CHECK((utils::lr_W_tau_local_dist(nproc, nwh, nq, NP) ==
            scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP})));
   }
 
@@ -526,7 +526,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
     auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
     CHECK((pg == grid_t{1, 256, 3, 1}));
     CHECK((bs == grid_t{1, 1, 562, 562}));
-    CHECK((utils::lr_W_omega_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
+    CHECK((utils::lr_W_tau_local_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
   }
 
   // --- the stored block size, and the two Dyson multiplies on the grid ---

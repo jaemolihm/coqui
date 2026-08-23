@@ -299,8 +299,8 @@ inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
  * the signature to name the array's shape. Argument order follows the gshape
  * order {nw_half, nq, NP, NP}.
  */
-inline auto lr_W_omega_dist([[maybe_unused]] long nproc,
-                            [[maybe_unused]] long nw_half, long nq, long NP)
+inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
+                                [[maybe_unused]] long nw_half, long nq, long NP)
     -> std::pair<std::array<long,4>, std::array<long,4>>
 {
   std::array<long, 4> b_pgrid = {1, 1, 1, 1};
@@ -312,7 +312,7 @@ inline auto lr_W_omega_dist([[maybe_unused]] long nproc,
     b_pgrid[3] = np_PQ / b_pgrid[2];
   } else {
     check(np_PQ == 1,
-          "lr_W_omega_dist: PQ too small for proc count (NP*NQ < np_PQ)");
+          "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
   }
   b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
                                 NP / std::max(b_pgrid[3], 1L)});

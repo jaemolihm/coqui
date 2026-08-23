@@ -79,7 +79,7 @@ namespace solvers {
      * _build_W_full_qpQ: it touches the concrete member cache directly.
      *
      * @param dW_c_wqPQ - [IN/OUT] W_c(iω) on entry, W_full(iω) on exit. Must be
-     *                    on the q-dist distribution (utils::lr_W_omega_dist).
+     *                    on the q-dist distribution (utils::lr_W_tau_local_dist).
      * @param thc       - [IN] THC-ERI handler (supplies Z(q))
      */
     void lr_Wc_to_Wfull(dArr4D_concrete_t& dW_c_wqPQ, THC_ERI auto& thc);
@@ -92,7 +92,7 @@ namespace solvers {
      *
      * @param dDeltaPi_tqPQ   - [IN/OUT] ΔΠ(τ) on input, ΔW_c(τ) on output (τ-dist)
      * @param dW_full_wqPQ    - [IN] W_c(iω) + V on the q-dist distribution
-     *                          (utils::lr_W_omega_dist), not consumed
+     *                          (utils::lr_W_tau_local_dist), not consumed
      * @param thc             - [IN] THC-ERI handler
      */
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
@@ -108,7 +108,7 @@ namespace solvers {
      *   Δ^Q W^{q}(iω) = W_full^{q+Q}(iω) · Δ^Q Π^{q}(iω) · W_full^{q}(iω)
      * where q is the bosonic wavevector of Coulomb interaction and Q is the perturbation wavevector.
      *
-     * All operands must be on the q-dist distribution (utils::lr_W_omega_dist) —
+     * All operands must be on the q-dist distribution (utils::lr_W_tau_local_dist) —
      * same processor grid and same (P, Q)
      * block size, since each one's SLATE tile map is built from its own block
      * size. On output, dDeltaPi_wqPQ contains ΔW_c(iω).
