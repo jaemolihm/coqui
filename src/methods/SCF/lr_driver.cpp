@@ -200,10 +200,10 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
 //   q-dist (τ-local):  pgrid = {1, nqpools, np_P, np_Q}  — tau/omega undivided
 //
 // Everything on the ω axis lives on q-dist as well
-// (solvers::lr_scr_coulomb_t::W_omega_dist returns it), which is what lets both
+// (solvers::scr_coulomb_fourier_t::ft_buffer_dist returns it), which is what lets both
 // Fourier transforms write straight into their output with no staging buffer.
 //
-//   W_c in:              (w,q,P,Q), q-dist (solvers::lr_scr_coulomb_t::W_omega_dist)
+//   W_c in:              (w,q,P,Q), q-dist (solvers::scr_coulomb_fourier_t::ft_buffer_dist)
 //   lr_setup_W:
 //     w_to_tau:          q-dist → (t,q,P,Q) straight onto the τ-dist tiling
 //     lr_Wc_to_Wfull:    + Z(q) in place on the ω copy → W_full(iω) [cached]
@@ -1659,7 +1659,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     arrays.push_back({"ΔΠ/ΔW(τ)",       shp4a(nth), aux4(nth), true, T_GWSIG});
     // FT staging buffers, allocated and released inside each tau_to_w/w_to_tau.
     arrays.push_back({"FT buffer (τ)",   shp4a(nth),  aux4(nth),  true, T_GWSIG});
-    arrays.push_back({"FT buffer (ω)",   shp4a(nwbh), aux4(nwbh), true, T_GWSIG});
+    arrays.push_back({"ΔΠ/ΔW(iω)",       shp4a(nwbh), aux4(nwbh), true, T_GWSIG});
   }
 
   // Shared / distributed totals, per lifetime.
@@ -1744,8 +1744,8 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
   // ω-side Dyson runs on.
   if (gw_full) {
-    auto [w_pg, w_bs] =
-        solvers::lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwbh, NP);
+    auto [w_pg, w_bs] = solvers::scr_coulomb_fourier_t::ft_buffer_dist(
+        nproc, {nwbh, nq, NP, NP});
     const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
                                     : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
     app_log(2, "    {:<22s}{:<30s}{}", "aux q-dist (ω-side)",

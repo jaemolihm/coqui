@@ -38,7 +38,7 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/h5.hpp"
 #include "utilities/test_common.hpp"
-#include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
+#include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 
 namespace bdft_tests
 {
@@ -420,8 +420,8 @@ std::cout<<" nx: " <<nx <<std::endl;
 // axis is split over the run's rank count. SLATE only accepts the distribution
 // when every non-final block along an axis has the full block size, so the block
 // size is min(floor(N/np_i), floor(N/np_j)) — floor, and the minimum over BOTH
-// axes. That is the same formula the ω-side W grid uses (see "lr_W_omega_dist"
-// below), where it additionally has to be square because the multiply needs
+// axes. That is the same formula the q-dist W grid uses (see the "ft_buffer_dist"
+// case), where it additionally has to be square because the multiply needs
 // Bs.nt() == As.mt(); getrf/getri only need this divisibility.
 TEST_CASE("distributed_inverse", "[math]")
 {
@@ -478,24 +478,23 @@ TEST_CASE("distributed_inverse", "[math]")
   run(41);
 }
 
-// The distribution W(iω) is carried on in the LR W Dyson
-// (lr_scr_coulomb_t::W_omega_dist, i.e. scr_coulomb_fourier_t::ft_buffer_dist).
+// scr_coulomb_fourier_t::ft_buffer_dist — the q-dist distribution, which on the
+// LR path is the one every W(iω) is carried on.
 // Three properties are load-bearing on that path: the (P,Q) block is square
 // (the C-order branch of multiply_impl issues slate::multiply(a,Bs,As,b,Cs),
 // which needs Bs.nt() == As.mt()), the array still stores that square block
 // after make_distributed_array's min(bsize, shape/grid) clamp — that clamp is
 // what the fused FT branches and SLATE both read — and the two rank-4
 // multiplies of lr_dyson_W_in_place are numerically right on the grid.
-TEST_CASE("lr_W_omega_dist", "[math]")
+TEST_CASE("ft_buffer_dist", "[math]")
 {
   using methods::solvers::scr_coulomb_fourier_t;
-  using methods::solvers::lr_scr_coulomb_t;
   using grid_t = std::array<long, 4>;
 
   auto world = boost::mpi3::environment::get_world_instance();
   auto all = nda::range::all;
 
-  // --- pure function: square (P,Q) block, and W_omega_dist == ft_buffer_dist ---
+  // --- pure function: the (P,Q) block is square at every rank count ---
   // (nproc, nq, nw_half, NP). The last row is the production point of record:
   // BaBiO3 nk8, 768 ranks, nq = 512, THC nIpts = 1687.
   const std::array<grid_t, 10> sweep = {{
@@ -505,20 +504,18 @@ TEST_CASE("lr_W_omega_dist", "[math]")
 
   for (auto s : sweep) {
     const long nproc = s[0], nq = s[1], nwh = s[2], NP = s[3];
-    INFO("nproc = " << nproc << ", nq = " << nq << ", nw_half = " << nwh
-         << ", NP = " << NP);
     auto [b_pgrid, b_bsize] =
         scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP});
+    INFO("nproc = " << nproc << ", nq = " << nq << ", nw_half = " << nwh
+         << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
+         << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
     CHECK(b_bsize[2] == b_bsize[3]);
-    auto [w_pgrid, w_bsize] = lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwh, NP);
-    CHECK((w_pgrid == b_pgrid));
-    CHECK((w_bsize == b_bsize));
   }
 
   // The production point, spelled out: the P-split grid whose SUMMA was
   // measured, with the 1024-capped square tile min(1024, 1687/3, 1687/1).
   {
-    auto [pg, bs] = lr_scr_coulomb_t::W_omega_dist(768, 512, 36, 1687);
+    auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
     CHECK((pg == grid_t{1, 256, 3, 1}));
     CHECK((bs == grid_t{1, 1, 562, 562}));
   }
@@ -528,7 +525,7 @@ TEST_CASE("lr_W_omega_dist", "[math]")
 
   auto check_grid = [&](long nq, long NP) {
     const long nwh = 2;
-    auto [pg, bs] = lr_scr_coulomb_t::W_omega_dist(nproc, nq, nwh, NP);
+    auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP});
     if (nwh < pg[0] or nq < pg[1] or NP < pg[2] or NP < pg[3]) return;
     INFO("nproc = " << nproc << ", nq = " << nq << ", NP = " << NP
          << ", pgrid = (" << pg[0] << "," << pg[1] << "," << pg[2] << ","
@@ -598,7 +595,7 @@ TEST_CASE("lr_W_omega_dist", "[math]")
           }
     err = world.all_reduce_value(err, boost::mpi3::max<>{});
     nrm = world.all_reduce_value(nrm, boost::mpi3::max<>{});
-    app_log(2, "  lr_W_omega_dist: nq = {}, NP = {}, pgrid = ({},{},{},{}), "
+    app_log(2, "  ft_buffer_dist: nq = {}, NP = {}, pgrid = ({},{},{},{}), "
                "bsize = ({},{}), max rel error = {:.3e}",
             nq, NP, pg[0], pg[1], pg[2], pg[3],
             dPi.block_size()[2], dPi.block_size()[3], err/nrm);

@@ -81,7 +81,7 @@ void lr_scr_coulomb_t::lr_Wc_to_Wfull(
   }
 
   app_log(2, "  lr_Wc_to_Wfull:");
-  app_log(2, "    - ω-side pgrid: ({}, {}, {}, {})",
+  app_log(2, "    - q-dist pgrid: ({}, {}, {}, {})",
           w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
   app_log(2, "    - W_full shape: ({}, {}, {}, {})", nw_half, nqpts, NP, NQ);
 
@@ -256,7 +256,7 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
  * LR W Dyson in Matsubara frequency space (in-place):
  *   ΔW_c(q, iω) = W_full(q+Q, iω) · ΔΠ(q, iω) · W_full(q, iω)
  *
- * All operands are on W_omega_dist = the q-dist distribution
+ * All operands are on the q-dist distribution (scr_coulomb_fourier_t::ft_buffer_dist)
  * {1, nqpools, np_P, np_Q}, with matched grids and matched (P, Q) block sizes.
  * For Q=Γ the (q+Q) sector is local; for Q≠Γ we fetch the required W_full slices
  * from peers within q_pool_comm via Alltoallv.
@@ -285,9 +285,8 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   // The batched multiply cross-checks block_size only on the leading axes, but
   // each operand's SLATE tile map is built from its own (P, Q) block size, so the
   // same grid with a different PQ blocking is a silent tile-map mismatch.
-  // Only above one rank: there tau_to_w's fast path hands back the input's block
-  // size rather than the requested one, and the mismatch is inert anyway because
-  // multiply_impl short-circuits to nda::blas::gemm without a tile map.
+  // Gated above one rank for the same reason as the guard in solve_lr_dyson_W —
+  // see there.
   if (comm.size() > 1) {
     auto w_bs   = dW_full_wqPQ.block_size();
     auto qpq_bs = dW_full_qpQ_wqPQ.block_size();
@@ -330,8 +329,9 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
  * Input: dDeltaPi_tqPQ in q-local (τ-dist) distribution.
  * On output: dDeltaPi_tqPQ is overwritten with ΔW_c(τ) in q-local distribution.
  *
- * Uses precomputed W_full(iω) on W_omega_dist = the q-dist distribution. The
- * FT functions handle the redistribute internally.
+ * Uses precomputed W_full(iω) on the q-dist distribution
+ * (scr_coulomb_fourier_t::ft_buffer_dist). The FT functions handle the
+ * redistribute internally.
  */
 template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t,
          typename dW_full_t>
@@ -356,15 +356,15 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
 
   // ω-space distribution for the Dyson step: the per-(iω,q)-tile matmul
   // ΔW_c = W_full(q+Q)·ΔΠ·W_full(q) requires ΔΠ(iω) co-distributed with W_full,
-  // so just adopt W_full's distribution. W_omega_dist made that the q-dist
-  // layout, so both transforms below fuse away their matching redistribute.
+  // so just adopt W_full's distribution. That is the q-dist layout, so both
+  // transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
   auto w_bsize = dW_full_wqPQ.block_size();
 
   // Guard the fusion: if W_full is not on the q-dist distribution, both
   // transforms below silently pay an extra global redistribute (~24% of the
-  // LR-GW run). Every producer of W(iω) goes through W_omega_dist, so a
-  // mismatch here is a programming error, not a configuration.
+  // LR-GW run). Every LR W(iω) is built on ft_buffer_dist, so a mismatch here
+  // is a programming error, not a configuration.
   //
   // Only above one rank, for the same reason as the block-size check in
   // lr_dyson_W_in_place: tau_to_w's single-rank fast path ignores the requested
@@ -390,7 +390,7 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
                  b_bsize[0], b_bsize[1], b_bsize[2], b_bsize[3]);
   }
 
-  // FT ΔΠ: τ → ω, output on W_omega_dist = the q-dist distribution.
+  // FT ΔΠ: τ → ω, output on the q-dist distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
   auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true, chk_leak);
   _Timer.stop("LR_W_FT_TAU_TO_W");

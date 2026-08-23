@@ -499,7 +499,7 @@ private:
   // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
   // *address* of this array, so a per-call local would silently invalidate it.
   std::optional<sArray_t<Array_view_5D_t>> _sG_wskij;
-  std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), ω-side
+  std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), q-dist
   std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist
   std::optional<dArr_3D_t> _opt_dWc0_qPQ;        // W_c(iν=0)(q,P,Q), HSEX kernel
   double _hsex_head_factor = 1.0;                // ... and its q→0 Madelung scale

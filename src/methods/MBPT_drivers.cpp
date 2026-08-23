@@ -1233,7 +1233,8 @@ auto load_W_and_eps_inv_head(
  * @param input_iter  - Iteration to read (-1 = final_iter)
  * @param screened_interaction_file - Explicit path to W_qtPQ, "" = auto-derive
  * @return (dW_wqPQ, eps_inv_head, div_treatment) — W on the Matsubara axis on
- *         solvers::lr_scr_coulomb_t::W_omega_dist, head on the τ axis
+ *         the q-dist distribution (solvers::scr_coulomb_fourier_t::ft_buffer_dist),
+ *         head on the τ axis
  */
 template<typename mpi_context_t, typename THC_t>
 auto lr_load_W_omega(
@@ -1250,8 +1251,8 @@ auto lr_load_W_omega(
       screened_interaction_file);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
-      mpi.comm.size(), thc.MF()->nkpts(), nw_half, thc.Np());
+  auto [w_pgrid, w_bsize] = solvers::scr_coulomb_fourier_t::ft_buffer_dist(
+      mpi.comm.size(), {nw_half, thc.MF()->nkpts(), thc.Np(), thc.Np()});
 
   solvers::scr_coulomb_fourier_t setup_ft(&ft);
   auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
@@ -1282,7 +1283,8 @@ auto lr_load_W_omega(
  * the no-symmetry requirement below + the RPA screen_type.
  *
  * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
- * wants (solvers::lr_scr_coulomb_t::W_omega_dist) — the one layout lr_driver accepts.
+ * wants (solvers::scr_coulomb_fourier_t::ft_buffer_dist) — the one layout lr_driver
+ * accepts.
  * The W Dyson is solved in ω anyway, so returning ω saves the ω→τ transform
  * back onto Π's τ grid *and* the redistribute onto the LR tiling that would
  * follow it — the LR driver does one ω→τ straight onto its own grid instead.
@@ -1320,8 +1322,8 @@ auto recompute_W_and_eps_inv_head(
   solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = solvers::lr_scr_coulomb_t::W_omega_dist(
-      mpi.comm.size(), nkpts, nw_half, thc.Np());
+  auto [w_pgrid, w_bsize] = solvers::scr_coulomb_fourier_t::ft_buffer_dist(
+      mpi.comm.size(), {nw_half, nkpts, thc.Np(), thc.Np()});
 
   auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi.comm.barrier();
@@ -1846,7 +1848,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // Load W and eps_inv_head if GW self-energy is requested. W is either read
   // from disk (explicit screened_interaction_file, else the auto-derived path)
   // or recomputed on the fly from the checkpoint Green's function (RPA). Both
-  // hand W to lr_driver as W_c(iω) on solvers::lr_scr_coulomb_t::W_omega_dist.
+  // hand W to lr_driver as W_c(iω) on the q-dist distribution
+  // (solvers::scr_coulomb_fourier_t::ft_buffer_dist).
   using dW_type = std::tuple_element_t<0, decltype(lr_load_W_omega(
       *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter))>;
   std::optional<dW_type> opt_dW;
