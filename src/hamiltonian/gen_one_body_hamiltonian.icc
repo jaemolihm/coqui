@@ -206,11 +206,9 @@ auto gen_V_Hxc_aug(mf::MF& mf, pseudopot* psp,
   utils::check(b_range.size() == psi.global_shape()[2], "Shape mismatch.");
   utils::check(psp != nullptr, "gen_V_Hxc_aug: Missing pseudopot object.");
 
-  // Guard: the DFT V_Hxc seed requires a QE-derived parent with a local/semilocal
-  // (LDA/GGA) functional whose V_xc is multiplicative (signalled by has_local_vhxc()).
-  // Meta-GGA/hybrid or pyscf-parented augmentation -- where svsc/svloc are absent or
-  // incomplete -- is refused. Callers that can fall back should check has_local_vhxc()
-  // first (see orbitals::try_ks_eigval_ibz).
+  // The DFT V_Hxc seed needs a multiplicative V_xc (signalled by has_local_vhxc()):
+  // a QE-derived parent on a local/semilocal functional. Backstop only --
+  // orbitals::build_ks_matrix_ibz tests the same condition and aborts earlier.
   if (!psp->has_local_vhxc())
     APP_ABORT("gen_V_Hxc_aug: the augmented DFT V_Hxc seed requires a QE-derived parent "
               "with a local/semilocal (LDA/GGA) functional. The mean field '{}' has no "

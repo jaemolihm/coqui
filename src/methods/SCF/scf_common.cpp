@@ -364,7 +364,7 @@ namespace detail {
 // each other, since the IAFT grid is sized from eigval (see log_spectrum_vs_wmax).
 inline void log_augmented_spectrum(const mf::MF &mf,
                                    nda::array<ComplexType, 4> const& spectra) {
-  if (not (mf.is_augmented() and mf.has_hks_matrix())) return;
+  if (not mf.is_augmented()) return;
   double ef = mf.efermi(), max_abs_E = 0.0;
   for (long i = 0; i < spectra.size(); ++i)
     max_abs_E = std::max(max_abs_E, std::abs(spectra.data()[i].real() - ef));

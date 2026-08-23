@@ -371,29 +371,24 @@ public:
     sys.mpi->comm.barrier();
   }
 
-  // Writer for an augmented (non-eigenstate) orbital basis. `psi` is the full
-  // basis (all bands, b0=0 semantics) already assembled by the caller;
-  // `eigval_ibz` holds the kinetic-energy seed energies over the IBZ,
-  // (nspin, nkpts_ibz, nbnd). `band_weights_ibz` holds the per-band THC fit
-  // weights over the IBZ, same shape (empty -> all ones, e.g. for the
-  // no-augmentation baseline). Marks the system augmented and writes the
-  // pseudopotential so downstream can recompute H0 (h0_source="compute").
-  // `H_KS_ibz` (optional) is the full Kohn-Sham matrix H0 + V_Hxc in the
-  // augmented basis over the IBZ, (nspin, nkpts_ibz, nbnd, nbnd), of which
-  // eigval_ibz is the diagonal. It is stored as Orbitals/H_KS_skij and marks the
-  // system as carrying a KS matrix, which hamilt::set_fock then uses as the
-  // iter-0 one-body seed instead of diag(eigval). Unlike eigval/occ it is IBZ
-  // only: the reader conjugates orbitals at time-reversal-paired k, so a
-  // full-BZ band x band matrix would need a rotation convention nothing else in
-  // the file carries. nullptr -> no dataset, downstream falls back to
-  // diag(eigval).
+  // Writer for an augmented (non-eigenstate) orbital basis. `psi` is the full basis
+  // (all bands, b0=0 semantics); `eigval_ibz` (seed energies) and `band_weights_ibz`
+  // (per-band THC fit weights, empty -> all ones) are IBZ, (nspin, nkpts_ibz, nbnd).
+  // `H_KS_ibz` is the basis's Kohn-Sham matrix H0 + V_Hxc, (nspin, nkpts_ibz, nbnd,
+  // nbnd), of which eigval_ibz is the diagonal; written as Orbitals/H_KS_skij, it is
+  // the one-body seed of every run on the basis. IBZ only: the reader conjugates
+  // orbitals at time-reversal-paired k, so a full-BZ band x band matrix would need a
+  // rotation convention nothing else in the file carries. nullptr writes no dataset
+  // and serves only the provisional write in orbitals::build_ks_matrix_ibz -- a basis
+  // emitted without the matrix is unusable. Also marks the system augmented and writes
+  // the pseudopotential so downstream can recompute H0.
   template<class MF>
   bdft_readonly(MF& mf, std::string fn,
                 math::nda::DistributedArray auto const& psi,
                 nda::array<double,3> const& eigval_ibz,
                 std::string augment_type_in,
-                nda::array<double,3> const& band_weights_ibz = {},
-                nda::array_view<ComplexType,4> const* H_KS_ibz = nullptr) :
+                nda::array<double,3> const& band_weights_ibz,
+                nda::array_view<ComplexType,4> const* H_KS_ibz) :
     sys(mf,fn,false),
     h5file(std::nullopt),
     ecut(sys.ecutrho), fft_mesh(sys.fft_mesh),

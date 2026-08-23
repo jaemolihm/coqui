@@ -378,60 +378,6 @@ TEST_CASE("aug_ks_seed_partial", "[orbit]")
   }
 }
 
-// Graceful fallback when the DFT V_Hxc is unavailable (QE-xml parent: no exported
-// scf_local_potential / vxc_with_nlcc). No H_KS_skij dataset is written, the flag
-// is false, and set_fock falls back to exactly diag(eigval). Written as a consistency gate so it also holds -- and
-// still exercises the stored-matrix branch -- if the fixture ever gains V_Hxc.
-TEST_CASE("aug_ks_seed_fallback", "[orbit]")
-{
-  auto& mpi = utils::make_unit_test_mpi_context();
-  auto qe_mf = mf::default_MF(mpi,mf::qe_source);
-
-  auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
-  auto aug_mf = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "dummy_aug_f.h5", augmenter,
-                                                        0, 1e-6, 1e-2);
-
-  int has_ds = 0;
-  if(mpi->comm.root()) {
-    h5::file file("dummy_aug_f.h5", 'r');
-    h5::group grp(file);
-    has_ds = grp.open_group("Orbitals").has_dataset("H_KS_skij") ? 1 : 0;
-  }
-  mpi->comm.broadcast_n(&has_ds, 1, 0);
-  app_log(2, "aug_ks_seed_fallback: H_KS_skij present = {}", has_ds);
-  REQUIRE(aug_mf.is_augmented());
-  REQUIRE(aug_mf.has_hks_matrix() == (has_ds != 0));
-
-  // set_fock must reproduce diag(eigval) exactly on the fallback path
-  if(!has_ds) {
-    long nspin = aug_mf.nspin();
-    long nkpts_ibz = aug_mf.nkpts_ibz();
-    long nbnd = aug_mf.nbnd();
-    auto all = nda::range::all;
-    auto eig = aug_mf.eigval()(all, nda::range(nkpts_ibz), all);
-    auto psp = hamilt::make_pseudopot(aug_mf);
-    auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
-        *mpi, {nspin, nkpts_ibz, nbnd, nbnd});
-    hamilt::set_fock(aug_mf, psp.get(), sF, false);
-    double err = 0.0;
-    if(mpi->node_comm.root()) {
-      auto F = sF.local();
-      for (long s = 0; s < nspin; ++s)
-        for (long k = 0; k < nkpts_ibz; ++k)
-          for (long i = 0; i < nbnd; ++i)
-            for (long j = 0; j < nbnd; ++j)
-              err += std::norm(F(s,k,i,j) - ((i==j) ? ComplexType(eig(s,k,i)) : ComplexType(0.0)));
-    }
-    mpi->comm.broadcast_n(&err, 1, 0);
-    app_log(2, "aug_ks_seed_fallback: ||set_fock - diag(eigval)|| = {}", std::sqrt(err));
-    utils::VALUE_EQUAL(std::sqrt(err), 0.0, 1e-14);
-  }
-
-  mpi->comm.barrier();
-  if(mpi->comm.root()) remove("dummy_aug_f.h5");
-  mpi->comm.barrier();
-}
-
 TEST_CASE("eig_select", "[orbit]")
 {
   auto& mpi = utils::make_unit_test_mpi_context();

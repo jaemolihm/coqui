@@ -128,7 +128,10 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
     ``diag(eigval)``; the whole matrix is stored (``Orbitals/H_KS_skij``, IBZ
     only) and used as the one-body seed of any run on this basis, with
     ``Orbitals/eigval`` keeping its diagonal. Many-body runs on it must use
-    ``h0_source="compute"``.
+    ``h0_source="compute"``. Building that matrix needs the parent's DFT
+    ``V_Hxc``, so the parent must export a multiplicative ``V_xc``: a QE-xml
+    parent (re-export it through the h5 route) and a meta-GGA functional are
+    refused outright rather than augmented without it.
 
     Parameters
     ----------
@@ -205,7 +208,10 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
     ``diag(eigval)``; the whole matrix is stored (``Orbitals/H_KS_skij``, IBZ
     only) and used as the one-body seed of any run on this basis, with
     ``Orbitals/eigval`` keeping its diagonal. Many-body runs on it must use
-    ``h0_source="compute"``. Requires
+    ``h0_source="compute"``. Building that matrix needs the parent's DFT
+    ``V_Hxc``, so the parent must export a multiplicative ``V_xc``: a QE-xml
+    parent (re-export it through the h5 route) and a meta-GGA functional are
+    refused outright rather than augmented without it. Requires
     ``npol == 1`` and a full-BZ k-grid (``nkpts == nkpts_ibz``).
 
     Parameters

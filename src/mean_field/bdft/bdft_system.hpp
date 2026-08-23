@@ -166,9 +166,9 @@ namespace mf {
       // expect SO term in pseudo?
       bool spinorbit = false;
 
-      // orbitals are an augmented, non-eigenstate basis. When true, the stored
-      // eigval are kinetic-energy seeds (not eigenvalues of any stored H0), so
-      // downstream must recompute H0 from the orbitals (h0_source="compute").
+      // orbitals are an augmented, non-eigenstate basis: eigval is only the diagonal
+      // Re[H_KS(i,i)] of the basis's Kohn-Sham matrix, not a spectrum. The matrix
+      // itself is Orbitals/H_KS_skij.
       bool augmented = false;
       // provenance tag for the augmentation ("momentum", "dpsi", ...)
       std::string augment_type = "";
