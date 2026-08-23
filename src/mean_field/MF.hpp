@@ -339,10 +339,9 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
-    // True if the h5 of an augmented basis carries the full Kohn-Sham matrix
-    // Orbitals/H_KS_skij (IBZ only). False for a basis built before the matrix was
-    // persisted, which is no longer usable: hamilt::set_fock aborts on it rather
-    // than seeding diag(eigval). Only the bdft backend can carry it.
+    // True if the h5 carries the full Kohn-Sham matrix Orbitals/H_KS_skij (IBZ only).
+    // Every augmented basis is required to; hamilt::set_fock aborts on one that is
+    // not. Only the bdft backend can carry it.
     bool has_hks_matrix() const
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().has_hks_matrix; }
