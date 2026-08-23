@@ -212,8 +212,7 @@ inline double wmax_from_mf(const MF& mf, double padding_factor = 1.5)
  * For an augmented basis eigval is only diag(H_KS), and the extreme eigenvalues of a
  * matrix are not bounded by the range of its diagonal, so wmax_from_mf's padding can
  * silently fail to cover the spectrum. This logs the gap; it does not close it --
- * wmax stays defined by eigval by design. Silent for every non-augmented mean field
- * and for augmented bases with no stored matrix, where eigval is the spectrum.
+ * wmax stays defined by eigval by design. Silent for every non-augmented mean field.
  *
  * Parameters:
  *   mf        : mean field whose eigval defines wmax.
@@ -222,7 +221,7 @@ inline double wmax_from_mf(const MF& mf, double padding_factor = 1.5)
  */
 inline void log_spectrum_vs_wmax(const MF& mf, double max_abs_E, std::string_view where)
 {
-  if (not (mf.is_augmented() and mf.has_hks_matrix())) return;
+  if (not mf.is_augmented()) return;
   auto ev = mf.eigval();
   double ef = mf.efermi();
   double diag_max = 0.0;

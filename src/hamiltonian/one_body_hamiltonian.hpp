@@ -301,7 +301,8 @@ auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
  * leading block as an h5 hyperslab, which drops the coupling to the discarded states.
  * The h5 schema belongs to the mean-field backend (MF::read_hks_matrix); this owns
  * only the node-root gating and the window synchronization.
- * Only meaningful when mf.is_augmented() and mf.has_hks_matrix().
+ * Aborts unless mf.is_augmented() and mf.has_hks_matrix(): there is no fallback seed
+ * for an augmented basis, so a basis without the matrix is unusable.
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
@@ -309,7 +310,11 @@ void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
   long nkpts_ibz = mf.nkpts_ibz();
   long nbnd = mf.nbnd();
   utils::check(mf.is_augmented() and mf.has_hks_matrix(),
-               "read_H_KS_aug: mean field carries no augmented H_KS matrix.");
+               "read_H_KS_aug: the augmented basis {} carries no Orbitals/H_KS_skij "
+               "dataset. An augmented basis is not an eigenbasis, so its one-body "
+               "Hamiltonian cannot be reconstructed from the eigenvalues alone: the full "
+               "Kohn-Sham matrix is required. Regenerate the basis with the current code "
+               "(augment_mf / augment_mf_dpsi), which always stores it.", mf.filename());
   utils::check(sH_KS.shape() == std::array<long,4>{nspin, nkpts_ibz, nbnd, nbnd},
                "read_H_KS_aug: shape ({},{},{},{}) != ({},{},{},{}).",
                sH_KS.shape()[0], sH_KS.shape()[1], sH_KS.shape()[2], sH_KS.shape()[3],
@@ -327,24 +332,6 @@ void read_H_KS_aug(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sH_KS) {
 }
 
 /**
- * Emit which one-body seed an augmented mean field is about to use. Called from
- * set_fock -- the single funnel every seed site goes through -- so no call site has
- * to remember it. Root-only and verbosity-gated (app_warning is neither, and goes to
- * stderr while the run banner goes to stdout), so an archived log records the path.
- */
-inline void log_augmented_hks_status(mf::MF &mf) {
-  if (not mf.is_augmented()) return;
-  if (mf.has_hks_matrix()) {
-    app_log(1, "  Augmented basis one-body seed = full H_KS matrix from {}", mf.filename());
-  } else {
-    app_log(1, "  [WARNING] Augmented basis one-body seed = diag(eigval) (basis predates "
-               "H_KS): {} stores no Kohn-Sham matrix, so the off-diagonal couplings of "
-               "the non-eigenstate basis are dropped. Regenerate the basis to use the "
-               "full Kohn-Sham matrix.", mf.filename());
-  }
-}
-
-/**
  * One-body Hamiltonian associated with a MF object in a shared memory array
  * Includes Kinetic, pseudo-potential/external potential and HF/Vxc potential
  * @param exclude_H0 [INPUT] - exclude kinetic + pseudo/external potential or not
@@ -352,7 +339,7 @@ inline void log_augmented_hks_status(mf::MF &mf) {
  *        precomputed H0 (global shape (nspin, nkpts_ibz, nbnd, nbnd)) instead of
  *        recomputing it. Lets callers that already hold H0 (e.g. the dyson solver)
  *        avoid the redundant O(nbnd²·npw) PW/FFT recompute. nullptr → recompute,
- *        except for an augmented basis with a stored H_KS, where it is required.
+ *        except for an augmented basis, where it is required.
  * @return - A shared memory array of one-body Hamiltonian with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
@@ -360,19 +347,16 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
               bool exclude_H0=false,
               const math::shm::shared_array<Array_4D_t> *sH0_skij=nullptr) {
   // An augmented basis is not an eigenbasis, so hamilt::F's diag(eigval) is only the
-  // diagonal of its one-body Hamiltonian. When the full matrix was persisted at
-  // augmentation time, use it: this is the single funnel every iter-0 seed goes
-  // through (ground-state SCF, qp SCF, the LR "mf_dft" G0, rpa, downfolding), so
-  // reporting the path taken here covers all of them.
-  log_augmented_hks_status(mf);
-  if (mf.is_augmented() and mf.has_hks_matrix()) {
+  // diagonal of its one-body Hamiltonian: the stored H_KS matrix is its only valid
+  // seed, and a basis that does not carry one is an error.
+  if (mf.is_augmented()) {
     read_H_KS_aug(mf, sF_skij);
     if (exclude_H0) {
       utils::check(sH0_skij != nullptr,
                    "set_fock: the augmented H_KS seed with exclude_H0 requires the caller "
                    "to provide sH0_skij.");
-      // whole-array subtraction: unlike the distributed fallback below there is no
-      // local_range to slice by, so the shapes must agree exactly
+      // whole-array subtraction: unlike the distributed non-augmented path below,
+      // there is no local_range to slice by, so the shapes must agree exactly
       utils::check(sH0_skij->shape() == sF_skij.shape(),
                    "set_fock: sH0_skij shape ({},{},{},{}) != sF_skij shape ({},{},{},{}).",
                    sH0_skij->shape()[0], sH0_skij->shape()[1], sH0_skij->shape()[2],

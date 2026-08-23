@@ -209,8 +209,10 @@ auto gen_V_Hxc_aug(mf::MF& mf, pseudopot* psp,
   // Guard: the DFT V_Hxc seed requires a QE-derived parent with a local/semilocal
   // (LDA/GGA) functional whose V_xc is multiplicative (signalled by has_local_vhxc()).
   // Meta-GGA/hybrid or pyscf-parented augmentation -- where svsc/svloc are absent or
-  // incomplete -- is refused. Callers that can fall back should check has_local_vhxc()
-  // first (see orbitals::try_ks_eigval_ibz).
+  // incomplete -- is refused. No caller can fall back; orbitals::build_ks_matrix_ibz
+  // tests the same condition earlier so augmentation aborts before reaching here, with
+  // a message naming the parent and removing the provisional h5. This guard stays as
+  // the backstop for any other caller.
   if (!psp->has_local_vhxc())
     APP_ABORT("gen_V_Hxc_aug: the augmented DFT V_Hxc seed requires a QE-derived parent "
               "with a local/semilocal (LDA/GGA) functional. The mean field '{}' has no "

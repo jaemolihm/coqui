@@ -785,7 +785,7 @@ double update_mu(double old_mu, const mf::MF &mf, const X_t &sE_ski, double beta
   // For an augmented basis mf.eigval() is only diag(H_KS); these are its real
   // eigenvalues. Reported here because every path that forms MO energies -- the qp
   // SCF, write_mf_data, and the LR "mf_dft" G0 via get_mf_MOs -- passes through.
-  if (mf.is_augmented() and mf.has_hks_matrix()) {
+  if (mf.is_augmented()) {
     auto E = sE_ski.local();
     double ef = mf.efermi(), max_abs_E = 0.0;
     for (long i = 0; i < E.size(); ++i)
