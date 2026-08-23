@@ -327,6 +327,14 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ")};
 
+// lr_DeltaH0_from_thc_aux
+static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &h_int, const nda::array<double, 1> &q_vec,
+       std::optional<nda::array<ComplexType, 2>> u_mP) {
+      return coqui_py::lr_DeltaH0_from_thc_aux(h_int, q_vec, u_mP);
+    },
+    "h_int", "q_vec", "u_mP")};
+
 static const auto doc_d_0 =
     fun_0.doc(R"DOC(
 Compute k+q mapping for linear response calculations
@@ -769,6 +777,28 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
     {c2py::python_typename<
         std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
+static const auto doc_d_15 = fun_15.doc(
+    R"DOC(
+Band-basis perturbation from a local potential in the THC aux basis
+
+Parameters
+----------
+h_int : {par_0}
+   - [INPUT] THC ERI handler
+q_vec : {par_1}
+   - [INPUT] Perturbation wavevector in crystal coords (3,)
+u_mP : {par_2}
+   - [INPUT] Aux-basis potentials (nmodes, NP); root only
+
+Returns
+-------
+{ret_0}
+   - [OUTPUT] ΔH0 (nmodes, ns, nkpts_ibz, nbnd, nbnd), root only
+)DOC",
+    {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
+     {c2py::python_typename<const nda::array<double, 1> &>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 2>>>()}},
+    {c2py::python_typename<nda::array<ComplexType, 5>>()});
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -786,6 +816,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_5.c_str()},
     {"hf_evaluate", (PyCFunction)c2py::pyfkw<fun_6>,
      METH_VARARGS | METH_KEYWORDS, doc_d_6.c_str()},
+    {"lr_DeltaH0_from_thc_aux", (PyCFunction)c2py::pyfkw<fun_15>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_15.c_str()},
     {"lr_gw_Pi", (PyCFunction)c2py::pyfkw<fun_7>, METH_VARARGS | METH_KEYWORDS,
      doc_d_7.c_str()},
     {"lr_gw_W", (PyCFunction)c2py::pyfkw<fun_8>, METH_VARARGS | METH_KEYWORDS,

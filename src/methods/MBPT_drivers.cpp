@@ -40,6 +40,7 @@
 #include "methods/SCF/lr_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_precompute.hpp"
+#include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/lr_gw.hpp"
 #include "methods/GW/g0_div_utils.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
@@ -2322,6 +2323,92 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
 
 
 /**
+ * Band-basis perturbation from a local potential given in the THC aux basis.
+ *
+ * Runs the aux→primary map of the diagonal Hartree channel
+ * (lr_thc_comm::aux_to_primary_diagonal) on a caller-supplied u_P instead of on
+ * ΔJ_P, so an external scalar field projected onto the interpolating vectors
+ * (u_P = ∫ dr ζ_P(r) u(r)) becomes a perturbation run_lr can consume.
+ *
+ * Per mode, and summed over the diagonal polarization blocks p, the result is
+ *
+ *   ΔH0_ij(k) = Σ_(p,P) X_p(k+q)†_iP · u_P · X_p(k)_Pj
+ *             = Σ_(p,P) conj(X_p(k+q)_Pi) · u_P · X_p(k)_Pj
+ *
+ * i.e. a row-scaled X†X with no (P,Q) gemm, which is exactly what the diagonal
+ * aux→primary routine already does; hence the reuse rather than an open-coded
+ * pair of gemms here.
+ *
+ * Each (s, k_ibz) block is written by exactly one rank, as in
+ * lr_hf::thc_lr_hartree_only, and reduced once per mode.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 2>> const& u_mP_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  long ns        = mf->nspin();
+  long npol      = mf->npol();
+  long nkpts     = mf->nkpts();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd      = mf->nbnd();
+  long NP        = thc.Np();
+
+  // An arbitrary u_P at finite q is not symmetric under the little group of q, so the
+  // (ns, nkpts_ibz, ...) perturbation this returns is only the full-BZ object when the
+  // IBZ is the full BZ. run_lr_calc's shape check accepts nkpts_ibz either way, so the
+  // requirement is enforced here, at the only entry point that manufactures such a
+  // perturbation.
+  utils::check(nkpts_ibz == nkpts,
+               "lr_DeltaH0_from_thc_aux: needs a mean field without symmetry "
+               "(nkpts_ibz = {} != nkpts = {}). An aux-basis potential at finite q "
+               "breaks the crystal symmetry, so a symmetry-reduced k-set cannot carry "
+               "the resulting perturbation.", nkpts_ibz, nkpts);
+
+  auto su_mP = math::shm::make_shared_from_root_input<ComplexType, 2>(*mpi, u_mP_root);
+  long nmodes = su_mP.shape()[0];
+  utils::check(su_mP.shape()[1] == NP,
+               "lr_DeltaH0_from_thc_aux: u_mP has {} aux components, expected Np = {}.",
+               su_mP.shape()[1], NP);
+
+  nda::array<int, 1> kpq_map(nkpts);
+  utils::calculate_kpq_map(mf->kpts_crystal(), q_pert, kpq_map);
+
+  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
+  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, std::array<long, 4>{ns, nkpts_ibz, nbnd, nbnd});
+
+  nda::array<ComplexType, 5> DeltaH0_mskij;
+  if (mpi->comm.root())
+    DeltaH0_mskij = nda::array<ComplexType, 5>({nmodes, ns, nkpts_ibz, nbnd, nbnd});
+
+  auto kp_map = mf->ks_to_k(0);
+  long nsk_ibz = ns * nkpts_ibz;
+  nda::range sk_rng(std::min<long>(mpi->comm.rank(), nsk_ibz), nsk_ibz, mpi->comm.size());
+
+  for (long m = 0; m < nmodes; ++m) {
+    sDeltaH0_skij.set_zero();
+    auto u_P = su_mP.local()(m, nda::range::all);
+    auto DeltaH0_loc = sDeltaH0_skij.local();
+    for (auto ip : nda::range(npol))
+      solvers::lr_thc_comm::aux_to_primary_diagonal(ip, ip, ComplexType(1.0), u_P,
+                                                    DeltaH0_loc, sk_rng, thc,
+                                                    kp_map, kpq_map);
+    sDeltaH0_skij.win().fence();
+    sDeltaH0_skij.all_reduce_parallel();
+    if (mpi->comm.root()) DeltaH0_mskij(m, nda::ellipsis{}) = sDeltaH0_skij.local();
+  }
+
+  return DeltaH0_mskij;
+}
+
+
+/**
  * Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space).
  *
  * Creates lr_rpa_pi solver, calls evaluate_lr_Pi,
@@ -2946,6 +3033,12 @@ template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
     ptree const&,
     std::optional<nda::array<ComplexType, 5>> const&,
     bool);
+
+// lr_DeltaH0_from_thc_aux_calc instantiations (THC only — the aux basis is THC's)
+template nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    nda::array<double, 1> const&,
+    std::optional<nda::array<ComplexType, 2>> const&);
 
 // lr_gw_Pi_calc instantiations (THC only — lr_gw requires THC)
 template nda::array<ComplexType, 4> lr_gw_Pi_calc(
