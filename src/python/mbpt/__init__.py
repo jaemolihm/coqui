@@ -27,6 +27,7 @@ from .mbpt_driver import (
     run_lr_gw_sigma_DeltaW, gw_evaluate_sigma_with_W,
     compute_eps_inv_head,
 )
+from .chi_driver import run_chi
 from .lr_driver import (
     calculate_kpq_map,
     is_q_commensurate,
@@ -36,6 +37,8 @@ from .lr_driver import (
     write_DeltaH0,
     read_lr_results,
     read_lr_hessian,
+    METHOD_KERNEL,
+    resolve_kernel,
 )
 
 __all__ = [
@@ -68,4 +71,8 @@ __all__ = [
     "write_DeltaH0",
     "read_lr_results",
     "read_lr_hessian",
+    "METHOD_KERNEL",
+    "resolve_kernel",
+    # Charge susceptibility / dielectric matrix
+    "run_chi",
 ]
