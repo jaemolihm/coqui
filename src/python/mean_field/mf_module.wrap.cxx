@@ -207,6 +207,10 @@ static auto const fun_32 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     },
     "self")};
 
+// volume
+static auto const fun_33 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self) { return self.volume(); }, "self")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -240,6 +244,7 @@ static const auto doc_d_29 = fun_29.doc(R"DOC()DOC");
 static const auto doc_d_30 = fun_30.doc(R"DOC()DOC");
 static const auto doc_d_31 = fun_31.doc(R"DOC()DOC");
 static const auto doc_d_32 = fun_32.doc(R"DOC()DOC");
+static const auto doc_d_33 = fun_33.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -268,6 +273,8 @@ PyMethodDef c2py::tp_methods<coqui_py::Mf>[] = {
      doc_d_10.c_str()},
     {"nelec", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
      doc_d_11.c_str()},
+    {"volume", (PyCFunction)c2py::pyfkw<fun_33>, METH_VARARGS | METH_KEYWORDS,
+     doc_d_33.c_str()},
     {"nkpts", (PyCFunction)c2py::pyfkw<fun_12>, METH_VARARGS | METH_KEYWORDS,
      doc_d_12.c_str()},
     {"nkpts_ibz", (PyCFunction)c2py::pyfkw<fun_13>,

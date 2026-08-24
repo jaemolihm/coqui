@@ -75,6 +75,10 @@ namespace coqui_py {
     auto prefix() const { return _mf->prefix(); }
     auto filename() const { return _mf->filename(); }
 
+    /// Unit-cell volume in atomic units. CoQuí's Coulomb kernel carries no 1/Omega,
+    /// so a caller assembling v(q+G)-weighted quantities needs this explicitly.
+    auto volume() const { return _mf->volume(); }
+
     auto nelec() const { return _mf->nelec(); }
     auto nbnd() const { return _mf->nbnd(); }
     auto nspin() const { return _mf->nspin(); }
@@ -82,7 +86,14 @@ namespace coqui_py {
 
     /* FFT grid */
     auto ecutrho () const { return _mf->ecutrho(); }
-    auto fft_grid() const { return _mf->fft_grid_dim(); }
+    /// FFT mesh (3,). Owning, because c2py cannot return a view on anything that
+    /// is not an nda::array.
+    nda::array<long, 1> fft_grid() const {
+      auto n = _mf->fft_grid_dim();
+      nda::array<long, 1> mesh(3);
+      for(int d=0; d<3; ++d) mesh(d) = n(d);
+      return mesh;
+    }
     auto ecutwfc () const { return _mf->wfc_truncated_grid()->ecut(); }
     auto fft_grid_wfc() const { return _mf->wfc_truncated_grid()->mesh(); }
 
