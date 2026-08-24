@@ -20,6 +20,7 @@ limitations under the License.
 
 from .mf import make_mf, augment_mf, augment_mf_dpsi
 from .eph import compute_bare_eph_vertex, compute_bare_eph_vertex_d2
+from .pw import compute_pw_matrix_elements
 
 # import PySCF converter module only if PySCF is available
 try:
@@ -30,4 +31,4 @@ else:
     from . import pyscf_interface
 
 __all__ = ["make_mf", "augment_mf", "augment_mf_dpsi", "compute_bare_eph_vertex",
-           "compute_bare_eph_vertex_d2"]
+           "compute_bare_eph_vertex_d2", "compute_pw_matrix_elements"]

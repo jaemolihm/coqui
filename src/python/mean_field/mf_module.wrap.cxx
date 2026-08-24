@@ -211,6 +211,14 @@ static auto const fun_32 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 static auto const fun_33 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](coqui_py::Mf const &self) { return self.volume(); }, "self")};
 
+// compute_pw_matrix_elements
+static auto const fun_34 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    [](coqui_py::Mf const &self, nda::array_const_view<double, 1> q_cryst,
+       nda::array_const_view<long, 2> G_mill) {
+      return self.compute_pw_matrix_elements(q_cryst, G_mill);
+    },
+    "self", "q_cryst", "G_mill")};
+
 static const auto doc_d_0 = fun_0.doc(R"DOC()DOC");
 static const auto doc_d_1 = fun_1.doc(R"DOC()DOC");
 static const auto doc_d_2 = fun_2.doc(R"DOC()DOC");
@@ -245,6 +253,7 @@ static const auto doc_d_30 = fun_30.doc(R"DOC()DOC");
 static const auto doc_d_31 = fun_31.doc(R"DOC()DOC");
 static const auto doc_d_32 = fun_32.doc(R"DOC()DOC");
 static const auto doc_d_33 = fun_33.doc(R"DOC()DOC");
+static const auto doc_d_34 = fun_34.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -315,6 +324,8 @@ PyMethodDef c2py::tp_methods<coqui_py::Mf>[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_31.c_str()},
     {"eph_vertex_nonlocal_d2", (PyCFunction)c2py::pyfkw<fun_32>,
      METH_VARARGS | METH_KEYWORDS, doc_d_32.c_str()},
+    {"compute_pw_matrix_elements", (PyCFunction)c2py::pyfkw<fun_34>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_34.c_str()},
     {"augment_basis_deltapsi", (PyCFunction)c2py::pyfkw<fun_29>,
      METH_VARARGS | METH_KEYWORDS, doc_d_29.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel

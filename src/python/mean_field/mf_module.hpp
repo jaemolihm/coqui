@@ -34,6 +34,7 @@
 #include "orbitals/orbital_augmenter.h"
 #include "orbitals/orbital_generator.h"
 #include "orbitals/eph_vertex.h"
+#include "orbitals/pw_matrix_elements.h"
 #include "hamiltonian/pseudo/pseudopot.h"
 
 namespace coqui_py {
@@ -231,6 +232,19 @@ namespace coqui_py {
       auto g  = orbitals::eph_vertex_local<HOST_MEMORY>(*_mf, dv(), q_cryst);
       g += pp.eph_vertex_nonlocal(*_mf, q_cryst);
       return g;
+    }
+
+    /// Plane-wave matrix elements M(G,s,k,i,j) = <phi_{k+q,i}| e^{i(q+G)r} |phi_{k,j}>
+    /// in the band basis, with i the k+q band and j the k band. No Coulomb weight
+    /// and no volume/k-count normalization: M(G=0) at q=0 is the identity. G_mill
+    /// is the (nG,3) table of Miller indices, each component bounded by the FFT
+    /// mesh Nyquist limit. Returns (M, q+G in Cartesian coords); M is returned full
+    /// on the MPI root and empty on every other rank, the q+G table on every rank.
+    /// Requires npol=1 and a full-BZ k-grid.
+    std::tuple<nda::array<ComplexType, 5>, nda::array<double, 2>>
+    compute_pw_matrix_elements(nda::array_const_view<double, 1> q_cryst,
+                               nda::array_const_view<long, 2> G_mill) const {
+      return orbitals::pw_matrix_elements(*_mf, q_cryst, G_mill);
     }
 
     /// Bare nonlocal part of the q=0 second-order electron-phonon vertex, stored

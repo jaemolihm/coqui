@@ -7,6 +7,7 @@ SET(SRC
   orbital_augmenter.cpp
   orbital_generator.cpp
   eph_vertex.cpp
+  pw_matrix_elements.cpp
 )
 ADD_LIBRARY(orbit ${SRC})
 TARGET_LINK_LIBRARIES(orbit PUBLIC meanfield hamilt numerics)
