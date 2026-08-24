@@ -130,6 +130,17 @@ public:
   bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
 
   /**
+   * @brief True when this accelerator is the identity: undamped Picard.
+   *
+   * Simple mixing with mixing = 1 writes back exactly what it was handed. There
+   * is then nothing to extrapolate from and nothing to damp against, so
+   * next_step_combined takes its fast path: it returns without touching — and
+   * therefore without ever allocating — the ring. Callers do not branch on this;
+   * they read the bool next_step_combined returns.
+   */
+  bool is_identity() const { return is_simple_mixing() && _mixing >= 1.0; }
+
+  /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
    *
    * SPMD: called on every rank of `comm`. Each rank owns the contiguous element
@@ -152,12 +163,21 @@ public:
    * @param DeltaSigma       - [IN/OUT] full ΔΣ (as DeltaF); empty if no GW
    * @param DeltaSigma_prev  - [INPUT]  this rank's slice of the previous ΔΣ
    * @param iter             - [INPUT]  current iteration number (1-based)
+   *
+   * @return whether the arrays were modified. False only on the identity
+   *         (undamped Picard) fast path, where the caller's arrays are already
+   *         the kernel output and no history is kept. This is what lets every
+   *         mixing option share one call site: the caller asks what happened
+   *         instead of deciding beforehand.
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
-  void next_step_combined(Comm& comm, utils::part_map const& pmap,
+  bool next_step_combined(Comm& comm, utils::part_map const& pmap,
                           FView DeltaF, FPrev const& DeltaF_prev,
                           SView DeltaSigma, SPrev const& DeltaSigma_prev,
                           int iter) {
+    // Undamped Picard: the mixed value IS the input. Return before push_slot, so
+    // a run that never mixes never grows the ring.
+    if (is_identity()) return false;
     const bool has_sigma = (DeltaSigma.size() > 0);
 
     // This rank's contiguous slice of the flattened ΔF. The "prev" arrays are
@@ -227,7 +247,7 @@ public:
       app_log(3, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
               iter, _mixing, _n);
       write_damping();
-      return;
+      return true;
     }
 
     auto C = compute_coefs();
@@ -243,7 +263,7 @@ public:
     if (c_norm < 1e-14) {
       app_log(2, "    DIIS: extrapolation failed (ill-conditioned B) -> fallback to damping");
       write_damping();
-      return;
+      return true;
     }
 
     // Extrapolate: out_slice <- Σ_i C(i) * trial_i  (in place).
@@ -254,6 +274,7 @@ public:
     }
 
     app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
+    return true;
   }
 
   /**

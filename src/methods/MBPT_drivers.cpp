@@ -1705,7 +1705,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
-                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP"}) {
+                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP",
+                  "LR_HESS_DYSON"}) {
     lr_init_timer.add(v);
   }
   lr_init_timer.start("LR_INIT");
@@ -2165,7 +2166,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // captured here, before the next perturbation resets it; every contraction
     // waits for the second pass below.
     if (opt_hessian) {
-      driver.materialize_raw_kernel(
+      driver.get_kernel_before_mixing(
           lr_state.sDeltaF_skij.value(), pDeltaSigma,
           lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
           sG_tskij, thc, p);
@@ -2229,12 +2230,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       mpi->comm.barrier();
 
       opt_hessian->rebuild_raw_kernel(m, lr_state.sDeltaF_skij.value(), pDeltaSigma);
-      // fix_density is the flag pass 1 used, so the extra solve recomputes Δμ
-      // from this ΔV and applies the same (constrained) bubble.
-      Delta_mu_improved_m(m) = driver.hessian_extra_dyson(
-          lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-          sDeltaH0, lr_state.sDeltaF_skij.value(), pDeltaSigma,
-          fix_density, include_gw_sigma);
+      // The extra Dyson solve on ΔV = ΔH0 + ΔF_raw + ΔΣ_raw. fix_density is the
+      // flag pass 1 used, so this recomputes Δμ from this ΔV and applies the same
+      // (constrained) bubble. ΔG(τ) is replicated only when the Matsubara term
+      // needs it — it is the most expensive step in LR.
+      lr_init_timer.start("LR_HESS_DYSON");
+      Delta_mu_improved_m(m) = driver.dyson().solve_lr_dyson(
+          lr_state.sDeltaDm_skij.value(), sDeltaH0,
+          lr_state.sDeltaF_skij.value(), pDeltaSigma, fix_density);
+      if (include_gw_sigma)
+        driver.dyson().materialize_DeltaG_tau(lr_state.sDeltaG_tskij.value());
+      mpi->comm.barrier();
+      lr_init_timer.stop("LR_HESS_DYSON");
       opt_hessian->set_improved(
           m, lr_state.sDeltaDm_skij.value(),
           include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr);
@@ -2245,7 +2252,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     opt_hessian->print_timers();
     // Reported here, not from lr_solve_one's own table: the extra Dyson happens
     // in this pass, after every lr_solve_one has already printed.
-    driver.print_hessian_timers();
+    driver.print_hessian_timers(lr_init_timer.elapsed("LR_HESS_DYSON"),
+                                lr_init_timer.number_of_calls("LR_HESS_DYSON"));
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
     // mode-PAIR matrices. dump_lr rebinds its group to mode{m} for a batched run,
@@ -2278,7 +2286,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
       h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
       h5::h5_write(lr_grp, "hessian_N_herm_dev", c1.herm_N);
-      h5::h5_write(lr_grp, "hessian_convention", lr_hessian_t::convention());
       app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
               nmodes);
     }

@@ -519,7 +519,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
         Writes the mode-PAIR matrices hessian, hessian_sym, hessian_N,
         hessian_M2, hessian_static2, hessian_call_index, Delta_mu_improved and the
-        hessian_*_herm_dev / hessian_convention diagnostics into the TOP-LEVEL
+        hessian_*_herm_dev diagnostics into the TOP-LEVEL
         "linear_response/" group; the per-mode subgroups are untouched. Shapes
         are (npert, npert) over the perturbations solved in this call, never
         padded to a full mode count, so a partial batch yields a sub-block for

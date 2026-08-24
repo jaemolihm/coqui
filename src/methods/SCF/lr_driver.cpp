@@ -74,8 +74,9 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                    "LR_GW_PI_PERT", "LR_GW_W_PERT",
                    // Mixing of the outer (perturbative-source) iteration.
                    "LR_OUTER_ITER_ALG",
-                   // Energy-curvature hooks; C1 = hessian.
-                   "LR_HESS_DYSON", "LR_HESS_PERT_REFRESH"}) {
+                   // Hessian hook. The extra Dyson is clocked by the caller,
+                   // which drives dyson() itself.
+                   "LR_HESS_PERT_REFRESH"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -123,7 +124,7 @@ lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc
  * solver, buffer and W-operand decision is taken.
  *
  * Derived from `p` alone and recomputed identically by lr_setup, lr_solve_one and
- * materialize_raw_kernel, so what one allocates is exactly what the others read.
+ * get_kernel_before_mixing, so what one allocates is exactly what the others read.
  */
 struct lr_kernel_split {
   lr_kernel_spec sc{};
@@ -491,7 +492,8 @@ void lr_driver::lr_setup(
   // A damping run goes through the same accelerator (with a depth-1 subspace it
   // never extrapolates from), so it carries a history too.
   lr_diis_hist_t inner_hist, outer_hist;
-  if (p.inner_mixes() && (k.sc_hf || k.sc_sigma || k.has_Vcorr)) {
+  const bool inner_stores = (p.use_diis() || p.mixing() < 1.0);
+  if (inner_stores && (k.sc_hf || k.sc_sigma || k.has_Vcorr)) {
     inner_hist.depth = static_cast<long>(p.use_diis() ? p.iter_params.max_subsp_size : 1);
     inner_hist.n_F = k.has_Vcorr ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = k.has_Sigma_sc ? 1 : 0;
@@ -605,14 +607,15 @@ void lr_driver::lr_setup(
   // than rebuilding it, so the (job-wide, striped) history is allocated exactly
   // once no matter how many perturbations follow.
   //
-  // Damping with mixing < 1 goes through it as well, rather than through an
-  // inline elementwise update: lr_diis::next_step_combined already implements
-  // exactly that update (the same striped expression, hence the same rounding),
-  // and routing through it is what makes the RAW pre-mixing slice available in
-  // every mixing configuration — which the hessian estimator needs. The
-  // subspace is then depth 1 with the warmup gate permanently on, so it never
-  // extrapolates and keeps only the current step.
-  if (p.inner_mixes()) {
+  // EVERY mixing option goes through it — DIIS, damping, and undamped Picard —
+  // so lr_solve_one has one call site and no per-algorithm branch. Damping is
+  // lr_diis::next_step_combined's own damping write (the same striped expression,
+  // hence the same rounding, as the inline update it replaced), on a depth-1
+  // subspace whose warmup gate is permanently on. Undamped Picard takes the
+  // identity fast path, which returns before the ring is ever grown, so it costs
+  // nothing to route it here. Routing damping through the accelerator is also what
+  // makes the RAW pre-mixing slice available, which the hessian estimator needs.
+  {
     const size_t depth  = p.use_diis() ? p.iter_params.max_subsp_size : size_t(1);
     const size_t warmup = p.use_diis() ? p.iter_params.diis_warmup : size_t(0);
     _lr_diis = std::make_unique<lr_diis>(depth, warmup, p.mixing());
@@ -668,10 +671,9 @@ void lr_driver::lr_setup(
   // more striped ΔF slice, and one more striped ΔΣ slice when the sc channel
   // carries a Σ. Allocated only under the flag, so the ordinary path is
   // unchanged in both memory and work.
-  if (p.hessian and p.inner_mixes()) {
-    _raw_F_slice = nda::array<ComplexType, 1>(_DeltaF.i1 - _DeltaF.i0);
-    if (k.has_Sigma_sc)
-      _raw_S_slice = nda::array<ComplexType, 1>(_DeltaSigma.i1 - _DeltaSigma.i0);
+  if (p.hessian and !_lr_diis->is_identity()) {
+    _DeltaF.alloc_raw();
+    if (k.has_Sigma_sc) _DeltaSigma.alloc_raw();
   }
 
   // Static ΔV_QPGW tracked in qp mode.
@@ -741,7 +743,7 @@ void lr_driver::lr_setup(
 
 
 template<THC_ERI THC_t>
-void lr_driver::eval_sigma_channel(
+void lr_driver::apply_kernel_gw(
     lr_kernel_spec const& lr_kernel,
     solvers::lr_gw& gw_solver,
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
@@ -755,7 +757,7 @@ void lr_driver::eval_sigma_channel(
 
   auto& sS_skij = _dyson.sS_skij();
   utils::check(lr_kernel.has_sigma(),
-               "lr_driver::eval_sigma_channel: called with a Σ-free "
+               "lr_driver::apply_kernel_gw: called with a Σ-free "
                "kernel ({}).", lr_kernel.to_string());
   if (!lr_kernel.sigma_G_dW) {
     // Term 1 only: ΔΣ = -ΔG ⊙ W_c
@@ -891,7 +893,7 @@ void lr_driver::apply_pert_kernel(
     _mpi->comm.barrier();
   }
   if (k.pert_sigma) {
-    eval_sigma_channel(k.pert, *_lr_gw_pert, *pDeltaSigma_pert, nullptr,
+    apply_kernel_gw(k.pert, *_lr_gw_pert, *pDeltaSigma_pert, nullptr,
                        "LR_GW_PI_PERT", "LR_GW_W_PERT", "LR_GW_SIGMA_PERT",
                        sDeltaG_tskij, sG_tskij, thc, p, nullptr);
   }
@@ -981,9 +983,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // self-consistent channel. The remainder's counter-term -W_c(iν=0) is built by
   // apply_pert_kernel, which owns the K_pert evaluation.
   auto hsex = hsex_kernel(false);
-  // The inner loop mixes at all: DIIS, or damping with mixing < 1. Both go
-  // through lr_diis, so this is also what decides whether its ring exists.
-  const bool inner_mix = p.inner_mixes();
 
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
@@ -1186,7 +1185,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Step 3: Compute the K_sc LR GW self-energy
     if (k.sc_sigma) {
       const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
-      eval_sigma_channel(k.sc, *_lr_gw, *pDeltaSigma_sc, ibc_ptr,
+      apply_kernel_gw(k.sc, *_lr_gw, *pDeltaSigma_sc, ibc_ptr,
                          "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA",
                          sDeltaG_tskij, sG_tskij, thc, p,
                          sDeltaSigma_term2_tskij);
@@ -1214,36 +1213,35 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // variable, so it never takes part in the mixing.
     _Timer.start("LR_ITER_ALG");
     if (stage_iter > 1 && (k.sc_hf || k.sc_sigma || has_Vcorr)) {
-      // Undamped Picard (no DIIS, mixing = 1) mixes nothing: the new iterate IS
-      // the kernel output, and _lr_diis is not even built. Everything else —
-      // DIIS and damping alike — goes through the accelerator.
-      if (inner_mix) {
-        // Striped: every rank of the global comm participates, each operating on
-        // its `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed
-        // result back in place. Pass .local() views directly (in/out); the "prev"
-        // arguments are already this rank's slice. A damping-only run takes the
-        // accelerator's own damping write, which is the same striped expression.
-        mixed_this_iter = true;
-        // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
-        // standard path, or the static ΔV_QPGW in qp mode.
-        if (has_Vcorr) {
-          _lr_diis->next_step_combined(
-              _mpi->comm, _pmap,
-              sDeltaF_sc_skij.local(), _DeltaF.prev,
-              sDeltaVcorr_skij.local(), _DeltaVcorr.prev, stage_iter);
-        } else if (has_Sigma_sc) {
-          _lr_diis->next_step_combined(
-              _mpi->comm, _pmap,
-              sDeltaF_sc_skij.local(), _DeltaF.prev,
-              pDeltaSigma_sc->local(), _DeltaSigma.prev, stage_iter);
-        } else {
-          nda::array<ComplexType, 5> empty_sigma;
-          nda::array<ComplexType, 1> empty_prev;
-          _lr_diis->next_step_combined(
-              _mpi->comm, _pmap,
-              sDeltaF_sc_skij.local(), _DeltaF.prev,
-              empty_sigma, empty_prev, stage_iter);
-        }
+      // Every mixing option goes through the accelerator, undamped Picard
+      // included: lr_diis takes an identity fast path for that case and says so in
+      // its return value, so there is one call site rather than a branch per
+      // algorithm.
+      //
+      // Striped: every rank of the global comm participates, each operating on its
+      // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
+      // back in place. Pass .local() views directly (in/out); the "prev" arguments
+      // are already this rank's slice.
+      //
+      // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
+      // standard path, or the static ΔV_QPGW in qp mode.
+      if (has_Vcorr) {
+        mixed_this_iter = _lr_diis->next_step_combined(
+            _mpi->comm, _pmap,
+            sDeltaF_sc_skij.local(), _DeltaF.prev,
+            sDeltaVcorr_skij.local(), _DeltaVcorr.prev, stage_iter);
+      } else if (has_Sigma_sc) {
+        mixed_this_iter = _lr_diis->next_step_combined(
+            _mpi->comm, _pmap,
+            sDeltaF_sc_skij.local(), _DeltaF.prev,
+            pDeltaSigma_sc->local(), _DeltaSigma.prev, stage_iter);
+      } else {
+        nda::array<ComplexType, 5> empty_sigma;
+        nda::array<ComplexType, 1> empty_prev;
+        mixed_this_iter = _lr_diis->next_step_combined(
+            _mpi->comm, _pmap,
+            sDeltaF_sc_skij.local(), _DeltaF.prev,
+            empty_sigma, empty_prev, stage_iter);
       }
       // The raw kernel output of THIS iteration, taken while it is still in the
       // ring. Copying here rather than reading the ring after the solve is what
@@ -1253,9 +1251,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // Assigned THROUGH a view: whole-array assignment on an nda owning array
       // reallocates unconditionally, which would both churn a ΔΣ-sized buffer
       // every iteration and discard what lr_setup allocated.
-      if (p.hessian and inner_mix) {
-        _raw_F_slice() = _lr_diis->newest_xF();
-        if (has_Sigma_sc) _raw_S_slice() = _lr_diis->newest_xS();
+      if (p.hessian and mixed_this_iter) {
+        _DeltaF.raw() = _lr_diis->newest_xF();
+        if (has_Sigma_sc) _DeltaSigma.raw() = _lr_diis->newest_xS();
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
       // place with no trailing collective. Fence + barrier make every slice
@@ -1593,7 +1591,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
 
 template<THC_ERI THC_t>
-void lr_driver::materialize_raw_kernel(
+void lr_driver::get_kernel_before_mixing(
     sArray_t<Array_view_4D_t>& sDeltaF_skij,
     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
@@ -1602,13 +1600,13 @@ void lr_driver::materialize_raw_kernel(
     THC_t& thc,
     const lr_params& p) {
 
-  utils::check(_setup_done, "lr_driver::materialize_raw_kernel: call lr_setup first.");
+  utils::check(_setup_done, "lr_driver::get_kernel_before_mixing: call lr_setup first.");
   utils::check(p.hessian,
-               "lr_driver::materialize_raw_kernel: lr_setup must have been given "
+               "lr_driver::get_kernel_before_mixing: lr_setup must have been given "
                "hessian = true, or there is no raw slice to read.");
   const lr_kernel_split k = make_kernel_split(p);
   utils::check(!k.qp_mode,
-               "lr_driver::materialize_raw_kernel: qp mode is out of scope — the "
+               "lr_driver::get_kernel_before_mixing: qp mode is out of scope — the "
                "accelerator's second slot holds the static ΔV_QPGW rather than ΔΣ, "
                "so the raw-ΔΣ algebra does not carry over.");
 
@@ -1645,7 +1643,7 @@ void lr_driver::materialize_raw_kernel(
   // ever added the slot would hold the PERT-written array and adding pert below
   // would double-count it.
   utils::check(k.sc_hf or !k.sc_sigma,
-               "lr_driver::materialize_raw_kernel: a Σ-carrying K_sc with no "
+               "lr_driver::get_kernel_before_mixing: a Σ-carrying K_sc with no "
                "Hartree/exchange component is not supported.");
   if (k.split_F) {
     _sDeltaF_pert->win().fence();
@@ -1661,12 +1659,12 @@ void lr_driver::materialize_raw_kernel(
   // just re-evaluated on the returned ΔG.
   if (k.sc_hf) {
     auto F_loc = _DeltaF.slice(sDeltaF_skij.local());
-    F_loc = _raw_F_slice;
+    F_loc = _DeltaF.raw;
     if (k.split_F) F_loc += _DeltaF.slice(_sDeltaF_pert->local());
   }
   if (k.has_Sigma_sc) {
     auto S_loc = _DeltaSigma.slice(sDeltaSigma_tskij->local());
-    S_loc = _raw_S_slice;
+    S_loc = _DeltaSigma.raw;
     if (k.split_Sigma) S_loc += _DeltaSigma.slice(_sDeltaSigma_pert->local());
   }
 
@@ -1686,24 +1684,6 @@ void lr_driver::materialize_raw_kernel(
   if (k.sc_hf) sDeltaF_skij.win().fence();
   if (k.has_Sigma_sc) sDeltaSigma_tskij->win().fence();
   _mpi->comm.barrier();
-}
-
-
-double lr_driver::hessian_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
-                                 sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                                 const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                                 const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
-                                 const sArray_t<Array_view_5D_t>* sDeltaSigma_raw_tskij,
-                                 bool fix_density, bool need_DeltaG) {
-  utils::check(_setup_done, "lr_driver::hessian_extra_dyson: call lr_setup first.");
-  _Timer.start("LR_HESS_DYSON");
-  const double Delta_mu = _lr_dyson.solve_lr_dyson(
-      sDeltaDm_out, sDeltaH0_skij, sDeltaF_raw_skij, sDeltaSigma_raw_tskij,
-      fix_density);
-  if (need_DeltaG) _lr_dyson.materialize_DeltaG_tau(sDeltaG_out);
-  _Timer.stop("LR_HESS_DYSON");
-  _mpi->comm.barrier();
-  return Delta_mu;
 }
 
 
@@ -1805,7 +1785,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // ΔG(τ) as lr_dyson hands it over: distributed, and alive from the end of the
   // solve until the first consumer replicates it. It overlaps neither transient
   // peak in practice — the next solve drops it before allocating anything, and a
-  // consumer replicates it at the top of eval_sigma_channel, ahead of any ΔΠ/ΔW
+  // consumer replicates it at the top of apply_kernel_gw, ahead of any ΔΠ/ΔW
   // — so counting it as persistent is a deliberate over-estimate.
   arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
 
@@ -2047,11 +2027,13 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
 }
 
 
-void lr_driver::print_hessian_timers() {
+void lr_driver::print_hessian_timers(double extra_dyson_sec, int extra_dyson_calls) {
   app_log(2, "\n  LR hessian driver timers");
   app_log(2, "  ------------------------");
+  // The extra Dyson is clocked by the caller: it drives dyson() directly, so the
+  // time is not on this object's TimerManager.
   app_log(2, "    Extra Dyson (per mode):     {0:8.3f} sec  {1:4d} calls",
-          _Timer.elapsed("LR_HESS_DYSON"), _Timer.number_of_calls("LR_HESS_DYSON"));
+          extra_dyson_sec, extra_dyson_calls);
   app_log(2, "    K_pert refresh (per mode):  {0:8.3f} sec  {1:4d} calls\n",
           _Timer.elapsed("LR_HESS_PERT_REFRESH"), _Timer.number_of_calls("LR_HESS_PERT_REFRESH"));
 }
@@ -2083,7 +2065,7 @@ template std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>*,
     int*);
 
-template void lr_driver::materialize_raw_kernel(
+template void lr_driver::get_kernel_before_mixing(
     sArray_t<Array_view_4D_t>&,
     sArray_t<Array_view_5D_t>*,
     const sArray_t<Array_view_4D_t>&,

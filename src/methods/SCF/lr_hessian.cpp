@@ -148,23 +148,14 @@ lr_hessian_t::lr_hessian_t(
   const double store_gb_job = _has_sigma
       ? 2.0 * double(_nmodes) * double(_nw) * double(_nF) * to_gb : 0.0;
   const long n_nodes = std::max(1, _mpi->internode_comm.size());
-  app_log(1, "\n  Energy-curvature (stationary hessian) estimator: ON");
+  app_log(1, "\n  Stationary free-energy-hessian estimator: ON");
   app_log(1, "    perturbations = {}, dynamic ΔΣ = {}", _nmodes, _has_sigma ? "yes" : "no");
   app_log(1, "    striped ω stores (ΔΣ + ΔG, {} modes): {:.3f} GB/node "
              "({:.3f} GB total over {} node(s))",
           _nmodes, store_gb_job / double(n_nodes), store_gb_job, n_nodes);
   app_log(1, "    plus one extra LR Dyson solve per perturbation");
-  app_log(1, "    convention: {}", convention());
   app_log(2, "    this rank owns {} of {} elements, {:.3f} GB/rank",
           _nloc, _nF, store_gb_rank);
-}
-
-
-std::string lr_hessian_t::convention() {
-  return "tau-dagger: c(iw_n) = sum_{skij} w_k conj(A[refl(n),s,k,i,j]) "
-         "B[n,s,k,i,j] with refl(n): iw_n -> -iw_n; "
-         "Tr_ω(A,B) = spin * (1/beta) sum_n c(iw_n) = -spin * c(tau=beta^-); "
-         "Tr(A,B) = spin * sum_{skij} w_k conj(A) B";
 }
 
 
@@ -447,11 +438,11 @@ lr_hessian_result_t lr_hessian_t::assemble() {
     }
   const double rel_sym_plain = (nrm > 0.0) ? std::sqrt(dev / nrm) : 0.0;
 
-  app_log(1, "\n  Energy-curvature (stationary hessian) diagnostics");
-  app_log(1, "  -------------------------------------------------");
-  app_log(1, "    ||hessian_sym - hessian_sym^dag|| / ||hessian_sym||       = {:.3e}   [H1: mixed "
-             "instead of raw ΔF/ΔΣ]", r.herm_sym);
-  app_log(1, "    ||N - N^dag|| / ||N||                      = {:.3e}   [H1, direct]",
+  app_log(1, "\n  Stationary free-energy-hessian diagnostics");
+  app_log(1, "  -----------------------------------------");
+  app_log(1, "    ||H_sym - H_sym^dag|| / ||H_sym||  = {:.3e}   [H1: mixed instead "
+             "of raw ΔF/ΔΣ]", r.herm_sym);
+  app_log(1, "    ||N - N^dag|| / ||N||              = {:.3e}   [H1, direct]",
           r.herm_N);
   // N is Hermitian exactly insofar as K is self-adjoint under this pairing, and
   // the same self-adjointness is what makes the estimator second order. So this
@@ -468,12 +459,11 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   // point. It is a DETECTOR only at convergence, where the correction cancels
   // identically: a nonzero value there means the extra Dyson applied a different
   // operator than pass 1 (a frozen Δμ, say), which Hermiticity cannot see.
-  app_log(1, "    ||hessian_sym - hessian_plain|| / ||hessian_plain||       = {:.3e}   [the "
-             "correction; -> 0 at convergence, where it is the D5 detector]",
-          rel_sym_plain);
-  app_log(1, "    ||hessian_plain - hessian_plain^dag|| / ||hessian_plain|| = {:.3e}", r.herm_plain);
+  app_log(1, "    ||H_sym - H_plain|| / ||H_plain||  = {:.3e}   [the correction; "
+             "-> 0 at convergence, where it is the D5 detector]", rel_sym_plain);
+  app_log(1, "    ||H_plain - H_plain^dag||/||H_plain|| = {:.3e}", r.herm_plain);
   if (_has_sigma) {
-    app_log(1, "    <A,A> on the stored ΔΣ_0                  = {:.6e} + {:.3e}i "
+    app_log(1, "    <A,A> on the stored ΔΣ_0           = {:.6e} + {:.3e}i "
                "(must be real and positive)", self_pair.real(), self_pair.imag());
     const bool ok = self_pair.real() > 0.0 &&
                     std::abs(self_pair.imag()) <= 1e-6 * std::abs(self_pair.real());

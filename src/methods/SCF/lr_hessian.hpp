@@ -73,7 +73,7 @@ struct lr_hessian_result_t {
  *
  *   (ΔF, ΔΣ) = K(ΔDm, ΔG)                                        [holds]
  *
- * because the loop applies K after the Dyson solve and materialize_raw_kernel
+ * because the loop applies K after the Dyson solve and get_kernel_before_mixing
  * hands back the value before mixing touched it. What it does NOT satisfy is the
  * Dyson equation,
  *
@@ -133,6 +133,15 @@ struct lr_hessian_result_t {
  * The single minus sign belongs to the τ = β⁻ form, not to the (1/β) Σ_n one —
  * they are the same number, via (1/β) Σ_n A(iω_n) = −A(τ=β⁻), and `assemble`
  * evaluates the second by the first.
+ *
+ * No k → k+q map appears, and should not. At finite q every operand is stored at
+ * index k with the SAME leg convention — lr_dyson builds ΔG = G_{k+q} · X · G_k at
+ * index k, so ΔH0, ΔF, ΔΣ and ΔG all carry legs (k+q, k). The dagger in §4 does
+ * shift the index, `[A(k)]†` having legs (k, k+q) and so being the (−q) object at
+ * k+q; but the k-sum is complete, so relabelling the summation variable absorbs
+ * the shift and leaves `Σ_k conj(A(k)) B(k)` elementwise. What the contraction
+ * DOES assume is that the k-sum is complete and w_k is the weight of k, which is
+ * why the weights are folded into the right operand once, at store time.
  *
  * This pairing is the one under which both the bubble P (ω-local) and the kernel
  * K (τ-local) are self-adjoint, which is the same property that makes the
@@ -200,7 +209,7 @@ public:
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
    * @param sDeltaH0   - [INPUT] ΔH0_p
-   * @param sDeltaF    - [INPUT] raw ΔF_p (materialize_raw_kernel must have run)
+   * @param sDeltaF    - [INPUT] raw ΔF_p (get_kernel_before_mixing must have run)
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel (never read then)
    */
@@ -257,9 +266,6 @@ public:
    * replicated, not root-only).
    */
   lr_hessian_result_t assemble();
-
-  /// The D1 convention this binary implements, for the self-describing checkpoint.
-  static std::string convention();
 
   /// Report (verbosity 2) the pass-1/pass-2 clocks owned by this object. The
   /// extra Dyson and the K_pert refresh are billed to lr_driver's own LR_HESS_*

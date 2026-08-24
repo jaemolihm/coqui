@@ -286,11 +286,6 @@ struct lr_params {
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
   bool use_diis() const { return iter_params.alg == "DIIS"; }
   double mixing() const { return iter_params.mixing; }
-  /// Whether the inner SCF loop mixes at all, i.e. whether the returned ΔF/ΔΣ
-  /// can differ from the last kernel evaluation. Both algorithms go through
-  /// lr_diis, so this is also the predicate for building its ring: damping with
-  /// mixing >= 1 is the identity and needs neither.
-  bool inner_mixes() const { return use_diis() || mixing() < 1.0; }
 };
 
 /// The kernel split a run executes: which components the inner SCF loop resums
@@ -426,7 +421,7 @@ public:
    * arrays hold.
    */
   template<THC_ERI THC_t>
-  void materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
+  void get_kernel_before_mixing(sArray_t<Array_view_4D_t>& sDeltaF_skij,
                               sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
                               const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                               const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -435,26 +430,24 @@ public:
                               const lr_params& p);
 
   /**
-   * @brief One extra LR Dyson solve on a caller-supplied ΔV, for the stationary
-   *        hessian functional: ΔG'' / ΔDm'' from ΔH0 + ΔF'_raw + ΔΣ'_raw.
+   * @brief The run's LR Dyson solver.
    *
-   * A thin forward to lr_dyson::solve_lr_dyson with the caller's output arrays,
-   * plus the ΔG(τ) replication when the functional's Matsubara term needs it.
+   * Exposed for the stationary hessian functional, which needs ONE more solve on
+   * a caller-supplied ΔV = ΔH0 + ΔF_raw + ΔΣ_raw, and must use *this* object: the
+   * same operator with the same cached setup pass 1 applied.
    *
-   * `fix_density` must be the flag pass 1 used: with it the solve recomputes Δμ
-   * self-consistently from this ΔV, which keeps the constrained bubble
-   * P_fd = P − u u†/⟨S,u⟩ — still self-adjoint — the same operator pass 1
-   * applied. lr_dyson takes no Δμ input (it always solves at Δμ = 0 and shifts
-   * afterwards), so forwarding the flag is the whole of it.
-   *
-   * @return the Δμ of the extra solve
+   * The caller drives it directly — `solve_lr_dyson(...)` and, only when the
+   * functional's Matsubara term needs ΔG(τ), `materialize_DeltaG_tau(...)`. Note
+   * that `fix_density` must be the flag pass 1 used: with it the solve recomputes
+   * Δμ self-consistently from this ΔV, which keeps the constrained bubble
+   * P_fd = P − u u†/⟨S,u⟩ — still self-adjoint — that pass 1 applied. lr_dyson
+   * takes no Δμ input (it always solves at Δμ = 0 and shifts afterwards), so
+   * passing the flag is the whole of it.
    */
-  double hessian_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
-                        sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                        const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                        const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
-                        const sArray_t<Array_view_5D_t>* sDeltaSigma_raw_tskij,
-                        bool fix_density, bool need_DeltaG);
+  lr_dyson& dyson() {
+    utils::check(_setup_done, "lr_driver::dyson: call lr_setup first.");
+    return _lr_dyson;
+  }
 
   /**
    * Report (verbosity 2) the two hessian clocks lr_driver owns: the
@@ -463,7 +456,7 @@ public:
    * loop, where the extra Dyson has not happened yet — the feature's dominant
    * cost would read 0.000 sec in every run. Call it after the pass-2 loop.
    */
-  void print_hessian_timers();
+  void print_hessian_timers(double extra_dyson_sec, int extra_dyson_calls);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -555,7 +548,7 @@ private:
                   std::optional<dW_t>& opt_dW_tRPQ);
 
   /**
-   * Evaluate the Σ components of `lr_kernel` into `sSigma_tskij_out`, overwriting
+   * Apply the GW self-energy branch of `lr_kernel` into `sSigma_tskij_out`, overwriting
    * it. Each divergence correction is applied by the evaluator that owns the term
    * it corrects, so passing the overlap and the heads is all this has to do.
    *
@@ -571,7 +564,7 @@ private:
    * exactly the sc/pert breakdown.
    */
   template<THC_ERI THC_t>
-  void eval_sigma_channel(lr_kernel_spec const& lr_kernel,
+  void apply_kernel_gw(lr_kernel_spec const& lr_kernel,
                           solvers::lr_gw& gw_solver,
                           sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                           const lr_ibc_DeltaX* ibc_ptr,
@@ -584,7 +577,7 @@ private:
 
   /**
    * One whole K_pert evaluation on the supplied ΔDm / ΔG: the static ΔF branch
-   * (including the HSEX counter-term) plus eval_sigma_channel for the Σ branch.
+   * (including the HSEX counter-term) plus apply_kernel_gw for the Σ branch.
    * Shared by the in-loop stage boundary and the post-solve refresh so the kernel
    * call exists exactly once.
    *
@@ -681,12 +674,19 @@ private:
     long n_flat = 0;                  ///< elements of the flattened array (0 = inactive)
     long i0 = 0, i1 = 0;              ///< this rank's slice
     nda::array<ComplexType, 1> prev;  ///< previous iterate over [i0, i1)
+    /// The same slice of the RAW (pre-mixing) kernel output, for the hessian
+    /// estimator. Empty unless alloc_raw() was called, since nothing else reads it.
+    nda::array<ComplexType, 1> raw;
 
     void alloc(utils::part_map const& pmap, long n) {
       n_flat = n;
       std::tie(i0, i1) = pmap.my_slice(n);
       prev = nda::array<ComplexType, 1>(i1 - i0);
     }
+    /// Add the raw buffer. Separate from alloc() so the ordinary path allocates
+    /// nothing extra; call after alloc().
+    void alloc_raw() { raw = nda::array<ComplexType, 1>(i1 - i0); }
+    bool has_raw() const { return raw.size() > 0; }
     void zero() { prev() = ComplexType{0}; }
     /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
     auto slice(auto&& A) const {
@@ -718,15 +718,11 @@ private:
 
   // --- State of the last lr_solve_one, read by the hessian hooks.
   /// The returned ΔF/ΔΣ went through the mixing block in the final iteration,
-  /// hence are the mixed iterate rather than the raw kernel output.
+  /// hence are the mixed iterate rather than the raw kernel output. The raw values
+  /// themselves live in _DeltaF.raw / _DeltaSigma.raw, filled the moment the
+  /// accelerator stores them: reading the ring later cannot work, since it is
+  /// reset at every split-kernel stage boundary.
   bool _mixed_last_iter = false;
-  /// This rank's `_pmap` slice of the raw (pre-mixing) ΔF_sc / ΔΣ_sc of the most
-  /// recent mixed iteration, copied out of the accelerator's ring the moment it
-  /// is stored. Reading the ring later cannot work: it is reset at every
-  /// split-kernel stage boundary, so a solve whose budget ran out on one would
-  /// have nothing to read. Allocated only when lr_params::hessian is
-  /// set, so the ordinary path neither copies nor allocates.
-  nda::array<ComplexType, 1> _raw_F_slice, _raw_S_slice;
 
   int _nts;
   int _ns;

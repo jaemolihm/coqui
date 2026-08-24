@@ -271,7 +271,7 @@ def read_lr_hessian(filename: str) -> dict:
         the diagnostics ``hessian_N`` / ``hessian_M2`` / ``hessian_static2``, the
         ``hessian_call_index`` list, ``Delta_mu_improved``, the scalar
         ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_N_herm_dev``
-        residuals and the ``hessian_convention`` string.
+        residuals.
 
     Raises
     ------
@@ -317,7 +317,4 @@ def read_lr_hessian(filename: str) -> dict:
             out[key] = lr_grp[key][()]
         for key in scalar_keys:
             out[key] = float(lr_grp[key][()])
-        conv = lr_grp['hessian_convention'][()]
-        out['hessian_convention'] = (conv.decode() if isinstance(conv, bytes)
-                                     else str(conv))
     return out
