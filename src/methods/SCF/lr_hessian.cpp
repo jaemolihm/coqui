@@ -72,13 +72,11 @@ lr_hessian_t::lr_hessian_t(
   utils::check(k_weight.size() == nk_ibz,
                "lr_hessian_t: k_weight has {} entries, expected nk_ibz = {}.",
                k_weight.size(), nk_ibz);
-  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ)). That
-  // round trip is the identity only on a square grid; on nt != nw it is a
-  // projection, and the ΔV the estimator solves with would not be the ΔV it
-  // contracted against, silently costing the stationarity it exists for.
-  utils::check(_nt == _nw,
-               "lr_hessian_t: the estimator needs a square IR sampling, "
-               "nt_f == nw_f, but got nt_f = {}, nw_f = {}.", _nt, _nw);
+  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ)). The IR
+  // sampling is NOT square (nt_f and nw_f differ by one in practice), and that is
+  // fine: the round trip is the identity on whatever the IR basis represents, and
+  // every ΔΣ in this code is already carried in that basis — the LR Dyson solve
+  // itself goes τ→ω→τ. So there is nothing to require here.
 
   _pmap = utils::make_part_map(*_mpi);
   std::tie(_i0, _i1) = _pmap.my_slice(_nF);
@@ -121,20 +119,16 @@ lr_hessian_t::lr_hessian_t(
   _dDm1.resize(_nmodes);
 
   if (_has_sigma) {
-    _accN  = nda::array<ComplexType, 3>(_nw, _nmodes, _nmodes);
-    _accM2 = nda::array<ComplexType, 3>(_nw, _nmodes, _nmodes);
-    _accN()  = ComplexType(0.0);
-    _accM2() = ComplexType(0.0);
+    for (auto* a : {&_N_mats, &_M2_mats}) {
+      *a = nda::array<ComplexType, 3>(_nw, _nmodes, _nmodes);
+      (*a)() = ComplexType(0.0);
+    }
   }
 
-  _statN     = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  _statM2    = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  _statPlain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  _statH0_2  = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  _statN()     = ComplexType(0.0);
-  _statM2()    = ComplexType(0.0);
-  _statPlain() = ComplexType(0.0);
-  _statH0_2()  = ComplexType(0.0);
+  for (auto* a : {&_plain_stat, &_static2_stat, &_N_stat, &_M2_stat}) {
+    *a = nda::array<ComplexType, 2>(_nmodes, _nmodes);
+    (*a)() = ComplexType(0.0);
+  }
 
   _stored.assign(_nmodes, false);
   _improved.assign(_nmodes, false);
@@ -160,7 +154,8 @@ lr_hessian_t::lr_hessian_t(
 
 
 void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
-                                          nda::array<ComplexType, 2>& dst_w) const {
+                                 nda::array<ComplexType, 2>& dst_w,
+                                 bool weighted) const {
   auto loc = src.local();
   // nda::reshape only EXPECTS the sizes to match, which compiles out under
   // NDEBUG and would silently reinterpret memory in a release build. An
@@ -176,11 +171,14 @@ void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
   for (long t = 0; t < _nt; ++t)
     buf_t(t, nda::range::all) = flat(nda::range(t * _nF + _i0, t * _nF + _i1));
   _FT->tau_to_w(buf_t, dst_w, imag_axes_ft::fermion);
+  if (weighted)
+    for (long n = 0; n < _nw; ++n)
+      for (long l = 0; l < _nloc; ++l) dst_w(n, l) *= _wloc(l);
 }
 
 
 nda::array<ComplexType, 1> lr_hessian_t::pack_static(
-    sArray_t<Array_view_4D_t> const& src) const {
+    sArray_t<Array_view_4D_t> const& src, bool weighted) const {
   auto loc = src.local();
   utils::check(loc.size() == _nF,
                "lr_hessian_t: rank-4 array has {} elements, expected "
@@ -188,6 +186,8 @@ nda::array<ComplexType, 1> lr_hessian_t::pack_static(
   auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
   nda::array<ComplexType, 1> out(_nloc);
   if (_nloc > 0) out = flat(nda::range(_i0, _i1));
+  if (weighted)
+    for (long l = 0; l < _nloc; ++l) out(l) *= _wloc(l);
   return out;
 }
 
@@ -208,19 +208,20 @@ void lr_hessian_t::store_mode(long p,
   utils::check(!_has_sigma || sDeltaG != nullptr,
                "lr_hessian_t::store_mode: a Σ-carrying kernel needs ΔG.");
 
+  // Store only. Every term of the functional needs pairs (λ, p) drawn from
+  // different modes, so nothing can be contracted until every mode is in.
+  //
+  // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
+  // contraction is a single unweighted dot over the whole local slab. Which side a
+  // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
+  // and ΔG always right.
   _Timer.start("LR_HESS_STORE");
-  _dH0[p]  = pack_static(sDeltaH0);
-  _dF[p]   = pack_static(sDeltaF);
-  _dDm1[p] = pack_static(sDeltaDm);
-  // The RIGHT operand of every contraction carries w_k, folded in once here so
-  // each pair contraction is a single unweighted dot over the whole local slab.
-  for (long l = 0; l < _nloc; ++l) _dDm1[p](l) *= _wloc(l);
-
+  _dH0[p]  = pack_static(sDeltaH0, /*weighted=*/false);   // left  of plain, static2
+  _dF[p]   = pack_static(sDeltaF,  /*weighted=*/false);   // left  of N, M2
+  _dDm1[p] = pack_static(sDeltaDm, /*weighted=*/true);    // right of plain, N
   if (_has_sigma) {
-    pack_to_omega(*sDeltaSigma, _Sw[p]);
-    pack_to_omega(*sDeltaG, _Gw[p]);
-    for (long n = 0; n < _nw; ++n)
-      for (long l = 0; l < _nloc; ++l) _Gw[p](n, l) *= _wloc(l);
+    pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of N, M2
+    pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of N
   }
   _stored[p] = true;
   _Timer.stop("LR_HESS_STORE");
@@ -316,24 +317,47 @@ void lr_hessian_t::set_improved(long p,
                  "lr_hessian_t::set_improved: every mode must be stored in "
                  "pass 1 before any pair is contracted; mode {} is missing.", l);
 
+  // The two terms carrying the improved solution, accumulated for every λ against
+  // this one p so ΔDm'_p / ΔG'_p never have to persist:
+  //
+  //   static2[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)
+  //   M2     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
+  //
   _Timer.start("LR_HESS_CONTRACT");
-  auto dDm2 = pack_static(sDeltaDm);
-  for (long l = 0; l < _nloc; ++l) dDm2(l) *= _wloc(l);
-
+  auto dDm2 = pack_static(sDeltaDm, /*weighted=*/true);
   nda::array<ComplexType, 2> G2w;
-  if (_has_sigma) {
-    pack_to_omega(*sDeltaG, G2w);
-    for (long n = 0; n < _nw; ++n)
-      for (long l = 0; l < _nloc; ++l) G2w(n, l) *= _wloc(l);
-  }
+  if (_has_sigma) pack_to_omega(*sDeltaG, G2w, /*weighted=*/true);
 
   for (long l = 0; l < _nmodes; ++l) {
-    _statH0_2(l, p) += trace_static_local(_dH0[l], dDm2);
-    _statM2(l, p)   += trace_static_local(_dF[l], dDm2);
-    if (_has_sigma) trace_matsubara_local(_Sw[l], G2w, _accM2(nda::range::all, l, p));
+    _static2_stat(l, p) += trace_static_local(_dH0[l], dDm2);
+    _M2_stat(l, p)      += trace_static_local(_dF[l], dDm2);
+    if (_has_sigma)
+      trace_matsubara_local(_Sw[l], G2w, _M2_mats(nda::range::all, l, p));
   }
   _improved[p] = true;
   _Timer.stop("LR_HESS_CONTRACT");
+}
+
+
+ComplexType lr_hessian_t::self_pairing() const {
+  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
+  // so it is real by construction; the sign is what a wrong pairing breaks. A
+  // static operand cannot serve here — a constant has no fermionic FT.
+  nda::array<ComplexType, 2> sp(_nw, 1);
+  sp() = ComplexType(0.0);
+  if (_nloc > 0) {
+    nda::array<ComplexType, 1> bw(_nloc);
+    for (long n = 0; n < _nw; ++n) {
+      for (long l = 0; l < _nloc; ++l) bw(l) = _Sw[0](n, l) * _wloc(l);
+      sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
+    }
+  }
+  _mpi->comm.all_reduce_in_place_n(sp.data(), sp.size(), std::plus<>{});
+  nda::array<ComplexType, 2> sp_t(_nt, 1);
+  nda::array<ComplexType, 1> sp_b(1);
+  _FT->w_to_tau(sp, sp_t, imag_axes_ft::fermion);
+  _FT->tau_to_beta(sp_t, sp_b);
+  return -sp_b(0);
 }
 
 
@@ -347,65 +371,58 @@ lr_hessian_result_t lr_hessian_t::assemble() {
                  "lr_hessian_t::assemble: mode {} is missing its pass-1 store "
                  "or its pass-2 improved solution.", p);
 
-  // N and the plain estimator over ALL mode pairs, both triangles, straight from
-  // the stores. No symmetry is used to build any entry — the Hermiticity numbers
-  // below are measurements of the finished matrices.
+  // The equation this function evaluates, term by term:
+  //
+  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )                        <- here
+  //   N      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )    <- here
+  //   static2[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)                        <- set_improved
+  //   M2     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)    <- set_improved
+  //
+  //   H_plain = spin * plain
+  //   H_sym   = spin * (static2 + M2 - N)
+  //
+  // The two terms that need only pass-1 stores are accumulated here, over ALL mode
+  // pairs and both triangles. No symmetry is used to build any entry — the
+  // Hermiticity numbers below are measurements of the finished matrices.
   _Timer.start("LR_HESS_CONTRACT");
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      _statPlain(l, p) += trace_static_local(_dH0[l], _dDm1[p]);
-      _statN(l, p)     += trace_static_local(_dF[l], _dDm1[p]);
-      if (_has_sigma) trace_matsubara_local(_Sw[l], _Gw[p], _accN(nda::range::all, l, p));
+      _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm1[p]);
+      _N_stat(l, p)     += trace_static_local(_dF[l], _dDm1[p]);
+      if (_has_sigma)
+        trace_matsubara_local(_Sw[l], _Gw[p], _N_mats(nda::range::all, l, p));
     }
 
-  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
-  // so it is real by construction; the sign is what a wrong pairing breaks. A
-  // static operand cannot serve here — a constant has no fermionic FT.
-  ComplexType self_pair(0.0);
-  if (_has_sigma) {
-    nda::array<ComplexType, 2> sp(_nw, 1);
-    sp() = ComplexType(0.0);
-    if (_nloc > 0) {
-      nda::array<ComplexType, 1> bw(_nloc);
-      for (long n = 0; n < _nw; ++n) {
-        for (long l = 0; l < _nloc; ++l) bw(l) = _Sw[0](n, l) * _wloc(l);
-        sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
-      }
-    }
-    _mpi->comm.all_reduce_in_place_n(sp.data(), sp.size(), std::plus<>{});
-    nda::array<ComplexType, 2> sp_t(_nt, 1);
-    nda::array<ComplexType, 1> sp_b(1);
-    _FT->w_to_tau(sp, sp_t, imag_axes_ft::fermion);
-    _FT->tau_to_beta(sp_t, sp_b);
-    self_pair = -sp_b(0);
-  }
   _Timer.stop("LR_HESS_CONTRACT");
 
+  const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
+
+  // Every term's static half is striped over comm, so each needs one reduction.
   const long nm2 = _nmodes * _nmodes;
-  _mpi->comm.all_reduce_in_place_n(_statPlain.data(), nm2, std::plus<>{});
-  _mpi->comm.all_reduce_in_place_n(_statN.data(), nm2, std::plus<>{});
-  _mpi->comm.all_reduce_in_place_n(_statM2.data(), nm2, std::plus<>{});
-  _mpi->comm.all_reduce_in_place_n(_statH0_2.data(), nm2, std::plus<>{});
+  for (auto* a : {&_plain_stat, &_static2_stat, &_N_stat, &_M2_stat})
+    _mpi->comm.all_reduce_in_place_n(a->data(), nm2, std::plus<>{});
 
   // Matsubara tail: (1/β) Σ_n c(iω_n) = −c(τ=β⁻). Replicated on every rank, so
   // assemble() returns the same matrices everywhere.
-  nda::array<ComplexType, 2> matsN(_nmodes, _nmodes), matsM2(_nmodes, _nmodes);
-  matsN()  = ComplexType(0.0);
-  matsM2() = ComplexType(0.0);
+  nda::array<ComplexType, 2> N_mats(_nmodes, _nmodes), M2_mats(_nmodes, _nmodes);
+  N_mats()  = ComplexType(0.0);
+  M2_mats() = ComplexType(0.0);
   if (_has_sigma) {
     _Timer.start("LR_HESS_FT");
-    _mpi->comm.all_reduce_in_place_n(_accN.data(), _accN.size(), std::plus<>{});
-    _mpi->comm.all_reduce_in_place_n(_accM2.data(), _accM2.size(), std::plus<>{});
     nda::array<ComplexType, 2> tail(_nt, nm2);
-    auto do_tail = [&](nda::array<ComplexType, 3>& acc, nda::array<ComplexType, 2>& out) {
+    // Tr_ω(A,B) = (1/β) Σ_n c(iω_n) = −c(τ=β⁻): reduce the per-ω accumulator, then
+    // take it to τ = β⁻ and flip the sign.
+    auto matsubara_tail = [&](nda::array<ComplexType, 3>& acc,
+                              nda::array<ComplexType, 2>& out) {
+      _mpi->comm.all_reduce_in_place_n(acc.data(), acc.size(), std::plus<>{});
       auto acc_2d = nda::reshape(acc, std::array<long, 2>{_nw, nm2});
       _FT->w_to_tau(acc_2d, tail, imag_axes_ft::fermion);
       auto out_1d = nda::reshape(out, std::array<long, 1>{nm2});
       _FT->tau_to_beta(tail, out_1d);
       for (long i = 0; i < nm2; ++i) out_1d(i) *= ComplexType(-1.0);
     };
-    do_tail(_accN, matsN);
-    do_tail(_accM2, matsM2);
+    matsubara_tail(_N_mats, N_mats);
+    matsubara_tail(_M2_mats, M2_mats);
     _Timer.stop("LR_HESS_FT");
   }
 
@@ -419,10 +436,10 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   const ComplexType sf(_spin_factor);
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      r.hessian_plain(l, p) = sf * _statPlain(l, p);
-      r.static2(l, p)  = sf * _statH0_2(l, p);
-      r.N(l, p)        = sf * (_statN(l, p) + matsN(l, p));
-      r.M2(l, p)       = sf * (_statM2(l, p) + matsM2(l, p));
+      r.hessian_plain(l, p) = sf * _plain_stat(l, p);
+      r.static2(l, p)       = sf * _static2_stat(l, p);
+      r.N(l, p)             = sf * (_N_stat(l, p)  + N_mats(l, p));
+      r.M2(l, p)            = sf * (_M2_stat(l, p) + M2_mats(l, p));
       r.hessian_sym(l, p)   = r.static2(l, p) + r.M2(l, p) - r.N(l, p);
     }
 

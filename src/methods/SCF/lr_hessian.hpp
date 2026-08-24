@@ -283,12 +283,19 @@ private:
                   nda::array_view<ComplexType, 1> acc) const;
 
   /// Pack this rank's element slice of a node-replicated (nt,ns,nk,nb,nb) array
-  /// into `(nt, nloc)` and transform it to `(nw, nloc)`.
+  /// into `(nt, nloc)` and transform it to `(nw, nloc)`. `weighted` folds in w_k,
+  /// which every RIGHT operand carries and no left operand does.
   void pack_to_omega(sArray_t<Array_view_5D_t> const& src,
-                     nda::array<ComplexType, 2>& dst_w) const;
+                     nda::array<ComplexType, 2>& dst_w, bool weighted) const;
 
   /// Pack this rank's element slice of a node-replicated (ns,nk,nb,nb) array.
-  nda::array<ComplexType, 1> pack_static(sArray_t<Array_view_4D_t> const& src) const;
+  nda::array<ComplexType, 1> pack_static(sArray_t<Array_view_4D_t> const& src,
+                                         bool weighted) const;
+
+  /// ⟨A,A⟩ on the stored ΔΣ of mode 0: real and positive by construction, so its
+  /// sign is what a wrong pairing breaks. Collective; a pure diagnostic, kept out
+  /// of assemble() so that reads as the equation.
+  ComplexType self_pairing() const;
 
   std::shared_ptr<mpi_context_t> _mpi;
   imag_axes_ft::IAFT const* _FT;
@@ -313,10 +320,20 @@ private:
   std::vector<nda::array<ComplexType, 1>> _dF;    ///< ΔF_λ, unweighted
   std::vector<nda::array<ComplexType, 1>> _dDm1;  ///< ΔDm_p, weighted
 
-  /// Per-ω accumulators of the two dynamic mode-pair matrices, and the static
-  /// parts. Reduced once, in assemble().
-  nda::array<ComplexType, 3> _accN, _accM2;
-  nda::array<ComplexType, 2> _statN, _statM2, _statPlain, _statH0_2;
+  // Mode-pair accumulators, one pair of arrays per TERM of the functional. Each
+  // term is Tr(static) + Tr_ω(dynamic); the two halves are accumulated apart
+  // because the ω half needs the Matsubara tail before it can be summed. All are
+  // reduced once, in assemble().
+  //
+  //   H_plain = plain
+  //   H_sym   = static2 + M2 − N
+  //
+  nda::array<ComplexType, 2> _plain_stat;              ///< Tr(ΔH0_λ, ΔDm_p)
+  nda::array<ComplexType, 2> _static2_stat;            ///< Tr(ΔH0_λ, ΔDm'_p)
+  nda::array<ComplexType, 2> _N_stat;                  ///< Tr(ΔF_λ, ΔDm_p)
+  nda::array<ComplexType, 3> _N_mats;                  ///< Tr_ω(ΔΣ_λ, ΔG_p)
+  nda::array<ComplexType, 2> _M2_stat;                 ///< Tr(ΔF_λ, ΔDm'_p)
+  nda::array<ComplexType, 3> _M2_mats;                 ///< Tr_ω(ΔΣ_λ, ΔG'_p)
 
   std::vector<bool> _stored, _improved;
   /// assemble() reduces the accumulators in place, so it is single-shot.
