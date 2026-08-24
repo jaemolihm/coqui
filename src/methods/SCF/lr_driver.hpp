@@ -295,6 +295,47 @@ struct lr_params {
 struct lr_kernel_split;
 
 /**
+ * One kernel channel, fully described: everything that differs between K_sc and
+ * K_pert, resolved once by lr_driver::sc_channel() / pert_channel().
+ *
+ * This is what makes apply_kernel channel-agnostic. What the code used to carry as
+ * two separate call paths is now data: which evaluator instances to drive, which
+ * component switches to pass them, which timer regions to bill, and which of the
+ * self-consistent channel's privileges this channel has.
+ */
+struct lr_kernel_channel {
+  /// The Σ component flags (term 1 / term 2) this channel carries.
+  lr_kernel_spec mask{};
+
+  bool hf_active = false;      ///< this channel evaluates ΔF at all
+  bool hartree = false;        ///< ... with the Hartree term
+  bool exchange = false;       ///< ... and/or an exchange contraction
+  bool sigma_active = false;   ///< this channel evaluates ΔΣ at all
+
+  solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
+  solvers::lr_gw* gw = nullptr;
+
+  /// Timer regions of THIS channel. Both channels run the same evaluators, and the
+  /// cost argument for a split kernel is exactly the sc/pert breakdown, so each
+  /// gets its own clocks.
+  const char* clk_hf = nullptr;
+  const char* clk_pi = nullptr;
+  const char* clk_w = nullptr;
+  const char* clk_sigma = nullptr;
+
+  /// Contract -W_c(iν=0) as the static counter-term instead of V + W_c(iν=0). Only
+  /// a split run's remainder owes it. See lr_params::exchange_static_W.
+  bool sex_counterterm = false;
+  /// Forward the static inputs (ΔV_qPQ, the unperturbed Dm, include_xc) and the
+  /// DeltaX IBC correction. The self-consistent channel owns those; the
+  /// perturbative one has never used them.
+  bool static_inputs = false;
+  /// Write ΔΣ term 2 to its own array as well as into the total. A one-shot G0W0
+  /// feature, incompatible with a split kernel, hence sc-channel only.
+  bool split_sigma_terms = false;
+};
+
+/**
  * @class lr_driver
  * @brief Driver for self-consistent Linear Response calculations
  *
@@ -547,52 +588,62 @@ private:
                   std::optional<dW_t>& opt_dW_full_wqPQ,
                   std::optional<dW_t>& opt_dW_tRPQ);
 
-  /**
-   * Apply the GW self-energy branch of `lr_kernel` into `sSigma_tskij_out`, overwriting
-   * it. Each divergence correction is applied by the evaluator that owns the term
-   * it corrects, so passing the overlap and the heads is all this has to do.
-   *
-   * The static ΔF is NOT here: it is one lr_hf::evaluate call with no ΔP/ΔW
-   * pipeline behind it, so K_sc inlines it in the SCF loop and K_pert takes it in
-   * apply_pert_kernel. This routine is the Σ pipeline (ΔP → ΔW → ΔΣ) shared by
-   * the two channels.
-   *
-   * A method rather than a lambda inside lr_solve_one because the post-solve
-   * K_pert refresh has to run the same evaluation from outside the SCF loop.
-   * `clk_*` name the timer regions of the channel being evaluated: the two
-   * channels run the same evaluators, and the cost argument for a split kernel is
-   * exactly the sc/pert breakdown.
-   */
-  template<THC_ERI THC_t>
-  void apply_kernel_gw(lr_kernel_spec const& lr_kernel,
-                          solvers::lr_gw& gw_solver,
-                          sArray_t<Array_view_5D_t>& sSigma_tskij_out,
-                          const lr_ibc_DeltaX* ibc_ptr,
-                          const char* clk_pi, const char* clk_w, const char* clk_sigma,
-                          const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                          const sArray_t<Array_view_5D_t>& sG_tskij,
-                          THC_t& thc,
-                          const lr_params& p,
-                          sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
+  /// Resolve the two channels of `k` into apply_kernel descriptors. Both read only
+  /// `k`, `p` and the driver's own evaluator instances, so every phase of a run
+  /// builds the identical channels.
+  lr_kernel_channel sc_channel(lr_kernel_split const& k, lr_params const& p);
+  lr_kernel_channel pert_channel(lr_kernel_split const& k, lr_params const& p);
 
   /**
-   * One whole K_pert evaluation on the supplied ΔDm / ΔG: the static ΔF branch
-   * (including the HSEX counter-term) plus apply_kernel_gw for the Σ branch.
-   * Shared by the in-loop stage boundary and the post-solve refresh so the kernel
-   * call exists exactly once.
+   * Apply one whole kernel channel to the supplied ΔDm / ΔG.
    *
-   * The perturbative source is OVERWRITTEN, not accumulated: the ΔG this is
-   * applied to already carries every lower order.
+   * Channel-agnostic: `ch` says which components, which evaluators, which clocks
+   * and which privileges, so K_sc and K_pert are the same code with different
+   * data. Both branches are optional — a channel carrying only ΔF does no Σ work,
+   * and vice versa.
+   *
+   * @param ch              - [INPUT]  from sc_channel() / pert_channel()
+   * @param sDeltaF_out     - [OUTPUT] this channel's ΔF, OVERWRITTEN (not
+   *                                   accumulated): the ΔG it is applied to
+   *                                   already carries every lower order. Untouched
+   *                                   when the channel carries no ΔF.
+   * @param pDeltaSigma_out - [OUTPUT] this channel's ΔΣ, overwritten; may be null
+   *                                   exactly when the channel carries no ΔΣ.
+   * @param sDeltaDm_skij   - [INPUT]  ΔDm the ΔF branch contracts
+   * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
+   * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
+   * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
+   *                                   ch.split_sigma_terms
    */
   template<THC_ERI THC_t>
-  void apply_pert_kernel(lr_kernel_split const& k,
-                         sArray_t<Array_view_4D_t>& sDeltaF_pert_skij,
-                         sArray_t<Array_view_5D_t>* pDeltaSigma_pert,
-                         const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-                         const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                         const sArray_t<Array_view_5D_t>& sG_tskij,
-                         THC_t& thc,
-                         const lr_params& p);
+  void apply_kernel(lr_kernel_channel const& ch,
+                    sArray_t<Array_view_4D_t>& sDeltaF_out,
+                    sArray_t<Array_view_5D_t>* pDeltaSigma_out,
+                    const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                    const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                    const sArray_t<Array_view_5D_t>& sG_tskij,
+                    THC_t& thc,
+                    const lr_params& p,
+                    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
+
+  /**
+   * The GW self-energy branch of apply_kernel: ΔΠ -> ΔW -> ΔΣ for one channel,
+   * into `sSigma_tskij_out`, overwriting it. Each divergence correction is applied
+   * by the evaluator that owns the term it corrects, so passing the overlap and
+   * the heads is all this has to do.
+   *
+   * Split out from apply_kernel because it is long, not because it is a separate
+   * concept: the static ΔF branch is one lr_hf::evaluate call with none of this
+   * pipeline behind it.
+   */
+  template<THC_ERI THC_t>
+  void apply_kernel_gw(lr_kernel_channel const& ch,
+                       sArray_t<Array_view_5D_t>& sSigma_tskij_out,
+                       const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                       const sArray_t<Array_view_5D_t>& sG_tskij,
+                       THC_t& thc,
+                       const lr_params& p,
+                       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
    * A split kernel evaluates ΔF / ΔΣ in two channels (K_sc every inner iteration,

@@ -744,17 +744,25 @@ void lr_driver::lr_setup(
 
 template<THC_ERI THC_t>
 void lr_driver::apply_kernel_gw(
-    lr_kernel_spec const& lr_kernel,
-    solvers::lr_gw& gw_solver,
+    lr_kernel_channel const& ch,
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
-    const lr_ibc_DeltaX* ibc_ptr,
-    const char* clk_pi, const char* clk_w, const char* clk_sigma,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
     THC_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
+  lr_kernel_spec const& lr_kernel = ch.mask;
+  solvers::lr_gw& gw_solver = *ch.gw;
+  const char* clk_pi = ch.clk_pi;
+  const char* clk_w = ch.clk_w;
+  const char* clk_sigma = ch.clk_sigma;
+  // Only the self-consistent channel carries the IBC correction.
+  const lr_ibc_DeltaX* ibc_ptr =
+      (ch.static_inputs && _opt_ibc) ? &(*_opt_ibc) : nullptr;
+  utils::check(!ch.split_sigma_terms || sDeltaSigma_term2_tskij != nullptr,
+               "lr_driver::apply_kernel_gw: the channel asks for split ΔΣ terms "
+               "but no term-2 destination was given.");
   auto& sS_skij = _dyson.sS_skij();
   utils::check(lr_kernel.has_sigma(),
                "lr_driver::apply_kernel_gw: called with a Σ-free "
@@ -802,7 +810,7 @@ void lr_driver::apply_kernel_gw(
   // ΔW stays in (t,q,P,Q): the Σ evaluator consumes one τ slice at a time,
   // which is contiguous in this layout and matches term 1's dW_tRPQ.
   _Timer.start(clk_sigma);
-  if (p.split_sigma_terms) {
+  if (ch.split_sigma_terms) {
     // One-shot G0W0: compute the two terms separately, then store
     //   sDeltaSigma_tskij       = term1 + term2  (total ΔΣ, same as fused)
     //   sDeltaSigma_term2_tskij = term2 (G0·dW0)  [written as DeltaSigma_GdW]
@@ -859,43 +867,96 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel(bool counter
 }
 
 
+lr_kernel_channel lr_driver::sc_channel(lr_kernel_split const& k, lr_params const& p) {
+  lr_kernel_channel ch;
+  ch.mask         = k.sc;
+  ch.hf_active    = k.sc_hf;
+  ch.hartree      = k.sc.hartree;
+  ch.exchange     = k.sc.exchange;
+  ch.sigma_active = k.sc_sigma;
+  ch.hf = _lr_hf.get();
+  ch.gw = _lr_gw.get();
+  ch.clk_hf = "LR_HF";
+  ch.clk_pi = "LR_GW_PI"; ch.clk_w = "LR_GW_W"; ch.clk_sigma = "LR_GW_SIGMA";
+  // The self-consistent channel is the one holding the HSEX kernel proper, the
+  // static inputs and the IBC correction, and the only one that can split ΔΣ.
+  ch.sex_counterterm   = false;
+  ch.static_inputs     = true;
+  ch.split_sigma_terms = p.split_sigma_terms;
+  return ch;
+}
+
+
+lr_kernel_channel lr_driver::pert_channel(lr_kernel_split const& k, lr_params const& p) {
+  lr_kernel_channel ch;
+  ch.mask         = k.pert;
+  ch.hf_active    = k.pert_hf;
+  ch.hartree      = k.pert.hartree;
+  // The counter-term IS an exchange contraction, just with the kernel -W_c(0), so
+  // it turns the exchange branch on even when the component mask leaves exchange
+  // wholly in K_sc.
+  ch.exchange     = k.pert.exchange || k.pert_sex_counterterm;
+  ch.sigma_active = k.pert_sigma;
+  ch.hf = _lr_hf_pert.get();
+  ch.gw = _lr_gw_pert.get();
+  ch.clk_hf = "LR_HF_PERT";
+  ch.clk_pi = "LR_GW_PI_PERT"; ch.clk_w = "LR_GW_W_PERT";
+  ch.clk_sigma = "LR_GW_SIGMA_PERT";
+  ch.sex_counterterm = k.pert_sex_counterterm;
+  ch.static_inputs   = false;
+  // The split-term ΔΣ output is a one-shot G0W0 feature, rejected together with a
+  // split kernel, so the perturbative channel never has a term-2 destination.
+  ch.split_sigma_terms = false;
+  return ch;
+}
+
+
 template<THC_ERI THC_t>
-void lr_driver::apply_pert_kernel(
-    lr_kernel_split const& k,
-    sArray_t<Array_view_4D_t>& sDeltaF_pert_skij,
-    sArray_t<Array_view_5D_t>* pDeltaSigma_pert,
+void lr_driver::apply_kernel(
+    lr_kernel_channel const& ch,
+    sArray_t<Array_view_4D_t>& sDeltaF_out,
+    sArray_t<Array_view_5D_t>* pDeltaSigma_out,
     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
     THC_t& thc,
-    const lr_params& p) {
+    const lr_params& p,
+    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
-  // The split-term ΔΣ output is a single-kernel, one-shot G0W0 feature and is
-  // rejected together with a split kernel, so the perturbative channel never has
-  // a term-2 destination to write. Checked rather than assumed, since passing
-  // nullptr below would otherwise be a silent null dereference.
-  utils::check(!p.split_sigma_terms,
-               "lr_driver::apply_pert_kernel: split ΔΣ terms are incompatible with "
-               "a split-kernel schedule.");
-  std::optional<solvers::lr_hf::hsex_kernel_t> hsex_ct;
-  if (k.pert_sex_counterterm) hsex_ct = hsex_kernel(true);
-  if (k.pert_hf) {
-    _Timer.start("LR_HF_PERT");
-    // The counter-term IS an exchange contraction, just with the kernel
-    // -W_c(0), so it turns the exchange branch on even when the component
-    // mask leaves exchange wholly in K_sc.
-    _lr_hf_pert->evaluate(sDeltaF_pert_skij, sDeltaDm_skij, thc,
-                          _dyson.sS_skij().local(),
-                          k.pert.hartree, k.pert.exchange || hsex_ct.has_value(),
-                          nullptr, nullptr, nullptr, nullptr, false,
-                          hsex_ct ? &(*hsex_ct) : nullptr);
-    _Timer.stop("LR_HF_PERT");
+  if (ch.hf_active) {
+    utils::check(ch.hf != nullptr,
+                 "lr_driver::apply_kernel: the channel evaluates ΔF but carries no "
+                 "lr_hf instance.");
+    // V + W_c(iν=0) for the self-consistent channel, -W_c(iν=0) for the
+    // counter-term a split run's remainder owes; empty unless the run is HSEX.
+    auto hsex = hsex_kernel(ch.sex_counterterm);
+    // A channel that owes the counter-term must have a kernel to build it from.
+    // It always does — pert_sex_counterterm implies exchange_static_W, which is
+    // exactly when lr_setup engages _opt_dWc0_qPQ — and ch.exchange is set from
+    // ch.sex_counterterm on that assumption, so the exchange branch would
+    // otherwise silently contract bare V instead of -W_c(0).
+    utils::check(!ch.sex_counterterm || hsex.has_value(),
+                 "lr_driver::apply_kernel: the channel owes the HSEX counter-term "
+                 "but W_c(iν=0) was never precomputed.");
+    _Timer.start(ch.clk_hf);
+    ch.hf->evaluate(sDeltaF_out, sDeltaDm_skij, thc, _dyson.sS_skij().local(),
+                    ch.hartree, ch.exchange,
+                    ch.static_inputs && _opt_ibc ? &(*_opt_ibc) : nullptr,
+                    ch.static_inputs ? p.DeltaV_qPQ : nullptr,
+                    ch.static_inputs ? p.Dm_ab : nullptr,
+                    nullptr,
+                    ch.static_inputs && p.include_xc,
+                    hsex ? &(*hsex) : nullptr);
+    _Timer.stop(ch.clk_hf);
     _mpi->comm.barrier();
   }
-  if (k.pert_sigma) {
-    apply_kernel_gw(k.pert, *_lr_gw_pert, *pDeltaSigma_pert, nullptr,
-                       "LR_GW_PI_PERT", "LR_GW_W_PERT", "LR_GW_SIGMA_PERT",
-                       sDeltaG_tskij, sG_tskij, thc, p, nullptr);
+
+  if (ch.sigma_active) {
+    utils::check(pDeltaSigma_out != nullptr,
+                 "lr_driver::apply_kernel: the channel evaluates ΔΣ but no "
+                 "destination was given.");
+    apply_kernel_gw(ch, *pDeltaSigma_out, sDeltaG_tskij, sG_tskij, thc, p,
+                    sDeltaSigma_term2_tskij);
   }
 }
 
@@ -979,10 +1040,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
   auto& sS_skij            = _dyson.sS_skij();
-  // The kernel lr_hf contracts under HSEX, empty otherwise: V + W_c(iν=0) in the
-  // self-consistent channel. The remainder's counter-term -W_c(iν=0) is built by
-  // apply_pert_kernel, which owns the K_pert evaluation.
-  auto hsex = hsex_kernel(false);
+  // The two kernel channels, resolved once: which evaluators, which component
+  // switches, which clocks. apply_kernel is agnostic to which one it is handed.
+  const lr_kernel_channel sc_ch   = sc_channel(k, p);
+  const lr_kernel_channel pert_ch = pert_channel(k, p);
 
   if (include_gw_sigma) {
     utils::check(sDeltaSigma_tskij != nullptr,
@@ -1170,26 +1231,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _mpi->comm.broadcast_n(&norm_DeltaDm_diff, 1, 0);
     _Timer.stop("LR_CONVERGENCE");
 
-    // Step 2: Compute the K_sc LR Fock matrix (if requested)
-    if (k.sc_hf) {
-      _Timer.start("LR_HF");
-      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
-      _lr_hf->evaluate(sDeltaF_sc_skij, sDeltaDm_skij, thc, sS_skij.local(),
-                       k.sc.hartree, k.sc.exchange, ibc_ptr,
-                       p.DeltaV_qPQ, p.Dm_ab, nullptr, p.include_xc,
-                       hsex ? &(*hsex) : nullptr);
-      _Timer.stop("LR_HF");
-      _mpi->comm.barrier();
-    }
-
-    // Step 3: Compute the K_sc LR GW self-energy
-    if (k.sc_sigma) {
-      const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
-      apply_kernel_gw(k.sc, *_lr_gw, *pDeltaSigma_sc, ibc_ptr,
-                         "LR_GW_PI", "LR_GW_W", "LR_GW_SIGMA",
-                         sDeltaG_tskij, sG_tskij, thc, p,
-                         sDeltaSigma_term2_tskij);
-    }
+    // Steps 2-3: apply K_sc — the ΔF branch, then the ΔΠ -> ΔW -> ΔΣ pipeline.
+    apply_kernel(sc_ch, sDeltaF_sc_skij, pDeltaSigma_sc,
+                 sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
+                 sDeltaSigma_term2_tskij);
 
     // Step 3g (qp mode): statify the dynamic ΔΣ(iω) into the static ΔV_QPGW(k)
     // using the frozen QP orbitals/energies. ΔV_QPGW is the tracked/mixed static
@@ -1369,8 +1414,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        apply_pert_kernel(k, sDeltaF_pert_skij, pDeltaSigma_pert,
-                          sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
+        apply_kernel(pert_ch, sDeltaF_pert_skij, pDeltaSigma_pert,
+                     sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
 
         // Extrapolate the perturbative source. Only a channel that actually
         // carries the quantity may be mixed — otherwise the handle aliases the
@@ -1573,7 +1618,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     auto sDeltaF_scratch = math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
     const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
-    // Total (K_sc ∪ K_pert) Hartree/exchange content.
+    // Total (K_sc ∪ K_pert) Hartree/exchange content — not a channel, so this one
+    // call does not go through apply_kernel: it spans both masks, writes a scratch
+    // array, and is the only caller that wants DeltaF_PQ_out.
+    auto hsex = hsex_kernel(false);
     _lr_hf->evaluate(sDeltaF_scratch, sDeltaDm_skij, thc, sS_skij.local(),
                      k.sc.hartree || k.pert.hartree,
                      k.sc.exchange || k.pert.exchange, ibc_ptr,
@@ -1624,8 +1672,8 @@ void lr_driver::get_kernel_before_mixing(
     sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
         !k.pert_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
 
-    apply_pert_kernel(k, sDeltaF_pert_skij, pDeltaSigma_pert,
-                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
+    apply_kernel(pert_channel(k, p), sDeltaF_pert_skij, pDeltaSigma_pert,
+                 sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
     // The totals the caller reads must see the new source; the sc channel is
     // untouched, so this is the same rebuild the SCF loop does every iteration.
     rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
