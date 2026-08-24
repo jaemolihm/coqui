@@ -1,0 +1,206 @@
+/**
+ * ==========================================================================
+ * CoQuí: Correlated Quantum ínterface
+ *
+ * Copyright (c) 2022-2026 Simons Foundation & The CoQuí developer team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * ==========================================================================
+ */
+
+
+#undef NDEBUG
+
+#include <algorithm>
+#include <vector>
+
+#include "catch2/catch.hpp"
+
+#include "configuration.hpp"
+#include "IO/AppAbort.hpp"
+#include "IO/app_loggers.h"
+
+#include "utilities/tile_partition.hpp"
+
+namespace bdft_tests
+{
+
+namespace
+{
+
+long ceil_div(long a, long b) { return (a + b - 1)/b; }
+
+// every factorization p*q == np
+std::vector<std::pair<long,long>> factorizations(long np)
+{
+  std::vector<std::pair<long,long>> f;
+  for (long p = 1; p <= np; ++p)
+    if (np%p == 0) f.push_back({p, np/p});
+  return f;
+}
+
+} // anonymous
+
+TEST_CASE("tile_partition_invariants", "[utilities]")
+{
+  using utils::tile_range;
+  using utils::tile_offset;
+  using utils::tile_extent;
+  using utils::tile_of;
+  using utils::local_range_of_rank;
+
+  std::vector<long> extents;
+  for (long N = 1; N <= 64; ++N) extents.push_back(N);
+  for (long N : {130l, 181l, 283l, 333l, 403l, 511l, 1687l, 2229l}) extents.push_back(N);
+
+  const std::vector<long> nprocs = {1,2,4,8,12,16,32,64,128,192,768,1024};
+
+  for (long N : extents) {
+
+    // -- properties of the element -> tile map, for every tile count ------------
+    std::vector<long> tcounts;
+    for (long t = 1; t <= std::min(N, 70l); ++t) tcounts.push_back(t);
+    if (N > 70) { tcounts.push_back(N/3); tcounts.push_back(N/2); tcounts.push_back(N-1); tcounts.push_back(N); }
+
+    for (long t : tcounts) {
+      if (t < 1 or t > N) continue;
+      const long a = N/t, r = N%t;
+
+      long covered = 0, prev_last = 0;
+      long emin = N+1, emax = -1;
+      for (long i = 0; i < t; ++i) {
+        auto [f,l] = tile_range(N,t,i);
+        // (1) no gap, no overlap
+        REQUIRE(f == prev_last);
+        REQUIRE(l > f);
+        prev_last = l;
+        covered += l-f;
+        emin = std::min(emin, l-f);
+        emax = std::max(emax, l-f);
+        // (3) closed form of the offset
+        REQUIRE(f == i*a + std::min(i,r));
+        REQUIRE(tile_extent(N,t,i) == (i < r ? a+1 : a));
+      }
+      // (1) tiles partition [0,N)
+      REQUIRE(prev_last == N);
+      REQUIRE(covered == N);
+      // (2) tile extents differ by at most one
+      REQUIRE(emax - emin <= 1);
+
+      // (8) index -> tile -> offset round trip
+      for (long i = 0; i < t; ++i) REQUIRE(tile_of(N,t,tile_offset(N,t,i)) == i);
+      for (long idx = 0; idx < N; ++idx) {
+        long i = tile_of(N,t,idx);
+        auto [f,l] = tile_range(N,t,i);
+        REQUIRE(idx >= f);
+        REQUIRE(idx < l);
+      }
+    }
+
+    // -- properties of the tile -> rank map -------------------------------------
+    for (long np : nprocs) {
+      if (np > N) continue;
+      for (auto [p_row,p_col] : factorizations(np)) {
+        if (p_row > N or p_col > N) continue;
+        const long p_max = std::max(p_row,p_col);
+
+        for (long cap : {1l, 16l, 1024l}) {
+          const long t = utils::balanced_tile_count(N, p_max, cap);
+          // the helper never returns an unusable count
+          REQUIRE(t >= p_max);
+          REQUIRE(t <= N);
+          // (6) every rank of the p_max axis owns at least one tile
+          REQUIRE(t/p_max >= 1);
+          // tiles honour the cap whenever the cap is reachable, i.e. t was not
+          // clamped down to N by the min
+          if (t == p_max*((N + p_max*cap - 1)/(p_max*cap)))
+            REQUIRE(tile_extent(N,t,0) <= cap);
+
+          // (7) equal tile counts on two axes of equal extent => identical
+          // boundaries, whatever their process grids. This is the getri mt == nt
+          // precondition and the gemm contracted-axis precondition, and it is the
+          // reason the stored quantity is a count and not a size: the partition
+          // must be a function of (N, t) alone.
+          for (long i = 0; i < t; ++i) {
+            REQUIRE(tile_range(N,t,i) ==
+                    std::make_pair(long(i*(N/t) + std::min(i,N%t)),
+                                   long((i+1)*(N/t) + std::min(i+1,N%t))));
+            REQUIRE(local_range_of_rank(N,t,1,0) == std::pair<long,long>{0,N});
+          }
+
+          for (long axis : {0l, 1l}) {
+            const long np_a = (axis == 0 ? p_row : p_col);
+            long prev = 0, lmin = N+1, lmax = -1;
+            for (long ip = 0; ip < np_a; ++ip) {
+              auto [f,l] = local_range_of_rank(N,t,np_a,ip);
+              REQUIRE(f == prev);
+              prev = l;
+              // (5) no empty rank
+              REQUIRE(l > f);
+              lmin = std::min(lmin, l-f);
+              lmax = std::max(lmax, l-f);
+            }
+            REQUIRE(prev == N);
+            // (4) load bounds. Equality with the ideal ceil(N/np) holds exactly when
+            // every rank owns a single tile; with k = t/np tiles per rank the worst
+            // rank can be up to k-1 elements above the ideal.
+            REQUIRE(lmax >= ceil_div(N,np_a));
+            REQUIRE(lmax <= ceil_div(t,np_a)*ceil_div(N,t));
+            REQUIRE(lmin >= (t/np_a)*(N/t));
+            if (t == np_a) REQUIRE(lmax == ceil_div(N,np_a));
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE("tile_partition_reference_values", "[utilities]")
+{
+  // t == N is the plain balanced element partition, i.e. tile size one
+  REQUIRE(utils::balanced_tile_count(403, 1, 1) == 403);
+  for (long i = 0; i < 403; ++i) REQUIRE(utils::tile_extent(403,403,i) == 1);
+
+  // N = 403 over the min_diff grids of a few rank counts, cap 1024 inactive
+  REQUIRE(utils::balanced_tile_count(403, 8, 1024) == 8);
+  REQUIRE(utils::balanced_tile_count(403, 32, 1024) == 32);
+  REQUIRE(utils::balanced_tile_count(403, 128, 1024) == 128);
+  REQUIRE(utils::balanced_tile_count(403, 403, 1024) == 403);
+  // 403 = 8*50 + 3: three tiles of 51, five of 50; max rank load 51 == ceil(403/8)
+  REQUIRE(utils::tile_extent(403, 8, 0) == 51);
+  REQUIRE(utils::tile_extent(403, 8, 2) == 51);
+  REQUIRE(utils::tile_extent(403, 8, 3) == 50);
+  REQUIRE(utils::local_range_of_rank(403, 8, 8, 0) == std::pair<long,long>{0,51});
+  REQUIRE(utils::local_range_of_rank(403, 8, 8, 7) == std::pair<long,long>{353,403});
+
+  // the cap does bite for a large axis: 2229 over 2 ranks needs two tiles per rank
+  REQUIRE(utils::balanced_tile_count(2229, 2, 1024) == 4);
+  REQUIRE(utils::tile_extent(2229, 4, 0) == 558);
+  REQUIRE(utils::tile_extent(2229, 4, 1) == 557);
+  REQUIRE(utils::local_range_of_rank(2229, 4, 2, 0) == std::pair<long,long>{0,1115});
+  REQUIRE(utils::local_range_of_rank(2229, 4, 2, 1) == std::pair<long,long>{1115,2229});
+
+  // 1687 over a 3-rank axis: 563/562/562, not the floor-division 562 with a 563 remainder
+  REQUIRE(utils::balanced_tile_count(1687, 3, 1024) == 3);
+  REQUIRE(utils::tile_extent(1687, 3, 0) == 563);
+  REQUIRE(utils::tile_extent(1687, 3, 1) == 562);
+  REQUIRE(utils::tile_extent(1687, 3, 2) == 562);
+
+  // inverse map on a ragged partition
+  REQUIRE(utils::tile_of(1687, 3, 562) == 0);
+  REQUIRE(utils::tile_of(1687, 3, 563) == 1);
+  REQUIRE(utils::tile_of(1687, 3, 1124) == 1);
+  REQUIRE(utils::tile_of(1687, 3, 1125) == 2);
+}
+
+} // bdft_tests
