@@ -44,7 +44,8 @@ from .version import *
 
 # Direct api for important routines
 from .utils import set_verbosity, MpiHandler, IAFT, app_log, app_debug, app_warning, app_error
-from .mean_field import make_mf, compute_bare_eph_vertex, compute_bare_eph_vertex_d2
+from .mean_field import (make_mf, compute_bare_eph_vertex, compute_bare_eph_vertex_d2,
+                         compute_pw_matrix_elements)
 from .interaction import make_thc_coulomb, make_thc_pivots, make_chol_coulomb, run_isdf
 from .mbpt import run_hf, run_gw, run_evgw, run_qpgw
 from .embed import read_proj_info, downfold_1e, downfold_2e, downfold_local_gf, downfold_coulomb, dmft_embed

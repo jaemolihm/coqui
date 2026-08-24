@@ -34,6 +34,7 @@
 #include "orbitals/orbital_augmenter.h"
 #include "orbitals/orbital_generator.h"
 #include "orbitals/eph_vertex.h"
+#include "orbitals/pw_matrix_elements.h"
 #include "hamiltonian/pseudo/pseudopot.h"
 
 namespace coqui_py {
@@ -75,6 +76,10 @@ namespace coqui_py {
     auto prefix() const { return _mf->prefix(); }
     auto filename() const { return _mf->filename(); }
 
+    /// Unit-cell volume in atomic units. CoQuí's Coulomb kernel carries no 1/Omega,
+    /// so a caller assembling v(q+G)-weighted quantities needs this explicitly.
+    auto volume() const { return _mf->volume(); }
+
     auto nelec() const { return _mf->nelec(); }
     auto nbnd() const { return _mf->nbnd(); }
     auto nspin() const { return _mf->nspin(); }
@@ -82,7 +87,14 @@ namespace coqui_py {
 
     /* FFT grid */
     auto ecutrho () const { return _mf->ecutrho(); }
-    auto fft_grid() const { return _mf->fft_grid_dim(); }
+    /// FFT mesh (3,). Owning, because c2py cannot return a view on anything that
+    /// is not an nda::array.
+    nda::array<long, 1> fft_grid() const {
+      auto n = _mf->fft_grid_dim();
+      nda::array<long, 1> mesh(3);
+      for(int d=0; d<3; ++d) mesh(d) = n(d);
+      return mesh;
+    }
     auto ecutwfc () const { return _mf->wfc_truncated_grid()->ecut(); }
     auto fft_grid_wfc() const { return _mf->wfc_truncated_grid()->mesh(); }
 
@@ -220,6 +232,19 @@ namespace coqui_py {
       auto g  = orbitals::eph_vertex_local<HOST_MEMORY>(*_mf, dv(), q_cryst);
       g += pp.eph_vertex_nonlocal(*_mf, q_cryst);
       return g;
+    }
+
+    /// Plane-wave matrix elements M(G,s,k,i,j) = <phi_{k+q,i}| e^{i(q+G)r} |phi_{k,j}>
+    /// in the band basis, with i the k+q band and j the k band. No Coulomb weight
+    /// and no volume/k-count normalization: M(G=0) at q=0 is the identity. G_mill
+    /// is the (nG,3) table of Miller indices, each component bounded by the FFT
+    /// mesh Nyquist limit. Returns (M, q+G in Cartesian coords); M is returned full
+    /// on the MPI root and empty on every other rank, the q+G table on every rank.
+    /// Requires npol=1 and a full-BZ k-grid.
+    std::tuple<nda::array<ComplexType, 5>, nda::array<double, 2>>
+    compute_pw_matrix_elements(nda::array_const_view<double, 1> q_cryst,
+                               nda::array_const_view<long, 2> G_mill) const {
+      return orbitals::pw_matrix_elements(*_mf, q_cryst, G_mill);
     }
 
     /// Bare nonlocal part of the q=0 second-order electron-phonon vertex, stored
