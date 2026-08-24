@@ -13,6 +13,7 @@
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
 #include "utilities/kpoint_utils.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mean_field/MF.hpp"
 #include "methods/ERI/detail/concepts.hpp"
@@ -156,14 +157,14 @@ namespace methods {
           size_t np_Q = np / np_P;
 
           std::array<long, 4> w_pgrid = {1, 1, np_P, np_Q};
-          std::array<long, 4> w_bsize = {1, 1, 1, 1};
+          std::array<long, 4> w_bsize = {0, 0, 0, 0};   // 0 = one element per tile
           app_log(2, "||dW_wqPQ(t)|| = {}", frob_norm2(dW_tqPQ));
           auto dW_wqPQ = scr_eri.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, false);
 
           if(_exchange_type == "dynamic_sosex" || _exchange_type == "dynamic_2sosex") {
 #if W_GATHER_OLD // a switch to the old version for debugging
             dW_wq_PQ_opt = math::nda::make_distributed_array<nda::array<ComplexType, 3>> (
-                      _context->comm, {1, np_P, np_Q}, {dW_wqPQ.global_shape()[0]*dW_wqPQ.global_shape()[1],dW_wqPQ.global_shape()[2],dW_wqPQ.global_shape()[3]}, {1,1,1});
+                      _context->comm, {1, np_P, np_Q}, {dW_wqPQ.global_shape()[0]*dW_wqPQ.global_shape()[1],dW_wqPQ.global_shape()[2],dW_wqPQ.global_shape()[3]}, {0,0,0});
 
                   for(size_t iw = 0; iw < dW_wqPQ.global_shape()[0]; iw++)
                   for(size_t iq = 0; iq < dW_wqPQ.global_shape()[1]; iq++)
@@ -179,7 +180,7 @@ namespace methods {
             size_t np2_Q = np2 / np2_P;
 
             dW_wqPQ_sosex_opt = math::nda::make_distributed_array<nda::array<ComplexType, 4>> (
-                _context->comm, {nwpools, nqpools, np2_P, np2_Q}, dW_wqPQ.global_shape(), {1,1,1,1});
+                _context->comm, {nwpools, nqpools, np2_P, np2_Q}, dW_wqPQ.global_shape(), {0,0,0,0});
             math::nda::redistribute(dW_wqPQ, dW_wqPQ_sosex_opt.value());
 #endif
 
@@ -206,7 +207,7 @@ namespace methods {
           auto w_gshape = dW_wqPQ.global_shape();  // (w, q, P, Q)
           dW0_qPQ_opt = math::nda::make_distributed_array<nda::array<ComplexType, 3>> (
               _context->comm, {1, np_P, np_Q},
-              {w_gshape[1], w_gshape[2], w_gshape[3]}, {1, 1, 1});
+              {w_gshape[1], w_gshape[2], w_gshape[3]}, {0, 0, 0});
 
           dW0_qPQ_opt.value().local() = dW_wqPQ.local()(0, nda::ellipsis{});
 
@@ -222,7 +223,7 @@ namespace methods {
       using math::nda::make_distributed_array;
       auto [nt, nqpts, NP, NQ] = dPi_tqPQ.global_shape();
       auto pgrid_old = dPi_tqPQ.grid();
-      auto block_size_old = dPi_tqPQ.block_size();
+      auto block_size_old = dPi_tqPQ.tile_count();
 
       { // setup a new pgrid maximizing nqpools and redistribute
         int np = _context->comm.size();
@@ -235,8 +236,9 @@ namespace methods {
         long np_Q = np / np_P;
 
         std::array<long,4> pgrid = {ntpools,nqpools,np_P,np_Q};
-        std::array<long,4> bsize = {1,1,1,1};
-        bsize[2] = std::min( {(long)1024, NP/pgrid[2], NP/pgrid[3]});
+        std::array<long,4> bsize = {0,0,0,0};
+        // square (P,Q) tile count: the same count on both axes
+        bsize[2] = utils::balanced_tile_count(NP, std::max(pgrid[2],pgrid[3]), 1024);
         bsize[3] = bsize[2];
 
         auto buffer_loc  = make_distributed_array<Array_4D_t>(
@@ -255,7 +257,7 @@ namespace methods {
       auto P_rng = dPi_tqPQ.local_range(2);
       auto Q_rng = dPi_tqPQ.local_range(3);
       auto pgrid = dPi_tqPQ.grid();
-      auto block_size = dPi_tqPQ.block_size();
+      auto block_size = dPi_tqPQ.tile_count();
 
       app_log(2, "Evaluation of the U Pi U interaction:");
       app_log(2, "  - processor grid for U Pi U: (t, q, P, Q) = ({}, {}, {}, {})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
@@ -320,7 +322,7 @@ namespace methods {
         size_t Np    = thc.Np();
 
         std::array<long,4> B_pgrid = {1,1,1,1};
-        std::array<long,4> B_bsize = {1,1,1,1};
+        std::array<long,4> B_bsize = {0,0,0,0};   // 0 = one element per tile
         {
             size_t np = comm.size();
             long nqpools = 1;
@@ -336,7 +338,7 @@ namespace methods {
             //size_t np_R = 1;
             B_pgrid = {nqpools,nkpools,np_P,np_R};
       
-            B_bsize[2] = std::min({(long unsigned)1024, Np/B_pgrid[2], Np/B_pgrid[3]});
+            B_bsize[2] = utils::balanced_tile_count(Np, std::max(B_pgrid[2],B_pgrid[3]), 1024);
             B_bsize[3] = B_bsize[2];
 
         }
@@ -393,7 +395,7 @@ namespace methods {
         // local shapes
         auto [nq_kpts_loc, nk_kpts_loc, Np_loc1, Np_loc2] = dB_qkPR.local_shape();
         auto [q_origin, k_origin, P_origin, R_origin] = dB_qkPR.origin();
-        auto bsize =  dB_qkPR.block_size();
+        auto bsize =  dB_qkPR.tile_count();
         auto pgrid =  dB_qkPR.grid();
 
         auto dZ_qPQ  = make_distributed_array<Array_3D_t>(*dB_qkPR.communicator(), {pgrid[0], pgrid[2], pgrid[3]}, 
@@ -483,7 +485,7 @@ namespace methods {
         size_t Np    = thc.Np();
 
         // local shapes
-        auto bsize =  dB_qkPR.block_size();
+        auto bsize =  dB_qkPR.tile_count();
         auto pgrid =  dB_qkPR.grid();
 
         auto dZ_PQ  = make_distributed_array<Array_2D_t>(qk_intra_comm, {pgrid[2], pgrid[3]}, {Np, Np}, 
@@ -719,7 +721,7 @@ namespace methods {
                 auto qk_comm = make_qk_intracom(dB_qkPR, thc);
                 auto [dZ_PQ, dXX_QR, dB_PR] = allocate_buffers_B(dB_qkPR, qk_comm, thc);  
 
-                auto dD_qkPR = allocate_D(dB_qkPR.grid(), dB_qkPR.block_size(), vcomm, thc);
+                auto dD_qkPR = allocate_D(dB_qkPR.grid(), dB_qkPR.tile_count(), vcomm, thc);
 
                 auto dZ_qPQ = allocate_Z(G_tskij, dB_qkPR, thc);
 
@@ -860,8 +862,8 @@ namespace methods {
           
                   auto [dB_qkPRv, dB_qkPRv_contr] = allocate_B(first_interaction, thc);
                   auto [dC_qkPRv, dC_qkPRv_contr] = allocate_C(second_interaction, thc); // C has the same shape
-                  auto dD_qkPR = allocate_D(dB_qkPRv.grid(), dB_qkPRv.block_size(), _context->comm, thc);
-                  auto dD_qkPR_buf = allocate_D(dB_qkPRv.grid(), dB_qkPRv.block_size(), _context->comm, thc);
+                  auto dD_qkPR = allocate_D(dB_qkPRv.grid(), dB_qkPRv.tile_count(), _context->comm, thc);
+                  auto dD_qkPR_buf = allocate_D(dB_qkPRv.grid(), dB_qkPRv.tile_count(), _context->comm, thc);
                   if(doing_dyn && _save_C) check_C_for_saving(thc, dC_qkPRv);
                   
                   for(size_t it = 0; it < nt; it++) {
@@ -927,7 +929,7 @@ namespace methods {
         size_t nbnd = thc.nbnd();
 
         std::array<long,6> A_pgrid = {1,1,1,1,1,1};
-        std::array<long,6> A_bsize = {1,1,1,1,1,1};
+        std::array<long,6> A_bsize = {0,0,0,0,0,0};   // 0 = one element per tile
         {
             size_t np = _context->comm.size();
             long nqpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
@@ -941,9 +943,11 @@ namespace methods {
             // TODO: setup a good block size
       
 #if 1
-            A_bsize[3] = 1; //std::min( (long unsigned)1024, Np/A_pgrid[3]);
-            A_bsize[4] = 1; //std::min( (long unsigned)1024, nbnd/A_pgrid[3]);
-            A_bsize[5] = 1; //std::min( (long unsigned)1024, nbnd/A_pgrid[4]);
+            // one element per tile on (P, u, v); the fused nbnd^2 axis below
+            // relies on the two band axes staying at one element per tile
+            A_bsize[3] = 0;
+            A_bsize[4] = 0;
+            A_bsize[5] = 0;
 #endif
         }
         size_t np_Pqs = A_pgrid[3];
@@ -960,7 +964,7 @@ namespace methods {
   
         auto [s_origin, q_origin, k_origin, P_origin, orb_q_origin, orb_s_origin] = dA_sqkPqs.origin();
 
-        auto block_size = dA_sqkPqs.block_size();
+        auto block_size = dA_sqkPqs.tile_count();
   
         utils::check(nbnd == nbnd_loc1, 
                        "gf2_t::build_U_Pqs_all, nbnd != nbnd_loc1");
@@ -979,9 +983,17 @@ namespace methods {
         
         long np_Z_bigger = utils::find_proc_grid_min_diff(np_Pqs, 1, 1);
         long np_Z_smaller = np_Pqs / np_Z_bigger;
-        long Z_bsize = std::min( {(long unsigned)1024, Np/np_Z_smaller, Np/np_Z_bigger} );
+        long Z_bsize = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
         // Better pgrid / block size balance for slate gemm
         auto dZ_PQ  = make_distributed_array<Array_2D_t>(qk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_bsize, Z_bsize });
+        // The (q,s) band pair is flattened onto one nbnd^2 axis below, so its tile
+        // count is the product of the two parents' -- valid only while both parents
+        // are undivided and at one element per tile.
+        utils::check(A_pgrid[4] == 1 and A_pgrid[5] == 1 and
+                     block_size[4] == long(nbnd) and block_size[5] == long(nbnd),
+            "gf2_t::build_U_Pqs_all: the two band axes must be undivided with one "
+            "element per tile to flatten them; grid ({}, {}), tile counts ({}, {}).",
+            A_pgrid[4], A_pgrid[5], block_size[4], block_size[5]);
         _Timer.start("MAKE_DISTR_ARRAY_XX");
         auto dXX_Qqs  = make_distributed_array<Array_2D_t>(qk_intra_comm, {np_Pqs, 1}, {Np, nbnd*nbnd}, {block_size[3], block_size[4]*block_size[5]});
         // Better pgrid / block size balance for slate gemm
@@ -1082,7 +1094,7 @@ namespace methods {
         // make only C distributed; 
         auto dC_qkPRv_contr = make_distributed_array<Array_5D_t>(_context->comm,
                                                           {pgrid[0], pgrid[1], pgrid[3], pgrid[2], pgrid[4]}, 
-                                                          //{nkpts, nkpts, Np, Np, nbnd}, {1,1,1,Np/pgrid[2],1}); // FIXME!
+                                                          //{nkpts, nkpts, Np, Np, nbnd}, {0,0,0,Np/pgrid[2],0}); // FIXME!
                                                           {nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1});
 
 
@@ -1107,7 +1119,7 @@ namespace methods {
         size_t np_R = np / np_P;
 
         auto dC_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {1,1,np_P,np_R,1},
-                                                          {nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1});
+                                                          {nkpts, nkpts, Np, Np, nbnd}, {0,0,0,0,0});
         return std::array<decltype(dC_qkPRv), 2>{dC_qkPRv, dC_qkPRv_contr};
 
 }
@@ -1131,7 +1143,7 @@ namespace methods {
 
         dC_tsqkPRv_opt = make_distributed_array<nda::array<ComplexType, 7>>(
             _context->comm, {1,1,1,1,np_P,np_R,1},
-            {nt, ns, nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1,1,1});
+            {nt, ns, nkpts, nkpts, Np, Np, nbnd}, {0,0,0,0,0,0,0});
 
         // local shapes
         auto [nt_loc, ns_loc, nq_kpts_loc, nk_kpts_loc, Np_loc2, Np_loc, nbnd_loc1] = dC_tsqkPRv_opt.value().local_shape();
@@ -1179,7 +1191,7 @@ namespace methods {
         auto U_pgrid  = dU_sqkPqs.grid();
 
         std::array<long,5> pgrid = {U_pgrid[1],U_pgrid[2],U_pgrid[3],U_pgrid[4],U_pgrid[5]};
-        std::array<long,5> bsize = {1,1,1,1,1};
+        std::array<long,5> bsize = {0,0,0,0,0};   // 0 = one element per tile
 
         // make only B distributed; do not make A distributed!
         _Timer.start("MAKE_DISTR_ARRAY1");
@@ -1204,7 +1216,7 @@ namespace methods {
         size_t np_P = utils::find_proc_grid_min_diff(np, 1, 1);
         size_t np_R = np / np_P;
 
-        bsize = {1,1,1,1,1};
+        bsize = {0,0,0,0,0};
 
         _Timer.start("MAKE_DISTR_ARRAY2");
         auto dB_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {1,1,np_P,np_R,1},
@@ -1238,17 +1250,9 @@ namespace methods {
         size_t np_P = utils::find_proc_grid_min_diff(np, 1, 1);
         size_t np_R = np / np_P;
 
-        auto bsize = dB_qkPRv_by_qk.block_size();
-        bsize[0] = 1; // TODO: revisit these at optimization of D evaluation
-        bsize[1] = 1;
-/*
-        bsize[2] = std::min( (long unsigned)1024, Np/np_P);
-        bsize[3] = std::min( (long unsigned)1024, Np/np_R);
-        bsize[4] = std::min( (long unsigned)1024, nbnd);
-*/
-        bsize[2] = 1;
-        bsize[3] = 1;
-        bsize[4] = 1;
+        // one element per tile on every axis (0); revisit at optimization of D
+        auto bsize = dB_qkPRv_by_qk.tile_count();
+        bsize.fill(0);
 
         _Timer.start("MAKE_DISTR_ARRAY2");
         auto dB_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {1,1,np_P,np_R,1}, {nkpts, nkpts, Np, Np, nbnd}, bsize);
@@ -1302,11 +1306,9 @@ namespace methods {
         auto U_pgrid =  dU_sqkPqs.grid();
 
         std::array<long,5> pgrid = {U_pgrid[1],U_pgrid[2],U_pgrid[3],U_pgrid[4],U_pgrid[5]};
-        std::array<long,5> bsize = {1,1,1,1,1};
+        std::array<long,5> bsize = {0,0,0,0,0};   // 0 = one element per tile
 
-        bsize[2] = std::min( (long unsigned)1024, Np/pgrid[2]);
-        //bsize[3] = std::min( (long unsigned)1024, Np/pgrid[3]);
-        //bsize[4] = std::min( (long unsigned)1024, nbnd/pgrid[4]);
+        bsize[2] = utils::balanced_tile_count(Np, pgrid[2], 1024);
 
         // make only B distributed; do not make A distributed!
         _Timer.start("MAKE_DISTR_ARRAY1");
@@ -1412,7 +1414,7 @@ namespace methods {
         // local shapes
         auto [nq_kpts_loc, nk_kpts_loc, Np_loc, Np_loc2, nbnd_loc1] = dB_qkPRv.local_shape();
         auto [q_origin, k_origin, P_origin, R_origin, orb_v_origin] = dB_qkPRv.origin();
-        auto bsize =  dB_qkPRv.block_size();
+        auto bsize =  dB_qkPRv.tile_count();
         utils::check(pgrid == dB_qkPRv.grid(), "gf2_t::build_B, pgrid != dB_qkPRv.grid()");
         utils::check(nbnd == nbnd_loc1, "gf2_t::build_B, nbnd != nbnd_loc1");
         utils::check(Np == Np_loc2, "gf2_t::build_B, Np != Np_loc2");
@@ -1558,7 +1560,7 @@ namespace methods {
 
       // make only C distributed;
       auto dC_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {pgrid[0], pgrid[1], pgrid[3], pgrid[2], pgrid[4]},
-                                                        {nkpts, nkpts, Np, Np, nbnd}, {1,1,1,Np/pgrid[2],1});
+                                                        {nkpts, nkpts, Np, Np, nbnd}, {0,0,0,Np/pgrid[2],0});
 
       // local shapes
       auto [nq_kpts_loc, nk_kpts_loc, Np_loc2, Np_loc, nbnd_loc1] = dC_qkPRv.local_shape();
@@ -1609,17 +1611,9 @@ namespace methods {
       size_t np_P = utils::find_proc_grid_min_diff(np, 1, 1);
       size_t np_R = np / np_P;
 
-      auto out_bsize = dC_qkPRv.block_size();
-      out_bsize[0] = 1; // TODO: revisit these at optimization of D evaluation
-      out_bsize[1] = 1;
-/*
-      out_bsize[2] = std::min( (long unsigned)1024, Np/np_P);
-      out_bsize[3] = std::min( (long unsigned)1024, Np/np_R);
-      out_bsize[4] = std::min( (long unsigned)1024, nbnd);
-*/
-      out_bsize[2] = 1;
-      out_bsize[3] = 1;
-      out_bsize[4] = 1;
+      // one element per tile on every axis (0); revisit at optimization of D
+      auto out_bsize = dC_qkPRv.tile_count();
+      out_bsize.fill(0);
 
       auto dC_qkPRv_out = make_distributed_array<Array_5D_t>(_context->comm, {1, 1, np_P, np_R, 1},
                                                         {nkpts, nkpts, Np, Np, nbnd}, out_bsize);
@@ -1737,7 +1731,7 @@ namespace methods {
 
         app_log(2, "MY: try to allocate D with procs {},{},{},{}", B_pgrid[0],1,np_P,np_R);
         auto dD_qkPR = make_distributed_array<Array_4D_t>(comm, {B_pgrid[0], 1, np_P, np_R}, 
-                                                          {nkpts, nkpts, Np, Np}, {B_bsize[0],1,B_bsize[2],B_bsize[3]});
+                                                          {nkpts, nkpts, Np, Np}, {B_bsize[0],0,B_bsize[2],B_bsize[3]});
         return dD_qkPR;
 
     }
@@ -1813,13 +1807,13 @@ namespace methods {
         auto pgrid =  dB_qkPR.grid();
         auto gshape = dB_qkPR.global_shape();
         auto lshape = dB_qkPR.local_shape();
-        auto bsize =  dB_qkPR.block_size();
+        auto bsize =  dB_qkPR.tile_count();
 
         // consistency check for both arrays
         utils::check(pgrid == dC_qkPR.grid(), "dB_qkPR.grid() != dC_qkPR.grid()");
         utils::check(gshape == dC_qkPR.global_shape(), "dB_qkPR.global_shape() != dC_qkPR.global_shape()");
         utils::check(lshape == dC_qkPR.local_shape(), "dB_qkPR.local_shape() != dC_qkPR.local_shape()");
-        utils::check(bsize == dC_qkPR.block_size(), "dB_qkPR.block_size() != dC_qkPR.block_size()");
+        utils::check(bsize == dC_qkPR.tile_count(), "dB_qkPR.tile_count() != dC_qkPR.tile_count()");
 
         // need to have full dimensions by k
         //utils::check(pgrid[0] == 1, "dB_qkPR.grid()[0] != 1");
@@ -1969,13 +1963,13 @@ namespace methods {
         auto pgrid =  dB_qkPRv.grid();
         auto gshape = dB_qkPRv.global_shape();
         auto lshape = dB_qkPRv.local_shape();
-        auto bsize =  dB_qkPRv.block_size();
+        auto bsize =  dB_qkPRv.tile_count();
 
         // consistency check for both arrays
         utils::check(pgrid == dC_qkPRv.grid(), "gf2_t::build_D, dB_qkPRv.grid() != dC_qkPRv.grid()");
         utils::check(gshape == dC_qkPRv.global_shape(), "gf2_t::build_D, dB_qkPRv.global_shape() != dC_qkPRv.global_shape()");
         utils::check(lshape == dC_qkPRv.local_shape(), "gf2_t::build_D, dB_qkPRv.local_shape() != dC_qkPRv.local_shape()");
-        utils::check(bsize == dC_qkPRv.block_size(), "gf2_t::build_D, dB_qkPRv.block_size() != dC_qkPRv.block_size()");
+        utils::check(bsize == dC_qkPRv.tile_count(), "gf2_t::build_D, dB_qkPRv.tile_count() != dC_qkPRv.tile_count()");
 
         // need to have full dimensions by q and k
         utils::check(pgrid[0] == 1, "gf2_t::build_D, dB_qkPRv.grid()[0] != 1");
@@ -2039,7 +2033,7 @@ namespace methods {
         auto pgrid =  dB_qkPRv.grid();
         auto gshape = dB_qkPRv.global_shape();
         auto lshape = dB_qkPRv.local_shape();
-        auto bsize =  dB_qkPRv.block_size();
+        auto bsize =  dB_qkPRv.tile_count();
 
         auto np_P = pgrid[2];
         auto np_R = pgrid[3];
@@ -2048,7 +2042,7 @@ namespace methods {
         utils::check(pgrid == dC_qkPRv.grid(), "gf2_t::build_D, dB_qkPRv.grid() != dC_qkPRv.grid()");
         utils::check(gshape == dC_qkPRv.global_shape(), "gf2_t::build_D, dB_qkPRv.global_shape() != dC_qkPRv.global_shape()");
         utils::check(lshape == dC_qkPRv.local_shape(), "gf2_t::build_D, dB_qkPRv.local_shape() != dC_qkPRv.local_shape()");
-        utils::check(bsize == dC_qkPRv.block_size(), "gf2_t::build_D, dB_qkPRv.block_size() != dC_qkPRv.block_size()");
+        utils::check(bsize == dC_qkPRv.tile_count(), "gf2_t::build_D, dB_qkPRv.tile_count() != dC_qkPRv.tile_count()");
 
         // need to have full dimensions by q and k
         utils::check(pgrid[0] == 1, "gf2_t::build_D, dB_qkPRv.grid()[0] != 1");
@@ -2060,7 +2054,7 @@ namespace methods {
         auto R_Np_loc = lshape[3];
 
         auto dD_qkPR = make_distributed_array<Array_4D_t>(_context->comm, {1, 1, np_P, np_R},
-                                                          {nkpts, nkpts, Np, Np}, {1,1,1,1});
+                                                          {nkpts, nkpts, Np, Np}, {0,0,0,0});
 
         if(is == 0 && it == 0) {
             app_log(2, "Evaluation of the D intermediate:");
@@ -2119,7 +2113,7 @@ namespace methods {
         auto dSigma_kPR = make_distributed_array<Array_3D_t>(D_comm, 
                               {dD_qkPR.grid()[0], dD_qkPR.grid()[2], dD_qkPR.grid()[3]}, 
                                                           {nkpts, Np, Np}, 
-                              {dD_qkPR.block_size()[0], dD_qkPR.block_size()[2], dD_qkPR.block_size()[3]});
+                              {dD_qkPR.tile_count()[0], dD_qkPR.tile_count()[2], dD_qkPR.tile_count()[3]});
 
         auto P_range_D = dD_qkPR.local_range(2);
         auto R_range_D = dD_qkPR.local_range(3);

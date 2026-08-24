@@ -181,7 +181,7 @@ void cholesky::evaluate(h5::group& gh5, std::string format, int Qi,
   } else {
     memory::host_array<ComplexType,5> Ah = L.local(); 
     dArray_t<memory::host_array<ComplexType,5>> Lh(L.communicator(),L.grid(),L.global_shape(),
-		L.origin(),L.block_size(),std::move(Ah));
+		L.origin(),L.tile_count(),std::move(Ah));
     write(gh5, Qi, Lh, format);
   }
 }

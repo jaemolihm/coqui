@@ -219,10 +219,10 @@ namespace methods {
     app_log(2, "    Processor grid: (w, s, k, i) = ({}, {}, {}, {})\n", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
 
     // Prepare input and output buffer
-    auto dA_iw_ski = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts_ibz, nbnds}, {1, 1, 1, 1});
+    auto dA_iw_ski = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts_ibz, nbnds}, {0, 0, 0, 0});
     if(dataset != "DOS" and dataset != "A") { // backward compatibility with "A" name for spectral function
       size_t ntau  = (ac_params.stats == imag_axes_ft::fermion)? FT.nt_f() : FT.nt_b();
-      auto dA_tau_ski = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ntau, ns, nkpts_ibz, nbnds}, {1, 1, 1, 1});
+      auto dA_tau_ski = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ntau, ns, nkpts_ibz, nbnds}, {0, 0, 0, 0});
       read_scf_dataset(dataset, dA_tau_ski);
       FT.tau_to_w(dA_tau_ski.local(), dA_iw_ski.local(), ac_params.stats);
       FT.check_leakage(dA_tau_ski, ac_params.stats, dataset);
@@ -231,14 +231,14 @@ namespace methods {
       std::string dataset_S = "S_skij";
       size_t ntau  = (ac_params.stats == imag_axes_ft::fermion)? FT.nt_f() : FT.nt_b();
       auto dG_tau_skij = make_distributed_array<local_Array_5D_t>(_context.comm, {1, 1, nkpools, np/nkpools, 1},
-                                                                  {ntau, ns, nkpts_ibz, nbnds, nbnds}, {1, 1, 1, 1, 1});
+                                                                  {ntau, ns, nkpts_ibz, nbnds, nbnds}, {0, 0, 0, 0, 0});
       auto dS_skij = make_distributed_array<local_Array_4D_t>(_context.comm, {1, nkpools, np/nkpools, 1},
-                                                              {ns, nkpts_ibz, nbnds, nbnds}, {1, 1, 1, 1});
+                                                              {ns, nkpts_ibz, nbnds, nbnds}, {0, 0, 0, 0});
       read_scf_dataset_full(dataset_G, "scf", dG_tau_skij);
       read_scf_dataset_full(dataset_S, "system", dS_skij);
       auto dA_tau_ski = evaluate_GS_diag(dG_tau_skij, dS_skij);
       auto dA_beta_ski = make_distributed_array<local_Array_3D_t>(_context.comm, {1, nkpools, np/nkpools},
-                                                                  {ns, nkpts_ibz, nbnds}, {1, 1, 1});
+                                                                  {ns, nkpts_ibz, nbnds}, {0, 0, 0});
       dA_beta_ski.communicator()->barrier();
       FT.tau_to_beta(dA_tau_ski.local(), dA_beta_ski.local());
       dA_beta_ski.communicator()->barrier();
@@ -251,7 +251,7 @@ namespace methods {
       FT.check_leakage(dA_tau_ski, ac_params.stats, dataset);
     }
     auto dA_w_ski = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid,
-                                                             {ac_params.Nw, ns, nkpts_ibz, nbnds}, {1, 1, 1, 1});
+                                                             {ac_params.Nw, ns, nkpts_ibz, nbnds}, {0, 0, 0, 0});
 
     // prepare imag and real frequency grids
     auto n_to_iw = nda::map([&](int n) { return FT.omega(n); } );
@@ -904,7 +904,7 @@ namespace methods {
     // Prepare input and output buffer
     using math::nda::make_distributed_array;
     using local_Array_4D_t = nda::array<ComplexType, 4>;
-    auto dG_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts, nbnd}, {1, 1, 1, 1});
+    auto dG_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts, nbnd}, {0, 0, 0, 0});
     auto w_rng = dG_wska.local_range(0);
     auto s_rng = dG_wska.local_range(1);
     auto k_rng = dG_wska.local_range(2);
@@ -912,7 +912,7 @@ namespace methods {
     auto G_wska_loc = dG_wska.local();
     for ( auto [i, a] : itertools::enumerate(a_rng) )
       G_wska_loc(nda::range::all, nda::range::all, nda::range::all, i) = G_wskab_inter(w_rng, s_rng, k_rng, a, a);
-    auto dA_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ac_params.Nw, ns, nkpts, nbnd}, {1, 1, 1, 1});
+    auto dA_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ac_params.Nw, ns, nkpts, nbnd}, {0, 0, 0, 0});
 
     // prepare imag and real frequency grids
     auto n_to_iw = nda::map([&](int n) { return FT.omega(n); } );
@@ -990,7 +990,7 @@ namespace methods {
     // Prepare input and output buffer
     using math::nda::make_distributed_array;
     using local_Array_4D_t = nda::array<ComplexType, 4>;
-    auto dG_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts, nbnd}, {1, 1, 1, 1});
+    auto dG_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {niw, ns, nkpts, nbnd}, {0, 0, 0, 0});
     auto w_rng = dG_wska.local_range(0);
     auto s_rng = dG_wska.local_range(1);
     auto k_rng = dG_wska.local_range(2);
@@ -998,7 +998,7 @@ namespace methods {
     auto G_wska_loc = dG_wska.local();
     for ( auto [i, a] : itertools::enumerate(a_rng) )
       G_wska_loc(nda::range::all, nda::range::all, nda::range::all, i) = G_wskab(w_rng, s_rng, k_rng, a, a);
-    auto dA_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ac_params.Nw, ns, nkpts, nbnd}, {1, 1, 1, 1});
+    auto dA_wska = make_distributed_array<local_Array_4D_t>(_context.comm, pgrid, {ac_params.Nw, ns, nkpts, nbnd}, {0, 0, 0, 0});
 
     // prepare imag and real frequency grids
     auto n_to_iw = nda::map([&](int n) { return FT.omega(n); } );
@@ -1042,7 +1042,7 @@ namespace methods {
 
       auto [ntau, ns, nkpts, nbnds, nbnds2] = dG_tau_skij.global_shape();
 
-      auto buffer1 = make_distributed_array<local_Array_5D_t>(_context.comm, dG_tau_skij.grid(), dG_tau_skij.global_shape(), dG_tau_skij.block_size());
+      auto buffer1 = make_distributed_array<local_Array_5D_t>(_context.comm, dG_tau_skij.grid(), dG_tau_skij.global_shape(), dG_tau_skij.tile_count());
 
       {
           auto [tau_origin, s_origin, k_origin, i_origin, j_origin] = dG_tau_skij.origin();
@@ -1053,9 +1053,9 @@ namespace methods {
           int key = _context.comm.rank();
           mpi3::communicator k_intra_comm = _context.comm.split(color, key);
           
-          auto dG_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {1, 1});
-          auto dS_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {1, 1});
-          auto dGS_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {1, 1});
+          auto dG_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {0, 0});
+          auto dS_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {0, 0});
+          auto dGS_ij = make_distributed_array<local_Array_2D_t>(k_intra_comm, {k_intra_comm.size(), 1}, {nbnds, nbnds}, {0, 0});
           
           size_t nkpts_loc = dG_tau_skij.local_shape()[2]; 
           utils::check(dG_tau_skij.local_shape()[1] == dS_skij.local_shape()[0], "pproc_t::evaluate_GS_diag: different local shapes of dG and dS");
@@ -1077,11 +1077,11 @@ namespace methods {
 
       int np = _context.comm.size();
       int ntpools = utils::find_proc_grid_max_npools(np, ntau, 0.2);
-      auto buffer2 = make_distributed_array<local_Array_5D_t>(_context.comm, {ntpools, 1, np/ntpools, 1, 1}, dG_tau_skij.global_shape(), {1,1,1,1,1});
+      auto buffer2 = make_distributed_array<local_Array_5D_t>(_context.comm, {ntpools, 1, np/ntpools, 1, 1}, dG_tau_skij.global_shape(), {0,0,0,0,0});
 
       math::nda::redistribute(buffer1, buffer2);
 
-      auto buffer2_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {ntpools, 1, np/ntpools, 1}, {ntau, ns, nkpts, nbnds}, {1,1,1,1});
+      auto buffer2_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {ntpools, 1, np/ntpools, 1}, {ntau, ns, nkpts, nbnds}, {0,0,0,0});
 
       auto [ntau_loc, ns_loc, nkpts_loc, nbnd_loc] = buffer2_diag.local_shape();
       for(size_t it = 0; it < ntau_loc; it++)
@@ -1091,7 +1091,7 @@ namespace methods {
           buffer2_diag.local()(it, is, ik, i) = 0.5 * (buffer2.local()(it, is, ik, i, i) + nda::conj(buffer2.local()(it, is, ik, i, i)));
       }
       int nkpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
-      auto GS_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {1, 1, nkpools, np/nkpools}, {ntau, ns, nkpts, nbnds}, {1,1,1,1});
+      auto GS_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {1, 1, nkpools, np/nkpools}, {ntau, ns, nkpts, nbnds}, {0,0,0,0});
       math::nda::redistribute(buffer2_diag, GS_diag);
       return GS_diag;
    }

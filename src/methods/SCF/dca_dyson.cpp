@@ -21,6 +21,7 @@
 
 #include "dca_dyson.h"
 #include "nda/linalg/eigenelements.hpp"
+#include "utilities/tile_partition.hpp"
 
 namespace methods {
 dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *mf,
@@ -129,14 +130,16 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
     int np_j = np / np_i;
 
     w_pgrid = {nwpools, 1, nkpools, np_i, np_j};
-    long ibsize = std::min({1024l, _MF->nbnd()/np_i, _MF->nbnd()/np_j});
-    w_bsize = {1, 1, 1, ibsize, ibsize};
+    // square band-band tile count (mt == nt for slate_ops::inverse); the (w, s, k)
+    // axes keep one element per tile (0)
+    long itiles = utils::balanced_tile_count(_MF->nbnd(), std::max(np_i, np_j), 1024);
+    w_bsize = {0, 0, 0, itiles, itiles};
 
     utils::check(nwpools*nkpools*np_i*np_j == _context.comm.size(), "solve_dyson: pgrid mismatches!");
 
     app_log(2, "Dyson equation for Green's function:");
     app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})", nwpools, nkpools, np_i, np_j);
-    app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})", 1, 1, ibsize, ibsize);
+    app_log(2, "  - tile count: (w, k, i, j) = ({}, {}, {}, {})", 1, 1, itiles, itiles);
   }
 
   auto dSigma_wskij = distributed_tau_to_w(_context.comm, _Sigma_shm, *_FT, w_pgrid, w_bsize);

@@ -571,11 +571,11 @@ TEST_CASE("redistribute_chunked_equivalence", "[math]")
   }
 
   // The reverse direction, with a block size of 1 on the split axis.
-  auto C = make_distributed_array<larray>(world, {1,1,size}, gshape, {1,1,1});
+  auto C = make_distributed_array<larray>(world, {1,1,size}, gshape, {0,0,0});
   fill(C);
-  auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape, {1,1,1});
+  auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape, {0,0,0});
   redistribute_alltoallv(C, D_ref, ComplexType(1.0), ComplexType(0.0), size_t(1) << 40);
-  auto D = make_distributed_array<larray>(world, {size,1,1}, gshape, {1,1,1});
+  auto D = make_distributed_array<larray>(world, {size,1,1}, gshape, {0,0,0});
   redistribute_alltoallv(C, D, ComplexType(1.0), ComplexType(0.0), size_t(8));
   {
     auto Dloc = D.local();

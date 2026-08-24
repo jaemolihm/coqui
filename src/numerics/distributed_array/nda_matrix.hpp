@@ -24,7 +24,8 @@
 
 #include <utility>
 #include <tuple>
-#include "utilities/check.hpp" 
+#include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp" 
 #include "nda/nda.hpp"
 #include "nda/mem/address_space.hpp"
 #include "numerics/distributed_array/detail/concepts.hpp"
@@ -56,19 +57,22 @@ struct darray
   // origin of local array 
   std::array<long,rank> lorigin;
 
-  // block size for slate and slate-like dispatch
-  std::array<long,rank> block_size;
+  // number of tiles per axis, for slate and slate-like dispatch. The tile
+  // boundaries follow from (gextents[d], tile_count[d]) alone -- see
+  // utilities/tile_partition.hpp -- so two axes with the same extent and the
+  // same tile count are partitioned identically whatever their process grids.
+  std::array<long,rank> tile_count;
 
   darray(communicator* comm_,
          std::array<long,rank>  grid_,
          std::array<long,rank> gshape,
          std::array<long,rank> origin_,
-	 std::array<long,rank> bsize) :
+	 std::array<long,rank> tcount) :
     comm(comm_),
     grid(grid_),
     gextents(gshape),
     lorigin(origin_),
-    block_size(bsize) 
+    tile_count(tcount)
   { 
     check_dimensions();
   }
@@ -78,13 +82,13 @@ struct darray
 	 std::array<long,rank>  grid_,
  	 std::array<long,rank> gshape,
 	 std::array<long,rank> origin_,
-	 std::array<long,rank> bsize,
+	 std::array<long,rank> tcount,
 	 IntArray const& local_size) :
     comm(comm_),
     grid(grid_),
     gextents(gshape),
     lorigin(origin_),
-    block_size(bsize)
+    tile_count(tcount)
   {
     check_dimensions(local_size);
   }
@@ -97,17 +101,17 @@ struct darray
   void reset() {
     gextents=std::array<long,rank>{0};
     lorigin=std::array<long,rank>{0};
-    block_size=std::array<long,rank>{0};
+    tile_count=std::array<long,rank>{0};
   }
 
 #if defined(SYNCHRONIZE_DISTRIBUTED_ARRAY)
   darray(darray const& other) :
     comm(other.comm), grid(other.grid), gextents(other.gextents), 
-    lorigin(other.lorigin),block_size(other.block_size)
+    lorigin(other.lorigin),tile_count(other.tile_count)
   { check_dimensions(); } 
   darray(darray && other) :
     comm(other.comm), grid(other.grid), gextents(other.gextents), 
-    lorigin(other.lorigin),block_size(other.block_size)
+    lorigin(other.lorigin),tile_count(other.tile_count)
   { check_dimensions(); } 
   darray& operator=(darray const& other)   
   { 
@@ -115,7 +119,7 @@ struct darray
     grid = other.grid;
     gextents = other.gextents;
     lorigin = other.lorigin;
-    block_size = other.block_size;
+    tile_count = other.tile_count;
     check_dimensions();  
     return *this;
   }
@@ -143,10 +147,12 @@ struct darray
     if constexpr (rank != 2) {
       return false;
     } else {
-      if( (block_size[0] <= 0) or
-	  (block_size[1] <= 0) or
-          (block_size[0] > gextents[0]/grid[0]) or
-          (block_size[1] > gextents[1]/grid[1]) or
+      if( (gextents[0] <= 0) or
+          (gextents[1] <= 0) or
+          (tile_count[0] < grid[0]) or
+	  (tile_count[1] < grid[1]) or
+          (tile_count[0] > gextents[0]) or
+          (tile_count[1] > gextents[1]) or
           (comm->size() != grid[0]*grid[1]) ) return false;
       long ix, iy;
       if constexpr (is_stride_order_C) {
@@ -157,9 +163,14 @@ struct darray
         ix = comm->rank()%grid[0];
         iy = comm->rank()/grid[0];
       }
-      // last proc in the grid can have any dimension
-      if( (ix<grid[0]-1) and (local_shape[0]%block_size[0] != 0)) return false; 
-      if( (iy<grid[1]-1) and (local_shape[1]%block_size[1] != 0)) return false; 
+      // The local block must be exactly the one the (gextents, tile_count)
+      // partition assigns to this rank, or slate's tile map and the actual data
+      // layout disagree. Cheap, and exact -- it replaces the old
+      // "local_shape % tile size == 0 except on the last rank" heuristic.
+      auto [x0,x1] = utils::local_range_of_rank(gextents[0],tile_count[0],grid[0],ix);
+      auto [y0,y1] = utils::local_range_of_rank(gextents[1],tile_count[1],grid[1],iy);
+      if( lorigin[0] != x0 or local_shape[0] != x1-x0 ) return false;
+      if( lorigin[1] != y0 or local_shape[1] != y1-y0 ) return false;
       return true;
     }
   }
@@ -252,8 +263,8 @@ class distributed_array
 		    std::array<long,rank> gshape,
 		    std::array<long,rank> local_size,
 		    std::array<long,rank> origin_,
-                    std::array<long,rank> bsize):
-    base(comm_,grid_,gshape,origin_,bsize,local_size),
+                    std::array<long,rank> tcount):
+    base(comm_,grid_,gshape,origin_,tcount,local_size),
     A(local_size)
   {
     // Complex value types are already zero-initialized by the nda allocator
@@ -271,9 +282,9 @@ class distributed_array
                     std::array<long,rank>  grid_,
                     std::array<long,rank> gshape,
                     std::array<long,rank> origin_,
-                    std::array<long,rank> bsize,
+                    std::array<long,rank> tcount,
 		    Arr&& A_):
-    base(comm_,grid_,gshape,origin_,bsize,A_.shape()),
+    base(comm_,grid_,gshape,origin_,tcount,A_.shape()),
     A(std::forward<Array_t>(A_))
   {}
 
@@ -297,7 +308,7 @@ class distributed_array
   template<DistributedArrayOfRank<rank> DArr>
   distributed_array(DArr const& other) : 
     base(other.communicator(),other.grid(),other.global_shape(),
-	 other.origin(),other.block_size(),other.local().shape()),
+	 other.origin(),other.tile_count(),other.local().shape()),
     A(other.local())
   {
 #if defined(SYNCHRONIZE_DISTRIBUTED_ARRAY)
@@ -312,7 +323,7 @@ class distributed_array
     base.gextents = other.global_shape();
     base.lorigin = other.origin();
     base.comm = other.communicator();
-    base.block_size = other.block_size();
+    base.tile_count = other.tile_count();
     A = other.local();
 #if defined(SYNCHRONIZE_DISTRIBUTED_ARRAY)
     base.comm->barrier();
@@ -326,7 +337,7 @@ class distributed_array
   std::array<long,rank> const& global_shape() const { return base.gextents; }
   std::array<long,rank> const& origin() const { return base.lorigin; }
   std::array<long,rank> const& grid() const { return base.grid; };
-  std::array<long,rank> const& block_size() const { return base.block_size; };
+  std::array<long,rank> const& tile_count() const { return base.tile_count; };
 
   // remove when contrain issue is fixed
   auto& local_() { return A; }
@@ -402,10 +413,10 @@ class distributed_array_view
 		    std::array<long,rank>  grid_,
 		    std::array<long,rank> gshape,
 		    std::array<long,rank> origin_,
-                    std::array<long,rank> bsize,
+                    std::array<long,rank> tcount,
 		    ::nda::ArrayOfRank<rank> auto && A_) :
 		    // can't keep a non-const view to a const-view, so need to take arg by mutable ref
-    base(comm_,grid_,gshape,origin_,bsize,A_.shape()),
+    base(comm_,grid_,gshape,origin_,tcount,A_.shape()),
     A(A_.indexmap(),A_.data()) 
   {
   }
@@ -458,7 +469,7 @@ class distributed_array_view
     base.gextents = other.global_shape(); 
     base.lorigin = other.origin();
     base.comm = other.communicator();
-    base.block_size = other.block_size();
+    base.tile_count = other.tile_count();
     A.rebind(other.local());
 #if defined(SYNCHRONIZE_DISTRIBUTED_ARRAY)
     base.comm->barrier();
@@ -471,7 +482,7 @@ class distributed_array_view
   std::array<long,rank> const& global_shape() const { return base.gextents; }
   std::array<long,rank> const& origin() const { return base.lorigin; }
   std::array<long,rank> const& grid() const { return base.grid; };
-  std::array<long,rank> const& block_size() const { return base.block_size; };
+  std::array<long,rank> const& tile_count() const { return base.tile_count; };
   
   auto local() { return A(); }
   auto local() const { return A(); }

@@ -99,6 +99,27 @@ inline long balanced_tile_count(long N, long p_max, long cap)
   return std::min(N, p_max*per_rank);
 }
 
+/**
+ * Per-axis tile counts from per-axis tile-size caps: axis n gets
+ * balanced_tile_count(shape[n], p[n], cap[n]), or shape[n] (one element per tile)
+ * when cap[n] <= 0.
+ *
+ * Pass the SAME p on two axes that have to share a partition -- the square
+ * operand of getrf/getri, or the contracted axis of a gemm -- normally the
+ * larger of their two grid extents. p[n] = grid[n] is right for an axis with no
+ * such partner.
+ */
+template<size_t R>
+inline std::array<long,R> balanced_tile_counts(std::array<long,R> const& shape,
+                                               std::array<long,R> const& p,
+                                               std::array<long,R> const& cap)
+{
+  std::array<long,R> t;
+  for(size_t n=0; n<R; ++n)
+    t[n] = (cap[n] <= 0 ? shape[n] : balanced_tile_count(shape[n],p[n],cap[n]));
+  return t;
+}
+
 /// [first,last) of the elements of [0,N) owned by rank `ip` of `np`, when the axis
 /// is cut into `t` tiles and the tiles are dealt out by chunk_range.
 inline std::pair<long,long> local_range_of_rank(long N, long t, long np, long ip)

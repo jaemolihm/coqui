@@ -25,6 +25,7 @@
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
@@ -88,7 +89,7 @@ void assemble_one_body(math::shm::shared_array<Array_4D_t>& sX, long n_active, B
  * @param comm  [input] - communicator 
  * @param psp   [input] - pseudopotential object 
  * @param pgrid [input] - processor grid for the distributed array
- * @param bz    [input] - block size for the distributed array
+ * @param bz    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */ 
@@ -147,7 +148,7 @@ void set_H0(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sH0
  * @param psp   [input] - pseudopotential object 
  * @param rhoij [input] - density matrix 
  * @param pgrid [input] - processor grid for the distributed array
- * @param bz    [input] - block size for the distributed array
+ * @param bz    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */
@@ -182,7 +183,7 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
  * @param psp   [input] - pseudopotential object 
  * @param rhoij [input] - density matrix 
  * @param pgrid [input] - processor grid for the distributed array
- * @param bz    [input] - block size for the distributed array
+ * @param bz    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */
@@ -249,8 +250,11 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
         pgrid = g;
       }
       using larray = memory::array<MEM,ComplexType,4>;
+      // the two band axes must share a partition (same extent, same tile count)
+      long p_M = std::max(pgrid[2],pgrid[3]);
       auto Fij = math::nda::make_distributed_array<larray>(comm,pgrid,{nspin,nkpts,M,M},
-                  {bz[0],bz[1],bz[2],bz[2]});
+                  utils::balanced_tile_counts<4>({nspin,nkpts,M,M},
+                      {pgrid[0],pgrid[1],p_M,p_M},{bz[0],bz[1],bz[2],bz[2]}));
       auto Floc = Fij.local();
       Floc = ComplexType(0.0);
       for( auto [is, s] : itertools::enumerate(Fij.local_range(0)))
@@ -594,7 +598,7 @@ void set_ovlp(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sS_skij) {
  * @param mf    [input] - mean-field object
  * @param comm  [input] - communicator
  * @param pgrid [input] - processor grid for the distributed array
- * @param bz    [input] - block size for the distributed array
+ * @param bz    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */

@@ -408,7 +408,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
 
   app_log(2, "\n  SCF distribution patterns (nproc = {}):", nproc);
   app_log(2, "  {}", std::string(112, '-'));
-  row("pattern", "pgrid", "bsize", "arrays");
+  row("pattern", "pgrid", "tiles", "arrays");
 
   if (aux_path) {
     row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"), bs4(pi_bsize),
@@ -424,13 +424,13 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     // The Sigma solver takes dW_tqPQ on the aux tau grid and forces qpools to 1.
     if (p.sigma_alg == "R") {
       std::array<long, 5> s_pgrid = {ntpools, 1, 1, np_P, np_Q};
-      std::array<long, 5> s_bsize = {pi_bsize[0], 1, pi_bsize[1],
+      std::array<long, 5> s_bsize = {pi_bsize[0], 0, pi_bsize[1],
                                      pi_bsize[2], pi_bsize[3]};
       row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"), bs5(s_bsize),
           "dG_tskPQ, dSigma_tskPQ");
     } else {
       std::array<long, 4> k_pgrid = {1, 1, np_P, np_Q};
-      std::array<long, 4> k_bsize = {1, pi_bsize[1], pi_bsize[2], pi_bsize[3]};
+      std::array<long, 4> k_bsize = {0, pi_bsize[1], pi_bsize[2], pi_bsize[3]};
       row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"), bs4(k_bsize),
           "dSigma_skPQ, dG_skPQ  [on t_intra_comm]");
       // Mirrors thc_gw.icc:277-279 (the aux->primary redistribute target), whose

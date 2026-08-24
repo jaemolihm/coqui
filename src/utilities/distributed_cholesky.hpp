@@ -75,7 +75,7 @@ auto distributed_cholesky(math::nda::DistributedArrayOfRank<2> auto const& M,
   utils::check(M.global_shape()[1] == ndim, "Shape mismatch.");
 
   auto CholMat = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                      {1,comm.size()},{ndim,ndim},{1,1});
+                      {1,comm.size()},{ndim,ndim},{0,0});
   auto a_rng = CholMat.local_range(1);  
   CholMat.local() = ComplexType(0.0);
 
@@ -235,7 +235,7 @@ auto distributed_cholesky(math::nda::DistributedArrayOfRank<2> auto const& M,
   utils::check(nchol > 0, "Error: Found nchol=0 in utils::distributed_cholesky.");
 
   auto Rt = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                  {comm.size(),1},{ndim,ndim},{1,1});
+                  {comm.size(),1},{ndim,ndim},{0,0});
   utils::check(a_rng == Rt.local_range(0), "Range mismatch.");
   Rt.local() = nda::dagger(CholMat.local());
   return Rt;

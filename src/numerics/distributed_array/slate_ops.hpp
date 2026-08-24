@@ -29,6 +29,7 @@
 #include <functional>
 
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "nda/nda.hpp"
 #include "nda/tensor.hpp"
 #include "numerics/distributed_array/ops.hpp"
@@ -339,6 +340,16 @@ void inverse(DistributedMatrix auto&& A)
                 local_Array_t::layout_t::is_stride_order_Fortran(),
                 "Layout mismatch" );
 
+  // getri asserts A.mt() == A.nt() (slate/src/getri.cc), which needs the same
+  // extent AND the same tile count on both axes -- the tile boundaries are a
+  // function of (extent, tile count) alone. Nothing else checks it.
+  utils::check(A.global_shape()[0] == A.global_shape()[1],
+      "inverse: matrix is not square: ({}, {}).",
+      A.global_shape()[0], A.global_shape()[1]);
+  utils::check(A.tile_count()[0] == A.tile_count()[1],
+      "inverse: row and column tile counts differ: ({}, {}).",
+      A.tile_count()[0], A.tile_count()[1]);
+
   if (A.communicator()->size() == 1) {
     auto Aloc = A.local();
     ::nda::basic_array<int, 1, ::nda::C_layout, 'A',
@@ -419,9 +430,9 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
   utils::check(A.global_shape()[0] == A.global_shape()[1],
       "determinant: matrix is not square: ({}, {}).",
       A.global_shape()[0], A.global_shape()[1]);
-  utils::check(A.block_size()[0] == A.block_size()[1],
-      "determinant: row and column blockings differ: ({}, {}).",
-      A.block_size()[0], A.block_size()[1]);
+  utils::check(A.tile_count()[0] == A.tile_count()[1],
+      "determinant: row and column tile counts differ: ({}, {}).",
+      A.tile_count()[0], A.tile_count()[1]);
 
   if constexpr (::nda::mem::on_host<local_Array_t>) {
     if (A.communicator()->size() == 1) {
@@ -451,8 +462,9 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
     // accumulates one factor of -1 per row interchange over the whole matrix.
     // This needs the row and column partitions to agree, which is also the
     // getrf/getri precondition mt == nt.
-    long rows_per_blk = A.block_size()[0];
-    long row_origin = A.origin()[0];
+    const long nrow = A.global_shape()[0];
+    const long t_row = A.tile_count()[0];
+    const long row_origin = A.origin()[0];
     long ndiag = long(diag_idx.size());
     A.communicator()->all_reduce_in_place_n(&ndiag, 1, std::plus<>{});
     utils::check(ndiag == std::min(A.global_shape()[0], A.global_shape()[1]),
@@ -462,8 +474,8 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
       det_A *= A_loc(idx.first, idx.second);
 
       long i_glob = idx.first + row_origin;
-      long ib = i_glob / rows_per_blk;   // global panel index
-      long ia = i_glob % rows_per_blk;   // row offset within the panel
+      long ib = utils::tile_of(nrow,t_row,i_glob);              // global panel index
+      long ia = i_glob - utils::tile_offset(nrow,t_row,ib);     // offset in the panel
       utils::check(ib < long(pivots.size()) and ia < long(pivots[ib].size()),
           "determinant: pivot index out of range: ({},{}) for {} panels.",
           ib, ia, pivots.size());
@@ -660,8 +672,8 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
         // otherwise it will need communication to check
         utils::check(dA.grid()[r]==dB.grid()[r] and
                      dA.grid()[r]==C.grid()[r],"Grid mismatch"); 
-        utils::check(dA.block_size()[r]==dB.block_size()[r] and
-                     dA.block_size()[r]==C.block_size()[r],"Grid mismatch"); 
+        utils::check(dA.tile_count()[r]==dB.tile_count()[r] and
+                     dA.tile_count()[r]==C.tile_count()[r],"Grid mismatch"); 
         color += px*C.origin()[r]; 
         px *= C.global_shape()[r];
       }
@@ -678,13 +690,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
           auto C2d = C.local()(ia,all,all);
           auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
           auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
           auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                get_arr(C.origin()),get_arr(C.tile_count()),C2d);
           detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                              b_v,C_);
         }
@@ -696,13 +708,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
             auto C2d = C.local()(ia,ib,all,all);
             auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                  get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                  get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
             auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                  get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                  get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
             auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                  get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                  get_arr(C.origin()),get_arr(C.tile_count()),C2d);
             detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                                  b_v,C_);
           }
@@ -715,13 +727,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
               auto C2d = C.local()(ia,ib,ic,all,all);
               auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                    get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                    get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
               auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                    get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                    get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
               auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                    get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                    get_arr(C.origin()),get_arr(C.tile_count()),C2d);
               detail::multiply_impl(a_v, math::detail::add_tags<Atr,Acg>(A_),
                                  math::detail::add_tags<Btr,Bcg>(B_),
                                  b_v,C_);
@@ -747,8 +759,8 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
         // otherwise it will need communication to check
         utils::check(dA.grid()[r]==dB.grid()[r] and
                      dA.grid()[r]==C.grid()[r],"Grid mismatch");               
-        utils::check(dA.block_size()[r]==dB.block_size()[r] and
-                     dA.block_size()[r]==C.block_size()[r],"Grid mismatch");
+        utils::check(dA.tile_count()[r]==dB.tile_count()[r] and
+                     dA.tile_count()[r]==C.tile_count()[r],"Grid mismatch");
         color += px*C.origin()[r]; 
         px *= C.global_shape()[r];
       }
@@ -765,13 +777,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
           auto C2d = C.local()(all,all,ia);
           auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
           auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
           auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                get_arr(C.origin()),get_arr(C.tile_count()),C2d);
           detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
 	  			                b_v,C_);
         }
@@ -783,13 +795,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
             auto C2d = C.local()(all,all,ia,ib);
             auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                  get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                  get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
             auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                  get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                  get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
             auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                  get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                  get_arr(C.origin()),get_arr(C.tile_count()),C2d);
             detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                                   b_v,C_);
           }
@@ -802,13 +814,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
               auto C2d = C.local()(all,all,ia,ib,ic);
               auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                    get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                    get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
               auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                    get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                    get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
               auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                    get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                    get_arr(C.origin()),get_arr(C.tile_count()),C2d);
               detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),
                                     math::detail::add_tags<Btr,Bcg>(B_),
                                     b_v,C_);

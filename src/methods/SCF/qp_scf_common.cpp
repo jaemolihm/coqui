@@ -195,7 +195,7 @@ void solve_qp_eqn(sArray_t<Array_view_3D_t> &sE_ska,
   utils::check(nkpools <= nkpts, "solv_qp_eqn: nkpools({}) > nkpts({})", nkpools, nkpts);
   utils::check(comm->size() % nkpools == 0, "solve_qp_eqn: comm.size({}) % nkpools({}) != 0", np, nkpools);
 
-  auto dSigma_wska = make_distributed_array<local_Array_4D_t>(*comm, {1, 1, nkpools, np_a}, {nw, ns, nkpts, nbnd}, {1, 1, 1, 1});
+  auto dSigma_wska = make_distributed_array<local_Array_4D_t>(*comm, {1, 1, nkpools, np_a}, {nw, ns, nkpts, nbnd}, {0, 0, 0, 0});
   auto s_rng = dSigma_wska.local_range(1);
   auto k_rng = dSigma_wska.local_range(2);
   auto a_rng = dSigma_wska.local_range(3);
@@ -205,7 +205,7 @@ void solve_qp_eqn(sArray_t<Array_view_3D_t> &sE_ska,
   // ------ basis transform from primary to MO basis ------
   {
     auto dSigma_tska = make_distributed_array<local_Array_4D_t>(
-        *comm, {1, 1, nkpools, np_a}, {nt, ns, nkpts, nbnd}, {1, 1, 1, 1});
+        *comm, {1, 1, nkpools, np_a}, {nt, ns, nkpts, nbnd}, {0, 0, 0, 0});
     auto Sigma_tska_loc = dSigma_tska.local();
 
     nda::array<ComplexType, 2> SigmaC_ia(nbnd, na_loc);
@@ -230,8 +230,8 @@ void solve_qp_eqn(sArray_t<Array_view_3D_t> &sE_ska,
   }
 
   // ------ basis transformation from primary to MO basis ------
-  auto dVhf_ska = make_distributed_array<local_Array_3D_t>(*comm, {1, nkpools, np_a}, {ns, nkpts, nbnd}, {1, 1, 1});
-  auto dE_ska = make_distributed_array<local_Array_3D_t>(*comm, {1, nkpools, np_a}, {ns, nkpts, nbnd}, {1, 1, 1});
+  auto dVhf_ska = make_distributed_array<local_Array_3D_t>(*comm, {1, nkpools, np_a}, {ns, nkpts, nbnd}, {0, 0, 0});
+  auto dE_ska = make_distributed_array<local_Array_3D_t>(*comm, {1, nkpools, np_a}, {ns, nkpts, nbnd}, {0, 0, 0});
   {
     nda::array<ComplexType, 2> VC_ia(nbnd, na_loc);
     nda::array<ComplexType, 2> V_ab(na_loc, na_loc);
@@ -437,7 +437,7 @@ auto qp_approx(const sArray_t<Array_view_5D_t> &sSigma_tskij,
   utils::check(np_a < nbnd and np_b < nbnd, "qp_approx: np_a({}) or np_b({}) > nbnd({})", np_a, np_b, nbnd);
 
   auto dSigma_wskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
-                                                               {nw, ns, nkpts, nbnd, nbnd}, {1, 1, 1, 1, 1});
+                                                               {nw, ns, nkpts, nbnd, nbnd}, {0, 0, 0, 0, 0});
   auto s_rng = dSigma_wskab.local_range(1);
   auto k_rng = dSigma_wskab.local_range(2);
   auto a_rng = dSigma_wskab.local_range(3);
@@ -448,7 +448,7 @@ auto qp_approx(const sArray_t<Array_view_5D_t> &sSigma_tskij,
   {
     auto dSigma_tskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
                                                                {nt, ns, nkpts, nbnd, nbnd},
-                                                               {1, 1, 1, 1, 1});
+                                                               {0, 0, 0, 0, 0});
     auto Sigma_tskab_loc = dSigma_tskab.local();
 
     nda::array<ComplexType, 2> C_jb(nbnd, nb_loc);
@@ -586,7 +586,7 @@ auto lr_qp_approx(const sArray_t<Array_view_5D_t> &sDeltaSigma_tskij,
   utils::check(np_a < nbnd and np_b < nbnd, "lr_qp_approx: np_a({}) or np_b({}) > nbnd({})", np_a, np_b, nbnd);
 
   auto dDeltaSigma_wskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
-                                                               {nw, ns, nkpts, nbnd, nbnd}, {1, 1, 1, 1, 1});
+                                                               {nw, ns, nkpts, nbnd, nbnd}, {0, 0, 0, 0, 0});
   auto s_rng = dDeltaSigma_wskab.local_range(1);
   auto k_rng = dDeltaSigma_wskab.local_range(2);
   auto a_rng = dDeltaSigma_wskab.local_range(3);
@@ -597,7 +597,7 @@ auto lr_qp_approx(const sArray_t<Array_view_5D_t> &sDeltaSigma_tskij,
   {
     auto dDeltaSigma_tskab = make_distributed_array<local_Array_5D_t>(*comm, {1, 1, nkpools, np_a, np_b},
                                                                {nt, ns, nkpts, nbnd, nbnd},
-                                                               {1, 1, 1, 1, 1});
+                                                               {0, 0, 0, 0, 0});
     auto DeltaSigma_tskab_loc = dDeltaSigma_tskab.local();
 
     nda::array<ComplexType, 2> Ck_jb(nbnd, nb_loc);          // C(k) columns b

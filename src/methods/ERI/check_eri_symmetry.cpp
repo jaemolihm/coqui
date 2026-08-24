@@ -33,6 +33,7 @@
 #include "mpi3/shared_communicator.hpp"
 
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
@@ -170,10 +171,13 @@ int main(int argc, char* argv[])
   auto dmat = utils::generate_dmatrix_old<false>(world,mf,mf.symm_list(),slist);
 
   for( auto i : itertools::range(nqpts-nqpts_ibz) ) {
+    // square (ab,ab) tile count: both axes of a square matrix need the same count
+    const long nab = nkpts*nbnd*nbnd;
+    const long eri_tiles = utils::balanced_tile_count(nab, q_comm.size(), nbnd);
     deri.emplace_back( math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,{q_comm.size(),1},
-                           {nkpts*nbnd*nbnd,nkpts*nbnd*nbnd},{nbnd,nbnd}) );
+                           {nab,nab},{eri_tiles,eri_tiles}) );
     deri_symm.emplace_back( math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,{q_comm.size(),1},
-                           {nkpts*nbnd*nbnd,nkpts*nbnd*nbnd},{nbnd,nbnd}) );
+                           {nab,nab},{eri_tiles,eri_tiles}) );
   }
 
   if( tag == "chol" ) {
@@ -213,7 +217,7 @@ int main(int argc, char* argv[])
             auto& dERIs = deri_symm.at(iqs-nqpts_ibz);
             auto dL = math::nda::make_distributed_array_view(q_comm,{1,q_comm.size()},
 						    {L.global_shape()[0],nspins*nkpts*nbnd*nbnd},
-						    {L.global_shape()[0], dERIs.block_size()[0]}, Lqs2d); 
+						    {1, dERIs.tile_count()[0]}, Lqs2d); 
 	    for(int ik=0; ik<nkpts; ik++) {
 	      int ks = ks_to_k(is,ik);
               int k2 = mf.qk_to_k2(iqs,ik);
@@ -234,7 +238,7 @@ int main(int argc, char* argv[])
         auto Lloc2d = nda::reshape(Lloc,std::array<long,2>{Lloc.shape(0),Lloc.size()/Lloc.shape(0)});
         auto dL = math::nda::make_distributed_array_view(q_comm,{1,q_comm.size()},
 						    {L.global_shape()[0],nspins*nkpts*nbnd*nbnd},
-						    {L.global_shape()[0], dERIs.block_size()[0]}, Lloc2d); 
+						    {1, dERIs.tile_count()[0]}, Lloc2d); 
 
         math::nda::slate_ops::multiply(dagger(dL),dL,dERIs);  
 

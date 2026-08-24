@@ -80,7 +80,7 @@ namespace methods {
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
       long Np = dDeltaPi_tqPQ.global_shape()[2];
       auto tau_pgrid = dDeltaPi_tqPQ.grid();
-      auto tau_bsize = dDeltaPi_tqPQ.block_size();
+      auto tau_bsize = dDeltaPi_tqPQ.tile_count();
       long np_P = tau_pgrid[2], np_Q = tau_pgrid[3];
 
       // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
@@ -125,7 +125,7 @@ namespace methods {
       // factor is supplied precomputed via the G^R cache, so no G buffer here.
       _dDeltaG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
           *_t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
-          {1, 1, tau_bsize[2], tau_bsize[3]}));
+          {0, 0, tau_bsize[2], tau_bsize[3]}));
       // Out-of-place FT buffer (term 1 uses it for ΔG^R, term 2 for ΔG^{-R};
       // the two terms run sequentially, so one buffer suffices).
       _fft_out.resize(nkpts, NP_loc*NQ_loc);

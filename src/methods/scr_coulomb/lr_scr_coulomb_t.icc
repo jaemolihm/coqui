@@ -124,7 +124,7 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
 
   _dW_full_qpQ_wqPQ.emplace(math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
       *dW_full_wqPQ.communicator(), dW_full_wqPQ.grid(),
-      dW_full_wqPQ.global_shape(), dW_full_wqPQ.block_size()));
+      dW_full_wqPQ.global_shape(), dW_full_wqPQ.tile_count()));
   auto& dW_full_qpQ = *_dW_full_qpQ_wqPQ;
 
   auto pgrid = dW_full_wqPQ.grid();
@@ -275,23 +275,25 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   _Timer.start("EVALUATE_LR_W");
 
   auto pgrid = dDeltaPi_wqPQ.grid();
-  auto bsize = dDeltaPi_wqPQ.block_size();
+  auto bsize = dDeltaPi_wqPQ.tile_count();
   auto& comm = *dDeltaPi_wqPQ.communicator();
 
   utils::check(pgrid == dW_full_wqPQ.grid() && pgrid == dW_full_qpQ_wqPQ.grid(),
                "lr_dyson_W_in_place: pgrid mismatch between ΔΠ and W_full operands");
-  utils::check(bsize[1] == 1,
-               "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
-  // The batched multiply cross-checks block_size only on the leading axes, but
-  // each operand's SLATE tile map is built from its own (P, Q) block size, so the
-  // same grid with a different PQ blocking is a silent tile-map mismatch.
+  utils::check(bsize[1] == dDeltaPi_wqPQ.global_shape()[1],
+               "lr_dyson_W_in_place: the q axis must be untiled (one element per "
+               "tile), got tile count {} for extent {}",
+               bsize[1], dDeltaPi_wqPQ.global_shape()[1]);
+  // The batched multiply cross-checks tile counts only on the leading axes, but
+  // each operand's SLATE tile map is built from its own (P, Q) tile count, so the
+  // same grid with a different PQ tiling is a silent tile-map mismatch.
   // Gated above one rank for the same reason as the guard in solve_lr_dyson_W —
   // see there.
   if (comm.size() > 1) {
-    auto w_bs   = dW_full_wqPQ.block_size();
-    auto qpq_bs = dW_full_qpQ_wqPQ.block_size();
+    auto w_bs   = dW_full_wqPQ.tile_count();
+    auto qpq_bs = dW_full_qpQ_wqPQ.tile_count();
     utils::check(bsize == w_bs and bsize == qpq_bs,
-                 "lr_dyson_W_in_place: block size mismatch between ΔΠ and the "
+                 "lr_dyson_W_in_place: tile count mismatch between ΔΠ and the "
                  "W_full operands. ΔΠ ({}, {}, {}, {}); W_full ({}, {}, {}, {}); "
                  "W_full(q+Q) ({}, {}, {}, {}).",
                  bsize[0], bsize[1], bsize[2], bsize[3],
@@ -358,16 +360,16 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // so just adopt W_full's distribution. That is the q-dist layout, so both
   // transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
-  auto w_bsize = dW_full_wqPQ.block_size();
+  auto w_bsize = dW_full_wqPQ.tile_count();
 
   // Guard the fusion: if W_full is not on the q-dist distribution, both
   // transforms below silently pay an extra global redistribute (~24% of the
   // LR-GW run). Every LR W(iω) is built on utils::lr_W_tau_local_dist, so a mismatch
   // here is a programming error, not a configuration.
   //
-  // Only above one rank, for the same reason as the block-size check in
+  // Only above one rank, for the same reason as the tile-count check in
   // lr_dyson_W_in_place: tau_to_w's single-rank fast path ignores the requested
-  // distribution and passes the input's block size through, so at one rank
+  // distribution and passes the input's tile count through, so at one rank
   // W_full carries whatever its τ-side producer had. gshape[0] is not read by
   // ft_buffer_dist, hence the 1.
   //

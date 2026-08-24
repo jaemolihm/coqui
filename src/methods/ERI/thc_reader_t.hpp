@@ -500,12 +500,12 @@ namespace methods {
         auto Zq_loc = dZq_uv.local();
         if (q == 0) {
           auto pgrid = dZq_uv.grid();
-          auto block_size = dZq_uv.block_size();
+          auto block_size = dZq_uv.tile_count();
           auto gshape = dZq_uv.global_shape();
           // choose distribution of _dZ based on dZq_uv at q = 0
           _dZ = make_distributed_array<Array_t<HOST_MEMORY,3>>(
               _mpi->comm, {1, pgrid[0], pgrid[1]}, {_nqpts_ibz, gshape[0], gshape[1]},
-              {1, block_size[0], block_size[1]});
+              {0, block_size[0], block_size[1]});
         }
         auto Z_loc = _dZ.local();
         Z_loc(q, nda::ellipsis{}) = Zq_loc;

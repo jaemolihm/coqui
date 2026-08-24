@@ -31,6 +31,7 @@
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
@@ -43,6 +44,12 @@
 
 namespace bdft_tests
 {
+
+// Tile count for an N x N operand on a (nx, ny) grid with tiles of at most 16
+// elements: the same count on both axes, which is what the old squared_blocks
+// flag used to enforce after the fact.
+inline long t16(long N, long nx, long ny)
+{ return utils::balanced_tile_count(N, std::max(nx,ny), 16); }
 
 template <typename scalar_type>
 void random_matrix( int64_t m, int64_t n, scalar_type* A, int64_t lda )
@@ -81,7 +88,8 @@ TEST_CASE("dops_tags", "[math]")
   using local_Array_t = nda::array<double, 2>;
   auto world = boost::mpi3::environment::get_world_instance();
   auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{world.size(),1},
-                        shape_t<2>{32*world.size(),32}, {16, 16}, true);
+                        shape_t<2>{32*world.size(),32},
+                        shape_t<2>{t16(32*world.size(),world.size(),1), t16(32,world.size(),1)});
 
   [[maybe_unused]] auto An = normal(A);
   [[maybe_unused]] auto An_ = N(std::move(A));
@@ -186,7 +194,7 @@ TEST_CASE("cuda_aware_mpi", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     world.broadcast_n(A.local().data(),A.local().size());
     world.barrier();
   }
@@ -238,13 +246,13 @@ TEST_CASE("determinant", "[math]") {
       REQUIRE(nswap > 0);
     }
 
-    auto check = [&](long np_i, long np_j, long bsize) {
+    auto check = [&](long np_i, long np_j, long t) {
       if (np_i*np_j != world.size()) return;
-      if (N < np_i or N < np_j or bsize < 1) return;
-      if (bsize > N/np_i or bsize > N/np_j) return;
+      if (N < np_i or N < np_j) return;
+      if (t < np_i or t < np_j or t > N) return;
 
       auto dA = make_distributed_array<local_Array_t>(world, shape_t<2>{np_i, np_j},
-                    shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
+                    shape_t<2>{N, N}, shape_t<2>{t, t});
       dA.local() = A(dA.local_range(0), dA.local_range(1));
 
       auto [Ni_loc, Nj_loc] = dA.local_shape();
@@ -257,10 +265,10 @@ TEST_CASE("determinant", "[math]") {
       auto det = math::nda::slate_ops::determinant(dA, diag_idx);
 
       auto ratio = det/det_ref;
-      app_log(2, "  determinant: N = {}, pgrid = ({}, {}), bsize = {}, "
+      app_log(2, "  determinant: N = {}, pgrid = ({}, {}), tiles = {}, "
                  "det/det_ref = ({:.12f}, {:.12f})",
-              N, np_i, np_j, bsize, ratio.real(), ratio.imag());
-      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize
+              N, np_i, np_j, t, ratio.real(), ratio.imag());
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), tiles = " << t
            << ", det = " << det << ", ref = " << det_ref);
       // The sign is exact -- assert it as such, with no tolerance.
       CHECK(ratio.real() > 0.0);
@@ -273,8 +281,8 @@ TEST_CASE("determinant", "[math]") {
              {world.size(), 1l}, {1l, world.size()}, {nx, world.size()/nx},
              {world.size()/nx, nx}}}) {
       const long p_max = std::max(np_i, np_j);
-      // one tile per rank, two tiles per rank, tile size one
-      for (long b : {N/p_max, N/(2*p_max), 1l}) check(np_i, np_j, b);
+      // one tile per rank, two tiles per rank, one element per tile
+      for (long t : {p_max, 2*p_max, N}) check(np_i, np_j, t);
     }
   };
 
@@ -296,11 +304,11 @@ TEST_CASE("distributed_ops", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-			shape_t<2>{N,N}, {16, 16}, true); 
+			shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)}); 
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-			shape_t<2>{N,N}, {16, 16}, true); 
+			shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)}); 
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-			shape_t<2>{N,N}, {16, 16}, true); 
+			shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)}); 
     random_matrix( A.local().shape()[0], A.local().shape()[1], 
   		   A.local().data(), A.local().indexmap().strides()[1] );
     random_matrix( B.local().shape()[0], B.local().shape()[1], 
@@ -323,9 +331,9 @@ TEST_CASE("distributed_ops", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);  
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});  
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);  
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});  
     for( auto& v: A.local()) v = rand() / double(RAND_MAX);
     for( auto& v: B.local()) v = rand() / double(RAND_MAX);
 
@@ -337,9 +345,9 @@ TEST_CASE("distributed_ops", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     for( auto& v: A.local()) v = rand() / double(RAND_MAX);
     for( auto& v: B.local()) v = rand() / double(RAND_MAX);
 
@@ -352,11 +360,11 @@ TEST_CASE("distributed_ops", "[math]")
     long ny = world.size()/nx;
     long bz = std::min(16l,std::min(N/nx,N/ny));
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {1, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, bz, bz});  
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {1, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, bz, bz});  
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {1, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, bz, bz});  
     auto Aloc = A.local();
     auto Bloc = B.local();
     A.local() = nda::rand(Aloc.shape());
@@ -380,11 +388,11 @@ TEST_CASE("distributed_ops", "[math]")
 std::cout<<" nx: " <<nx <<std::endl;
     long bz = std::min(16l,N/ny);
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {1, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {1, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {1, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
     auto Aloc = A.local();
     auto Bloc = B.local();
     A.local() = nda::rand(Aloc.shape());
@@ -409,11 +417,11 @@ std::cout<<" nx: " <<nx <<std::endl;
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     {
       A.local() = utils::make_random<double>(A.local_shape()[0],A.local_shape()[1]);;
       B.local() = utils::make_random<double>(B.local_shape()[0],B.local_shape()[1]);;
@@ -437,9 +445,9 @@ std::cout<<" nx: " <<nx <<std::endl;
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     nda::array<double, 2, nda::F_layout> a(A.local_shape());
     for( auto& v: a) v = rand() / double(RAND_MAX);
     A.local()=a;
@@ -455,9 +463,9 @@ std::cout<<" nx: " <<nx <<std::endl;
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<2>{nx,ny},
-                        shape_t<2>{N,N}, {16, 16}, true);
+                        shape_t<2>{N,N}, shape_t<2>{t16(N,nx,ny), t16(N,nx,ny)});
     nda::array<double, 2, nda::F_layout> a(A.local_shape());
     for( auto& v: a) v = rand() / double(RAND_MAX);
     A.local()=a;
@@ -472,12 +480,11 @@ std::cout<<" nx: " <<nx <<std::endl;
 }
 
 // slate_ops::inverse over the processor grids simple_dyson can pick: the band
-// axis is split over the run's rank count. SLATE only accepts the distribution
-// when every non-final block along an axis has the full block size, so the block
-// size is min(floor(N/np_i), floor(N/np_j)) — floor, and the minimum over BOTH
-// axes. That is the same formula the q-dist W grid uses (see the "ft_buffer_dist"
-// case), where it additionally has to be square because the multiply needs
-// Bs.nt() == As.mt(); getrf/getri only need this divisibility.
+// axis is split over the run's rank count. getrf/getri need A.mt() == A.nt(), so
+// the two axes must carry the SAME tile count — with equal extents that gives
+// identical tile boundaries, which is the whole point of storing the count. The
+// count itself is balanced_tile_count(N, max(np_i, np_j), 1024), the same recipe
+// the q-dist W grid uses (see the "ft_buffer_dist" case).
 TEST_CASE("distributed_inverse", "[math]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
@@ -498,11 +505,12 @@ TEST_CASE("distributed_inverse", "[math]")
     auto check = [&](long np_i, long np_j) {
       if (np_i*np_j != world.size()) return;
       if (N < np_i or N < np_j) return;
-      long bsize = std::min({1024l, N/np_i, N/np_j});
-      if (bsize < 1) return;
+      // square tile count: identical boundaries on both axes, which is the getri
+      // precondition mt == nt
+      long t = utils::balanced_tile_count(N, std::max(np_i, np_j), 1024);
 
       auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
-                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
+                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{t, t});
       dA.local() = A(dA.local_range(0), dA.local_range(1));
 
       math::nda::slate_ops::inverse(dA);
@@ -514,9 +522,9 @@ TEST_CASE("distributed_inverse", "[math]")
           err = std::max(err, std::abs(Aloc(i, j) - Ainv_ref(in, jn)));
       // Identical on every rank after the reduction, so CHECK cannot diverge.
       err = world.all_reduce_value(err, boost::mpi3::max<>{});
-      app_log(2, "  inverse: N = {}, pgrid = ({}, {}), bsize = {}, max error = {:.3e}",
-              N, np_i, np_j, bsize, err);
-      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize);
+      app_log(2, "  inverse: N = {}, pgrid = ({}, {}), tiles = {}, max error = {:.3e}",
+              N, np_i, np_j, t, err);
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), tiles = " << t);
       CHECK(err < 1e-10);
     };
 
@@ -542,9 +550,9 @@ TEST_CASE("distributed_inverse", "[math]")
   run(511);
 }
 
-// One gemm, one process grid, several blockings. Nothing else in the suite fixes
-// the grid and varies only the blocking, so nothing else can see a tiling bug
-// that a single blocking happens to hide (cf. docs/bug_lr_gw_fused_pq_tiling.md).
+// One gemm, one process grid, several tile counts. Nothing else in the suite fixes
+// the grid and varies only the tiling, so nothing else can see a tiling bug that a
+// single tile count happens to hide (cf. docs/bug_lr_gw_fused_pq_tiling.md).
 // The reference is a replicated nda::matmul, independent of the distributed path.
 TEST_CASE("multiply_blocking_sweep", "[math]")
 {
@@ -566,9 +574,9 @@ TEST_CASE("multiply_blocking_sweep", "[math]")
     double nrm = 0.0;
     for (auto v : Ref) nrm = std::max(nrm, std::abs(v));
 
-    // one tile per rank, two tiles per rank, and tile size one
-    for (long b : {N/p_max, N/(2*p_max), 1l}) {
-      if (b < 1) continue;
+    // one tile per rank, two tiles per rank, and one element per tile
+    for (long b : {p_max, 2*p_max, N}) {
+      if (b > N) continue;
       auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
                     shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{b, b});
       auto dB = make_distributed_array<nda::array<ComplexType, 2>>(world,
@@ -586,10 +594,10 @@ TEST_CASE("multiply_blocking_sweep", "[math]")
         for (auto [j, jn] : itertools::enumerate(dC.local_range(1)))
           err = std::max(err, std::abs(Cloc(i, j) - Ref(in, jn)));
       err = world.all_reduce_value(err, boost::mpi3::max<>{});
-      app_log(2, "  multiply_blocking_sweep: N = {}, pgrid = ({},{}), b = {}, "
+      app_log(2, "  multiply_blocking_sweep: N = {}, pgrid = ({},{}), tiles = {}, "
                  "stored = {}, max rel error = {:.3e}",
-              N, np_i, np_j, b, dA.block_size()[0], err/nrm);
-      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), b = " << b);
+              N, np_i, np_j, b, dA.tile_count()[0], err/nrm);
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), tiles = " << b);
       CHECK(err < 1e-12*nrm);
     }
   };
@@ -602,17 +610,19 @@ TEST_CASE("multiply_blocking_sweep", "[math]")
 
 // The factory's distribution, checked as a partition rather than through an
 // operation: gather every rank's (origin, local_shape) and verify per axis that
-// the local ranges tile [0,N) exactly, that no rank is empty, and how far the
-// per-rank loads spread. The spread is only reported here; it is what the
-// balanced partition tightens.
+// the local ranges tile [0,N) exactly, that no rank is empty, and that the
+// per-rank loads are within one element of each other when every rank owns a
+// single tile.
 TEST_CASE("factory_partition", "[math]")
 {
   auto world = boost::mpi3::environment::get_world_instance();
 
-  auto run = [&](shape_t<2> grid, shape_t<2> shape, shape_t<2> bsize) {
+  auto run = [&](shape_t<2> grid, shape_t<2> shape, shape_t<2> tcount) {
     if (grid[0]*grid[1] != world.size()) return;
     if (shape[0] < grid[0] or shape[1] < grid[1]) return;
-    auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world, grid, shape, bsize);
+    if (tcount[0] < grid[0] or tcount[1] < grid[1]) return;
+    if (tcount[0] > shape[0] or tcount[1] > shape[1]) return;
+    auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world, grid, shape, tcount);
 
     std::array<long, 4> mine{dA.origin()[0], dA.local_shape()[0],
                              dA.origin()[1], dA.local_shape()[1]};
@@ -620,7 +630,7 @@ TEST_CASE("factory_partition", "[math]")
     world.all_gather_n(mine.data(), 4, all_.data(), 4);
 
     INFO("grid = (" << grid[0] << "," << grid[1] << "), shape = (" << shape[0]
-         << "," << shape[1] << "), bsize = (" << bsize[0] << "," << bsize[1] << ")");
+         << "," << shape[1] << "), tiles = (" << tcount[0] << "," << tcount[1] << ")");
     for (int d = 0; d < 2; ++d) {
       // the distinct local ranges along axis d, sorted by origin
       std::vector<std::pair<long,long>> rng;
@@ -639,9 +649,13 @@ TEST_CASE("factory_partition", "[math]")
         lmax = std::max(lmax, l);
       }
       REQUIRE(prev == shape[d]);       // exactly the index space
-      app_log(2, "  factory_partition: axis {}, N = {}, grid = {}, bsize = {}, "
+      // the balanced partition: per-rank loads within ceil(tiles/grid) tiles of
+      // each other, and exactly within one element when every rank owns one tile
+      REQUIRE(lmax <= ((tcount[d]+grid[d]-1)/grid[d])*((shape[d]+tcount[d]-1)/tcount[d]));
+      if (tcount[d] == grid[d]) REQUIRE(lmax - lmin <= 1);
+      app_log(2, "  factory_partition: axis {}, N = {}, grid = {}, tiles = {}, "
                  "stored = {}, local extents [{},{}], ideal {}",
-              d, shape[d], grid[d], bsize[d], dA.block_size()[d], lmin, lmax,
+              d, shape[d], grid[d], tcount[d], dA.tile_count()[d], lmin, lmax,
               (shape[d] + grid[d] - 1)/grid[d]);
     }
   };
@@ -653,8 +667,8 @@ TEST_CASE("factory_partition", "[math]")
     for (auto g : std::array<shape_t<2>,3>{{ {np,1}, {1,np}, {nx,np/nx} }}) {
       if (N < g[0] or N < g[1]) continue;
       const long p_max = std::max(g[0], g[1]);
-      for (long b : {std::min({1024l, N/g[0], N/g[1]}), N/p_max, N/(2*p_max), 1l})
-        if (b >= 1) run(g, {N,N}, {b,b});
+      for (long t : {utils::balanced_tile_count(N, p_max, 1024), p_max, 2*p_max, N})
+        run(g, {N,N}, {t,t});
     }
   }
 }
@@ -696,20 +710,27 @@ TEST_CASE("ft_buffer_dist", "[math]")
          << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
          << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
     CHECK(b_bsize[2] == b_bsize[3]);
+    CHECK(b_bsize[2] >= std::max(b_pgrid[2], b_pgrid[3]));   // no empty rank
+    CHECK(b_bsize[2] <= NP);
     CHECK((utils::lr_W_tau_local_dist(nproc, nwh, nq, NP) ==
            scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP})));
   }
 
-  // The production point, spelled out: the P-split grid whose SUMMA was
-  // measured, with the 1024-capped square tile min(1024, 1687/3, 1687/1).
+  // The production point, spelled out: the P-split grid whose SUMMA was measured.
+  // The 1024 cap is inactive at NP = 1687 over max(3,1) = 3 ranks, so the tile
+  // count is 3 -- one tile per P rank, of 563/562/562 elements, instead of the
+  // floor-division 562/562/563 that dumped the remainder on the last rank.
   {
     auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
     CHECK((pg == grid_t{1, 256, 3, 1}));
-    CHECK((bs == grid_t{1, 1, 562, 562}));
+    CHECK((bs == grid_t{0, 0, 3, 3}));
+    CHECK(utils::tile_extent(1687, 3, 0) == 563);
+    CHECK(utils::tile_extent(1687, 3, 1) == 562);
+    CHECK(utils::tile_extent(1687, 3, 2) == 562);
     CHECK((utils::lr_W_tau_local_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
   }
 
-  // --- the stored block size, and the two Dyson multiplies on the grid ---
+  // --- the stored tile count, and the two Dyson multiplies on the grid ---
   const long nproc = world.size();
 
   auto check_grid = [&](long nq, long NP) {
@@ -727,8 +748,8 @@ TEST_CASE("ft_buffer_dist", "[math]")
     auto dW2  = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
     auto dTmp = make_distributed_array<local_Array_t>(world, pg, gshape, bs);
 
-    CHECK(dPi.block_size()[2] == dPi.block_size()[3]);
-    CHECK((dPi.block_size() == bs));
+    CHECK(dPi.tile_count()[2] == dPi.tile_count()[3]);
+    CHECK((dPi.tile_count()[2] == bs[2] and dPi.tile_count()[3] == bs[3]));
 
     // Replicated operands; the reference below is formed from them rank-locally,
     // so it is independent of the distributed path under test.
@@ -787,7 +808,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
     app_log(2, "  ft_buffer_dist: nq = {}, NP = {}, pgrid = ({},{},{},{}), "
                "bsize = ({},{}), max rel error = {:.3e}",
             nq, NP, pg[0], pg[1], pg[2], pg[3],
-            dPi.block_size()[2], dPi.block_size()[3], err/nrm);
+            dPi.tile_count()[2], dPi.tile_count()[3], err/nrm);
     CHECK(err < 1e-12 * nrm);
   };
 

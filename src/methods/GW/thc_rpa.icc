@@ -10,6 +10,7 @@
 
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mean_field/MF.hpp"
 #include "methods/ERI/detail/concepts.hpp"
@@ -55,9 +56,11 @@ namespace methods {
 
         w_pgrid = {nwpools, nqpools, np_P, np_Q}; // (w, q, P, Q)
 
-        // Setup square block size: make sure block sizes produce at least one full block per task
-        w_bsize = {1, 1, 1, 1};
-        w_bsize[2] = std::min( {(long)1024, NP/w_pgrid[2], NP/w_pgrid[3]});
+        // Square (P,Q) tile count: the same count on both axes, which is what the
+        // determinant path below needs (mt == nt). The (w,q) axes keep one element
+        // per tile (0).
+        w_bsize = {0, 0, 0, 0};
+        w_bsize[2] = utils::balanced_tile_count(NP, std::max(w_pgrid[2], w_pgrid[3]), 1024);
         w_bsize[3] = w_bsize[2];
       }
 
@@ -83,12 +86,19 @@ namespace methods {
       auto Q_rng = dPi_wqPQ.local_range(3);
 
       auto pgrid = dPi_wqPQ.grid();
-      auto block_size = dPi_wqPQ.block_size();
+      auto tile_count = dPi_wqPQ.tile_count();
+      // slate_ops::determinant below goes through getrf, which needs mt == nt:
+      // same extent AND same tile count on both PQ axes.
+      utils::check(NP == NQ and tile_count[2] == tile_count[3],
+          "thc_rpa_energy_all_impl: the (P,Q) block of Pi(iw) must be square in both "
+          "extent and tile count, got extents ({}, {}) and tile counts ({}, {}).",
+          NP, NQ, tile_count[2], tile_count[3]);
+      const long PQ_tiles = tile_count[2];
       long qpool_id = (nq_loc==nq_loc_max)? q_origin/nq_loc : (q_origin-nqpts%pgrid[1])/nq_loc;
 
       app_log(2, "e_rpa_impl:");
       app_log(2, "  - processor grid for Pi: (w, q, P, Q) = ({}, {}, {}, {})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
-      app_log(2, "  - block size: (w, q, P, Q) = ({}, {}, {}, {})", block_size[0], block_size[1], block_size[2], block_size[3]);
+      app_log(2, "  - tile count: (w, q, P, Q) = ({}, {}, {}, {})", tile_count[0], tile_count[1], tile_count[2], tile_count[3]);
 
       _Timer.start("RPA_ALLOC");
       nda::array<ComplexType, 1> e_rpa(1);
@@ -106,9 +116,9 @@ namespace methods {
 
       using Array_2D_t = memory::array<HOST_MEMORY, ComplexType, 2>;
       using math::nda::make_distributed_array;
-      auto dPi_PQ = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]});
-      auto dZ_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]});
-      auto dA_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]});
+      auto dPi_PQ = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
+      auto dZ_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
+      auto dA_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
       utils::check(dPi_PQ.local_range(0) == P_rng, "Error: local range mismatches!" );
       utils::check(dPi_PQ.local_range(1) == Q_rng, "Error: local range mismatches!");
       utils::check(dPi_PQ.local_shape()[0] == NP_loc and dPi_PQ.local_shape()[1] == NQ_loc,

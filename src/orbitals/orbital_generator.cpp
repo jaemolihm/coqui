@@ -119,12 +119,14 @@ mf::MF add_pgto(mf::MF& mf,
       auto psi_mf = mf::read_distributed_orbital_set<Array_t>(
                   mf,mpi.comm,'w',pgrid,
                   {0,nspin},{0,nkpts_ibz},{0,b0},
-                  std::array<long,4>{1,1,1,psi_pgto.block_size()[3]});
+                  // same G-axis tile cap as generate_basis_set, so psi_mf lands on
+                  // the same G partition; the range check below verifies it
+                  std::array<long,4>{1,1,1,2048});
       utils::check(psi_mf.global_shape()[3]==psi_pgto.global_shape()[3],"Shape mismatch.");
       utils::check(psi_mf.local_range(3)==psi_pgto.local_range(3),"Range mismatch.");
 
       auto psi = math::nda::make_distributed_array<memory::array<MEM,ComplexType,4>>(mpi.comm,pgrid,
-           {nspin,nkpts_ibz,npgto+b0,psi_pgto.global_shape()[3]},psi_pgto.block_size());
+           {nspin,nkpts_ibz,npgto+b0,psi_pgto.global_shape()[3]},psi_pgto.tile_count());
       auto psi_loc = psi.local();
       psi_loc(all,all,nda::range(npgto),all) = psi_pgto.local();
       psi_loc(all,all,nda::range(npgto,npgto+b0),all) = psi_mf.local();

@@ -7,6 +7,7 @@
 
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/freemem.h"
 #include "arch/arch.h"
 //#include "hamiltonian/potentials.hpp"
@@ -184,7 +185,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
           [&] (auto const& a, auto const& b) { return a + b.size(); });
   auto distPsia = memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),{1,mpi->comm.size()},
        {nspins*nkpts_ibz*a_range.size(),rho_g.nnr()},{nspins*nkpts_ibz*a_range.size(),ir_rgrid.size()},
-       {0,r0},{1,1});  
+       {0,r0},{0,0});  
 
   if( not mf->has_wfc_grid() or mf->fft_grid_dim() == rho_g.mesh() )
   {  
@@ -204,7 +205,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
                                      nda::range(0,nspins),nda::range(0,nkpts_ibz),a_range,{1,1});
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1},{dPsia.global_shape()[0],rho_g.nnr()},{dPsia.local_shape()[0],rho_g.nnr()},
-             dPsia.origin(),{1,1});
+             dPsia.origin(),{0,0});
     auto psir = dPsir.local();
     auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -336,18 +337,16 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   /**************************************************************************/
   // accumulation ranges for Pska
   nda::range k_subrange(1), a_subrange(1);
-  long arng_bsize = 1;//std::min( default_block_size, a_range.size()/nproc_per_pool);
+  // one element per tile on the band axis; the local range must be exactly the
+  // one the (extent, tile count) partition assigns, since that is what the darray
+  // built below advertises
+  long arng_tiles = a_range.size();
   {
-    auto [a,b] = itertools::chunk_range(0,a_range.size()/arng_bsize,
+    auto [a,b] = utils::local_range_of_rank(a_range.size(),arng_tiles,
                  nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
-    a *= arng_bsize;
-    if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
-      b = a_range.size(); 
-    else
-      b *= arng_bsize; 
     a_subrange = nda::range(a,b);
-    std::tie(a,b) = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
-    k_subrange = nda::range(a,b);
+    auto [k0,k1] = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
+    k_subrange = nda::range(k0,k1);
   }
   std::vector<memory::array<MEM,ComplexType,3>> Pskau;
 
@@ -742,7 +741,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
   auto Xskau = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
        {nspins,nkpts,a_range.size(),nchol},
        {nspins,k_subrange.size(),a_subrange.size(),nchol},
-       {0,k_subrange.first(),a_subrange.first(),0},{1,1,arng_bsize,1});  
+       {0,k_subrange.first(),a_subrange.first(),0},{0,0,arng_tiles,0});  
   // return empty optional for b_range
   std::optional<_darray_t_<MEM,4>> Xskbu;
 
@@ -798,9 +797,9 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
              a_range.size() / default_block_size) );
       while( nproc_per_pool%nx != 0 ) --nx;
       long ny = nproc_per_pool/nx;
-      long bu = std::min( nchol/std::max(nx,ny), default_block_size );
       math::nda::redistribute_in_place(Xskau,{1,nkpool,nx,ny},
-                                       {1,1,default_block_size,bu}); 
+          {0,0,utils::balanced_tile_count(a_range.size(),nx,default_block_size),
+               utils::balanced_tile_count(nchol,std::max(nx,ny),default_block_size)}); 
     }
   }
 
@@ -813,8 +812,10 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
     if constexpr ( return_Ruv ) {
       // returns only Ruv, instead of full Rur
 
+      // square tile count on both axes (the matrix is nchol x nchol)
+      long t512 = utils::balanced_tile_count(nchol, mpi->comm.size(), 512);
       auto return_value{math::nda::make_distributed_array<local_CArray_t>(mpi->comm,
-                          {1,mpi->comm.size()},{nchol,nchol},{512,512},true)};
+                          {1,mpi->comm.size()},{nchol,nchol},{t512,t512})};
 
       if(mpi->comm.size()==1) {
 
@@ -826,11 +827,11 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
 
         auto xloc = return_value.local()(nda::range(nchol),all);
         auto Xt = math::nda::distributed_array_view<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
-		return_value.grid(),return_value.global_shape(),return_value.origin(),{1,1},xloc);
+		return_value.grid(),return_value.global_shape(),return_value.origin(),{0,0},xloc);
   
         auto rloc = R(nda::range(nchol),all);
         auto Rt = math::nda::make_distributed_array_view<local_CArray_t>(mpi->comm,
-                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{1,1},rloc);
+                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{0,0},rloc);
         utils::check(Rt.local_range(1) == r_range, "Range error.");
 
         Timer.start("COMM");
@@ -850,7 +851,9 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
       Rt.local() = R(nda::range(nchol),all);
 
       auto return_value{math::nda::make_distributed_array<local_CArray_t>(mpi->comm,
-                          {1,mpi->comm.size()},{nchol,rho_g.nnr()},{512,512})};
+                          {1,mpi->comm.size()},{nchol,rho_g.nnr()},
+                          {utils::balanced_tile_count(nchol,1,512),
+                           utils::balanced_tile_count(rho_g.nnr(),mpi->comm.size(),512)})};
 
       Timer.start("COMM");
       math::nda::redistribute(Rt,return_value);
@@ -968,7 +971,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     auto wfc_to_rho = memory::to_memory_space<MEM>(swfc_to_rho.local());
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1}, {distPsia.global_shape()[0],rho_g.nnr()},
-             {distPsia.local_shape()[0],rho_g.nnr()}, distPsia.origin(),{1,1});
+             {distPsia.local_shape()[0],rho_g.nnr()}, distPsia.origin(),{0,0});
     auto psir = dPsir.local();
     auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -976,7 +979,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     psir() = ComplexType(0.0);
     nda::copy_select(true,1,wfc_to_rho,ComplexType(1.0),distPsia.local(),ComplexType(0.0),psir);
     F.backward(P4d);
-    math::nda::redistribute_in_place(dPsir,{1,mpi->comm.size()},{1,1});
+    math::nda::redistribute_in_place(dPsir,{1,mpi->comm.size()},{0,0});
     distPsia = std::move(dPsir);
   }
   // If a rotation matrix is provided, rotate orbitals
@@ -987,7 +990,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{1,mpi->comm.size()},{skap,distPsia.global_shape()[1]},
              {skap,distPsia.local_shape()[1]},
-             distPsia.origin(),{1,1});
+             distPsia.origin(),{0,0});
     utils::check(dPsir.local_shape()[1] == nnr_loc, "Shape mismatch.");
 
     // conjugate distPsia and dPsir afterwards, to avoid needing to modify C_skai
@@ -1036,7 +1039,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
                           nda::range(0,nspins),nda::range(0,nkpts),b_range,{1}); 
       auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1},{Psib.global_shape()[0],rho_g.nnr()},{Psib.local_shape()[0],rho_g.nnr()},
-             Psib.origin(),{1,1});
+             Psib.origin(),{0,0});
       auto psir = dPsir.local();
       auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -1047,14 +1050,14 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       // stealing the distribution from distPsia 
       distPsib = new memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
                           {1,mpi->comm.size()},dPsir.global_shape(),{dPsir.global_shape()[0],distPsia.local_shape()[1]},
-                          distPsia.origin(),{1,1});
+                          distPsia.origin(),{0,0});
       math::nda::redistribute(dPsir,*distPsib);
     } else {
       auto Psib = mf::read_distributed_orbital_set<local_CArray_t>(*mf,mpi->comm,'r',{1,mpi->comm.size()},
                           nda::range(0,nspins),nda::range(0,nkpts),b_range,{1}); 
       distPsib = new memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
                           Psib.grid(),Psib.global_shape(),Psib.local_shape(),
-                          Psib.origin(),Psib.block_size());
+                          Psib.origin(),Psib.tile_count());
       *distPsib = Psib;
       //*distPsib = std::move(Psib);
     }
@@ -1234,29 +1237,18 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   /**************************************************************************/
   // accumulation ranges for Pska
   nda::range k_subrange(1), a_subrange(1), b_subrange(1);
-  long arng_bsize = std::min( default_block_size, a_range.size()/nproc_per_pool);
-  long brng_bsize = std::min( default_block_size, b_range.size()/nproc_per_pool);
+  long arng_tiles = utils::balanced_tile_count(a_range.size(), nproc_per_pool, default_block_size);
+  long brng_tiles = utils::balanced_tile_count(b_range.size(), nproc_per_pool, default_block_size);
   {
-    auto [a,b] = itertools::chunk_range(0,a_range.size()/arng_bsize,
-                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
-    a *= arng_bsize;
-    if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
-      b = a_range.size();
-    else
-      b *= arng_bsize;
+    long ip = mpi->comm.rank()%nproc_per_pool;
+    auto [a,b] = utils::local_range_of_rank(a_range.size(),arng_tiles,nproc_per_pool,ip);
     a_subrange = nda::range(a,b);
-    std::tie(a,b) = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
-    k_subrange = nda::range(a,b);
+    auto [k0,k1] = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
+    k_subrange = nda::range(k0,k1);
     if(not single_psi)
     {
-      std::tie(a,b) = itertools::chunk_range(0,b_range.size()/brng_bsize,
-                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
-      a *= brng_bsize;
-      if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
-        b = b_range.size();
-      else
-        b *= brng_bsize;
-      b_subrange = nda::range(a,b);
+      auto [c,d] = utils::local_range_of_rank(b_range.size(),brng_tiles,nproc_per_pool,ip);
+      b_subrange = nda::range(c,d);
     }
   }
   std::vector<memory::array<MEM,ComplexType,3>> Pskau;
@@ -1659,7 +1651,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
   auto Xskau = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
        {nspins*npol,nkpts,a_range.size(),nchol},
        {nspins*npol,k_subrange.size(),a_subrange.size(),nchol},
-       {0,k_subrange.first(),a_subrange.first(),0},{1,1,arng_bsize,nchol});
+       {0,k_subrange.first(),a_subrange.first(),0},{0,0,arng_tiles,0});
   std::optional<_darray_t_<MEM,4>> Xskbu;
 
   {
@@ -1702,9 +1694,9 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
              a_range.size() / default_block_size) );
       while( nproc_per_pool%nx != 0 ) --nx;
       long ny = nproc_per_pool/nx;
-      long bu = std::min( nchol/std::max(nx,ny), default_block_size );
       math::nda::redistribute_in_place(Xskau,{1,nkpool,nx,ny},
-                                       {1,1,default_block_size,bu});
+          {0,0,utils::balanced_tile_count(a_range.size(),nx,default_block_size),
+               utils::balanced_tile_count(nchol,std::max(nx,ny),default_block_size)});
     }
   }
   if(not single_psi)
@@ -1712,7 +1704,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     Xskbu = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
        {nspins*npol,nkpts,b_range.size(),nchol},
        {nspins*npol,k_subrange.size(),b_subrange.size(),nchol},
-       {0,k_subrange.first(),b_subrange.first(),0},{1,1,brng_bsize,nchol});
+       {0,k_subrange.first(),b_subrange.first(),0},{0,0,brng_tiles,0});
     auto phase = memory::unified_array<ComplexType, 1>::zeros({nchol});
     auto kpts_c = mf->kpts_crystal();
     auto Xloc = Xskbu->local();
@@ -1750,9 +1742,9 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
              b_range.size() / default_block_size) );
       while( nproc_per_pool%nx != 0 ) --nx;
       long ny = nproc_per_pool/nx;
-      long bu = std::min( nchol/std::max(nx,ny), default_block_size );
       math::nda::redistribute_in_place(*Xskbu,{1,nkpool,nx,ny},
-                                       {1,1,default_block_size,bu});
+          {0,0,utils::balanced_tile_count(b_range.size(),nx,default_block_size),
+               utils::balanced_tile_count(nchol,std::max(nx,ny),default_block_size)});
     }
   }
 
@@ -1765,8 +1757,10 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     if constexpr ( return_Ruv ) {
       // returns only Ruv, instead of full Rur
 
+      // square tile count on both axes (the matrix is nchol x nchol)
+      long t512 = utils::balanced_tile_count(nchol, mpi->comm.size(), 512);
       auto return_value{math::nda::make_distributed_array<local_CArray_t>(mpi->comm,
-                          {1,mpi->comm.size()},{nchol,nchol},{512,512},true)};
+                          {1,mpi->comm.size()},{nchol,nchol},{t512,t512})};
 
       if(mpi->comm.size()==1) {
 
@@ -1778,11 +1772,11 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 
         auto xloc = return_value.local()(nda::range(nchol),all);
         auto Xt = math::nda::distributed_array_view<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
-		return_value.grid(),return_value.global_shape(),return_value.origin(),{1,1},xloc);
+		return_value.grid(),return_value.global_shape(),return_value.origin(),{0,0},xloc);
   
         auto rloc = R(nda::range(nchol),all);
         auto Rt = math::nda::make_distributed_array_view<local_CArray_t>(mpi->comm,
-                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{1,1},rloc);
+                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{0,0},rloc);
         utils::check(Rt.local_range(1) == r_range, "Range error.");
 
         Timer.start("COMM");
@@ -1802,7 +1796,9 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       Rt.local() = R(nda::range(nchol),all);
 
       auto return_value{math::nda::make_distributed_array<local_CArray_t>(mpi->comm,
-                          {1,mpi->comm.size()},{nchol,rho_g.nnr()},{512,512})};
+                          {1,mpi->comm.size()},{nchol,rho_g.nnr()},
+                          {utils::balanced_tile_count(nchol,1,512),
+                           utils::balanced_tile_count(rho_g.nnr(),mpi->comm.size(),512)})};
 
       Timer.start("COMM");
       math::nda::redistribute(Rt,return_value);
@@ -1826,7 +1822,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 template<typename DArr_t>
 void thc::build_Vxc_quv(DArr_t const& Z_quG,
                         std::array<long, 3> pgrid3D,
-                        std::array<long, 3> block_size)
+                        std::array<long, 3> tile_count)
 {
   decltype(nda::range::all) all;
   // Host-only: the kernel fields, zeta(u,G) and Vxc(q,u,v) are all host arrays and
@@ -1863,7 +1859,7 @@ void thc::build_Vxc_quv(DArr_t const& Z_quG,
 
   Vxc_quv.emplace(math::nda::make_distributed_array<memory::array<HOST_MEMORY,ComplexType,3>>(
       mpi->comm, pgrid3D, {nqpts_ibz, nIpts, nIpts},
-      {block_size[0], block_size[1], block_size[1]}));
+      {tile_count[0], tile_count[1], tile_count[1]}));
   auto& dVxc = Vxc_quv.value();
   // Built on Z_quG's pgrid3D with the same leading shapes and block sizes, so it
   // shares Z_quG's local (q, u) ranges by construction.
@@ -1967,13 +1963,13 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
   // Z_quG: quG array with appropriate distribution slate
   auto [Z_quG, C_quv] = get_ZquG_Cquv<MEM>(IPts,Xa,Xb,a_range,b_range,pgrid3D);
 
-  auto block_size = Z_quG.block_size();
+  auto tile_count = Z_quG.tile_count();
   utils::check(C_quv.grid() == Z_quG.grid()  and
                C_quv.grid() == pgrid3D,
                "Error: Processor grid mismatch. Oh oh");
-  utils::check(C_quv.block_size()[0] == block_size[0] and
-               C_quv.block_size()[1] == block_size[1] and
-               C_quv.block_size()[2] == block_size[1],
+  utils::check(C_quv.tile_count()[0] == tile_count[0] and
+               C_quv.tile_count()[1] == tile_count[1] and
+               C_quv.tile_count()[2] == tile_count[1],
                "Error: Block size mismatch. Oh oh...");
 
   // MAM: leave option for round-robin serial solves!  
@@ -1991,11 +1987,11 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
       auto Z2D = Z_quG.local()(iq,all,all);
       memory::darray_view_t<lArray_t,mpi3::communicator> Ciq(std::addressof(q_intra_comm),
                 {pgrid3D[1],pgrid3D[2]}, {nIpts,nIpts}, {C_quv.origin()[1], C_quv.origin()[2]},
-                {block_size[1],block_size[1]}, C2D);
+                {tile_count[1],tile_count[1]}, C2D);
       memory::darray_view_t<lArray_t,mpi3::communicator> Ziq(std::addressof(q_intra_comm),
                 {pgrid3D[1],pgrid3D[2]}, {nIpts,Z_quG.global_shape()[2]}, 
                 {Z_quG.origin()[1], Z_quG.origin()[2]},
-                {block_size[1],block_size[2]}, Z2D);
+                {tile_count[1],tile_count[2]}, Z2D);
 
       if (use_least_squares) {
         long info = math::nda::slate_ops::least_squares_solve<true>(Ciq,Ziq);
@@ -2016,7 +2012,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
     // C_quv: Vxc is only valid in the direct (Hartree) channel, so it must not
     // be folded into the Coulomb matrix this routine returns.
     if(vxc_file != "")
-      build_Vxc_quv(Z_quG, pgrid3D, block_size);
+      build_Vxc_quv(Z_quG, pgrid3D, tile_count);
 
     // First compute the inverse of overlap matrices
     Timer.start("ZBAR");
@@ -2031,7 +2027,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
       mpi3::communicator q_intra_comm = mpi->comm.split(C_quv.origin()[0], mpi->comm.rank());
       Timer.start("ALLOC");
       auto buffer = make_distributed_array<lArray_t>(q_intra_comm, {pgrid3D[1], pgrid3D[2]},
-                                                     {nIpts,nIpts},{block_size[1],block_size[1]});
+                                                     {nIpts,nIpts},{tile_count[1],tile_count[1]});
       Timer.stop("ALLOC");
       auto buf_loc = buffer.local();
       for (auto [iq, q]: itertools::enumerate(C_quv.local_range(0))) {
@@ -2043,7 +2039,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
 
         memory::darray_view_t <lArray_t, mpi3::communicator> Ciq(std::addressof(q_intra_comm),
                   {pgrid3D[1], pgrid3D[2]}, {nIpts, nIpts}, {C_quv.origin()[1], C_quv.origin()[2]},
-                  {block_size[1], block_size[1]}, C2D);
+                  {tile_count[1], tile_count[1]}, C2D);
 
         if(use_least_squares) {
           long info = math::nda::slate_ops::least_squares_solve<true>(Ciq,buffer);
@@ -2060,7 +2056,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
       // construct IquG
       Timer.start("ALLOC");
       IquG = make_distributed_array<local_uArray_t>(mpi->comm,pgrid3D,Z_quG.global_shape(),
-                  Z_quG.block_size());  
+                  Z_quG.tile_count());  
       Timer.stop("ALLOC");
       math::nda::slate_ops::multiply(C_quv, Z_quG, *IquG);
     }    
@@ -2127,7 +2123,7 @@ auto thc::intvec_impl(nda::MemoryArrayOfRank<1> auto const& IPts,
       Timer.start("ALLOC");
       math::nda::distributed_array<local_Array_t,mpi3::communicator> C_quv_(
           std::addressof(mpi->comm),C_quv.grid(),C_quv.global_shape(),C_quv.local_shape(),
-          C_quv.origin(),C_quv.block_size());
+          C_quv.origin(),C_quv.tile_count());
       Timer.stop("ALLOC");
       C_quv_.local() = C_quv.local();	
       return std::make_tuple(std::move(C_quv_), std::move(Z_qu), std::move(Zbar_qu), 
@@ -2197,30 +2193,26 @@ auto thc::intvec_impl(int iq, nda::MemoryArrayOfRank<1> auto const& IPts,
   // temporary, optimize later!
   std::array<long, 2> pgrid2D = {mpi->comm.size(), 1};
 
-  // make sure block sizes produce at least one full block per task 
-  std::array<long, 2> block_size = {  
-    std::min( { long(default_block_size), 
-                nIpts/pgrid2D[0],
-                nIpts/pgrid2D[1]
-              } ), 
-    std::min(long(default_block_size), nIpts/pgrid2D[1])
-  };
+  // Square (u,v) tile count: the same count on both axes, so ChC_uv/Tl/Tr are
+  // partitioned identically on both and the slate ops on them conform.
+  long uv_tiles = utils::balanced_tile_count(nIpts, std::max(pgrid2D[0],pgrid2D[1]),
+                                             default_block_size);
 
   if(iq==0) { 
     app_log(2," - processor grid: ({},{})",pgrid2D[0],pgrid2D[1]);
-    app_log(2," - block sizes: ({},{})",block_size[0],block_size[1]);
+    app_log(2," - tile count (u,v): ({},{})",uv_tiles,uv_tiles);
   }
 
   // (C^H*C)(p,q) = sum_k conj(Ta(k,p,q)) * Tb(k,p,q)
-  auto ChC_uv{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{block_size[0],block_size[0]})};
+  auto ChC_uv{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{uv_tiles,uv_tiles})};
   // 1D views of local arrays
   auto ChC_uv_1D = nda::reshape(ChC_uv.local(),shape_t<1>{ChC_uv.local().size()});
   ChC_uv_1D() = ComplexType(0.0);
 
   { // to control memory scope
     // Tl/r(p,r) = sum_a_range std::conj(Psi(k,a,Ipts(p)))*Psi(k,a,r) 
-    auto Tl{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{block_size[0],block_size[0]})};
-    auto Tr{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{block_size[0],block_size[0]})};
+    auto Tl{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{uv_tiles,uv_tiles})};
+    auto Tr{make_distributed_array<local_Array_t>(mpi->comm,pgrid2D,{nIpts,nIpts},{uv_tiles,uv_tiles})};
 
     auto Tl_1D = nda::reshape(Tl.local(),shape_t<1>{Tl.local().size()});
     auto Tr_1D = nda::reshape(Tr.local(),shape_t<1>{Tr.local().size()});
@@ -2250,7 +2242,9 @@ auto thc::intvec_impl(int iq, nda::MemoryArrayOfRank<1> auto const& IPts,
 
   // Snv = sum_k_a_b Pa(k,a,v) * conj(Pb(k,b,v)) * B(n,s,k,a,b)
   auto Snv{math::nda::make_distributed_array<local_Array_t>(mpi->comm,
-                      {mpi->comm.size(),1},{nchol,nIpts},{default_block_size,block_size[0]})};
+                      {mpi->comm.size(),1},{nchol,nIpts},
+                      {utils::balanced_tile_count(nchol,mpi->comm.size(),default_block_size),
+                       uv_tiles})};
 //  auto Sloc = Snv.local();
 
   // NOT OPTIMAL!!!

@@ -43,6 +43,7 @@
 #include "nda/blas.hpp"
 #include "nda/linalg.hpp"
 #include "numerics/nda_functions.hpp"
+#include "utilities/tile_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/nda_utils.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -272,7 +273,8 @@ auto orthonormalize_augmentation(
   long nbnd_tot = nbnd + n_aug_max;
   auto psi_out = math::nda::make_distributed_array<larray>(*comm, psi_orig.grid(),
       {nspin_tot, nkpts_tot, nbnd_tot, ngm},
-      {psi_orig.block_size()[0], psi_orig.block_size()[1], nbnd_tot, psi_orig.block_size()[3]});
+      {psi_orig.tile_count()[0], psi_orig.tile_count()[1], psi_orig.grid()[2],
+       psi_orig.tile_count()[3]});
   auto out_all = psi_out.local();
 
   nda::array<ComplexType,2> R(n_aug_max, n_raw);
@@ -529,7 +531,8 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   // raw (non-orthonormal) augmentation states, same grid/G-distribution
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,n_raw,ngm},bs_raw);
+                    {nspin,nkpts_ibz,n_raw,ngm},
+                    utils::balanced_tile_counts<4>({nspin,nkpts_ibz,n_raw,ngm},pgrid,bs_raw));
   {
     long g0 = psi_base.local_range(3).first();
     auto base_loc = psi_base.local();
@@ -747,7 +750,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // psi_orig = first M bands (the kept originals) as its own distributed array.
   auto psi_orig = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,M,ngm},bs_orig);
+                    {nspin,nkpts_ibz,M,ngm},
+                    utils::balanced_tile_counts<4>({nspin,nkpts_ibz,M,ngm},pgrid,bs_orig));
   psi_orig.local() = psi_all.local()(all,all,nda::range(0,M),all);
 
   if(R == 0) {
@@ -775,7 +779,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // raw (non-orthonormal) augmentation states on the 'w' grid, zeroed
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,n_raw,ngm},bs_raw);
+                    {nspin,nkpts_ibz,n_raw,ngm},
+                    utils::balanced_tile_counts<4>({nspin,nkpts_ibz,n_raw,ngm},pgrid,bs_raw));
   raw_aug.local() = ComplexType(0.0);
 
   utils::check(psi_all.local_range(1) == raw_aug.local_range(1),

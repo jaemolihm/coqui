@@ -100,11 +100,11 @@ namespace solvers {
 
     // The total memory requirement is ntpools*ns*nkpts*Np*Np rather than nt*ns*nkpts*Np*Np
     auto dGp_sRPQ = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {0, 0, 0, 0});
     auto dGn_sRPQ = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {0, 0, 0, 0});
     auto dbuf_skPQ  = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np}, {0, 0, 0, 0});
     nda::matrix<ComplexType> X_R_PQ(nkpts, NP_loc*NQ_loc);
     utils::check(dGp_sRPQ.local_shape()[2] == NP_loc, "dGp_sRPQ.local_shape[2] != NP_loc");
     utils::check(dGp_sRPQ.local_shape()[3] == NQ_loc, "dGp_sRPQ.local_shape[3] != NQ_loc");
@@ -252,11 +252,11 @@ namespace solvers {
     // from primary to auxiliary basis: G_ij -> G_PQ
     _Timer.start("PI_ALLOC_K");
     auto dGp_sktPQ_c = make_distributed_array<local_Array_5D_t>(
-        mpi->comm, {1, 1, ntpools, np_P, np_Q}, {ns, nkpts, nt_half, Np, Np}, {1, 1, 1, 1, 1});
+        mpi->comm, {1, 1, ntpools, np_P, np_Q}, {ns, nkpts, nt_half, Np, Np}, {0, 0, 0, 0, 0});
     long nt_loc = dGp_sktPQ_c.local_shape()[2];
     {
       auto dGp_tskPQ  = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {ntpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np}, {1, 1, 1, 1, 1});
+          mpi->comm, {ntpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np}, {0, 0, 0, 0, 0});
       _Timer.stop("PI_ALLOC_K");
 
       _Timer.start("PI_PRIM_TO_AUX");
@@ -274,10 +274,10 @@ namespace solvers {
       }
     }
     auto dGn_sktPQ = make_distributed_array<local_Array_5D_t>(
-        mpi->comm, {1, 1, ntpools, np_P, np_Q}, {ns, nkpts, nt_half, Np, Np}, {1, 1, 1, 1, 1});
+        mpi->comm, {1, 1, ntpools, np_P, np_Q}, {ns, nkpts, nt_half, Np, Np}, {0, 0, 0, 0, 0});
     {
       auto dGn_tskPQ = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {ntpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np}, {1, 1, 1, 1, 1});
+          mpi->comm, {ntpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np}, {0, 0, 0, 0, 0});
       _Timer.stop("PI_ALLOC_K");
 
       _Timer.start("PI_PRIM_TO_AUX");
@@ -305,7 +305,7 @@ namespace solvers {
     }
 
     auto dPi_qtPQ = make_distributed_array<local_Array_4D_t>(
-        mpi->comm, {1, ntpools, np_P, np_Q}, {nqpts_ibz, nt_half, Np, Np}, {1, 1, 1, 1});
+        mpi->comm, {1, ntpools, np_P, np_Q}, {nqpts_ibz, nt_half, Np, Np}, {0, 0, 0, 0});
     _Timer.stop("PI_ALLOC_K");
 
     eval_Pi_rpa_k_impl(dGp_sktPQ_c, dGn_sktPQ, dPi_qtPQ, thc);
@@ -314,7 +314,7 @@ namespace solvers {
 
     _Timer.start("PI_ALLOC_K");
     auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-        mpi->comm, {ntpools, 1, np_P, np_Q}, {nt_half, nqpts_ibz, Np, Np}, {1, 1, 1, 1});
+        mpi->comm, {ntpools, 1, np_P, np_Q}, {nt_half, nqpts_ibz, Np, Np}, {0, 0, 0, 0});
     {
       auto Pi_tqPQ = dPi_tqPQ.local();
       auto Pi_qtPQ = dPi_qtPQ.local();
