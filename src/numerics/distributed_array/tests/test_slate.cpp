@@ -193,43 +193,97 @@ TEST_CASE("cuda_aware_mpi", "[math]")
 }
 #endif
 
+// slate_ops::determinant: the log-det of the RPA correlation energy
+// (methods/GW/thc_rpa.icc).  The reference is serial LAPACK on a replicated copy
+// of the same analytic matrix, so it shares nothing with the distributed path.
+//
+// The matrix is a deterministic pseudo-random complex one, NOT the diagonally
+// dominant sin/cos matrix of "distributed_inverse": a diagonally dominant matrix
+// pivots trivially, so its permutation parity is +1 and a sign bug is invisible.
+// The sweep below asserts the pivot sequence really is nontrivial before it
+// trusts the sign comparison.
 TEST_CASE("determinant", "[math]") {
-  const long N = 128;
   auto world = boost::mpi3::environment::get_world_instance();
+  using local_Array_t = memory::array<HOST_MEMORY, ComplexType, 2>;
 
-  nda::matrix<double> A(N, N);
-  A() = 1.1;
-  auto detA_ref = ::nda::determinant_in_place(A);
-  app_log(2, "detA_ref = {}", detA_ref);
+  auto run = [&](const long N) {
+    // replicated on every rank: same seed, same sequence, no communication
+    unsigned long seed = 0x9E3779B97F4A7C15ul + 1315423911ul*static_cast<unsigned long>(N);
+    auto u01 = [&seed]() {
+      seed = seed*6364136223846793005ul + 1442695040888963407ul;
+      return double((seed >> 11) & ((1ul<<52)-1))/double(1ul<<52);
+    };
+    nda::array<ComplexType, 2> A(N, N);
+    for (long i = 0; i < N; ++i)
+      for (long j = 0; j < N; ++j)
+        A(i, j) = ComplexType(2.0*u01() - 1.0, 2.0*u01() - 1.0);
 
-  long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
-  long ny = world.size() / nx;
-  using local_Array_t = memory::array<HOST_MEMORY, double, 2>;
-  auto dA = make_distributed_array<local_Array_t>(world, shape_t<2>{nx, ny},
-                                                 shape_t<2>{N, N}, {16,16}, true);
-
-  auto i_rng = dA.local_range(0);
-  auto j_rng = dA.local_range(1);
-  auto A_loc = dA.local();
-  A_loc = A(i_rng, j_rng);
-
-  auto [Ni_loc, Nj_loc] = dA.local_shape();
-  auto [i_origin, j_origin] = dA.origin();
-  std::vector<std::pair<long,long> > diag_idx;
-  for (long ii = 0; ii < Ni_loc; ++ii) {
-    long i = ii + i_origin;
-    for (size_t jj = 0; jj < Nj_loc; ++jj) {
-      long j = jj + j_origin;
-      if (i == j) diag_idx.push_back({ii, jj});
+    // reference value
+    ComplexType det_ref;
+    {
+      nda::matrix<ComplexType> Am(A);
+      det_ref = nda::determinant_in_place(Am);
     }
-  }
+    REQUIRE(std::abs(det_ref) > 0.0);
 
-  app_log(2, "pgrid = ({}, {})", dA.grid()[0], dA.grid()[1]);
-  app_log(2, "bsize = ({}, {})", dA.block_size()[0], dA.block_size()[1]);
-  [[maybe_unused]] auto detA = math::nda::slate_ops::determinant(dA, diag_idx);
-  app_log(2, "detA = {}", detA);
+    // the permutation is nontrivial, i.e. the sign is actually under test
+    {
+      nda::array<ComplexType, 2, nda::F_layout> Af(A);
+      nda::array<int, 1> ipiv(N);
+      long info = nda::lapack::getrf(Af, ipiv);
+      REQUIRE(info == 0);
+      long nswap = 0;
+      for (long i = 0; i < N; ++i) if (ipiv(i)-1 != i) ++nswap;
+      INFO("N = " << N << ": LAPACK swapped " << nswap << " rows");
+      REQUIRE(nswap > 0);
+    }
 
-  utils::VALUE_EQUAL(detA, detA_ref);
+    auto check = [&](long np_i, long np_j, long bsize) {
+      if (np_i*np_j != world.size()) return;
+      if (N < np_i or N < np_j or bsize < 1) return;
+      if (bsize > N/np_i or bsize > N/np_j) return;
+
+      auto dA = make_distributed_array<local_Array_t>(world, shape_t<2>{np_i, np_j},
+                    shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
+
+      auto [Ni_loc, Nj_loc] = dA.local_shape();
+      auto [i_origin, j_origin] = dA.origin();
+      std::vector<std::pair<long,long> > diag_idx;
+      for (long ii = 0; ii < Ni_loc; ++ii)
+        for (long jj = 0; jj < Nj_loc; ++jj)
+          if (ii + i_origin == jj + j_origin) diag_idx.push_back({ii, jj});
+
+      auto det = math::nda::slate_ops::determinant(dA, diag_idx);
+
+      auto ratio = det/det_ref;
+      app_log(2, "  determinant: N = {}, pgrid = ({}, {}), bsize = {}, "
+                 "det/det_ref = ({:.12f}, {:.12f})",
+              N, np_i, np_j, bsize, ratio.real(), ratio.imag());
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), bsize = " << bsize
+           << ", det = " << det << ", ref = " << det_ref);
+      // The sign is exact -- assert it as such, with no tolerance.
+      CHECK(ratio.real() > 0.0);
+      // The magnitude is a product of N factors, so it carries N roundings.
+      CHECK(std::abs(std::abs(det)/std::abs(det_ref) - 1.0) < 1e-10);
+    };
+
+    const long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
+    for (auto [np_i, np_j] : std::array<std::pair<long,long>,4>{{
+             {world.size(), 1l}, {1l, world.size()}, {nx, world.size()/nx},
+             {world.size()/nx, nx}}}) {
+      const long p_max = std::max(np_i, np_j);
+      // one tile per rank, two tiles per rank, tile size one
+      for (long b : {N/p_max, N/(2*p_max), 1l}) check(np_i, np_j, b);
+    }
+  };
+
+  // Small enough that |det| stays well inside double range, ragged over the rank
+  // counts ctest uses.
+  run(8);
+  run(9);
+  run(12);
+  run(41);
 }
 
 TEST_CASE("distributed_ops", "[math]")

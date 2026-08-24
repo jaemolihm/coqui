@@ -149,13 +149,14 @@ namespace methods {
 
           // Tr{ln(B)} = ln(det(B))
           ComplexType det_A = math::nda::slate_ops::determinant(dA_PQ, diag_idx);
-          if (det_A.real() < 0) {
-            if (dA_PQ.communicator()->root())
-              std::cout << "[WARNING] thc_rpa:: determinant of (I - Pi*Z) < 0. "
-                           "This is likely due to our API of determinant from SLATE "
-                           "which miscounts the number of pivoting..." << std::endl;
-            det_A *= -1.0;
-          }
+          // log(det) is undefined for a non-positive determinant. On the imaginary
+          // axis -Pi is positive semidefinite, so I - Pi*Z has all eigenvalues >= 1
+          // and det > 0 for any sound polarizability.
+          utils::check(det_A.real() > 0.0,
+              "thc_rpa: det(I - Pi*Z) = {} at iq = {}, iw = {} is not positive, so "
+              "the log-det RPA correlation energy is undefined. This indicates an "
+              "unstable polarizability, not a pivot-counting problem.",
+              det_A.real(), iq, wn);
 
           if (dA_PQ.communicator()->root()) {
             e_rpa_w(wn, 0) += double(q_weight) * std::log(det_A.real());
