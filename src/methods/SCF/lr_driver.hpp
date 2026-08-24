@@ -158,6 +158,9 @@ struct lr_diis_hist_t {
   long depth = 0;     ///< max_subsp_size; 0 = no history (accelerator off)
   long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities stored per entry
   long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per entry
+  /// Residuals are stored only by a configuration that can extrapolate, so a
+  /// damping ring holds trials alone: one vector per entry, not two.
+  bool with_residuals = true;
 };
 
 /**
@@ -290,41 +293,11 @@ struct lr_params {
   bool inner_mixes() const { return use_diis() || mixing() < 1.0; }
 };
 
-/**
- * The kernel split a run executes: the components the inner SCF loop resums
- * (K_sc), those applied perturbatively (K_pert), and the unions on which every
- * solver, buffer and W-operand decision is taken.
- *
- * Derived from `p` alone and recomputed identically by lr_setup, lr_solve_one and
- * the post-solve hooks, so what one allocates is exactly what the others read.
- */
-struct lr_kernel_split {
-  lr_kernel_spec sc{};
-  lr_kernel_spec pert{};
-  bool do_pert = false;            ///< a perturbative pass actually runs
-
-  bool sc_hf = false,    pert_hf = false;
-  bool sc_sigma = false, pert_sigma = false;
-  bool need_hf = false;            ///< ΔF is evaluated by some channel
-  bool include_gw_sigma = false;   ///< ΔΣ is evaluated by some channel
-  bool gw_full = false;            ///< Σ2 = -G⊙ΔW anywhere, hence the ΔW Dyson
-
-  /// A quantity BOTH channels contribute to. It is the only case needing
-  /// per-channel buffers and a total rebuilt every inner iteration; a quantity
-  /// carried by one channel is written straight into the caller's array.
-  bool split_F = false, split_Sigma = false;
-
-  bool qp_mode = false;
-  bool has_Vcorr = false;     ///< the static ΔV_QPGW is the mixed/tracked quantity
-  bool has_Sigma = false;     ///< the dynamic ΔΣ enters the Dyson RHS
-  bool has_Sigma_sc = false;  ///< ... and the sc channel's copy is the tracked one
-
-  /// The perturbative channel owes the static counter-term +ΔDm ⊙ W_c(0) on
-  /// top of its mask, because K_sc is HSEX. See lr_params::exchange_static_W.
-  bool pert_sex_counterterm = false;
-};
-
-lr_kernel_split make_kernel_split(lr_params const& p);
+/// The kernel split a run executes: which components the inner SCF loop resums
+/// (K_sc) and which are applied perturbatively (K_pert). Derived from lr_params
+/// alone, so every phase of a run recomputes the identical split; defined in
+/// lr_driver.cpp, which is its only user.
+struct lr_kernel_split;
 
 /**
  * @class lr_driver
@@ -430,50 +403,35 @@ public:
       int* n_pert_applied_out = nullptr);
 
   /**
-   * @brief Re-apply K_pert on the ΔG the last lr_solve_one returned, overwriting
-   *        the perturbative source with a fresh one.
+   * @brief Replace the ΔF / ΔΣ the last lr_solve_one returned with the RAW kernel
+   *        output of its final iteration, so the stationary C_term1 functional can
+   *        be handed ΔV' = ΔH0 + K(ΔG').
    *
-   * Split-kernel runs only; a no-op otherwise. Inside a stage the perturbative
-   * source is frozen at K_pert(ΔG at stage start), so the returned ΔΣ'/ΔF' is not
-   * K(ΔG') and the stationary C_term1 functional loses its second-order property
-   * — the same violation as handing it the mixed iterate. One extra K_pert
-   * evaluation restores ΔV' = ΔH0 + K_sc(ΔG') + K_pert(ΔG') exactly.
+   * Two things stand between the returned arrays and that ΔV'.
    *
-   * Must run immediately before materialize_raw_kernel(), which reads the arrays
-   * this overwrites; the ordering is checked there.
+   * The mixing block destroys the raw output: it overwrites the shared arrays in
+   * place, and the "previous iterate" buffers hold the previous *already mixed*
+   * value. The raw slice survives in the inner accelerator's ring, which stores it
+   * ahead of both the extrapolation and the damping write. Nothing to do when the
+   * final iteration did not mix (a one-iteration stage, or undamped Picard).
+   *
+   * On a split-kernel run the perturbative source is additionally frozen at
+   * K_pert(ΔG at stage start), so this re-evaluates K_pert on the returned ΔG
+   * first — otherwise the total is not K(ΔG') and the functional loses its
+   * second-order property just as surely as with a mixed iterate. The raw total is
+   * then raw-sc (from the ring) plus that fresh source. The OUTER accelerator's
+   * ring is deliberately not consulted: its newest slot is an extrapolate.
+   *
+   * Collective on comm. Call after the checkpoint dump: it changes what the shared
+   * arrays hold.
    */
   template<THC_ERI THC_t>
-  void refresh_pert_on_final_G(
-      const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-      const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-      const sArray_t<Array_view_5D_t>& sG_tskij,
-      sArray_t<Array_view_4D_t>& sDeltaF_skij,
-      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-      THC_t& thc,
-      const lr_params& p);
-
-  /**
-   * @brief Replace the returned (mixed) ΔF / ΔΣ with the RAW kernel output of the
-   *        final iteration.
-   *
-   * The stationary C_term1 functional needs ΔV' = ΔH0 + K(ΔG'), which the mixing
-   * block destroys: it overwrites the shared arrays in place, and the "previous
-   * iterate" buffers hold the previous *already mixed* value, not the raw one.
-   * The raw slice is still available in the inner accelerator's ring, which
-   * stores it ahead of both the extrapolation and the damping write.
-   *
-   * Returns false when the arrays are already raw (no mixing ran in the final
-   * iteration — a one-iteration stage, or undamped Picard), and true when they
-   * were rebuilt. On the split-kernel path the raw total is raw-sc + pert, the
-   * pert channel being read from the buffers refresh_pert_on_final_G() has just
-   * overwritten; the outer accelerator's ring is deliberately NOT consulted,
-   * since its newest slot is an extrapolate.
-   *
-   * Collective on comm. Call after the checkpoint dump: it changes what the
-   * shared arrays hold.
-   */
-  bool materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
+  void materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
                               sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
+                              const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                              const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                              const sArray_t<Array_view_5D_t>& sG_tskij,
+                              THC_t& thc,
                               const lr_params& p);
 
   /**
@@ -625,10 +583,13 @@ private:
                           sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
-   * One whole K_pert evaluation on the supplied ΔDm / ΔG, writing the perturbative
-   * source in place: the static ΔF branch (including the HSEX counter-term) plus
-   * eval_sigma_channel for the Σ branch. Shared by the in-loop stage boundary and
-   * the post-solve refresh so the kernel call exists exactly once.
+   * One whole K_pert evaluation on the supplied ΔDm / ΔG: the static ΔF branch
+   * (including the HSEX counter-term) plus eval_sigma_channel for the Σ branch.
+   * Shared by the in-loop stage boundary and the post-solve refresh so the kernel
+   * call exists exactly once.
+   *
+   * The perturbative source is OVERWRITTEN, not accumulated: the ΔG this is
+   * applied to already carries every lower order.
    */
   template<THC_ERI THC_t>
   void apply_pert_kernel(lr_kernel_split const& k,
@@ -644,8 +605,19 @@ private:
    * A split kernel evaluates ΔF / ΔΣ in two channels (K_sc every inner iteration,
    * K_pert only at a stage boundary) into separate buffers, so the total the Dyson
    * solve and the checkpoint consume has to be rebuilt from them: total <- sc +
-   * pert. Striped over node_comm because a ΔΣ total is GBs at production sizes and
-   * is rebuilt every inner iteration.
+   * pert.
+   *
+   * Striped over node_comm: every node rank owns a contiguous element slice of the
+   * shared window and writes only that slice. The result is bit-identical to a
+   * serial sum — this is an element-wise map with no reduction — but it runs at
+   * 1/nrank of the cost, which matters because a split ΔΣ is rebuilt on EVERY
+   * inner iteration (a ΔΣ array is nk·nt·nb², i.e. GBs at production sizes).
+   *
+   * CALLERS fence the total and both operand windows first: the sources are
+   * node-replicated shared memory and every rank reads slices written by others,
+   * so barriers alone are insufficient under the MPI-3 separate shared-memory
+   * model. The operands are taken by const reference (shared_array::win() is
+   * non-const), which is why the operand fences live at the call site.
    */
   template<typename Arr_t>
   void refresh_total(Arr_t& total, Arr_t const& sc_part, Arr_t const& pert_part);
@@ -756,10 +728,6 @@ private:
   /// have nothing to read. Allocated only when lr_params::energy_curvature is
   /// set, so the ordinary path neither copies nor allocates.
   nda::array<ComplexType, 1> _raw_F_slice, _raw_S_slice;
-  bool _raw_slice_captured = false;
-  /// refresh_pert_on_final_G() has run since the last lr_solve_one, so the pert
-  /// buffers hold fresh K_pert(ΔG'). Cleared by materialize_raw_kernel().
-  bool _pert_refreshed_post_solve = false;
 
   int _nts;
   int _ns;

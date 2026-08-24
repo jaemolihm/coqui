@@ -92,8 +92,9 @@ struct lr_c1_result_t {
  * contiguous element slice of the flattened (s,k,i,j) band array, the
  * `utils::part_map` partition the LR driver already uses. Reads are local (both
  * ΔG and ΔΣ are node-replicated shm), the ω axis of each stored slab is whole so
- * the IAFT transforms stay rank-local, and the only collectives are the two
- * accumulator reductions in assemble() plus one completion per shm rebuild.
+ * the IAFT transforms stay rank-local, and the collectives are confined to
+ * assemble()'s accumulator reductions plus the shm completions in
+ * rebuild_raw_kernel (see its COST NOTE — one per τ point, not one per mode).
  *
  * Hermiticity of `N` and of `C1_sym` is *measured*, never assumed: both matrices
  * are computed in full, both triangles, and the residuals are correctness

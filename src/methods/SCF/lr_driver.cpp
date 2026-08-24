@@ -20,7 +20,6 @@
 
 
 #include <cmath>
-#include <limits>
 
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_precompute.hpp"
@@ -75,9 +74,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                    "LR_GW_PI_PERT", "LR_GW_W_PERT",
                    // Mixing of the outer (perturbative-source) iteration.
                    "LR_OUTER_ITER_ALG",
-                   // Energy-curvature (stationary C_term1) hooks. The labels keep
-                   // "C1": they name the physical quantity C_term1, which is
-                   // unchanged; only the flag and the class carry the new name.
+                   // Energy-curvature hooks; C1 = C_term1.
                    "LR_C1_DYSON", "LR_C1_PERT_REFRESH"}) {
     _Timer.add(v);
   }
@@ -118,6 +115,41 @@ lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc
                         total.sigma_dG_W && !sc.sigma_dG_W,
                         total.sigma_G_dW && !sc.sigma_G_dW};
 }
+
+
+/**
+ * The kernel split a run executes: the components the inner SCF loop resums
+ * (K_sc), those applied perturbatively (K_pert), and the unions on which every
+ * solver, buffer and W-operand decision is taken.
+ *
+ * Derived from `p` alone and recomputed identically by lr_setup, lr_solve_one and
+ * materialize_raw_kernel, so what one allocates is exactly what the others read.
+ */
+struct lr_kernel_split {
+  lr_kernel_spec sc{};
+  lr_kernel_spec pert{};
+  bool do_pert = false;            ///< a perturbative pass actually runs
+
+  bool sc_hf = false,    pert_hf = false;
+  bool sc_sigma = false, pert_sigma = false;
+  bool need_hf = false;            ///< ΔF is evaluated by some channel
+  bool include_gw_sigma = false;   ///< ΔΣ is evaluated by some channel
+  bool gw_full = false;            ///< Σ2 = -G⊙ΔW anywhere, hence the ΔW Dyson
+
+  /// A quantity BOTH channels contribute to. It is the only case needing
+  /// per-channel buffers and a total rebuilt every inner iteration; a quantity
+  /// carried by one channel is written straight into the caller's array.
+  bool split_F = false, split_Sigma = false;
+
+  bool qp_mode = false;
+  bool has_Vcorr = false;     ///< the static ΔV_QPGW is the mixed/tracked quantity
+  bool has_Sigma = false;     ///< the dynamic ΔΣ enters the Dyson RHS
+  bool has_Sigma_sc = false;  ///< ... and the sc channel's copy is the tracked one
+
+  /// The perturbative channel owes the static counter-term +ΔDm ⊙ W_c(0) on
+  /// top of its mask, because K_sc is HSEX. See lr_params::exchange_static_W.
+  bool pert_sex_counterterm = false;
+};
 
 
 lr_kernel_split make_kernel_split(lr_params const& p) {
@@ -463,6 +495,7 @@ void lr_driver::lr_setup(
     inner_hist.depth = static_cast<long>(p.use_diis() ? p.iter_params.max_subsp_size : 1);
     inner_hist.n_F = k.has_Vcorr ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = k.has_Sigma_sc ? 1 : 0;
+    inner_hist.with_residuals = p.use_diis();
   }
   if (outer_diis_on) {
     outer_hist.depth = static_cast<long>(p.outer_accel.iter.max_subsp_size);
@@ -702,11 +735,6 @@ void lr_driver::lr_setup(
 }
 
 
-/**
- * Evaluate the Σ components of `lr_kernel` into `sSigma_tskij_out`, overwriting
- * it. Each divergence correction is applied by the evaluator that owns the term
- * it corrects, so passing the overlap and the heads is all this has to do.
- */
 template<THC_ERI THC_t>
 void lr_driver::eval_sigma_channel(
     lr_kernel_spec const& lr_kernel,
@@ -822,11 +850,6 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel(bool counter
 }
 
 
-/**
- * One K_pert evaluation on the supplied ΔDm / ΔG, overwriting (not accumulating)
- * the perturbative source — the ΔG it is applied to already carries every lower
- * order. Shared by the in-loop stage boundary and the post-solve refresh.
- */
 template<THC_ERI THC_t>
 void lr_driver::apply_pert_kernel(
     lr_kernel_split const& k,
@@ -868,25 +891,6 @@ void lr_driver::apply_pert_kernel(
 }
 
 
-/**
- * A split kernel evaluates ΔF / ΔΣ in two channels — K_sc every inner iteration,
- * K_pert only at a stage boundary — into separate buffers, because the two are
- * refreshed on different schedules and are timed apart. The quantity the Dyson
- * solve and the checkpoint actually consume is the sum, so it has to be rebuilt
- * from them: total = sc + pert.
- *
- * Striped over node_comm: every node rank owns a contiguous element slice of the
- * shared window and writes only that slice. The result is bit-identical to a
- * serial sum — this is an element-wise map with no reduction — but it runs at
- * 1/nrank of the cost, which matters because a split ΔΣ is rebuilt on EVERY inner
- * iteration (a ΔΣ array is nk·nt·nb², i.e. GBs at production sizes).
- *
- * Callers fence the total and both operand windows before calling: sources are
- * node-replicated shared memory and every rank reads slices written by others,
- * so barriers alone are insufficient under the MPI-3 separate shared-memory
- * model. The operands are taken by const reference (shared_array::win() is
- * non-const), which is why the operand fences live at the call site.
- */
 template<typename Arr_t>
 void lr_driver::refresh_total(Arr_t& total, Arr_t const& sc_part,
                               Arr_t const& pert_part) {
@@ -1020,8 +1024,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (_lr_diis) _lr_diis->reset();
   if (outer_diis_on) _outer_diis->reset();
   _mixed_last_iter = false;
-  _raw_slice_captured = false;
-  _pert_refreshed_post_solve = false;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
   // the last one is the cost of the whole batch. Each intermediate table is
@@ -1216,8 +1218,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // its `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed
         // result back in place. Pass .local() views directly (in/out); the "prev"
         // arguments are already this rank's slice. A damping-only run takes the
-        // accelerator's own damping write, which is the same striped expression
-        // the loop used to inline.
+        // accelerator's own damping write, which is the same striped expression.
         mixed_this_iter = true;
         // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
         // standard path, or the static ΔV_QPGW in qp mode.
@@ -1243,12 +1244,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // The raw kernel output of THIS iteration, taken while it is still in the
       // ring. Copying here rather than reading the ring after the solve is what
       // makes the estimator independent of how the loop exited: the ring is reset
-      // at every split-kernel stage boundary, so a budget that ran out on one
-      // would leave nothing to read (and used to abort the whole job).
+      // at every split-kernel stage boundary, so a solve whose budget ran out on
+      // one would have nothing left to read.
+      // Assigned THROUGH a view: whole-array assignment on an nda owning array
+      // reallocates unconditionally, which would both churn a ΔΣ-sized buffer
+      // every iteration and discard what lr_setup allocated.
       if (p.energy_curvature and inner_mix) {
-        _raw_F_slice = _lr_diis->newest_xF();
-        if (has_Sigma_sc) _raw_S_slice = _lr_diis->newest_xS();
-        _raw_slice_captured = true;
+        _raw_F_slice() = _lr_diis->newest_xF();
+        if (has_Sigma_sc) _raw_S_slice() = _lr_diis->newest_xS();
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
       // place with no trailing collective. Fence + barrier make every slice
@@ -1586,61 +1589,52 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
 
 template<THC_ERI THC_t>
-void lr_driver::refresh_pert_on_final_G(
+void lr_driver::materialize_raw_kernel(
+    sArray_t<Array_view_4D_t>& sDeltaF_skij,
+    sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
-    sArray_t<Array_view_4D_t>& sDeltaF_skij,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
     THC_t& thc,
     const lr_params& p) {
 
-  utils::check(_setup_done, "lr_driver::refresh_pert_on_final_G: call lr_setup first.");
-  const lr_kernel_split k = make_kernel_split(p);
-  if (!k.do_pert) return;
-
-  _Timer.start("LR_C1_PERT_REFRESH");
-  // Same write targets the stage boundary uses: a channel that is the sole
-  // contributor to a quantity writes the caller's array directly.
-  auto& sDeltaF_pert_skij = k.split_F ? *_sDeltaF_pert : sDeltaF_skij;
-  sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
-      !k.pert_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
-
-  apply_pert_kernel(k, sDeltaF_pert_skij, pDeltaSigma_pert,
-                    sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
-  // The totals the caller reads must see the new source; the sc channel is
-  // untouched, so this is the same rebuild the SCF loop does every iteration.
-  refresh_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
-  _pert_refreshed_post_solve = true;
-  _Timer.stop("LR_C1_PERT_REFRESH");
-}
-
-
-bool lr_driver::materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
-                                       sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-                                       const lr_params& p) {
   utils::check(_setup_done, "lr_driver::materialize_raw_kernel: call lr_setup first.");
+  utils::check(p.energy_curvature,
+               "lr_driver::materialize_raw_kernel: lr_setup must have been given "
+               "energy_curvature = true, or there is no raw slice to read.");
   const lr_kernel_split k = make_kernel_split(p);
   utils::check(!k.qp_mode,
                "lr_driver::materialize_raw_kernel: qp mode is out of scope — the "
                "accelerator's second slot holds the static ΔV_QPGW rather than ΔΣ, "
                "so the raw-ΔΣ algebra does not carry over.");
-  const bool refreshed = _pert_refreshed_post_solve;
-  _pert_refreshed_post_solve = false;
-  utils::check(!k.do_pert || refreshed,
-               "lr_driver::materialize_raw_kernel: on a split-kernel run "
-               "refresh_pert_on_final_G() must run immediately before this call, or "
-               "the perturbative source is the one frozen at the last stage boundary "
-               "and ΔV' != ΔH0 + K(ΔG').");
 
-  // No mixing ran in the final iteration (a one-iteration stage, or undamped
+  // Step 1, split-kernel runs only: re-evaluate K_pert on the ΔG the solve
+  // returned. Inside a stage the perturbative source is frozen at K_pert(ΔG at
+  // stage start), so without this the returned ΔΣ'/ΔF' is not K(ΔG') and the
+  // stationary functional loses its second-order property — the same violation as
+  // handing it the mixed iterate. One extra K_pert evaluation restores
+  // ΔV' = ΔH0 + K_sc(ΔG') + K_pert(ΔG') exactly.
+  if (k.do_pert) {
+    _Timer.start("LR_C1_PERT_REFRESH");
+    // Same write targets the stage boundary uses: a channel that is the sole
+    // contributor to a quantity writes the caller's array directly.
+    auto& sDeltaF_pert_skij = k.split_F ? *_sDeltaF_pert : sDeltaF_skij;
+    sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
+        !k.pert_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
+
+    apply_pert_kernel(k, sDeltaF_pert_skij, pDeltaSigma_pert,
+                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
+    // The totals the caller reads must see the new source; the sc channel is
+    // untouched, so this is the same rebuild the SCF loop does every iteration.
+    refresh_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    _Timer.stop("LR_C1_PERT_REFRESH");
+  }
+
+  // Step 2: swap the mixed ΔF / ΔΣ for the raw kernel output. Nothing to do when
+  // no mixing ran in the final iteration (a one-iteration stage, or undamped
   // Picard): the arrays the solve returned already ARE the raw kernel output.
-  if (!_mixed_last_iter) return false;
+  if (!_mixed_last_iter) return;
 
-  utils::check(_raw_slice_captured,
-               "lr_driver::materialize_raw_kernel: no raw slice was captured, but the "
-               "arrays were mixed. lr_setup must have been given "
-               "energy_curvature = true.");
   // The ring's ΔF slot holds whatever the mixing block mixed alongside ΔΣ, which
   // is the sc-channel ΔF. A Σ-carrying K_sc with no Hartree/exchange component
   // is off the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder and unreachable today, but were it
@@ -1659,8 +1653,8 @@ bool lr_driver::materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
   }
 
   // Each rank writes its own `_pmap` element slice; the raw total of a split
-  // quantity is raw-sc (from the ring) plus the perturbative source that
-  // refresh_pert_on_final_G has just re-evaluated on the returned ΔG.
+  // quantity is raw-sc (from the ring) plus the perturbative source step 1 has
+  // just re-evaluated on the returned ΔG.
   if (k.sc_hf) {
     auto F_loc = _DeltaF.slice(sDeltaF_skij.local());
     F_loc = _raw_F_slice;
@@ -1688,7 +1682,6 @@ bool lr_driver::materialize_raw_kernel(sArray_t<Array_view_4D_t>& sDeltaF_skij,
   if (k.sc_hf) sDeltaF_skij.win().fence();
   if (k.has_Sigma_sc) sDeltaSigma_tskij->win().fence();
   _mpi->comm.barrier();
-  return true;
 }
 
 
@@ -1784,20 +1777,21 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     arrays.push_back({"ΔΣ_prev (striped)", shp5b(nt), band5(nt), true, PERSIST});
   }
 
-  // DIIS histories. Each subspace entry keeps a trial AND a residual vector,
-  // and the residual is not reconstructible from the trials once extrapolation
-  // is active, so a depth-d history is 2d arrays. The history is striped over
-  // the global comm, so the whole job stores it once.
+  // DIIS histories. An extrapolating subspace keeps a trial AND a residual per
+  // entry — the residual is not reconstructible from the trials — so it costs 2
+  // vectors per entry; a damping ring stores trials only. The history is striped
+  // over the global comm, so the whole job stores it once.
   // The ring holds max_subsp_size + 1 slots, not max_subsp_size: push_slot()
   // grows to that before the first eviction and the capacity never shrinks.
-  // Counting only `depth` under-reports every history by (d+1)/d — a flat factor
-  // 2 for the depth-1 ring a damping run now allocates.
   auto push_hist = [&](lr_diis_hist_t const& h, const char* who) {
     if (h.depth <= 0 || (h.n_F == 0 && h.n_Sigma == 0)) return;
     const long slots = h.depth + 1;
-    const double nelem = 2.0 * slots * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
+    const long per_entry = h.with_residuals ? 2 : 1;
+    const double nelem =
+        per_entry * slots * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
     arrays.push_back({fmt::format("{} DIIS history", who),
-                      fmt::format("2x{}x[{}xΔF + {}xΔΣ]", slots, h.n_F, h.n_Sigma),
+                      fmt::format("{}x{}x[{}xΔF + {}xΔΣ]", per_entry, slots,
+                                  h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
   push_hist(inner_hist, "inner");
@@ -2085,12 +2079,12 @@ template std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>*,
     int*);
 
-template void lr_driver::refresh_pert_on_final_G(
+template void lr_driver::materialize_raw_kernel(
+    sArray_t<Array_view_4D_t>&,
+    sArray_t<Array_view_5D_t>*,
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>&,
     const sArray_t<Array_view_5D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_5D_t>*,
     thc_reader_t&,
     const lr_params&);
 

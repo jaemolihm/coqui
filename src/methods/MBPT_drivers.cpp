@@ -2165,11 +2165,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // captured here, before the next perturbation resets it; every contraction
     // waits for the second pass below.
     if (opt_curv) {
-      if (p.two_step())
-        driver.refresh_pert_on_final_G(
-            lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
-            sG_tskij, lr_state.sDeltaF_skij.value(), pDeltaSigma, thc, p);
-      driver.materialize_raw_kernel(lr_state.sDeltaF_skij.value(), pDeltaSigma, p);
+      driver.materialize_raw_kernel(
+          lr_state.sDeltaF_skij.value(), pDeltaSigma,
+          lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
+          sG_tskij, thc, p);
       opt_curv->store_mode(m, lr_state.sDeltaDm_skij.value(),
                            lr_state.sDeltaH0_skij.value(),
                            lr_state.sDeltaF_skij.value(), pDeltaSigma,

@@ -72,6 +72,13 @@ lr_energy_curvature_t::lr_energy_curvature_t(
   utils::check(k_weight.size() == nk_ibz,
                "lr_energy_curvature_t: k_weight has {} entries, expected nk_ibz = {}.",
                k_weight.size(), nk_ibz);
+  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ')). That
+  // round trip is the identity only on a square grid; on nt != nw it is a
+  // projection, and the ΔV' the estimator solves with would not be the ΔV' it
+  // contracted against, silently costing the stationarity it exists for.
+  utils::check(_nt == _nw,
+               "lr_energy_curvature_t: the estimator needs a square IR sampling, "
+               "nt_f == nw_f, but got nt_f = {}, nw_f = {}.", _nt, _nw);
 
   _pmap = utils::make_part_map(*_mpi);
   std::tie(_i0, _i1) = _pmap.my_slice(_nF);

@@ -195,13 +195,19 @@ public:
     // all_reduce over comm). Assigning into the slot keeps the buffers the
     // previous solve/iteration allocated: past the first max_subsp_size+1
     // iterations this loop performs no allocation at all.
+    //
+    // The residuals feed local_overlap, which only update_B reaches, so a
+    // configuration that never extrapolates must not pay for them either: they
+    // cost a full-slice subtraction and a slice of storage per iteration for a
+    // matrix nothing builds.
+    const bool build_res = !is_simple_mixing();
     const size_t s = push_slot();
-    _xF[s]   = F_loc;
-    _resF[s] = F_loc - F_prev_loc;
+    _xF[s] = F_loc;
+    if (build_res) _resF[s] = F_loc - F_prev_loc;
     if (has_sigma) {
       auto S_loc = nda::reshape(DeltaSigma, std::array<long, 1>{nS})(nda::range(sS0, sS1));
-      _xS[s]   = S_loc;
-      _resS[s] = S_loc - DeltaSigma_prev;
+      _xS[s] = S_loc;
+      if (build_res) _resS[s] = S_loc - DeltaSigma_prev;
     }
 
     // Warmup gate, evaluated on the subspace INCLUDING the step just stored.
