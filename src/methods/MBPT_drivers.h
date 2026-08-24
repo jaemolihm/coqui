@@ -315,6 +315,44 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
     std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root);
 
 /**
+ * @brief Band-basis perturbation from a local potential given in the THC aux basis
+ *
+ * Maps a local potential u(r), supplied through its projections onto the THC
+ * interpolating vectors,
+ *
+ *   u_P = ∫ dr ζ_P(r) u(r)
+ *
+ * onto the band-basis perturbation the LR solver takes:
+ *
+ *   ΔH0_ij(k) = Σ_(p,P) conj(X_p(k+q)_Pi) u_P X_p(k)_Pj
+ *
+ * No overlap matrix enters even though the ζ are not orthonormal: the ISDF ansatz
+ * expands the pair density with its own values at the interpolating points,
+ * conj(X(k+q)_Pi) X(k)_Pj, so ζ appears exactly once per matrix element. A caller
+ * holding expansion coefficients c_Q with u(r) = Σ_Q c_Q ζ_Q(r) must convert them,
+ * u_P = Σ_Q S_PQ c_Q with S_PQ = ∫ dr ζ_P(r) ζ_Q(r); the metric belongs to that
+ * conversion, not here.
+ *
+ * The map itself is the same aux→primary one the Hartree channel applies to ΔJ_P
+ * (lr_thc_comm::aux_to_primary_diagonal). A stack of potentials at the one q is
+ * mapped in a single call and returned as the rank-5 perturbation stack run_lr
+ * accepts.
+ *
+ * @param eri     - [INPUT] THC ERI handler
+ * @param q_pert  - [INPUT] Perturbation wavevector in crystal coords (3,)
+ * @param u_mP    - [INPUT] Aux-basis potential projections u_P (nmodes, NP); root only
+ * @return ΔH0 (nmodes, ns, nkpts_ibz, nbnd, nbnd) on the root, empty elsewhere
+ *
+ * Requires nkpts_ibz == nkpts: an arbitrary u_P at finite q breaks the crystal
+ * symmetry, so a symmetry-reduced k-set cannot carry the resulting perturbation.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
+    eri_t &eri,
+    nda::array<double, 1> const& q_pert,
+    std::optional<nda::array<ComplexType, 2>> const& u_mP_root);
+
+/**
  * @brief Linear response polarization ΔP = -ΔG·G - G·ΔG (R-space)
  *
  * Computes LR polarization via product-rule differentiation of P = -G·G.

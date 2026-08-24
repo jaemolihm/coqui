@@ -366,6 +366,23 @@ namespace coqui_py {
 
 
   /**
+   * @brief Band-basis perturbation from a local potential in the THC aux basis
+   *
+   * @param h_int  - [INPUT] THC ERI handler
+   * @param q_vec  - [INPUT] Perturbation wavevector in crystal coords (3,)
+   * @param u_mP   - [INPUT] Aux-basis potentials (nmodes, NP); root only
+   * @return       - [OUTPUT] ΔH0 (nmodes, ns, nkpts_ibz, nbnd, nbnd), root only
+   */
+  nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux(
+      ThcCoulomb &h_int,
+      nda::array<double, 1> const& q_vec,
+      std::optional<nda::array<ComplexType, 2>> u_mP) {
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    return methods::lr_DeltaH0_from_thc_aux_calc(mb_eri, q_vec, u_mP);
+  }
+
+
+  /**
    * @brief Compute LR polarization ΔP = -ΔG·G - G·ΔG (R-space)
    *
    * @param h_int          - [INPUT] THC ERI handler
