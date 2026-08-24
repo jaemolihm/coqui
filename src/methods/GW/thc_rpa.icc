@@ -149,13 +149,10 @@ namespace methods {
 
           // Tr{ln(B)} = ln(det(B))
           ComplexType det_A = math::nda::slate_ops::determinant(dA_PQ, diag_idx);
-          if (det_A.real() < 0) {
-            if (dA_PQ.communicator()->root())
-              std::cout << "[WARNING] thc_rpa:: determinant of (I - Pi*Z) < 0. "
-                           "This is likely due to our API of determinant from SLATE "
-                           "which miscounts the number of pivoting..." << std::endl;
-            det_A *= -1.0;
-          }
+          if (det_A.real() <= 0.0 and dA_PQ.communicator()->root())
+            app_warning("thc_rpa: det(I - Pi*Z) = {} at iq = {}, iw = {} is not "
+                        "positive, so the log-det RPA energy is undefined there.",
+                        det_A.real(), iq, wn);
 
           if (dA_PQ.communicator()->root()) {
             e_rpa_w(wn, 0) += double(q_weight) * std::log(det_A.real());
