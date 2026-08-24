@@ -610,6 +610,28 @@ auto multiply_impl(T a, A_t&& A, B_t&& B, T b, C_t&& C)
   auto Bs = detail::to_slate_view<dB_t::is_stride_order_C()>(B);
   auto Cs = detail::to_slate_view<dC_t::is_stride_order_C()>(C);
 
+  // slate::gemm asserts none of its own conformability: a mismatched tile count on
+  // the contracted axis or on either outer axis silently produces wrong numbers.
+  // Check it here, on the operands slate will actually receive -- mt()/nt()/m()/n()
+  // already account for the transpose/conjugate-transpose op and for the layout
+  // swap, so this is the same X*Y=Z it will run, whichever branch is taken below.
+  auto check_gemm = [](auto const& X, auto const& Y, auto const& Z) {
+    utils::check(X.n() == Y.m() and X.nt() == Y.mt(),
+        "multiply: contracted axis mismatch: A is {}x{} ({}x{} tiles), "
+        "B is {}x{} ({}x{} tiles).",
+        X.m(), X.n(), X.mt(), X.nt(), Y.m(), Y.n(), Y.mt(), Y.nt());
+    utils::check(X.m() == Z.m() and X.mt() == Z.mt(),
+        "multiply: row axis mismatch: A is {}x{} ({}x{} tiles), "
+        "C is {}x{} ({}x{} tiles).",
+        X.m(), X.n(), X.mt(), X.nt(), Z.m(), Z.n(), Z.mt(), Z.nt());
+    utils::check(Y.n() == Z.n() and Y.nt() == Z.nt(),
+        "multiply: column axis mismatch: B is {}x{} ({}x{} tiles), "
+        "C is {}x{} ({}x{} tiles).",
+        Y.m(), Y.n(), Y.mt(), Y.nt(), Z.m(), Z.n(), Z.mt(), Z.nt());
+  };
+  if constexpr (dA_t::is_stride_order_Fortran()) check_gemm(As,Bs,Cs);
+  else                                          check_gemm(Bs,As,Cs);
+
   if constexpr (dA_t::is_stride_order_Fortran()) {
     static_assert(dB_t::is_stride_order_Fortran(),"Stride order mismatch.");
     static_assert(dC_t::is_stride_order_Fortran(),"Stride order mismatch.");
