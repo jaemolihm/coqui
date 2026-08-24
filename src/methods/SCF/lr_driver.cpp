@@ -609,9 +609,9 @@ void lr_driver::lr_setup(
   //
   // EVERY mixing option goes through it — DIIS, damping, and undamped Picard —
   // so lr_solve_one has one call site and no per-algorithm branch. Damping is
-  // lr_diis::next_step_combined's own damping write (the same striped expression,
-  // hence the same rounding, as the inline update it replaced), on a depth-1
-  // subspace whose warmup gate is permanently on. Undamped Picard takes the
+  // lr_diis::next_step_combined's own damping write — the same striped expression,
+  // hence bit-identical to an inline elementwise update — on a depth-1 subspace
+  // whose warmup gate is permanently on. Undamped Picard takes the
   // identity fast path, which returns before the ring is ever grown, so it costs
   // nothing to route it here. Routing damping through the accelerator is also what
   // makes the RAW pre-mixing slice available, which the hessian estimator needs.
@@ -871,7 +871,6 @@ lr_kernel_channel lr_driver::sc_channel(lr_kernel_split const& k, lr_params cons
   lr_kernel_channel ch;
   ch.mask         = k.sc;
   ch.hf_active    = k.sc_hf;
-  ch.hartree      = k.sc.hartree;
   ch.exchange     = k.sc.exchange;
   ch.sigma_active = k.sc_sigma;
   ch.hf = _lr_hf.get();
@@ -891,7 +890,6 @@ lr_kernel_channel lr_driver::pert_channel(lr_kernel_split const& k, lr_params co
   lr_kernel_channel ch;
   ch.mask         = k.pert;
   ch.hf_active    = k.pert_hf;
-  ch.hartree      = k.pert.hartree;
   // The counter-term IS an exchange contraction, just with the kernel -W_c(0), so
   // it turns the exchange branch on even when the component mask leaves exchange
   // wholly in K_sc.
@@ -940,7 +938,7 @@ void lr_driver::apply_kernel(
                  "but W_c(iν=0) was never precomputed.");
     _Timer.start(ch.clk_hf);
     ch.hf->evaluate(sDeltaF_out, sDeltaDm_skij, thc, _dyson.sS_skij().local(),
-                    ch.hartree, ch.exchange,
+                    ch.mask.hartree, ch.exchange,
                     ch.static_inputs && _opt_ibc ? &(*_opt_ibc) : nullptr,
                     ch.static_inputs ? p.DeltaV_qPQ : nullptr,
                     ch.static_inputs ? p.Dm_ab : nullptr,
@@ -1085,7 +1083,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // but it makes a solve depend on nothing but its own ΔH0.
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
-  if (_lr_diis) _lr_diis->reset();
+  _lr_diis->reset();
   if (outer_diis_on) _outer_diis->reset();
   _mixed_last_iter = false;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
@@ -1497,7 +1495,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // this one is invalid and its warmup keys off the stage-local iteration
         // index. ΔF_sc/ΔΣ_sc are deliberately kept as the warm start for the
         // next stage.
-        if (_lr_diis) _lr_diis->reset();
+        _lr_diis->reset();
       } else {
         app_log(1, "    [outer] converged after {} K_pert evaluation(s): "
                    "||ΔDm - ΔDm_stage_prev|| = {:.6e} < {:.2e}",
@@ -1706,11 +1704,17 @@ void lr_driver::get_kernel_before_mixing(
   // quantity is raw-sc (from the ring) plus the perturbative source step 1 has
   // just re-evaluated on the returned ΔG.
   if (k.sc_hf) {
+    utils::check(_DeltaF.has_raw(),
+                 "lr_driver::get_kernel_before_mixing: lr_setup allocated no raw "
+                 "ΔF slice, so lr_params::hessian cannot have been set.");
     auto F_loc = _DeltaF.slice(sDeltaF_skij.local());
     F_loc = _DeltaF.raw;
     if (k.split_F) F_loc += _DeltaF.slice(_sDeltaF_pert->local());
   }
   if (k.has_Sigma_sc) {
+    utils::check(_DeltaSigma.has_raw(),
+                 "lr_driver::get_kernel_before_mixing: lr_setup allocated no raw "
+                 "ΔΣ slice.");
     auto S_loc = _DeltaSigma.slice(sDeltaSigma_tskij->local());
     S_loc = _DeltaSigma.raw;
     if (k.split_Sigma) S_loc += _DeltaSigma.slice(_sDeltaSigma_pert->local());

@@ -23,7 +23,6 @@
 #define COQUI_LR_HESSIAN_HPP
 
 #include <memory>
-#include <optional>
 #include <vector>
 
 #include "nda/nda.hpp"
@@ -136,12 +135,17 @@ struct lr_hessian_result_t {
  *
  * No k → k+q map appears, and should not. At finite q every operand is stored at
  * index k with the SAME leg convention — lr_dyson builds ΔG = G_{k+q} · X · G_k at
- * index k, so ΔH0, ΔF, ΔΣ and ΔG all carry legs (k+q, k). The dagger in §4 does
- * shift the index, `[A(k)]†` having legs (k, k+q) and so being the (−q) object at
- * k+q; but the k-sum is complete, so relabelling the summation variable absorbs
- * the shift and leaves `Σ_k conj(A(k)) B(k)` elementwise. What the contraction
- * DOES assume is that the k-sum is complete and w_k is the weight of k, which is
- * why the weights are folded into the right operand once, at store time.
+ * index k, so ΔH0, ΔF, ΔΣ and ΔG all carry legs (k+q, k). Matching inner legs then
+ * forces the pairing to be A^{−q}(k+q) against B^{q}(k), and A^{−q}(k+q) =
+ * [A^{q}(k)]† — so both operands are read at the SAME stored index k and there is
+ * no shift to apply.
+ *
+ * The k-sum itself is the driver's IBZ convention, not something this contraction
+ * establishes: everything is carried on nkpts_ibz with the unperturbed k_weight,
+ * and w_k is the weight of k. At finite q the little group of q is smaller than
+ * the full point group, so that reduction is the driver's assumption to justify
+ * (compute_lr_Nelec makes the same one). Here it only fixes where the weights go:
+ * into the right operand, once, at store time.
  *
  * This pairing is the one under which both the bubble P (ω-local) and the kernel
  * K (τ-local) are self-adjoint, which is the same property that makes the
@@ -267,9 +271,11 @@ public:
    */
   lr_hessian_result_t assemble();
 
-  /// Report (verbosity 2) the pass-1/pass-2 clocks owned by this object. The
-  /// extra Dyson and the K_pert refresh are billed to lr_driver's own LR_HESS_*
-  /// clocks instead, since they run inside it.
+  /// Report (verbosity 2) the pass-1/pass-2 clocks owned by this object: the
+  /// stores, the shm rebuild, the pair contractions and the Matsubara tail. The
+  /// K_pert refresh is lr_driver's clock, and the extra Dyson is the caller's,
+  /// since the caller drives lr_driver::dyson() itself; both appear in
+  /// lr_driver::print_hessian_timers().
   void print_timers();
 
 private:

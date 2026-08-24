@@ -72,11 +72,17 @@ lr_hessian_t::lr_hessian_t(
   utils::check(k_weight.size() == nk_ibz,
                "lr_hessian_t: k_weight has {} entries, expected nk_ibz = {}.",
                k_weight.size(), nk_ibz);
-  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ)). The IR
-  // sampling is NOT square (nt_f and nw_f differ by one in practice), and that is
-  // fine: the round trip is the identity on whatever the IR basis represents, and
-  // every ΔΣ in this code is already carried in that basis — the LR Dyson solve
-  // itself goes τ→ω→τ. So there is nothing to require here.
+  // No square-grid requirement, and nt_f != nw_f in practice (95 vs 96 here).
+  //
+  // What the estimator needs is that the ΔΣ it CONTRACTED (`_Sw`, in ω) and the
+  // ΔΣ the extra Dyson SOLVES with are the same operator. rebuild_raw_kernel
+  // hands the solve w_to_tau(_Sw), and the solve transforms that back to ω
+  // itself, so the composition in play is
+  //
+  //   tau_to_w ∘ w_to_tau = I  on the ω coefficients,
+  //
+  // which holds whenever the τ sampling determines those coefficients — a
+  // property of the IR basis, not of the two grids having equal size.
 
   _pmap = utils::make_part_map(*_mpi);
   std::tie(_i0, _i1) = _pmap.my_slice(_nF);
@@ -98,8 +104,8 @@ lr_hessian_t::lr_hessian_t(
     for (long n = 0; n < _nw; ++n)
       utils::check(_refl(n) >= 0,
                    "lr_hessian_t: the fermionic Matsubara grid is not closed "
-                   "under negation — no partner for index {} (wn = {}). The energy-"
-                   "curvature estimator's inner product is not representable on it.",
+                   "under negation — no partner for index {} (wn = {}). The hessian "
+                   "estimator's inner product is not representable on it.",
                    n, wn(n));
   }
 
@@ -208,8 +214,6 @@ void lr_hessian_t::store_mode(long p,
   utils::check(!_has_sigma || sDeltaG != nullptr,
                "lr_hessian_t::store_mode: a Σ-carrying kernel needs ΔG.");
 
-  // Store only. Every term of the functional needs pairs (λ, p) drawn from
-  // different modes, so nothing can be contracted until every mode is in.
   //
   // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
   // contraction is a single unweighted dot over the whole local slab. Which side a
@@ -393,9 +397,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
         trace_matsubara_local(_Sw[l], _Gw[p], _N_mats(nda::range::all, l, p));
     }
 
-  _Timer.stop("LR_HESS_CONTRACT");
-
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
+  _Timer.stop("LR_HESS_CONTRACT");
 
   // Every term's static half is striped over comm, so each needs one reduction.
   const long nm2 = _nmodes * _nmodes;

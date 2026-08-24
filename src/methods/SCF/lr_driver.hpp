@@ -298,18 +298,21 @@ struct lr_kernel_split;
  * One kernel channel, fully described: everything that differs between K_sc and
  * K_pert, resolved once by lr_driver::sc_channel() / pert_channel().
  *
- * This is what makes apply_kernel channel-agnostic. What the code used to carry as
- * two separate call paths is now data: which evaluator instances to drive, which
- * component switches to pass them, which timer regions to bill, and which of the
- * self-consistent channel's privileges this channel has.
+ * This is what makes apply_kernel channel-agnostic: `ch` carries as data which
+ * evaluator instances to drive, which component switches to pass them, which timer
+ * regions to bill, and which of the self-consistent channel's privileges this
+ * channel has.
  */
 struct lr_kernel_channel {
   /// The Σ component flags (term 1 / term 2) this channel carries.
   lr_kernel_spec mask{};
 
   bool hf_active = false;      ///< this channel evaluates ΔF at all
-  bool hartree = false;        ///< ... with the Hartree term
-  bool exchange = false;       ///< ... and/or an exchange contraction
+  /// The exchange switch lr_hf is given. Resolved rather than read off `mask`
+  /// because the perturbative channel turns exchange on for the counter-term even
+  /// when the mask leaves exchange wholly in K_sc. Hartree needs no such
+  /// resolution and is read from `mask` directly.
+  bool exchange = false;
   bool sigma_active = false;   ///< this channel evaluates ΔΣ at all
 
   solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
@@ -491,11 +494,15 @@ public:
   }
 
   /**
-   * Report (verbosity 2) the two hessian clocks lr_driver owns: the
-   * extra Dyson solve and the K_pert refresh. Separate from print_timers()
-   * because that one runs at the end of every lr_solve_one, i.e. inside the mode
-   * loop, where the extra Dyson has not happened yet — the feature's dominant
-   * cost would read 0.000 sec in every run. Call it after the pass-2 loop.
+   * Report (verbosity 2) the hessian timing table: the one clock lr_driver owns
+   * (the K_pert refresh) plus the extra-Dyson figures the caller supplies, since
+   * the caller drives dyson() itself and so clocks that solve on its own
+   * TimerManager.
+   *
+   * Separate from print_timers() because that one runs at the end of every
+   * lr_solve_one, i.e. inside the mode loop, where the extra Dyson has not
+   * happened yet — the feature's dominant cost would read 0.000 sec in every run.
+   * Call it after the pass-2 loop.
    */
   void print_hessian_timers(double extra_dyson_sec, int extra_dyson_calls);
 
