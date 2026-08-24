@@ -159,6 +159,22 @@ inline void resolve_tile_counts(std::array<long,R>& t,
   }
 }
 
+/**
+ * Resolve the `0` sentinels of a *requested* tile count against the extents of the
+ * array it will describe, without validating. Distribution helpers return the
+ * sentinel (they are deliberately extent-agnostic on the pooled axes) while a
+ * constructed array stores the resolved count, so the two are only comparable
+ * after this. Use it wherever a stored tile_count() is tested against a helper's
+ * output -- an unresolved comparison silently reports "different distribution".
+ */
+template<size_t R>
+inline std::array<long,R> resolved_tile_counts(std::array<long,R> t,
+                                               std::array<long,R> const& extents)
+{
+  for(size_t n=0; n<R; ++n) if(t[n] == 0) t[n] = extents[n];
+  return t;
+}
+
 } // namespace utils
 
 #endif

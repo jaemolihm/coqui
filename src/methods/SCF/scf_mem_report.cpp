@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "configuration.hpp"
+#include "utilities/tile_partition.hpp"
 #include "IO/app_loggers.h"
 
 #include "methods/SCF/scf_common.hpp"
@@ -238,7 +239,10 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     // Fourier calls take their fast branch: tau_to_w transforms straight into
     // W(iw) and w_to_tau straight out of it, so there is no omega-side staging
     // buffer and one redistribute each instead of two.
-    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and wo_bsize == ftb_bsize);
+    const std::array<long, 4> w_gs{p.nwh, p.nqi, p.NP, p.NP};
+    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and
+        utils::resolved_tile_counts<4>(wo_bsize, w_gs) ==
+        utils::resolved_tile_counts<4>(ftb_bsize, w_gs));
     auto max_local = [&](std::array<long, 4> const& gs, std::array<long, 4> const& pg) {
       double n = 1.0;
       for (int i = 0; i < 4; ++i) n *= double(ceil_div(gs[i], std::max(1L, pg[i])));

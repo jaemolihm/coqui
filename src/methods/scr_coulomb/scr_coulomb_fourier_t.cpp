@@ -20,6 +20,7 @@
 
 
 #include "scr_coulomb_fourier_t.h"
+#include "utilities/tile_partition.hpp"
 #include "utilities/proc_meminfo.hpp"
 
 namespace methods {
@@ -77,7 +78,12 @@ namespace solvers {
       _ft->check_leakage(buffer_ti, imag_axes_ft::boson, "polarizability", true);
     }
 
-    if (w_pgrid_out == b_pgrid && w_tcount_out == b_tcount) {
+    // Resolve both sides' 0 sentinels against the array being created: a stored
+    // tile_count() is always resolved, a helper's return value is not, and an
+    // unresolved comparison would silently stop the FT fusing.
+    if (w_pgrid_out == b_pgrid &&
+        utils::resolved_tile_counts<4>(w_tcount_out, w_gshape) ==
+        utils::resolved_tile_counts<4>(b_tcount, w_gshape)) {
       // Output distribution == buffer distribution: FT straight into the
       // output, no ω-side staging buffer and no final redistribute.
       auto dPi_wqPQ = make_distributed_array<local_Array_t>(
@@ -157,7 +163,10 @@ namespace solvers {
     // input is in place, so it is not resident across the input redistribute.
     memory::darray_t<local_Array_t, mpi3::communicator> buffer_ti;
 
-    if (dW_wqPQ_pos.grid() == b_pgrid && dW_wqPQ_pos.tile_count() == b_tcount) {
+    // dW's stored tile count is resolved; ft_buffer_dist's is not (see above).
+    if (dW_wqPQ_pos.grid() == b_pgrid &&
+        dW_wqPQ_pos.tile_count() ==
+        utils::resolved_tile_counts<4>(b_tcount, dW_wqPQ_pos.global_shape())) {
       // Input distribution == buffer distribution: FT straight from the input,
       // no ω-side staging buffer and no input redistribute.
       buffer_ti = make_distributed_array<local_Array_t>(*comm, b_pgrid, t_gshape, b_tcount);
