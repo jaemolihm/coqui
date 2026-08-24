@@ -23,7 +23,7 @@
 #include <cmath>
 #include <utility>
 
-#include "methods/SCF/lr_energy_curvature.hpp"
+#include "methods/SCF/lr_hessian.hpp"
 #include "nda/blas.hpp"
 #include "utilities/check.hpp"
 #include "IO/app_loggers.h"
@@ -47,7 +47,7 @@ double herm_dev(nda::array<ComplexType, 2> const& A) {
 } // namespace
 
 
-lr_energy_curvature_t::lr_energy_curvature_t(
+lr_hessian_t::lr_hessian_t(
     std::shared_ptr<mpi_context_t> mpi,
     imag_axes_ft::IAFT const& FT,
     nda::array<double, 1> const& k_weight,
@@ -65,19 +65,19 @@ lr_energy_curvature_t::lr_energy_curvature_t(
       _nF(ns * nk_ibz * nbnd * nbnd),
       _Timer() {
 
-  for (auto& v : {"LR_C1_STORE", "LR_C1_REBUILD", "LR_C1_CONTRACT", "LR_C1_FT"})
+  for (auto& v : {"LR_HESS_STORE", "LR_HESS_REBUILD", "LR_HESS_CONTRACT", "LR_HESS_FT"})
     _Timer.add(v);
 
-  utils::check(nmodes > 0, "lr_energy_curvature_t: nmodes must be > 0, got {}.", nmodes);
+  utils::check(nmodes > 0, "lr_hessian_t: nmodes must be > 0, got {}.", nmodes);
   utils::check(k_weight.size() == nk_ibz,
-               "lr_energy_curvature_t: k_weight has {} entries, expected nk_ibz = {}.",
+               "lr_hessian_t: k_weight has {} entries, expected nk_ibz = {}.",
                k_weight.size(), nk_ibz);
-  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ')). That
+  // rebuild_raw_kernel hands the extra Dyson solve w_to_tau(tau_to_w(ΔΣ)). That
   // round trip is the identity only on a square grid; on nt != nw it is a
-  // projection, and the ΔV' the estimator solves with would not be the ΔV' it
+  // projection, and the ΔV the estimator solves with would not be the ΔV it
   // contracted against, silently costing the stationarity it exists for.
   utils::check(_nt == _nw,
-               "lr_energy_curvature_t: the estimator needs a square IR sampling, "
+               "lr_hessian_t: the estimator needs a square IR sampling, "
                "nt_f == nw_f, but got nt_f = {}, nw_f = {}.", _nt, _nw);
 
   _pmap = utils::make_part_map(*_mpi);
@@ -90,7 +90,7 @@ lr_energy_curvature_t::lr_energy_curvature_t(
   {
     nda::array<long, 1> wn(_FT->wn_mesh_f());
     utils::check(wn.size() == _nw,
-                 "lr_energy_curvature_t: wn_mesh_f has {} entries, expected nw_f = {}.",
+                 "lr_hessian_t: wn_mesh_f has {} entries, expected nw_f = {}.",
                  wn.size(), _nw);
     _refl = nda::array<long, 1>(_nw);
     _refl() = -1;
@@ -99,7 +99,7 @@ lr_energy_curvature_t::lr_energy_curvature_t(
         if (wn(m) == -wn(n)) { _refl(n) = m; break; }
     for (long n = 0; n < _nw; ++n)
       utils::check(_refl(n) >= 0,
-                   "lr_energy_curvature_t: the fermionic Matsubara grid is not closed "
+                   "lr_hessian_t: the fermionic Matsubara grid is not closed "
                    "under negation — no partner for index {} (wn = {}). The energy-"
                    "curvature estimator's inner product is not representable on it.",
                    n, wn(n));
@@ -148,9 +148,9 @@ lr_energy_curvature_t::lr_energy_curvature_t(
   const double store_gb_job = _has_sigma
       ? 2.0 * double(_nmodes) * double(_nw) * double(_nF) * to_gb : 0.0;
   const long n_nodes = std::max(1, _mpi->internode_comm.size());
-  app_log(1, "\n  Energy-curvature (stationary C_term1) estimator: ON");
+  app_log(1, "\n  Energy-curvature (stationary hessian) estimator: ON");
   app_log(1, "    perturbations = {}, dynamic ΔΣ = {}", _nmodes, _has_sigma ? "yes" : "no");
-  app_log(1, "    striped ω stores (ΔΣ' + ΔG', {} modes): {:.3f} GB/node "
+  app_log(1, "    striped ω stores (ΔΣ + ΔG, {} modes): {:.3f} GB/node "
              "({:.3f} GB total over {} node(s))",
           _nmodes, store_gb_job / double(n_nodes), store_gb_job, n_nodes);
   app_log(1, "    plus one extra LR Dyson solve per perturbation");
@@ -160,22 +160,22 @@ lr_energy_curvature_t::lr_energy_curvature_t(
 }
 
 
-std::string lr_energy_curvature_t::convention() {
+std::string lr_hessian_t::convention() {
   return "tau-dagger: c(iw_n) = sum_{skij} w_k conj(A[refl(n),s,k,i,j]) "
          "B[n,s,k,i,j] with refl(n): iw_n -> -iw_n; "
-         "Mats(A,B) = spin * (1/beta) sum_n c(iw_n) = -spin * c(tau=beta^-); "
-         "Stat(A,B) = spin * sum_{skij} w_k conj(A) B";
+         "Tr_ω(A,B) = spin * (1/beta) sum_n c(iw_n) = -spin * c(tau=beta^-); "
+         "Tr(A,B) = spin * sum_{skij} w_k conj(A) B";
 }
 
 
-void lr_energy_curvature_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
+void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
                                           nda::array<ComplexType, 2>& dst_w) const {
   auto loc = src.local();
   // nda::reshape only EXPECTS the sizes to match, which compiles out under
   // NDEBUG and would silently reinterpret memory in a release build. An
   // nbnd_save-trimmed array reaching here is exactly that case.
   utils::check(loc.size() == _nt * _nF,
-               "lr_energy_curvature_t: rank-5 array has {} elements, expected "
+               "lr_hessian_t: rank-5 array has {} elements, expected "
                "nt*ns*nk*nb*nb = {}. A band-trimmed array cannot be used here.",
                loc.size(), _nt * _nF);
   auto flat = nda::reshape(loc, std::array<long, 1>{_nt * _nF});
@@ -188,11 +188,11 @@ void lr_energy_curvature_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
 }
 
 
-nda::array<ComplexType, 1> lr_energy_curvature_t::pack_static(
+nda::array<ComplexType, 1> lr_hessian_t::pack_static(
     sArray_t<Array_view_4D_t> const& src) const {
   auto loc = src.local();
   utils::check(loc.size() == _nF,
-               "lr_energy_curvature_t: rank-4 array has {} elements, expected "
+               "lr_hessian_t: rank-4 array has {} elements, expected "
                "ns*nk*nb*nb = {}.", loc.size(), _nF);
   auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
   nda::array<ComplexType, 1> out(_nloc);
@@ -201,23 +201,23 @@ nda::array<ComplexType, 1> lr_energy_curvature_t::pack_static(
 }
 
 
-void lr_energy_curvature_t::store_mode(long p,
+void lr_hessian_t::store_mode(long p,
                                        sArray_t<Array_view_4D_t> const& sDeltaDm,
                                        sArray_t<Array_view_4D_t> const& sDeltaH0,
                                        sArray_t<Array_view_4D_t> const& sDeltaF,
                                        sArray_t<Array_view_5D_t> const* sDeltaSigma,
                                        sArray_t<Array_view_5D_t> const* sDeltaG) {
   utils::check(p >= 0 && p < _nmodes,
-               "lr_energy_curvature_t::store_mode: mode {} outside [0, {}).", p, _nmodes);
+               "lr_hessian_t::store_mode: mode {} outside [0, {}).", p, _nmodes);
   utils::check(!_stored[p],
-               "lr_energy_curvature_t::store_mode: mode {} stored twice.", p);
+               "lr_hessian_t::store_mode: mode {} stored twice.", p);
   utils::check(_has_sigma == (sDeltaSigma != nullptr),
-               "lr_energy_curvature_t::store_mode: ΔΣ presence must match the "
+               "lr_hessian_t::store_mode: ΔΣ presence must match the "
                "has_sigma the object was built with.");
   utils::check(!_has_sigma || sDeltaG != nullptr,
-               "lr_energy_curvature_t::store_mode: a Σ-carrying kernel needs ΔG'.");
+               "lr_hessian_t::store_mode: a Σ-carrying kernel needs ΔG.");
 
-  _Timer.start("LR_C1_STORE");
+  _Timer.start("LR_HESS_STORE");
   _dH0[p]  = pack_static(sDeltaH0);
   _dF[p]   = pack_static(sDeltaF);
   _dDm1[p] = pack_static(sDeltaDm);
@@ -232,21 +232,21 @@ void lr_energy_curvature_t::store_mode(long p,
       for (long l = 0; l < _nloc; ++l) _Gw[p](n, l) *= _wloc(l);
   }
   _stored[p] = true;
-  _Timer.stop("LR_C1_STORE");
+  _Timer.stop("LR_HESS_STORE");
 }
 
 
-void lr_energy_curvature_t::rebuild_raw_kernel(
+void lr_hessian_t::rebuild_raw_kernel(
     long p,
     sArray_t<Array_view_4D_t>& sDeltaF_out,
     sArray_t<Array_view_5D_t>* sDeltaSigma_out) {
   utils::check(p >= 0 && p < _nmodes && _stored[p],
-               "lr_energy_curvature_t::rebuild_raw_kernel: mode {} was never stored.", p);
+               "lr_hessian_t::rebuild_raw_kernel: mode {} was never stored.", p);
   utils::check(_has_sigma == (sDeltaSigma_out != nullptr),
-               "lr_energy_curvature_t::rebuild_raw_kernel: ΔΣ destination presence "
+               "lr_hessian_t::rebuild_raw_kernel: ΔΣ destination presence "
                "must match has_sigma.");
 
-  _Timer.start("LR_C1_REBUILD");
+  _Timer.start("LR_HESS_REBUILD");
   // Every rank writes its own disjoint element slice of the node-replicated
   // window, then one allgatherv among the node roots completes every replica —
   // the same fence / barrier / complete_node_slices sequence the SCF loop's
@@ -255,7 +255,7 @@ void lr_energy_curvature_t::rebuild_raw_kernel(
   {
     auto loc = sDeltaF_out.local();
     utils::check(loc.size() == _nF,
-                 "lr_energy_curvature_t::rebuild_raw_kernel: ΔF destination has {} "
+                 "lr_hessian_t::rebuild_raw_kernel: ΔF destination has {} "
                  "elements, expected {}.", loc.size(), _nF);
     auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
     if (_nloc > 0) flat(nda::range(_i0, _i1)) = _dF[p];
@@ -267,14 +267,14 @@ void lr_energy_curvature_t::rebuild_raw_kernel(
   }
 
   if (_has_sigma) {
-    // ΔΣ'(τ) comes back from this rank's own ω slab: w_to_tau contracts the
+    // ΔΣ(τ) comes back from this rank's own ω slab: w_to_tau contracts the
     // leading axis only and the partition never splits it, so the transform is
     // rank-local. The completion runs once per τ point, because a rank's element
     // slice is contiguous within a τ block rather than across the whole array.
     nda::array<ComplexType, 2> buf_t(_nt, _nloc);
     auto loc = sDeltaSigma_out->local();
     utils::check(loc.size() == _nt * _nF,
-                 "lr_energy_curvature_t::rebuild_raw_kernel: ΔΣ destination has {} "
+                 "lr_hessian_t::rebuild_raw_kernel: ΔΣ destination has {} "
                  "elements, expected {}.", loc.size(), _nt * _nF);
     auto flat = nda::reshape(loc, std::array<long, 1>{_nt * _nF});
     if (_nloc > 0) {
@@ -291,18 +291,18 @@ void lr_energy_curvature_t::rebuild_raw_kernel(
     sDeltaSigma_out->win().fence();
   }
   _mpi->comm.barrier();
-  _Timer.stop("LR_C1_REBUILD");
+  _Timer.stop("LR_HESS_REBUILD");
 }
 
 
-ComplexType lr_energy_curvature_t::stat_local(nda::array<ComplexType, 1> const& a,
+ComplexType lr_hessian_t::trace_static_local(nda::array<ComplexType, 1> const& a,
                                               nda::array<ComplexType, 1> const& b) const {
   if (_nloc == 0) return ComplexType(0.0);
   return nda::blas::dotc(a, b);
 }
 
 
-void lr_energy_curvature_t::mats_local(nda::array<ComplexType, 2> const& Aw,
+void lr_hessian_t::trace_matsubara_local(nda::array<ComplexType, 2> const& Aw,
                                        nda::array<ComplexType, 2> const& Bw,
                                        nda::array_view<ComplexType, 1> acc) const {
   if (_nloc == 0) return;
@@ -311,21 +311,21 @@ void lr_energy_curvature_t::mats_local(nda::array<ComplexType, 2> const& Aw,
 }
 
 
-void lr_energy_curvature_t::set_improved(long p,
+void lr_hessian_t::set_improved(long p,
                                          sArray_t<Array_view_4D_t> const& sDeltaDm,
                                          sArray_t<Array_view_5D_t> const* sDeltaG) {
   utils::check(p >= 0 && p < _nmodes && _stored[p],
-               "lr_energy_curvature_t::set_improved: mode {} was never stored.", p);
+               "lr_hessian_t::set_improved: mode {} was never stored.", p);
   utils::check(!_improved[p],
-               "lr_energy_curvature_t::set_improved: mode {} set twice.", p);
+               "lr_hessian_t::set_improved: mode {} set twice.", p);
   utils::check(!_has_sigma || sDeltaG != nullptr,
-               "lr_energy_curvature_t::set_improved: a Σ-carrying kernel needs ΔG''.");
+               "lr_hessian_t::set_improved: a Σ-carrying kernel needs ΔG'.");
   for (long l = 0; l < _nmodes; ++l)
     utils::check(_stored[l],
-                 "lr_energy_curvature_t::set_improved: every mode must be stored in "
+                 "lr_hessian_t::set_improved: every mode must be stored in "
                  "pass 1 before any pair is contracted; mode {} is missing.", l);
 
-  _Timer.start("LR_C1_CONTRACT");
+  _Timer.start("LR_HESS_CONTRACT");
   auto dDm2 = pack_static(sDeltaDm);
   for (long l = 0; l < _nloc; ++l) dDm2(l) *= _wloc(l);
 
@@ -337,34 +337,34 @@ void lr_energy_curvature_t::set_improved(long p,
   }
 
   for (long l = 0; l < _nmodes; ++l) {
-    _statH0_2(l, p) += stat_local(_dH0[l], dDm2);
-    _statM2(l, p)   += stat_local(_dF[l], dDm2);
-    if (_has_sigma) mats_local(_Sw[l], G2w, _accM2(nda::range::all, l, p));
+    _statH0_2(l, p) += trace_static_local(_dH0[l], dDm2);
+    _statM2(l, p)   += trace_static_local(_dF[l], dDm2);
+    if (_has_sigma) trace_matsubara_local(_Sw[l], G2w, _accM2(nda::range::all, l, p));
   }
   _improved[p] = true;
-  _Timer.stop("LR_C1_CONTRACT");
+  _Timer.stop("LR_HESS_CONTRACT");
 }
 
 
-lr_c1_result_t lr_energy_curvature_t::assemble() {
+lr_hessian_result_t lr_hessian_t::assemble() {
   // The accumulators are reduced and rescaled in place, so a second call would
   // return a different (wrong) answer rather than the same one.
-  utils::check(!_assembled, "lr_energy_curvature_t::assemble: called twice.");
+  utils::check(!_assembled, "lr_hessian_t::assemble: called twice.");
   _assembled = true;
   for (long p = 0; p < _nmodes; ++p)
     utils::check(_stored[p] && _improved[p],
-                 "lr_energy_curvature_t::assemble: mode {} is missing its pass-1 store "
+                 "lr_hessian_t::assemble: mode {} is missing its pass-1 store "
                  "or its pass-2 improved solution.", p);
 
   // N and the plain estimator over ALL mode pairs, both triangles, straight from
   // the stores. No symmetry is used to build any entry — the Hermiticity numbers
   // below are measurements of the finished matrices.
-  _Timer.start("LR_C1_CONTRACT");
+  _Timer.start("LR_HESS_CONTRACT");
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      _statPlain(l, p) += stat_local(_dH0[l], _dDm1[p]);
-      _statN(l, p)     += stat_local(_dF[l], _dDm1[p]);
-      if (_has_sigma) mats_local(_Sw[l], _Gw[p], _accN(nda::range::all, l, p));
+      _statPlain(l, p) += trace_static_local(_dH0[l], _dDm1[p]);
+      _statN(l, p)     += trace_static_local(_dF[l], _dDm1[p]);
+      if (_has_sigma) trace_matsubara_local(_Sw[l], _Gw[p], _accN(nda::range::all, l, p));
     }
 
   // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
@@ -388,7 +388,7 @@ lr_c1_result_t lr_energy_curvature_t::assemble() {
     _FT->tau_to_beta(sp_t, sp_b);
     self_pair = -sp_b(0);
   }
-  _Timer.stop("LR_C1_CONTRACT");
+  _Timer.stop("LR_HESS_CONTRACT");
 
   const long nm2 = _nmodes * _nmodes;
   _mpi->comm.all_reduce_in_place_n(_statPlain.data(), nm2, std::plus<>{});
@@ -402,7 +402,7 @@ lr_c1_result_t lr_energy_curvature_t::assemble() {
   matsN()  = ComplexType(0.0);
   matsM2() = ComplexType(0.0);
   if (_has_sigma) {
-    _Timer.start("LR_C1_FT");
+    _Timer.start("LR_HESS_FT");
     _mpi->comm.all_reduce_in_place_n(_accN.data(), _accN.size(), std::plus<>{});
     _mpi->comm.all_reduce_in_place_n(_accM2.data(), _accM2.size(), std::plus<>{});
     nda::array<ComplexType, 2> tail(_nt, nm2);
@@ -415,65 +415,65 @@ lr_c1_result_t lr_energy_curvature_t::assemble() {
     };
     do_tail(_accN, matsN);
     do_tail(_accM2, matsM2);
-    _Timer.stop("LR_C1_FT");
+    _Timer.stop("LR_HESS_FT");
   }
 
-  lr_c1_result_t r;
-  r.C1_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
+  lr_hessian_result_t r;
+  r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.N        = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.M2       = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.static2  = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  r.C1_sym   = nda::array<ComplexType, 2>(_nmodes, _nmodes);
+  r.hessian_sym   = nda::array<ComplexType, 2>(_nmodes, _nmodes);
 
   const ComplexType sf(_spin_factor);
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      r.C1_plain(l, p) = sf * _statPlain(l, p);
+      r.hessian_plain(l, p) = sf * _statPlain(l, p);
       r.static2(l, p)  = sf * _statH0_2(l, p);
       r.N(l, p)        = sf * (_statN(l, p) + matsN(l, p));
       r.M2(l, p)       = sf * (_statM2(l, p) + matsM2(l, p));
-      r.C1_sym(l, p)   = r.static2(l, p) + r.M2(l, p) - r.N(l, p);
+      r.hessian_sym(l, p)   = r.static2(l, p) + r.M2(l, p) - r.N(l, p);
     }
 
-  r.herm_plain = herm_dev(r.C1_plain);
-  r.herm_sym   = herm_dev(r.C1_sym);
+  r.herm_plain = herm_dev(r.hessian_plain);
+  r.herm_sym   = herm_dev(r.hessian_sym);
   r.herm_N     = herm_dev(r.N);
 
   double dev = 0.0, nrm = 0.0;
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      dev += std::norm(r.C1_sym(l, p) - r.C1_plain(l, p));
-      nrm += std::norm(r.C1_plain(l, p));
+      dev += std::norm(r.hessian_sym(l, p) - r.hessian_plain(l, p));
+      nrm += std::norm(r.hessian_plain(l, p));
     }
   const double rel_sym_plain = (nrm > 0.0) ? std::sqrt(dev / nrm) : 0.0;
 
-  app_log(1, "\n  Energy-curvature (stationary C_term1) diagnostics");
+  app_log(1, "\n  Energy-curvature (stationary hessian) diagnostics");
   app_log(1, "  -------------------------------------------------");
-  app_log(1, "    ||C1_sym - C1_sym^dag|| / ||C1_sym||       = {:.3e}   [H1: mixed "
+  app_log(1, "    ||hessian_sym - hessian_sym^dag|| / ||hessian_sym||       = {:.3e}   [H1: mixed "
              "instead of raw ΔF/ΔΣ]", r.herm_sym);
   app_log(1, "    ||N - N^dag|| / ||N||                      = {:.3e}   [H1, direct]",
           r.herm_N);
   // N is Hermitian exactly insofar as K is self-adjoint under this pairing, and
   // the same self-adjointness is what makes the estimator second order. So this
-  // residual BOUNDS the accuracy C1_sym can reach, and a non-tiny value has to
+  // residual BOUNDS the accuracy hessian_sym can reach, and a non-tiny value has to
   // appear in the log next to the number it bounds rather than be read as noise.
   if (r.herm_N > 1e-6)
     app_log(1, "    [WARNING] ||N - N^dag|| is not at roundoff. N is Hermitian only "
                "as far as the kernel is self-adjoint under this pairing, and the "
                "estimator is second order only as far as the same holds — so "
-               "~{:.1e} bounds the relative accuracy C1_sym can reach here. Check "
+               "~{:.1e} bounds the relative accuracy hessian_sym can reach here. Check "
                "the imaginary-time grid and, for a GW kernel, the -G(.)dW channel.",
             r.herm_N);
   // Away from convergence this is the size of the correction, and large is the
   // point. It is a DETECTOR only at convergence, where the correction cancels
   // identically: a nonzero value there means the extra Dyson applied a different
   // operator than pass 1 (a frozen Δμ, say), which Hermiticity cannot see.
-  app_log(1, "    ||C1_sym - C1_plain|| / ||C1_plain||       = {:.3e}   [the "
+  app_log(1, "    ||hessian_sym - hessian_plain|| / ||hessian_plain||       = {:.3e}   [the "
              "correction; -> 0 at convergence, where it is the D5 detector]",
           rel_sym_plain);
-  app_log(1, "    ||C1_plain - C1_plain^dag|| / ||C1_plain|| = {:.3e}", r.herm_plain);
+  app_log(1, "    ||hessian_plain - hessian_plain^dag|| / ||hessian_plain|| = {:.3e}", r.herm_plain);
   if (_has_sigma) {
-    app_log(1, "    <A,A> on the stored ΔΣ'_0                  = {:.6e} + {:.3e}i "
+    app_log(1, "    <A,A> on the stored ΔΣ_0                  = {:.6e} + {:.3e}i "
                "(must be real and positive)", self_pair.real(), self_pair.imag());
     const bool ok = self_pair.real() > 0.0 &&
                     std::abs(self_pair.imag()) <= 1e-6 * std::abs(self_pair.real());
@@ -487,17 +487,17 @@ lr_c1_result_t lr_energy_curvature_t::assemble() {
 }
 
 
-void lr_energy_curvature_t::print_timers() {
-  app_log(2, "\n  LR_C1 (energy curvature) timers");
-  app_log(2, "  --------------------------------");
+void lr_hessian_t::print_timers() {
+  app_log(2, "\n  LR hessian timers");
+  app_log(2, "  -----------------");
   app_log(2, "    Store (pack + τ→ω):        {0:8.3f} sec  {1:4d} calls",
-          _Timer.elapsed("LR_C1_STORE"), _Timer.number_of_calls("LR_C1_STORE"));
+          _Timer.elapsed("LR_HESS_STORE"), _Timer.number_of_calls("LR_HESS_STORE"));
   app_log(2, "    Rebuild raw ΔF/ΔΣ in shm:  {0:8.3f} sec  {1:4d} calls",
-          _Timer.elapsed("LR_C1_REBUILD"), _Timer.number_of_calls("LR_C1_REBUILD"));
+          _Timer.elapsed("LR_HESS_REBUILD"), _Timer.number_of_calls("LR_HESS_REBUILD"));
   app_log(2, "    Pair contractions:         {0:8.3f} sec  {1:4d} calls",
-          _Timer.elapsed("LR_C1_CONTRACT"), _Timer.number_of_calls("LR_C1_CONTRACT"));
+          _Timer.elapsed("LR_HESS_CONTRACT"), _Timer.number_of_calls("LR_HESS_CONTRACT"));
   app_log(2, "    Matsubara tail (FT):       {0:8.3f} sec  {1:4d} calls\n",
-          _Timer.elapsed("LR_C1_FT"), _Timer.number_of_calls("LR_C1_FT"));
+          _Timer.elapsed("LR_HESS_FT"), _Timer.number_of_calls("LR_HESS_FT"));
 }
 
 } // namespace methods

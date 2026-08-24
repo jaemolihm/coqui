@@ -265,13 +265,13 @@ struct lr_params {
   bool split_sigma_terms = false;
   /// Gather the unperturbed V_HF in the aux basis during the IBC build.
   bool keep_F_PQ = false;
-  /// Evaluate the phonon C_term1 through the variationally-stationary
+  /// Evaluate the free-energy hessian through the variationally-stationary
   /// (quadratic-error) functional as well as the plain contraction. Opt-in: it
   /// costs one extra Dyson solve per perturbation plus two striped ω stores, and
   /// it needs the RAW (pre-mixing) ΔF/ΔΣ of the final iteration, which is why
   /// lr_solve_one keeps track of whether the returned arrays are mixed.
-  /// See lr_energy_curvature.hpp and docs/plan_lr_c1_quadratic_functional.md.
-  bool energy_curvature = false;
+  /// See lr_hessian.hpp for the functional and its conventions.
+  bool hessian = false;
 
   bool need_hf() const { return include_hartree || include_exchange; }
   bool include_gw_sigma() const { return gw_mode != lr_gw_update_mode::none; }
@@ -404,7 +404,7 @@ public:
 
   /**
    * @brief Replace the ΔF / ΔΣ the last lr_solve_one returned with the RAW kernel
-   *        output of its final iteration, so the stationary C_term1 functional can
+   *        output of its final iteration, so the stationary hessian functional can
    *        be handed ΔV' = ΔH0 + K(ΔG').
    *
    * Two things stand between the returned arrays and that ΔV'.
@@ -436,7 +436,7 @@ public:
 
   /**
    * @brief One extra LR Dyson solve on a caller-supplied ΔV, for the stationary
-   *        C_term1 functional: ΔG'' / ΔDm'' from ΔH0 + ΔF'_raw + ΔΣ'_raw.
+   *        hessian functional: ΔG'' / ΔDm'' from ΔH0 + ΔF'_raw + ΔΣ'_raw.
    *
    * A thin forward to lr_dyson::solve_lr_dyson with the caller's output arrays,
    * plus the ΔG(τ) replication when the functional's Matsubara term needs it.
@@ -449,7 +449,7 @@ public:
    *
    * @return the Δμ of the extra solve
    */
-  double c1_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
+  double hessian_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
                         sArray_t<Array_view_4D_t>& sDeltaDm_out,
                         const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
                         const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
@@ -457,13 +457,13 @@ public:
                         bool fix_density, bool need_DeltaG);
 
   /**
-   * Report (verbosity 2) the two energy-curvature clocks lr_driver owns: the
+   * Report (verbosity 2) the two hessian clocks lr_driver owns: the
    * extra Dyson solve and the K_pert refresh. Separate from print_timers()
    * because that one runs at the end of every lr_solve_one, i.e. inside the mode
    * loop, where the extra Dyson has not happened yet — the feature's dominant
    * cost would read 0.000 sec in every run. Call it after the pass-2 loop.
    */
-  void print_c1_timers();
+  void print_hessian_timers();
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -613,18 +613,17 @@ private:
    * 1/nrank of the cost, which matters because a split ΔΣ is rebuilt on EVERY
    * inner iteration (a ΔΣ array is nk·nt·nb², i.e. GBs at production sizes).
    *
-   * CALLERS fence the total and both operand windows first: the sources are
-   * node-replicated shared memory and every rank reads slices written by others,
-   * so barriers alone are insufficient under the MPI-3 separate shared-memory
-   * model. The operands are taken by const reference (shared_array::win() is
-   * non-const), which is why the operand fences live at the call site.
+   * Fences all three windows itself: the sources are node-replicated shared memory
+   * and every rank reads slices written by others, so barriers alone are
+   * insufficient under the MPI-3 separate shared-memory model. That is why the
+   * operands are non-const — shared_array::win() is.
    */
   template<typename Arr_t>
-  void refresh_total(Arr_t& total, Arr_t const& sc_part, Arr_t const& pert_part);
+  void rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t& pert_part);
 
   /// Rebuild whichever of ΔF / ΔΣ both channels contribute to. A quantity carried
   /// by one channel needs nothing — that channel wrote the caller's array.
-  void refresh_split_totals(lr_kernel_split const& k,
+  void rebuild_split_totals(lr_kernel_split const& k,
                             sArray_t<Array_view_4D_t>& sDeltaF_skij,
                             sArray_t<Array_view_5D_t>* sDeltaSigma_tskij);
 
@@ -717,7 +716,7 @@ private:
 
   bool _setup_done = false;
 
-  // --- State of the last lr_solve_one, read by the energy-curvature hooks.
+  // --- State of the last lr_solve_one, read by the hessian hooks.
   /// The returned ΔF/ΔΣ went through the mixing block in the final iteration,
   /// hence are the mixed iterate rather than the raw kernel output.
   bool _mixed_last_iter = false;
@@ -725,7 +724,7 @@ private:
   /// recent mixed iteration, copied out of the accelerator's ring the moment it
   /// is stored. Reading the ring later cannot work: it is reset at every
   /// split-kernel stage boundary, so a solve whose budget ran out on one would
-  /// have nothing to read. Allocated only when lr_params::energy_curvature is
+  /// have nothing to read. Allocated only when lr_params::hessian is
   /// set, so the ordinary path neither copies nor allocates.
   nda::array<ComplexType, 1> _raw_F_slice, _raw_S_slice;
 

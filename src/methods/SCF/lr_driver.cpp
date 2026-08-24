@@ -74,8 +74,8 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
                    "LR_GW_PI_PERT", "LR_GW_W_PERT",
                    // Mixing of the outer (perturbative-source) iteration.
                    "LR_OUTER_ITER_ALG",
-                   // Energy-curvature hooks; C1 = C_term1.
-                   "LR_C1_DYSON", "LR_C1_PERT_REFRESH"}) {
+                   // Energy-curvature hooks; C1 = hessian.
+                   "LR_HESS_DYSON", "LR_HESS_PERT_REFRESH"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -609,7 +609,7 @@ void lr_driver::lr_setup(
   // inline elementwise update: lr_diis::next_step_combined already implements
   // exactly that update (the same striped expression, hence the same rounding),
   // and routing through it is what makes the RAW pre-mixing slice available in
-  // every mixing configuration — which the energy-curvature estimator needs. The
+  // every mixing configuration — which the hessian estimator needs. The
   // subspace is then depth 1 with the warmup gate permanently on, so it never
   // extrapolates and keeps only the current step.
   if (p.inner_mixes()) {
@@ -617,12 +617,17 @@ void lr_driver::lr_setup(
     const size_t warmup = p.use_diis() ? p.iter_params.diis_warmup : size_t(0);
     _lr_diis = std::make_unique<lr_diis>(depth, warmup, p.mixing());
     // What keeps a damping run on the damping write is the SUBSPACE, not the
-    // warmup count: the default min_subsp of 3 can never be reached by a depth-1
-    // ring, so `_n < _min_subsp` gates every step. Asserted rather than assumed,
-    // because it is also what lets lr_diis skip its dead B-matrix work.
-    utils::check(p.use_diis() or _lr_diis->is_simple_mixing(),
-                 "lr_driver::lr_setup: the damping accelerator could extrapolate "
-                 "(subspace depth {} >= min_subsp); a damping run must never.",
+    // warmup count: min_subsp can never be reached by a depth-1 ring, so
+    // `_n < _min_subsp` gates every step.
+    //
+    // The reachable misconfiguration is the other direction: a DIIS run whose
+    // max_subsp_size is below lr_diis's min_subsp gets the same permanent gate and
+    // silently degrades to plain damping, which would otherwise show up only as
+    // "DIIS converges exactly like mixing".
+    utils::check(!p.use_diis() or !_lr_diis->is_simple_mixing(),
+                 "lr_driver::lr_setup: DIIS was requested but a subspace of depth {} "
+                 "can never reach lr_diis's min_subsp, so it would never extrapolate. "
+                 "Raise iter_params.max_subsp_size or use damping explicitly.",
                  depth);
   }
   // The outer accelerator is a separate object with its own subspace, history
@@ -659,11 +664,11 @@ void lr_driver::lr_setup(
   _DeltaSigma.alloc(_pmap, k.has_Sigma_sc ? _nts * nF : 0);
   _DeltaVcorr.alloc(_pmap, k.has_Vcorr ? nF : 0);
 
-  // Raw (pre-mixing) capture buffers for the energy-curvature estimator: one
+  // Raw (pre-mixing) capture buffers for the hessian estimator: one
   // more striped ΔF slice, and one more striped ΔΣ slice when the sc channel
   // carries a Σ. Allocated only under the flag, so the ordinary path is
   // unchanged in both memory and work.
-  if (p.energy_curvature and p.inner_mixes()) {
+  if (p.hessian and p.inner_mixes()) {
     _raw_F_slice = nda::array<ComplexType, 1>(_DeltaF.i1 - _DeltaF.i0);
     if (k.has_Sigma_sc)
       _raw_S_slice = nda::array<ComplexType, 1>(_DeltaSigma.i1 - _DeltaSigma.i0);
@@ -819,7 +824,9 @@ void lr_driver::eval_sigma_channel(
     sSigma_tskij_out.win().fence();
     _mpi->comm.barrier();
   } else if (lr_kernel.sigma_dG_W) {
-    // Fused ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW (single R-space pass)
+    // BOTH terms: term 2 is already known present (the !sigma_G_dW case returned
+    // at the top), so this tests whether term 1 is there as well. Fused
+    // ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW in a single R-space pass.
     auto S_loc = sS_skij.local();
     gw_solver.evaluate_sigma(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ,
@@ -892,8 +899,13 @@ void lr_driver::apply_pert_kernel(
 
 
 template<typename Arr_t>
-void lr_driver::refresh_total(Arr_t& total, Arr_t const& sc_part,
-                              Arr_t const& pert_part) {
+void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t& pert_part) {
+  // Both operands are node-replicated shared memory whose slices were written by
+  // other ranks, so a barrier is not enough under the MPI-3 separate
+  // shared-memory model: each window has to be fenced before it is read.
+  total.win().fence();
+  sc_part.win().fence();
+  pert_part.win().fence();
   auto tot_v  = total.local();
   auto sc_v   = sc_part.local();
   auto pert_v = pert_part.local();
@@ -915,25 +927,17 @@ void lr_driver::refresh_total(Arr_t& total, Arr_t const& sc_part,
 }
 
 
-void lr_driver::refresh_split_totals(lr_kernel_split const& k,
+void lr_driver::rebuild_split_totals(lr_kernel_split const& k,
                                      sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij) {
   if (!k.split_F && !k.split_Sigma) return;
   _Timer.start("LR_TOTALS");
   // split_F / split_Sigma guarantee the corresponding optionals are engaged and
   // are exactly the per-channel buffers.
-  if (k.split_F) {
-    sDeltaF_skij.win().fence();
-    _sDeltaF_sc->win().fence();
-    _sDeltaF_pert->win().fence();
-    refresh_total(sDeltaF_skij, *_sDeltaF_sc, *_sDeltaF_pert);
-  }
-  if (k.split_Sigma) {
-    sDeltaSigma_tskij->win().fence();
-    _sDeltaSigma_sc->win().fence();
-    _sDeltaSigma_pert->win().fence();
-    refresh_total(*sDeltaSigma_tskij, *_sDeltaSigma_sc, *_sDeltaSigma_pert);
-  }
+  if (k.split_F)
+    rebuild_total(sDeltaF_skij, *_sDeltaF_sc, *_sDeltaF_pert);
+  if (k.split_Sigma)
+    rebuild_total(*sDeltaSigma_tskij, *_sDeltaSigma_sc, *_sDeltaSigma_pert);
   _mpi->comm.barrier();
   _Timer.stop("LR_TOTALS");
 }
@@ -1110,9 +1114,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     ++stage_iter;
     const bool first_of_stage = (stage_iter == 1);
     bool pert_refreshed_this_iter = false;
-    // Did the mixing block actually write this iteration? The energy-curvature
-    // estimator needs to know whether the arrays it is handed at exit are the
-    // raw kernel output or the mixed iterate.
+    // Did the mixing block actually write this iteration? The hessian estimator
+    // needs to know whether the arrays it is handed at exit are the raw kernel
+    // output or the mixed iterate.
     bool mixed_this_iter = false;
 
     // Save previous density matrix and Fock matrix. ΔDm is node-replicated, so
@@ -1249,7 +1253,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // Assigned THROUGH a view: whole-array assignment on an nda owning array
       // reallocates unconditionally, which would both churn a ΔΣ-sized buffer
       // every iteration and discard what lr_setup allocated.
-      if (p.energy_curvature and inner_mix) {
+      if (p.hessian and inner_mix) {
         _raw_F_slice() = _lr_diis->newest_xF();
         if (has_Sigma_sc) _raw_S_slice() = _lr_diis->newest_xS();
       }
@@ -1461,7 +1465,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Refresh whichever totals are actually split, for the next Dyson solve and
     // the checkpoint. A quantity carried by one channel needs nothing: that
     // channel already wrote the caller's array.
-    refresh_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
 
     // Whether the caller's ΔF/ΔΣ are the mixed iterate on exit. The raw slice
     // itself was already copied out above, so no exit path can lose it.
@@ -1599,9 +1603,9 @@ void lr_driver::materialize_raw_kernel(
     const lr_params& p) {
 
   utils::check(_setup_done, "lr_driver::materialize_raw_kernel: call lr_setup first.");
-  utils::check(p.energy_curvature,
+  utils::check(p.hessian,
                "lr_driver::materialize_raw_kernel: lr_setup must have been given "
-               "energy_curvature = true, or there is no raw slice to read.");
+               "hessian = true, or there is no raw slice to read.");
   const lr_kernel_split k = make_kernel_split(p);
   utils::check(!k.qp_mode,
                "lr_driver::materialize_raw_kernel: qp mode is out of scope — the "
@@ -1615,7 +1619,7 @@ void lr_driver::materialize_raw_kernel(
   // handing it the mixed iterate. One extra K_pert evaluation restores
   // ΔV' = ΔH0 + K_sc(ΔG') + K_pert(ΔG') exactly.
   if (k.do_pert) {
-    _Timer.start("LR_C1_PERT_REFRESH");
+    _Timer.start("LR_HESS_PERT_REFRESH");
     // Same write targets the stage boundary uses: a channel that is the sole
     // contributor to a quantity writes the caller's array directly.
     auto& sDeltaF_pert_skij = k.split_F ? *_sDeltaF_pert : sDeltaF_skij;
@@ -1626,8 +1630,8 @@ void lr_driver::materialize_raw_kernel(
                       sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
     // The totals the caller reads must see the new source; the sc channel is
     // untouched, so this is the same rebuild the SCF loop does every iteration.
-    refresh_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
-    _Timer.stop("LR_C1_PERT_REFRESH");
+    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    _Timer.stop("LR_HESS_PERT_REFRESH");
   }
 
   // Step 2: swap the mixed ΔF / ΔΣ for the raw kernel output. Nothing to do when
@@ -1685,19 +1689,19 @@ void lr_driver::materialize_raw_kernel(
 }
 
 
-double lr_driver::c1_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
+double lr_driver::hessian_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
                                  sArray_t<Array_view_4D_t>& sDeltaDm_out,
                                  const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
                                  const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
                                  const sArray_t<Array_view_5D_t>* sDeltaSigma_raw_tskij,
                                  bool fix_density, bool need_DeltaG) {
-  utils::check(_setup_done, "lr_driver::c1_extra_dyson: call lr_setup first.");
-  _Timer.start("LR_C1_DYSON");
+  utils::check(_setup_done, "lr_driver::hessian_extra_dyson: call lr_setup first.");
+  _Timer.start("LR_HESS_DYSON");
   const double Delta_mu = _lr_dyson.solve_lr_dyson(
       sDeltaDm_out, sDeltaH0_skij, sDeltaF_raw_skij, sDeltaSigma_raw_tskij,
       fix_density);
   if (need_DeltaG) _lr_dyson.materialize_DeltaG_tau(sDeltaG_out);
-  _Timer.stop("LR_C1_DYSON");
+  _Timer.stop("LR_HESS_DYSON");
   _mpi->comm.barrier();
   return Delta_mu;
 }
@@ -2037,19 +2041,19 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "      - LR Save (prev arrays):  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SAVE"), _Timer.number_of_calls("LR_SAVE"));
   app_log(2, "      - LR Convergence (norms): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_CONVERGENCE"), _Timer.number_of_calls("LR_CONVERGENCE"));
   app_log(2, "");
-  // The energy-curvature clocks are NOT reported here: this runs at the end of
+  // The hessian clocks are NOT reported here: this runs at the end of
   // every lr_solve_one, i.e. inside the mode loop, and the extra Dyson happens
-  // in a second pass afterwards. See print_c1_timers().
+  // in a second pass afterwards. See print_hessian_timers().
 }
 
 
-void lr_driver::print_c1_timers() {
-  app_log(2, "\n  LR_C1 (energy curvature) driver timers");
-  app_log(2, "  ---------------------------------------");
+void lr_driver::print_hessian_timers() {
+  app_log(2, "\n  LR hessian driver timers");
+  app_log(2, "  ------------------------");
   app_log(2, "    Extra Dyson (per mode):     {0:8.3f} sec  {1:4d} calls",
-          _Timer.elapsed("LR_C1_DYSON"), _Timer.number_of_calls("LR_C1_DYSON"));
+          _Timer.elapsed("LR_HESS_DYSON"), _Timer.number_of_calls("LR_HESS_DYSON"));
   app_log(2, "    K_pert refresh (per mode):  {0:8.3f} sec  {1:4d} calls\n",
-          _Timer.elapsed("LR_C1_PERT_REFRESH"), _Timer.number_of_calls("LR_C1_PERT_REFRESH"));
+          _Timer.elapsed("LR_HESS_PERT_REFRESH"), _Timer.number_of_calls("LR_HESS_PERT_REFRESH"));
 }
 
 
