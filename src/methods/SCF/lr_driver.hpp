@@ -491,6 +491,13 @@ public:
    *
    * @return the Δμ of the extra solve
    */
+  double c1_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
+                        sArray_t<Array_view_4D_t>& sDeltaDm_out,
+                        const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                        const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
+                        const sArray_t<Array_view_5D_t>* sDeltaSigma_raw_tskij,
+                        bool fix_density, bool need_DeltaG);
+
   /**
    * Report (verbosity 2) the two energy-curvature clocks lr_driver owns: the
    * extra Dyson solve and the K_pert refresh. Separate from print_timers()
@@ -499,13 +506,6 @@ public:
    * cost would read 0.000 sec in every run. Call it after the pass-2 loop.
    */
   void print_c1_timers();
-
-  double c1_extra_dyson(sArray_t<Array_view_5D_t>& sDeltaG_out,
-                        sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                        const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                        const sArray_t<Array_view_4D_t>& sDeltaF_raw_skij,
-                        const sArray_t<Array_view_5D_t>* sDeltaSigma_raw_tskij,
-                        bool fix_density, bool need_DeltaG);
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -597,9 +597,14 @@ private:
                   std::optional<dW_t>& opt_dW_tRPQ);
 
   /**
-   * Evaluate the Σ components of `mask` into `sSigma_out`, overwriting it. Each
-   * divergence correction is applied by the evaluator that owns the term it
-   * corrects, so passing the overlap and the heads is all this has to do.
+   * Evaluate the Σ components of `lr_kernel` into `sSigma_tskij_out`, overwriting
+   * it. Each divergence correction is applied by the evaluator that owns the term
+   * it corrects, so passing the overlap and the heads is all this has to do.
+   *
+   * The static ΔF is NOT here: it is one lr_hf::evaluate call with no ΔP/ΔW
+   * pipeline behind it, so K_sc inlines it in the SCF loop and K_pert takes it in
+   * apply_pert_kernel. This routine is the Σ pipeline (ΔP → ΔW → ΔΣ) shared by
+   * the two channels.
    *
    * A method rather than a lambda inside lr_solve_one because the post-solve
    * K_pert refresh has to run the same evaluation from outside the SCF loop.
@@ -608,9 +613,9 @@ private:
    * exactly the sc/pert breakdown.
    */
   template<THC_ERI THC_t>
-  void eval_sigma_channel(lr_kernel_spec const& mask,
+  void eval_sigma_channel(lr_kernel_spec const& lr_kernel,
                           solvers::lr_gw& gw_solver,
-                          sArray_t<Array_view_5D_t>& sSigma_out,
+                          sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                           const lr_ibc_DeltaX* ibc_ptr,
                           const char* clk_pi, const char* clk_w, const char* clk_sigma,
                           const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -620,9 +625,10 @@ private:
                           sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
-   * One K_pert evaluation on the supplied ΔDm / ΔG, writing the perturbative
-   * source in place. Shared by the in-loop stage boundary and the post-solve
-   * refresh so the kernel call exists exactly once.
+   * One whole K_pert evaluation on the supplied ΔDm / ΔG, writing the perturbative
+   * source in place: the static ΔF branch (including the HSEX counter-term) plus
+   * eval_sigma_channel for the Σ branch. Shared by the in-loop stage boundary and
+   * the post-solve refresh so the kernel call exists exactly once.
    */
   template<THC_ERI THC_t>
   void apply_pert_kernel(lr_kernel_split const& k,
@@ -634,7 +640,13 @@ private:
                          THC_t& thc,
                          const lr_params& p);
 
-  /// total <- sc + pert on a node-replicated window, striped over node_comm.
+  /**
+   * A split kernel evaluates ΔF / ΔΣ in two channels (K_sc every inner iteration,
+   * K_pert only at a stage boundary) into separate buffers, so the total the Dyson
+   * solve and the checkpoint consume has to be rebuilt from them: total <- sc +
+   * pert. Striped over node_comm because a ΔΣ total is GBs at production sizes and
+   * is rebuilt every inner iteration.
+   */
   template<typename Arr_t>
   void refresh_total(Arr_t& total, Arr_t const& sc_part, Arr_t const& pert_part);
 

@@ -120,14 +120,14 @@ public:
     _B = nda::matrix<ComplexType>(0, 0);
   }
   /**
-   * @brief True when this accelerator can never extrapolate.
+   * @brief True when this accelerator only ever damps, never extrapolates.
    *
    * The subspace is capped at _max_subsp_size, so a _min_subsp above that makes
    * the warmup gate `_n < _min_subsp` fire on every step for the lifetime of the
    * object: every call takes the damping write. It is how a damping run is
    * expressed as an lr_diis, and it is what lets the B-matrix work be skipped.
    */
-  bool never_extrapolates() const { return _min_subsp > _max_subsp_size; }
+  bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
 
   /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
@@ -213,7 +213,7 @@ public:
     // every iteration, feeding a matrix nothing reads. That is exactly the
     // depth-1 ring a damping run builds. Any configuration that CAN extrapolate
     // takes the branch unchanged, so DIIS is untouched.
-    if (!never_extrapolates()) update_B(comm, has_sigma);
+    if (!is_simple_mixing()) update_B(comm, has_sigma);
 
     if (_n > _max_subsp_size) purge_oldest();
 
@@ -249,11 +249,6 @@ public:
 
     app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
   }
-
-  /// Whether the ring holds anything, i.e. whether next_step_combined has run
-  /// since the last reset().
-  bool has_raw() const { return _n > 0; }
-
 
   /**
    * @brief This rank's slice of the newest step's ΔF / ΔΣ, as it was BEFORE any
@@ -371,7 +366,7 @@ private:
    * shift — it is (S+1)² and costs nothing.
    */
   void purge_oldest() {
-    // B is empty when it is never built (never_extrapolates()); there is then
+    // B is empty when it is never built (is_simple_mixing()); there is then
     // nothing to shift, and forming a (n-1) x (n-1) matrix from n = 0 would be
     // a negative extent.
     size_t n = _B.shape()[0];
