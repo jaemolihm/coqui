@@ -1094,8 +1094,10 @@ namespace methods {
         // make only C distributed; 
         auto dC_qkPRv_contr = make_distributed_array<Array_5D_t>(_context->comm,
                                                           {pgrid[0], pgrid[1], pgrid[3], pgrid[2], pgrid[4]}, 
-                                                          //{nkpts, nkpts, Np, Np, nbnd}, {0,0,0,Np/pgrid[2],0}); // FIXME!
-                                                          {nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1});
+                                                          // R shares dU's partition: same extent, same grid, so the same
+                                                          // tile count gives identical boundaries (checked below)
+                                                          {nkpts, nkpts, Np, Np, nbnd},
+                                                          {0,0,0,dU_sqkRvw.tile_count()[3],0});
 
 
         // local shapes
@@ -1559,8 +1561,11 @@ namespace methods {
       std::array<long,5> lshape = {U_lshape[1],U_lshape[2],U_lshape[3],U_lshape[4],U_lshape[5]};
 
       // make only C distributed;
+      // R shares dU's partition: same extent, same grid, so the same tile count
+      // gives identical boundaries (checked below)
       auto dC_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {pgrid[0], pgrid[1], pgrid[3], pgrid[2], pgrid[4]},
-                                                        {nkpts, nkpts, Np, Np, nbnd}, {0,0,0,Np/pgrid[2],0});
+                                                        {nkpts, nkpts, Np, Np, nbnd},
+                                                        {0,0,0,dU_sqkRvw.tile_count()[3],0});
 
       // local shapes
       auto [nq_kpts_loc, nk_kpts_loc, Np_loc2, Np_loc, nbnd_loc1] = dC_qkPRv.local_shape();

@@ -278,8 +278,10 @@ auto gen_ovlp(boost::mpi3::communicator& comm,
     auto k_comm = comm.split(psi.origin()[0]*nkpts+psi.origin()[1],comm.rank());
     std::array<long,3> pg = {psi.grid()[0], psi.grid()[1], psi.grid()[2]*psi.grid()[3]};
     auto psiloc = psi.local();
+    // The band axis carries psi's (P,G) grid product here, not psi.grid()[2], so
+    // psi's band tile count would be short of the grid whenever grid()[3] > 1.
     auto Hii = math::nda::make_distributed_array<larray3D>(comm,pg,{nspin,nkpts,nbnd},
-                  {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2]});
+                  {psi.tile_count()[0],psi.tile_count()[1],pg[2]});
     auto Hloc = Hii.local();
     Hloc() = ComplexType(0.0);
     if constexpr (MEM == HOST_MEMORY) {

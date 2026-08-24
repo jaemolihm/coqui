@@ -396,10 +396,14 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     return fmt::format("{}=({},{},{},{})", ax, g[0], g[1], g[2], g[3]); };
   auto pg5 = [](const std::array<long, 5>& g, const char* ax) {
     return fmt::format("{}=({},{},{},{},{})", ax, g[0], g[1], g[2], g[3], g[4]); };
-  auto bs4 = [](const std::array<long, 4>& b) {
-    return fmt::format("({},{},{},{})", b[0], b[1], b[2], b[3]); };
-  auto bs5 = [](const std::array<long, 5>& b) {
-    return fmt::format("({},{},{},{},{})", b[0], b[1], b[2], b[3], b[4]); };
+  // 0 is the "one element per tile" sentinel; print what the factory will resolve
+  // it to, so the column reads as an actual tile count.
+  auto bs4 = [](const std::array<long, 4>& b, const std::array<long, 4>& n) {
+    return fmt::format("({},{},{},{})", b[0]?b[0]:n[0], b[1]?b[1]:n[1],
+                                        b[2]?b[2]:n[2], b[3]?b[3]:n[3]); };
+  auto bs5 = [](const std::array<long, 5>& b, const std::array<long, 5>& n) {
+    return fmt::format("({},{},{},{},{})", b[0]?b[0]:n[0], b[1]?b[1]:n[1],
+                       b[2]?b[2]:n[2], b[3]?b[3]:n[3], b[4]?b[4]:n[4]); };
 
   auto row = [&](std::string const& pattern, std::string const& grid,
                  std::string const& bsize, std::string const& arrs) {
@@ -411,13 +415,17 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   row("pattern", "pgrid", "tiles", "arrays");
 
   if (aux_path) {
-    row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"), bs4(pi_bsize),
+    row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"),
+        bs4(pi_bsize, {p.nth, p.nqi, p.NP, p.NP}),
         "dPi_tqPQ, dW_tqPQ");
-    row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q), "(1,1,1,1)",
+    row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q),
+        fmt::format("({},{},{},{})", p.ns, p.nk, p.NP, p.NP),
         "dGp_sRPQ, dGn_sRPQ, dbuf_skPQ  [on t_intra_comm]");
-    row("aux FT buffer", pg4(ftb_pgrid, "(·,q,P,Q)"), bs4(ftb_bsize),
+    row("aux FT buffer", pg4(ftb_pgrid, "(·,q,P,Q)"),
+        bs4(ftb_bsize, {p.nth, p.nqi, p.NP, p.NP}),
         "buffer_ti, buffer_wi");
-    row("aux ω (W Dyson)", pg4(wo_pgrid, "(w,q,P,Q)"), bs4(wo_bsize), "W(iω) (dPi_wqPQ)");
+    row("aux ω (W Dyson)", pg4(wo_pgrid, "(w,q,P,Q)"),
+        bs4(wo_bsize, {p.nwh, p.nqi, p.NP, p.NP}), "W(iω) (dPi_wqPQ)");
   }
 
   if (p.thc_eri and p.have_corr) {
@@ -426,12 +434,14 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
       std::array<long, 5> s_pgrid = {ntpools, 1, 1, np_P, np_Q};
       std::array<long, 5> s_bsize = {pi_bsize[0], 0, pi_bsize[1],
                                      pi_bsize[2], pi_bsize[3]};
-      row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"), bs5(s_bsize),
+      row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"),
+          bs5(s_bsize, {p.nth, p.ns, p.nk, p.NP, p.NP}),
           "dG_tskPQ, dSigma_tskPQ");
     } else {
       std::array<long, 4> k_pgrid = {1, 1, np_P, np_Q};
       std::array<long, 4> k_bsize = {0, pi_bsize[1], pi_bsize[2], pi_bsize[3]};
-      row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"), bs4(k_bsize),
+      row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"),
+          bs4(k_bsize, {p.ns, p.nki, p.NP, p.NP}),
           "dSigma_skPQ, dG_skPQ  [on t_intra_comm]");
       // Mirrors thc_gw.icc:277-279 (the aux->primary redistribute target), whose
       // input comm is t_intra_comm, i.e. nproc/ntpools ranks.
@@ -445,7 +455,8 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   }
 
   auto [dyw_pgrid, dyw_bsize] = dyson_omega_proc_grid(nproc, p.nw_f, p.nki, int(p.nb));
-  row("band Dyson(ω)", pg5(dyw_pgrid, "(w,s,k,i,j)"), bs5(dyw_bsize),
+  row("band Dyson(ω)", pg5(dyw_pgrid, "(w,s,k,i,j)"),
+      bs5(dyw_bsize, {p.nw_f, p.ns, p.nki, p.nb, p.nb}),
       "dSigma_wskij, dG_wskij");
   auto dyt_pgrid = dyson_tau_proc_grid(nproc, p.nki);
   row("band Dyson(τ)", pg5(dyt_pgrid, "(·,·,k,i,j)"), "default",

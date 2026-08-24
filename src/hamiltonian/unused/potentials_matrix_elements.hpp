@@ -352,8 +352,8 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
     long np_local = psi_1.local_shape()[0];
     // better layout for gemm
     auto psi_2 = make_distributed_array<local_Array_t,comm_t>(q_comm,Vgrid,{np,nnr},
-                                              {V.tile_count()[1],
-                     utils::balanced_tile_count(V.global_shape()[2],1,2048)});
+                     {V.tile_count()[1],
+                      utils::balanced_tile_count(nnr,Vgrid[1],2048)});
     psi_2.local() = ComplexType(0.0);
 
     auto P4d = ::nda::reshape(p_local, std::array<long,4> {np_local,mesh(0),mesh(1),mesh(2)});

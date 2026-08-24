@@ -63,21 +63,6 @@ namespace math::nda
 namespace detail
 {
 
-template<int rank>
-void resolve_tile_counts(std::array<long,rank>& tcount,
-                         std::array<long,rank> const& shape,
-                         std::array<long,rank> const& grid,
-                         std::string_view who)
-{
-  for(int n=0; n<rank; ++n) {
-    if(tcount[n] == 0) tcount[n] = shape[n];
-    utils::check( tcount[n] >= grid[n] and tcount[n] <= shape[n],
-      "{}: tile count out of range - dim:{}, tile count:{}, shape:{}, grid:{}. "
-      "It must satisfy grid <= tile count <= shape (0 means one tile per element).",
-      who,n,tcount[n],shape[n],grid[n]);
-  }
-}
-
 // (origin, local extent) per axis, walking the proc grid in the order the memory
 // layout wants: column major over the grid for Fortran layout, row major otherwise.
 template<bool is_stride_order_Fortran, int rank>
@@ -120,7 +105,7 @@ auto make_distributed_array(communicator_t& comm,
   for(int n=0; n<rank; ++n) 
     utils::check( shape[n] >= grid[n], 
       "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]); 
-  detail::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array");
+  utils::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array");
 
   auto [origin,lshape] = detail::local_block<
         local_Array_t::layout_t::is_stride_order_Fortran(),rank>(long(comm.rank()),shape,grid,tcount);
@@ -145,7 +130,7 @@ auto make_distributed_array_view(communicator_t& comm,
   for(int n=0; n<rank; ++n)
     utils::check( shape[n] >= grid[n],
       "make_distributed_array_view: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
-  detail::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array_view");
+  utils::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array_view");
 
   auto [origin,lshape] = detail::local_block<
         local_Array_t::layout_t::is_stride_order_Fortran(),rank>(long(comm.rank()),shape,grid,tcount);

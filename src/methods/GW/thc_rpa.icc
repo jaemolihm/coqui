@@ -159,10 +159,14 @@ namespace methods {
 
           // Tr{ln(B)} = ln(det(B))
           ComplexType det_A = math::nda::slate_ops::determinant(dA_PQ, diag_idx);
-          if (det_A.real() <= 0.0 and dA_PQ.communicator()->root())
-            app_warning("thc_rpa: det(I - Pi*Z) = {} at iq = {}, iw = {} is not "
-                        "positive, so the log-det RPA energy is undefined there.",
-                        det_A.real(), iq, wn);
+          // log(det) is undefined for a non-positive determinant. The old code
+          // flipped the sign here to work around the miscounted pivot parity,
+          // which silently returned log|det| instead of the RPA energy.
+          utils::check(det_A.real() > 0.0,
+              "thc_rpa: det(I - Pi*Z) = {} at iq = {}, iw = {} is not positive, so "
+              "the log-det RPA correlation energy is undefined. This indicates an "
+              "unstable polarizability, not a pivot-counting problem.",
+              det_A.real(), iq, wn);
 
           if (dA_PQ.communicator()->root()) {
             e_rpa_w(wn, 0) += double(q_weight) * std::log(det_A.real());

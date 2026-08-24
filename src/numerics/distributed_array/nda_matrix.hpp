@@ -74,6 +74,7 @@ struct darray
     lorigin(origin_),
     tile_count(tcount)
   { 
+    utils::resolve_tile_counts<rank>(tile_count,gextents,grid,"distributed_array");
     check_dimensions();
   }
 
@@ -90,6 +91,7 @@ struct darray
     lorigin(origin_),
     tile_count(tcount)
   {
+    utils::resolve_tile_counts<rank>(tile_count,gextents,grid,"distributed_array");
     check_dimensions(local_size);
   }
 

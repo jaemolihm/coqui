@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <string_view>
 
 #include "itertools/itertools.hpp"
 #include "utilities/check.hpp"
@@ -128,6 +129,34 @@ inline std::pair<long,long> local_range_of_rank(long N, long t, long np, long ip
   utils::check(ip >= 0 and ip < np, "local_range_of_rank: rank out of range ip:{} np:{}", ip, np);
   auto [t0,t1] = itertools::chunk_range(0, t, np, ip);
   return {tile_offset(N,t,long(t0)), (t1 == t ? N : tile_offset(N,t,long(t1)))};
+}
+
+/**
+ * Resolve and validate a per-axis tile-count array in place.
+ *
+ * `t[n] == 0` is the sentinel for "one element per tile", i.e. `t[n] = extents[n]`,
+ * which reproduces a tile size of one. Anything else must satisfy
+ * `grid[n] <= t[n] <= extents[n]`; out-of-range counts are rejected rather than
+ * clamped, because a silently clamped count gives two axes different tile
+ * boundaries and slate's gemm does not check that.
+ *
+ * Axes with a non-positive extent or grid are left alone: those are reset or
+ * dummy-constructed arrays, which carry no partition.
+ */
+template<size_t R>
+inline void resolve_tile_counts(std::array<long,R>& t,
+                                std::array<long,R> const& extents,
+                                std::array<long,R> const& grid,
+                                std::string_view who)
+{
+  for(size_t n=0; n<R; ++n) {
+    if(extents[n] <= 0 or grid[n] <= 0) continue;
+    if(t[n] == 0) t[n] = extents[n];
+    utils::check(t[n] >= grid[n] and t[n] <= extents[n],
+      "{}: tile count out of range - dim:{}, tile count:{}, extent:{}, grid:{}. "
+      "It must satisfy grid <= tile count <= extent (0 means one element per tile).",
+      who, n, t[n], extents[n], grid[n]);
+  }
 }
 
 } // namespace utils

@@ -147,7 +147,9 @@ namespace solvers {
       std::array<long, 4> w_pgrid, std::array<long, 4> w_tcount)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    if (w_pgrid[0]*w_pgrid[1]*w_pgrid[2]*w_pgrid[3] <= 0 or w_tcount[2]*w_tcount[3] <= 0) {
+    // Gate on the processor grid alone: {0,0,0,0} is a legal tile count now (one
+    // element per tile), so it can no longer double as "unset".
+    if (w_pgrid[0]*w_pgrid[1]*w_pgrid[2]*w_pgrid[3] <= 0) {
       std::tie(w_pgrid, w_tcount) = scr_coulomb_t::W_omega_proc_grid(
           thc.mpi()->comm.size(), thc.MF()->nqpts_ibz(), _ft->nw_b(), thc.Np());
     }

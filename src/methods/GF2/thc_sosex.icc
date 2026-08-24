@@ -24,6 +24,13 @@
 namespace methods {
   namespace solvers {
 
+    // The tau <-> omega transforms below change the extent of axis 0, so the
+    // source's tile count on that axis does not carry over to the target; 0 means
+    // one element per tile, which is what every one of these arrays uses there.
+    template<size_t R>
+    inline std::array<long,R> ft_axis0_untiled(std::array<long,R> tc) { tc[0] = 0; return tc; }
+
+
     template<nda::MemoryArray Array_view_5D_t>
     void gf2_t::add_2sosex(sArray_t<Array_view_5D_t> &sSigma_tskij, [[maybe_unused]] THC_ERI auto &thc) {
         size_t nt = sSigma_tskij.shape()[0];
@@ -462,7 +469,7 @@ namespace methods {
         _ft->check_leakage(dA_tx, imag_axes_ft::boson, name, false);
         _Timer.start("ALLOC_SOSEX");
         auto dA_wx = make_distributed_array<local_Array_t>(
-            _context->comm, w_pgrid, w_gshape, dA_tx.tile_count());
+            _context->comm, w_pgrid, w_gshape, ft_axis0_untiled(dA_tx.tile_count()));
         _Timer.stop("ALLOC_SOSEX");
         // local arrays cover all tau and w points
         auto A_tx_loc = dA_tx.local();
@@ -508,7 +515,7 @@ namespace methods {
 
         _Timer.start("ALLOC_SOSEX");
       auto buffer_wi  = make_distributed_array<local_Array_t>(
-          _context->comm, b_pgrid, w_gshape, buffer_ti.tile_count());
+          _context->comm, b_pgrid, w_gshape, ft_axis0_untiled(buffer_ti.tile_count()));
         _Timer.stop("ALLOC_SOSEX");
       {
         auto buf_ti_loc = buffer_ti.local();
@@ -600,7 +607,7 @@ namespace methods {
 
         _Timer.start("ALLOC_SOSEX");
       auto buffer_wi  = make_distributed_array<local_Array_t>(
-          _context->comm, b_pgrid, w_gshape, buffer_ti.tile_count());
+          _context->comm, b_pgrid, w_gshape, ft_axis0_untiled(buffer_ti.tile_count()));
         _Timer.stop("ALLOC_SOSEX");
       {
         auto buf_ti_loc = buffer_ti.local();
@@ -686,7 +693,7 @@ namespace methods {
       if (dA_wx.communicator()->size() == 1) {
         _Timer.start("ALLOC_SOSEX");
         auto dA_tx = make_distributed_array<local_Array_t>(
-            _context->comm, t_pgrid, t_gshape, dA_wx.tile_count());
+            _context->comm, t_pgrid, t_gshape, ft_axis0_untiled(dA_wx.tile_count()));
         _Timer.stop("ALLOC_SOSEX");
         // local arrays cover all tau and w points
         auto A_tx_loc = dA_tx.local();
@@ -752,7 +759,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto buffer_ti  = make_distributed_array<local_Array_t>(
-          _context->comm, tb_pgrid, t_gshape, buffer_wi.tile_count());
+          _context->comm, tb_pgrid, t_gshape, ft_axis0_untiled(buffer_wi.tile_count()));
       _Timer.stop("ALLOC_SOSEX");
       {
         auto buf_ti_loc = buffer_ti.local();
@@ -805,7 +812,7 @@ namespace methods {
       if (dA_wx.communicator()->size() == 1) {
         _Timer.start("ALLOC_SOSEX");
         auto dA_tx_ = make_distributed_array<local_Array_t>(
-            _context->comm, t_pgrid, t_gshape, dA_wx.tile_count());
+            _context->comm, t_pgrid, t_gshape, ft_axis0_untiled(dA_wx.tile_count()));
         _Timer.stop("ALLOC_SOSEX");
         // local arrays cover all tau and w points
         auto A_tx_loc = dA_tx_.local();
@@ -868,7 +875,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto buffer_ti  = make_distributed_array<local_Array_t>(
-          _context->comm, tb_pgrid, t_gshape, buffer_wi.tile_count());
+          _context->comm, tb_pgrid, t_gshape, ft_axis0_untiled(buffer_wi.tile_count()));
       _Timer.stop("ALLOC_SOSEX");
       {
         auto buf_ti_loc = buffer_ti.local();

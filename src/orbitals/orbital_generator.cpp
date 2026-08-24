@@ -125,8 +125,11 @@ mf::MF add_pgto(mf::MF& mf,
       utils::check(psi_mf.global_shape()[3]==psi_pgto.global_shape()[3],"Shape mismatch.");
       utils::check(psi_mf.local_range(3)==psi_pgto.local_range(3),"Range mismatch.");
 
+      // the band axis grows from npgto to npgto+b0, so psi_pgto's count on it does
+      // not carry over; one element per tile (0). The G axis keeps its partition.
       auto psi = math::nda::make_distributed_array<memory::array<MEM,ComplexType,4>>(mpi.comm,pgrid,
-           {nspin,nkpts_ibz,npgto+b0,psi_pgto.global_shape()[3]},psi_pgto.tile_count());
+           {nspin,nkpts_ibz,npgto+b0,psi_pgto.global_shape()[3]},
+           {psi_pgto.tile_count()[0],psi_pgto.tile_count()[1],0,psi_pgto.tile_count()[3]});
       auto psi_loc = psi.local();
       psi_loc(all,all,nda::range(npgto),all) = psi_pgto.local();
       psi_loc(all,all,nda::range(npgto,npgto+b0),all) = psi_mf.local();

@@ -172,7 +172,7 @@ int main(int argc, char* argv[])
 
   for( auto i : itertools::range(nqpts-nqpts_ibz) ) {
     // square (ab,ab) tile count: both axes of a square matrix need the same count
-    const long nab = nkpts*nbnd*nbnd;
+    const long nab = nspins*nkpts*nbnd*nbnd;
     const long eri_tiles = utils::balanced_tile_count(nab, q_comm.size(), nbnd);
     deri.emplace_back( math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,{q_comm.size(),1},
                            {nab,nab},{eri_tiles,eri_tiles}) );

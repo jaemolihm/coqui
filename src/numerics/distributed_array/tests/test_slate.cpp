@@ -49,7 +49,7 @@ namespace bdft_tests
 // elements: the same count on both axes, which is what the old squared_blocks
 // flag used to enforce after the fact.
 inline long t16(long N, long nx, long ny)
-{ return utils::balanced_tile_count(N, std::max(nx,ny), 16); }
+{ return utils::balanced_tile_count(N, std::min(N, std::max(nx,ny)), 16); }
 
 template <typename scalar_type>
 void random_matrix( int64_t m, int64_t n, scalar_type* A, int64_t lda )
@@ -89,7 +89,7 @@ TEST_CASE("dops_tags", "[math]")
   auto world = boost::mpi3::environment::get_world_instance();
   auto A =  make_distributed_array<local_Array_t>(world, shape_t<2>{world.size(),1},
                         shape_t<2>{32*world.size(),32},
-                        shape_t<2>{t16(32*world.size(),world.size(),1), t16(32,world.size(),1)});
+                        shape_t<2>{t16(32*world.size(),world.size(),1), 0});
 
   [[maybe_unused]] auto An = normal(A);
   [[maybe_unused]] auto An_ = N(std::move(A));
@@ -358,7 +358,7 @@ TEST_CASE("distributed_ops", "[math]")
     using local_Array_t = nda::array<double, 3>;
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
-    long bz = std::min(16l,std::min(N/nx,N/ny));
+    long bz = t16(N,nx,ny);
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
                         shape_t<3>{4,N,N}, {0, bz, bz});  
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
@@ -386,7 +386,7 @@ TEST_CASE("distributed_ops", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
 std::cout<<" nx: " <<nx <<std::endl;
-    long bz = std::min(16l,N/ny);
+    long bz = t16(N,nx,ny);
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
                         shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},

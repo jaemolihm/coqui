@@ -121,12 +121,22 @@ TEST_CASE("tile_partition_invariants", "[utilities]")
           REQUIRE(t <= N);
           // (6) every rank of the p_max axis owns at least one tile
           REQUIRE(t/p_max >= 1);
-          // tiles honour the cap whenever the cap is reachable, i.e. t was not clamped
+          // tiles honour the cap whenever the cap is reachable, i.e. t was not
+          // clamped down to N by the min
           if (t == p_max*((N + p_max*cap - 1)/(p_max*cap)))
-            REQUIRE(tile_extent(N,t,0) <= std::max(cap, ceil_div(N,t)));
+            REQUIRE(tile_extent(N,t,0) <= cap);
 
-          // (7) equal tile counts on both axes => identical boundaries
-          for (long i = 0; i < t; ++i) REQUIRE(tile_range(N,t,i) == tile_range(N,t,i));
+          // (7) equal tile counts on two axes of equal extent => identical
+          // boundaries, whatever their process grids. This is the getri mt == nt
+          // precondition and the gemm contracted-axis precondition, and it is the
+          // reason the stored quantity is a count and not a size: the partition
+          // must be a function of (N, t) alone.
+          for (long i = 0; i < t; ++i) {
+            REQUIRE(tile_range(N,t,i) ==
+                    std::make_pair(long(i*(N/t) + std::min(i,N%t)),
+                                   long((i+1)*(N/t) + std::min(i+1,N%t))));
+            REQUIRE(local_range_of_rank(N,t,1,0) == std::pair<long,long>{0,N});
+          }
 
           for (long axis : {0l, 1l}) {
             const long np_a = (axis == 0 ? p_row : p_col);

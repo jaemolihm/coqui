@@ -49,7 +49,11 @@ namespace solvers {
         _ft->check_leakage(dPi_tqPQ_pos, imag_axes_ft::boson, "polarizability", true);
       }
       auto dPi_wqPQ = make_distributed_array<local_Array_t>(
-          *comm, {1, 1, 1, 1}, w_gshape, dPi_tqPQ_pos.tile_count());
+          // axis 0 changes extent (tau -> omega), so the input's tile count there
+          // does not carry over; 0 = one element per tile
+          *comm, {1, 1, 1, 1}, w_gshape,
+          {0, dPi_tqPQ_pos.tile_count()[1], dPi_tqPQ_pos.tile_count()[2],
+              dPi_tqPQ_pos.tile_count()[3]});
       auto Pi_ti_loc = dPi_tqPQ_pos.local();
       auto Pi_wi_loc = dPi_wqPQ.local();
       _ft->tau_to_w_PHsym(Pi_ti_loc, Pi_wi_loc);
