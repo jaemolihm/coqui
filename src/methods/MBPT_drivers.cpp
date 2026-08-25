@@ -2159,11 +2159,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
-    // Pass 1 of the stationary hessian estimator, after the dump so what lands on
-    // disk stays the mixed iterate exactly as before. The raw (pre-mixing) kernel
-    // output lives in the accelerator's per-solve history, so it has to be
-    // captured here, before the next perturbation resets it; every contraction
-    // waits for the second pass below.
+    // Store this mode's operands for the stationary hessian estimator, after the
+    // dump so what lands on disk stays the mixed iterate exactly as before. A copy
+    // out and nothing else: the raw (pre-mixing) kernel output lives in the
+    // accelerator's per-solve history and ΔDm/ΔG in shm windows, so both have to be
+    // taken here, before the next perturbation destroys them. Every contraction
+    // happens after this loop.
     if (opt_hessian) {
       driver.get_kernel_before_mixing(
           lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -2215,11 +2216,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
   }
 
-  // Pass 2 of the stationary hessian estimator, driven by lr_hessian_t itself: per
-  // mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
+  // Every mode is stored now, so the estimator can be evaluated. lr_hessian_t
+  // drives it: per mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
   // ΔV = ΔH0 + ΔF + ΔΣ, and contracts the improved solution against every stored
-  // mode. It works in the mode loop's own shm arrays — free scratch after the last
-  // dump — so no array is allocated here and ΔDm' is never persisted.
+  // mode; assemble() then takes the traces that need no extra solve. It works in
+  // the mode loop's own shm arrays — free scratch after the last dump — so no array
+  // is allocated here and ΔDm' is never persisted.
   if (opt_hessian) {
     Delta_mu_improved_m = opt_hessian->solve_improved(
         driver.dyson(), lr_state.sDeltaH0_skij.value(),

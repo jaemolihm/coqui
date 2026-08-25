@@ -211,12 +211,12 @@ void lr_hessian_t::store_mode(long p,
   // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
   // and ΔG always right.
   _Timer.start("LR_HESS_STORE");
-  _dH0[p]  = pack_static(sDeltaH0, /*weighted=*/false);   // left  of plain, static2
-  _dF[p]   = pack_static(sDeltaF,  /*weighted=*/false);   // left  of N, M2
+  _dH0[p] = pack_static(sDeltaH0, /*weighted=*/false);   // left  of plain, static'
+  _dF[p]  = pack_static(sDeltaF,  /*weighted=*/false);   // left  of M, M'
   _dDm[p] = pack_static(sDeltaDm, /*weighted=*/true);    // right of plain, M
   if (_has_sigma) {
-    pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of N, M2
-    pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of N
+    pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
+    pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M
   }
   _stored[p] = true;
   _Timer.stop("LR_HESS_STORE");
@@ -316,8 +316,8 @@ void lr_hessian_t::accumulate_improved(long p,
                "lr_hessian_t::accumulate_improved: a Σ-carrying kernel needs ΔG'.");
   for (long l = 0; l < _nmodes; ++l)
     utils::check(_stored[l],
-                 "lr_hessian_t::accumulate_improved: every mode must be stored in "
-                 "pass 1 before any pair is contracted; mode {} is missing.", l);
+                 "lr_hessian_t::accumulate_improved: every mode must be stored "
+                 "before any pair is contracted; mode {} is missing.", l);
 
   _Timer.start("LR_HESS_CONTRACT");
   auto dDm2 = pack_static(sDeltaDm, /*weighted=*/true);
@@ -350,8 +350,8 @@ nda::array<double, 1> lr_hessian_t::solve_improved(
                "ΔG scratch arrays.");
   for (long p = 0; p < _nmodes; ++p)
     utils::check(_stored[p],
-                 "lr_hessian_t::solve_improved: mode {} was never stored; pass 1 "
-                 "must cover every mode before pass 2 begins.", p);
+                 "lr_hessian_t::solve_improved: mode {} was never stored; every "
+                 "mode must be stored before the first extra solve.", p);
 
   nda::array<double, 1> Delta_mu(_nmodes);
   Delta_mu() = 0.0;
@@ -417,8 +417,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   _assembled = true;
   for (long p = 0; p < _nmodes; ++p)
     utils::check(_stored[p] && _improved[p],
-                 "lr_hessian_t::assemble: mode {} is missing its pass-1 store "
-                 "or its pass-2 improved solution.", p);
+                 "lr_hessian_t::assemble: mode {} is missing its store or its "
+                 "improved solution.", p);
 
   // The equation this function evaluates, term by term:
   //
@@ -430,8 +430,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   //   H_plain = spin * plain
   //   H_sym   = spin * (static' + M' - M)
   //
-  // The two terms that need only pass-1 stores are accumulated here, over ALL mode
-  // pairs and both triangles. No symmetry is used to build any entry — the
+  // The two terms whose operands are all still in the stores are taken here, over
+  // ALL mode pairs and both triangles. No symmetry is used to build any entry — the
   // Hermiticity numbers below are measurements of the finished matrices.
   _Timer.start("LR_HESS_CONTRACT");
   for (long l = 0; l < _nmodes; ++l)
@@ -523,7 +523,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   // Away from convergence this is the size of the correction, and large is the
   // point. It is a DETECTOR only at convergence, where the correction cancels
   // identically: a nonzero value there means the extra Dyson applied a different
-  // operator than pass 1 (a frozen Δμ, say), which Hermiticity cannot see.
+  // operator than the original solve (a frozen Δμ, say), which Hermiticity cannot
+  // see.
   app_log(1, "    ||H_sym - H_plain|| / ||H_plain||  = {:.3e}   [the correction; "
              "-> 0 at convergence, where it is the D5 detector]", rel_sym_plain);
   app_log(1, "    ||H_plain - H_plain^dag||/||H_plain|| = {:.3e}", r.herm_plain);

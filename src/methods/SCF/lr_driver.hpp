@@ -486,13 +486,13 @@ public:
    *
    * Exposed for the stationary hessian functional, which needs ONE more solve on
    * a caller-supplied ΔV = ΔH0 + ΔF_raw + ΔΣ_raw, and must use *this* object: the
-   * same operator with the same cached setup pass 1 applied.
+   * same operator with the same cached setup the original solves applied.
    *
    * `lr_hessian_t::solve_improved` drives it — `solve_lr_dyson(...)` and, only when
    * the functional's Matsubara term needs ΔG(τ), `materialize_DeltaG_tau(...)`. Note
-   * that `fix_density` must be the flag pass 1 used: with it the solve recomputes
-   * Δμ self-consistently from this ΔV, which keeps the constrained bubble
-   * P_fd = P − u u†/⟨S,u⟩ — still self-adjoint — that pass 1 applied. lr_dyson
+   * that `fix_density` must be the flag the original solves used: with it the solve
+   * recomputes Δμ self-consistently from this ΔV, which keeps the constrained bubble
+   * P_fd = P − u u†/⟨S,u⟩ — still self-adjoint — that they applied. lr_dyson
    * takes no Δμ input (it always solves at Δμ = 0 and shifts afterwards), so
    * passing the flag is the whole of it.
    */

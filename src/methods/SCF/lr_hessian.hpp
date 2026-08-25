@@ -178,23 +178,29 @@ struct lr_hessian_result_t {
  * on, and `herm_M` is what detects that. Physical phonon perturbations have the
  * structure, so on those `herm_M` sits at the roundoff floor.
  *
- * ## 7. Why two passes over the perturbations
+ * ## 7. Storing, then evaluating
  *
- * `store_mode` runs inside the caller's mode loop and only stores; `solve_improved`
- * is a second loop afterwards. The split is forced from both ends.
+ * No trace is taken while the caller's mode loop runs. `store_mode` only packs one
+ * mode's five operands into the striped stores; every contraction happens after the
+ * loop. It has to be that way round, because a mode's data does not survive the
+ * next one: the raw pre-mixing ΔF/ΔΣ live in the inner accelerator's ring, which
+ * lr_solve_one resets per solve, and ΔDm/ΔG live in shm windows the next solve
+ * overwrites in place. Storing is a copy-out, not a first half of the arithmetic.
  *
- * Pass 1 cannot contract, because `M'[λ,p]` pairs mode p's improved solution
- * against EVERY λ, including the ones not solved yet. Pass 2 cannot be merged back
- * into the mode loop for the same reason.
+ * The evaluation is then split in two, for one reason — memory:
  *
- * The alternative — do the extra Dyson in the mode loop and keep ΔG'_p for all
- * modes, contracting at the end — needs a THIRD ω store the size of `_Gw`, i.e.
- * +50% on the largest allocation the feature makes. Contracting ΔX'_p against every
- * stored λ the moment it exists is what keeps it at two.
+ *   - `solve_improved` loops the modes again and, for each p, solves ΔX'_p and
+ *     contracts it against every λ on the spot. It contracts inside its own loop
+ *     because ΔDm'_p / ΔG'_p are dropped as soon as mode p is done. Keeping them
+ *     for every mode instead — so that `assemble` could take these traces too —
+ *     would add a THIRD ω store beside `_Sw` and `_Gw`, +50% on the largest
+ *     allocation the feature makes.
+ *   - `assemble` takes the two traces whose operands are all still in the stores
+ *     (`plain` and `M`), then reduces, applies the Matsubara tail and the
+ *     prefactors, and forms hessian_sym.
  *
- * What pass 1 must capture, then, is exactly what the next solve destroys: the RAW
- * (pre-mixing) ΔF/ΔΣ live in the inner accelerator's ring, which is reset per
- * solve. Everything else pass 2 needs it reconstructs.
+ * So the ONLY thing that has to be interleaved with the extra Dyson solves is the
+ * primed pair of traces. Everything unprimed is left to `assemble`.
  */
 class lr_hessian_t {
 public:
@@ -223,12 +229,13 @@ public:
   lr_hessian_t& operator=(lr_hessian_t const&) = delete;
 
   /**
-   * @brief Pass-1 capture of mode `p`: transform the dynamic operands to ω once
-   *        and stripe-store them, together with the statics.
+   * @brief Store mode `p`: transform the dynamic operands to ω once and
+   *        stripe-store them, together with the statics.
    *
-   * No contraction happens here — the mode loop only stores, because the raw
-   * (pre-mixing) ΔF/ΔΣ live in the per-solve DIIS ring and are invalidated by
-   * the next mode's solve.
+   * A copy-out, not a stage of the arithmetic: no trace is taken here. It runs in
+   * the caller's mode loop because that is the only place mode p's operands exist —
+   * the raw (pre-mixing) ΔF/ΔΣ live in the per-solve DIIS ring and ΔDm/ΔG in shm
+   * windows, and the next mode's solve destroys both.
    *
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
@@ -245,15 +252,16 @@ public:
                   sArray_t<Array_view_5D_t> const* sDeltaG);
 
   /**
-   * @brief Pass 2, whole: for every stored mode, solve the extra Dyson equation on
-   *        its raw kernel output and contract the improved solution in.
+   * @brief For every stored mode, solve the extra Dyson equation on its raw kernel
+   *        output and contract the improved solution in.
    *
    * Per mode p: refill ΔH0 from the caller's stack, put the stored raw ΔF_p / ΔΣ_p
    * back into shm, solve ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], and accumulate ΔX'_p
-   * against every stored λ. `dyson` must be the SAME solver pass 1 used — the same
-   * operator with the same cached setup — and `fix_density` the flag pass 1 passed,
-   * so the solve recomputes Δμ from this ΔV and applies the same constrained
-   * (still self-adjoint) bubble.
+   * against every stored λ before moving on — which is what lets ΔDm'_p / ΔG'_p be
+   * dropped rather than stored (§7). `dyson` must be the SAME solver the original
+   * solves used — the same operator with the same cached setup — and `fix_density`
+   * the flag they were given, so this solve recomputes Δμ from its own ΔV and
+   * applies the same constrained (still self-adjoint) bubble.
    *
    * The shm arrays are the mode loop's own, free scratch once the last checkpoint
    * dump has run: ΔG'' lands in `sDeltaG`, ΔDm'' in `sDeltaDm`, and neither is
@@ -267,7 +275,7 @@ public:
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free
    * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
    *                                     the global root only
-   * @param fix_density- [INPUT] the flag pass 1 solved with
+   * @param fix_density- [INPUT] the flag the original solves used
    *
    * @return Δμ' of each mode, as the extra solve recomputed it
    */
