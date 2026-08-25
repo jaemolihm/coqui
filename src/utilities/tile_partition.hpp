@@ -23,6 +23,7 @@
 #define UTILITIES_TILE_PARTITION_HPP
 
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <string_view>
 
@@ -50,6 +51,16 @@ namespace utils
  * `t == N` reproduces a tile size of one, i.e. the plain balanced element
  * distribution of chunk_range.
  */
+
+/**
+ * Per-axis tile count meaning "one element per tile" on every axis, i.e. the plain
+ * balanced element distribution. It is the `0` sentinel resolved by
+ * resolve_tile_counts, spelled so that a tile-count argument is not mistaken for an
+ * origin or a shape at the call site, and so that every elementwise-tiled array is
+ * greppable.
+ */
+template<size_t R>
+inline constexpr std::array<long,R> one_per_tile = {};
 
 /// [first,last) of tile `i` of the partition of [0,N) into `t` tiles.
 inline std::pair<long,long> tile_range(long N, long t, long i)
@@ -120,6 +131,28 @@ inline std::array<long,R> balanced_tile_counts(std::array<long,R> const& shape,
     t[n] = (cap[n] <= 0 ? shape[n] : balanced_tile_count(shape[n],p[n],cap[n]));
   return t;
 }
+
+/**
+ * A per-axis tile-size cap: a request for the balanced tile count that keeps every
+ * tile at or below `cap[n]`, left for the factory that knows the array's shape and
+ * process grid to resolve. Its own type, so that a cap can never be passed where a
+ * count is expected.
+ *
+ * The factory resolves it against the array's OWN grid extent on each axis, which is
+ * right only when no two axes have to share a partition. Two axes that do -- the
+ * square operand of getrf/getri, or the contracted axis of a gemm -- must go through
+ * balanced_tile_counts with the paired `p` on both, and say so.
+ *
+ * `cap[n] <= 0` means one element per tile, as in balanced_tile_counts.
+ */
+template<size_t R>
+struct tile_caps {
+  std::array<long,R> cap;
+  // Not an aggregate, and explicit: brace elision would otherwise let a plain
+  // `{...}` tile-count argument match this overload too, and every factory call
+  // passing a count literal becomes ambiguous.
+  explicit constexpr tile_caps(std::array<long,R> c) : cap(c) {}
+};
 
 /// [first,last) of the elements of [0,N) owned by rank `ip` of `np`, when the axis
 /// is cut into `t` tiles and the tiles are dealt out by chunk_range.

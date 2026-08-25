@@ -30,6 +30,7 @@
 #include <string_view>
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "nda/nda.hpp"
 #include "nda/tensor.hpp"
@@ -110,6 +111,27 @@ auto make_distributed_array(communicator_t& comm,
   auto [origin,lshape] = detail::local_block<
         local_Array_t::layout_t::is_stride_order_Fortran(),rank>(long(comm.rank()),shape,grid,tcount);
   return Array_t{ std::addressof(comm), grid, shape, lshape, origin, tcount}; 
+}
+
+/*
+ * Same, from per-axis tile-size caps instead of tile counts: the caller says how big
+ * a tile may get and the factory -- which already has the shape and the grid --
+ * derives the balanced counts. Use it whenever no two axes of the array have to
+ * share a partition; when they do, pass explicit counts from
+ * utils::balanced_tile_counts with the paired `p` on both axes.
+ */
+template<::nda::Array Array_base_t, typename communicator_t>
+auto make_distributed_array(communicator_t& comm,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
+		utils::tile_caps<::nda::get_rank<std::decay_t<Array_base_t>>> caps)
+{
+  static constexpr int rank = ::nda::get_rank<std::decay_t<Array_base_t>>;
+  for(int n=0; n<rank; ++n)
+    utils::check( shape[n] >= grid[n],
+      "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
+  return make_distributed_array<Array_base_t>(comm,grid,shape,
+      utils::balanced_tile_counts(shape,grid,caps.cap));
 }
 
 template<::nda::Array Array_base_t, typename communicator_t>
