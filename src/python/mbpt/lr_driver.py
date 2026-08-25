@@ -387,3 +387,74 @@ def read_lr_results(filename: str,
     return q_vec, DeltaG_tskij, DeltaDm_skij, DeltaF_PQ_skij, F_PQ_skij
 
 
+def read_lr_hessian(filename: str) -> dict:
+    """
+    Read the stationary free-energy-hessian datasets from an LR checkpoint.
+
+    These are mode-PAIR matrices, so they live in the TOP-LEVEL
+    ``linear_response/`` group rather than in the per-perturbation ``mode{m}/``
+    subgroups, and they are written only by a run made with
+    ``run_lr(..., hessian=True)``.
+
+    Parameters
+    ----------
+    filename : str
+        HDF5 file path
+
+    Returns
+    -------
+    dict
+        ``hessian`` (the plain estimator), ``hessian_sym`` (the stationary one),
+        the two kernel pairings ``hessian_M`` = <K dX_l, dX_p> and
+        ``hessian_M_prime`` = <K dX_l, dX'_p> together with
+        ``hessian_static_prime`` = Tr(dH0_l, dDm'_p), so that
+        ``hessian_sym = hessian_static_prime + hessian_M_prime - hessian_M``, the
+        ``hessian_call_index`` list, ``Delta_mu_improved``, and the scalar
+        ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_M_herm_dev``
+        residuals.
+
+    Raises
+    ------
+    KeyError
+        If the file carries no hessian block, i.e. the run did not set
+        ``hessian=True``.
+
+    Notes
+    -----
+    Every matrix is ``(npert, npert)`` over the perturbations the run actually
+    solved — never padded to a full mode count. A partial batch is a sub-block
+    for inspection, not a dynamical matrix.
+
+    ``hessian_call_index`` is the 0-based perturbation index WITHIN the run_lr
+    call, which is all the C++ knows: it is handed a bare DeltaH0 stack and no
+    mode numbering. It is not a phonon mode number, and deliberately not named
+    like the ``hessian_modes`` dataset the phonon drivers write (1-based phonon
+    modes) — mapping one to the other is the caller's job.
+
+    Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the same
+    file can contend on the file lock.
+    """
+    complex_keys = ("hessian", "hessian_sym", "hessian_M", "hessian_M_prime",
+                    "hessian_static_prime")
+    real_keys = ("hessian_call_index", "Delta_mu_improved")
+    scalar_keys = ("hessian_herm_dev", "hessian_sym_herm_dev", "hessian_M_herm_dev")
+
+    with h5py.File(filename, 'r') as f:
+        if 'linear_response' not in f:
+            raise KeyError(f"{filename} holds no 'linear_response' group.")
+        lr_grp = f['linear_response']
+        if 'hessian_sym' not in lr_grp:
+            raise KeyError(
+                f"{filename} holds no hessian block; rerun with "
+                f"run_lr(..., hessian=True).")
+
+        out = {}
+        for key in complex_keys:
+            a = lr_grp[key][()]
+            # CoQui writes complex as a trailing (..., 2) real/imag axis.
+            out[key] = a[..., 0] + 1j * a[..., 1]
+        for key in real_keys:
+            out[key] = lr_grp[key][()]
+        for key in scalar_keys:
+            out[key] = float(lr_grp[key][()])
+    return out

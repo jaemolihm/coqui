@@ -39,6 +39,7 @@
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
+#include "methods/SCF/lr_hessian.hpp"
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/lr_gw.hpp"
@@ -1519,6 +1520,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
   // not do IBC should never pay for them.
   auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
+  // Variationally-stationary (quadratic-error) free-energy hessian, on top of the
+  // plain contraction. Opt-in: one extra Dyson solve per perturbation plus two
+  // striped ω stores, and it adds the top-level linear_response/hessian* datasets
+  // to the checkpoint. Off by default, so the default output is unchanged.
+  auto hessian = io::get_value_with_default<bool>(pt, "lr_hessian", false);
   // Checked before the include_xc validation below, so that a split-kernel run
   // is rejected for being a split-kernel run rather than for whichever
   // include_xc precondition the bed happens to violate first.
@@ -1568,6 +1574,33 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     utils::check(!split_sigma_terms,
                  "run_lr_calc: qp_static_sigma is incompatible with split_sigma_terms.");
     recompute_W = true;  // W0 = RPA[G_QP]
+  }
+
+  // Scope of the stationary hessian estimator: the plain single- or split-kernel
+  // bare-vertex path. Both exclusions are places where its algebra stops holding
+  // rather than places it merely has not been tested.
+  if (hessian) {
+    // IBC / δX / δV: the left vertex handed to the hessian contraction is then
+    // not the ΔH0 that drives the equation, so the functional is no longer the
+    // second derivative of one functional and would need the adjoint solve.
+    int has_pert_arrays = 0;
+    if (mpi->comm.root())
+      has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                         DeltaV_qPQ_root.has_value()) ? 1 : 0;
+    mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
+    utils::check(!has_pert_arrays,
+                 "run_lr_calc: lr_hessian is incompatible with the DeltaX "
+                 "(IBC) and DeltaV_qPQ perturbations. With g_left != ΔH0 the "
+                 "stationary functional is not a second derivative of a single "
+                 "functional and the correction formula does not apply.");
+    // qpGW static map: the mixed/tracked quantity is the static ΔV_QPGW rather
+    // than ΔΣ(iω), and the effective kernel carries the lr_qp_approx
+    // statification, so the raw-ΔΣ algebra does not carry over.
+    utils::check(!qp_static_sigma,
+                 "run_lr_calc: lr_hessian is incompatible with "
+                 "qp_static_sigma. In qp mode the accelerator tracks the static "
+                 "ΔV_QPGW instead of ΔΣ(iω) and the kernel includes the qp "
+                 "statification, so the functional's raw-ΔΣ algebra does not hold.");
   }
 
   // Split-kernel schedule: build and validate the two component masks.
@@ -2041,6 +2074,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.qp_static        = pQpStatic;
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
+  p.hessian_nmodes = hessian ? nmodes : 0;
   // Split-kernel schedule. It selects which solvers lr_setup builds and how many
   // ΔΣ-sized buffers it allocates, so it has to be in `p` rather than per-solve.
   p.sc_kernel        = sc_kernel;
@@ -2052,6 +2086,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   nda::array<long, 1> niter_m(nmodes);
   nda::array<double, 1> Delta_mu_m(nmodes);
+
+  // Stationary hessian estimator. Built before the mode loop: it owns the striped
+  // per-mode stores, so its lifetime spans both passes. The k-weight and the spin
+  // factor follow lr_dyson::compute_lr_Nelec, which is what makes the C++ matrices
+  // directly comparable with the Python reference implementation.
+  std::optional<lr_hessian_t> opt_hessian;
+  if (hessian) {
+    nda::array<double, 1> k_weight(mf->k_weight());
+    const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
+    opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
+                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd());
+  }
 
   for (long m = 0; m < nmodes; ++m) {
     if (nmodes > 1)
@@ -2114,6 +2160,24 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
+    // Store this mode's operands for the stationary hessian estimator, after the
+    // dump so what lands on disk stays the mixed iterate exactly as before. A copy
+    // out and nothing else: the raw (pre-mixing) kernel output lives in the
+    // accelerator's per-solve history and ΔDm/ΔG in shm windows, so both have to be
+    // taken here, before the next perturbation destroys them. Every contraction
+    // happens after this loop.
+    if (opt_hessian) {
+      driver.get_full_kernel_result(
+          lr_state.sDeltaF_skij.value(), pDeltaSigma,
+          lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
+          sG_tskij, thc, p);
+      opt_hessian->store_mode(m, lr_state.sDeltaDm_skij.value(),
+                           lr_state.sDeltaH0_skij.value(),
+                           lr_state.sDeltaF_skij.value(), pDeltaSigma,
+                           include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr);
+      mpi->comm.barrier();
+    }
+
     // Persist the IBC aux→primary correction and the aux-basis Fock matrices
     // alongside the LR results. Hellmann-Feynman-style δX gradient consumers
     // read DeltaF_ibc as
@@ -2149,6 +2213,61 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         nda::h5_write(lr_grp, "DeltaF_PQ_skij", DeltaF_PQ_skij, false);
         app_log(2, "  - DeltaF_PQ_skij written to \"{}\"", where);
       }
+    }
+    mpi->comm.barrier();
+  }
+
+  // Every mode is stored now, so the estimator can be evaluated. One call does all
+  // of it: per mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
+  // ΔV = ΔH0 + ΔF + ΔΣ and contracts the result against every stored mode, then
+  // reduces and combines. It works in the mode loop's own shm arrays — free scratch
+  // after the last dump — so no array is allocated here and ΔDm' is never
+  // persisted.
+  if (opt_hessian) {
+    auto c1 = opt_hessian->evaluate(
+        driver.dyson(), lr_state.sDeltaH0_skij.value(),
+        lr_state.sDeltaDm_skij.value(), lr_state.sDeltaF_skij.value(),
+        pDeltaSigma,
+        include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr,
+        DeltaH0_mskij_root, fix_density);
+    // The K_pert refresh is the one clock lr_driver owns; the rest of the table is
+    // lr_hessian's own.
+    opt_hessian->print_timers(driver.hessian_refresh_sec(),
+                              driver.hessian_refresh_calls());
+
+    // Top-level linear_response/ group, NOT the per-mode subgroups: these are
+    // mode-PAIR matrices. dump_lr rebinds its group to mode{m} for a batched run,
+    // which is why the write does not go through it.
+    if (mpi->comm.root()) {
+      // D7: the block spans the perturbations solved in THIS call, so its axes are
+      // (npert, npert) and never padded to the full mode count.
+      //
+      // The index written here is the 0-based perturbation index WITHIN the call
+      // — the only thing the C++ knows, since run_lr is handed a bare ΔH0 stack
+      // and no mode numbering. It is deliberately NOT called "hessian_modes":
+      // the phonon drivers write a dataset of that name holding 1-based phonon
+      // mode numbers, and a consumer that confused the two would be off by one
+      // and on the wrong subset.
+      nda::array<long, 1> hessian_call_index(nmodes);
+      for (long m = 0; m < nmodes; ++m) hessian_call_index(m) = m;
+
+      h5::file file(output + ".mbpt.h5", 'a');
+      h5::group grp(file);
+      auto lr_grp = grp.has_subgroup("linear_response") ?
+                    grp.open_group("linear_response") :
+                    grp.create_group("linear_response");
+      nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
+      nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
+      nda::h5_write(lr_grp, "hessian_M", c1.M, false);
+      nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
+      nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
+      nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
+      nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
+      h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
+      h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
+      h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
+      app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
+              nmodes);
     }
     mpi->comm.barrier();
   }

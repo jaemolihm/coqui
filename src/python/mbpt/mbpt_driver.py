@@ -392,7 +392,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            two_step_inner_method=None,
            two_step_order=1,
            two_step_outer_iter_alg=None,
-           two_step_outer_tol=0.0):
+           two_step_outer_tol=0.0,
+           hessian=False):
     """
     Run unified linear response calculation.
 
@@ -509,6 +510,24 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can
         turn it off.
+    hessian : bool, optional
+        Also evaluate the free-energy hessian through the variationally-stationary
+        (quadratic-error) functional (default False). The error in hessian then
+        falls as the SQUARE of the linear-response solution error instead of
+        linearly in it, at the cost of one extra Dyson solve per perturbation
+        plus two striped omega stores of the per-mode dSigma / dG.
+
+        Writes the mode-PAIR matrices hessian, hessian_sym, hessian_M,
+        hessian_M_prime, hessian_static_prime, hessian_call_index,
+        Delta_mu_improved and the hessian_*_herm_dev diagnostics into the TOP-LEVEL
+        "linear_response/" group; the per-mode subgroups are untouched. Shapes
+        are (npert, npert) over the perturbations solved in this call, never
+        padded to a full mode count, so a partial batch yields a sub-block for
+        inspection rather than a dynamical matrix. Read them with
+        coqui.mbpt.read_lr_hessian.
+
+        Requires the plain single- or split-kernel bare-vertex path: rejected
+        together with DeltaX/DeltaV (IBC) and with a qpGW static map.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -682,6 +701,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     lr_params["save_DeltaG"] = bool(save_DeltaG)
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
+    lr_params["lr_hessian"] = bool(hessian)
     # Kernel ladder alias and the split-kernel (two-step) schedule. Read by C++
     # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
     # are overridden by "method" when it is given.
