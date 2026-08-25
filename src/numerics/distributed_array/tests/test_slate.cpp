@@ -358,13 +358,13 @@ TEST_CASE("distributed_ops", "[math]")
     using local_Array_t = nda::array<double, 3>;
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
-    long bz = t16(N,nx,ny);
+    long t = t16(N,nx,ny);
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {0, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, t, t});  
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {0, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, t, t});  
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<3>{1,nx,ny},
-                        shape_t<3>{4,N,N}, {0, bz, bz});  
+                        shape_t<3>{4,N,N}, {0, t, t});  
     auto Aloc = A.local();
     auto Bloc = B.local();
     A.local() = nda::rand(Aloc.shape());
@@ -386,13 +386,13 @@ TEST_CASE("distributed_ops", "[math]")
     long nx = utils::find_proc_grid_min_diff(world.size(),N,N);
     long ny = world.size()/nx;
 std::cout<<" nx: " <<nx <<std::endl;
-    long bz = t16(N,nx,ny);
+    long t = t16(N,nx,ny);
     auto A =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, t, t}); 
     auto B =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, t, t}); 
     auto C =  make_distributed_array<local_Array_t>(world, shape_t<3>{nx,ny,1},
-                        shape_t<3>{2*nx,N,N}, {0, bz, bz}); 
+                        shape_t<3>{2*nx,N,N}, {0, t, t}); 
     auto Aloc = A.local();
     auto Bloc = B.local();
     A.local() = nda::rand(Aloc.shape());
@@ -678,7 +678,7 @@ TEST_CASE("factory_partition", "[math]")
 // Three properties are load-bearing on that path: the (P,Q) block is square
 // (the C-order branch of multiply_impl issues slate::multiply(a,Bs,As,b,Cs),
 // which needs Bs.nt() == As.mt()), the array still stores that square block
-// after make_distributed_array's min(bsize, shape/grid) clamp — that clamp is
+// after make_distributed_array's min(tile size, shape/grid) clamp — that clamp is
 // what the fused FT branches and SLATE both read — and the two rank-4
 // multiplies of lr_dyson_W_in_place are numerically right on the grid.
 TEST_CASE("ft_buffer_dist", "[math]")
@@ -704,14 +704,14 @@ TEST_CASE("ft_buffer_dist", "[math]")
 
   for (auto s : sweep) {
     const long nproc = s[0], nq = s[1], nwh = s[2], NP = s[3];
-    auto [b_pgrid, b_bsize] =
+    auto [b_pgrid, b_tcount] =
         scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP});
     INFO("nproc = " << nproc << ", nq = " << nq << ", nw_half = " << nwh
          << ", NP = " << NP << ", pgrid = (" << b_pgrid[0] << "," << b_pgrid[1]
          << "," << b_pgrid[2] << "," << b_pgrid[3] << ")");
-    CHECK(b_bsize[2] == b_bsize[3]);
-    CHECK(b_bsize[2] >= std::max(b_pgrid[2], b_pgrid[3]));   // no empty rank
-    CHECK(b_bsize[2] <= NP);
+    CHECK(b_tcount[2] == b_tcount[3]);
+    CHECK(b_tcount[2] >= std::max(b_pgrid[2], b_pgrid[3]));   // no empty rank
+    CHECK(b_tcount[2] <= NP);
     CHECK((utils::lr_W_tau_local_dist(nproc, nwh, nq, NP) ==
            scr_coulomb_fourier_t::ft_buffer_dist(nproc, {nwh, nq, NP, NP})));
   }
@@ -739,7 +739,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
     if (nwh < pg[0] or nq < pg[1] or NP < pg[2] or NP < pg[3]) return;
     INFO("nproc = " << nproc << ", nq = " << nq << ", NP = " << NP
          << ", pgrid = (" << pg[0] << "," << pg[1] << "," << pg[2] << ","
-         << pg[3] << "), bsize = (" << bs[2] << "," << bs[3] << ")");
+         << pg[3] << "), tiles = (" << bs[2] << "," << bs[3] << ")");
 
     const shape_t<4> gshape{nwh, nq, NP, NP};
     using local_Array_t = nda::array<ComplexType, 4>;
@@ -806,7 +806,7 @@ TEST_CASE("ft_buffer_dist", "[math]")
     err = world.all_reduce_value(err, boost::mpi3::max<>{});
     nrm = world.all_reduce_value(nrm, boost::mpi3::max<>{});
     app_log(2, "  ft_buffer_dist: nq = {}, NP = {}, pgrid = ({},{},{},{}), "
-               "bsize = ({},{}), max rel error = {:.3e}",
+               "tiles = ({},{}), max rel error = {:.3e}",
             nq, NP, pg[0], pg[1], pg[2], pg[3],
             dPi.tile_count()[2], dPi.tile_count()[3], err/nrm);
     CHECK(err < 1e-12 * nrm);

@@ -31,6 +31,7 @@
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mpi3/communicator.hpp"
 #include "mpi3/shared_communicator.hpp"
@@ -80,7 +81,7 @@ auto embed_cholesky(utils::Communicator auto &comm, long nOrb, functor_diag_t &d
   //     with separate routine (in serial to simplify coding).
   // store cholesky matrix
   auto CholMat = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                      {1,comm.size()},{nmax,nab},{0,0});
+                      {1,comm.size()},{nmax,nab},utils::one_per_tile<2>);
   auto ab_rng = CholMat.local_range(1);  
 
   // adjust block_size
@@ -190,7 +191,7 @@ auto embed_cholesky(utils::Communicator auto &comm, long nOrb, functor_diag_t &d
       int nmax_new = nmax + 2*nab;
       Rc = CArray_2D_t(nmax_new,block_size);
       auto CholMat_ = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                      {1,comm.size()},{nmax_new,nab},{0,0});
+                      {1,comm.size()},{nmax_new,nab},utils::one_per_tile<2>);
       utils::check(ab_rng == CholMat_.local_range(1), "Range mismatch.");
       CholMat_.local()(nda::range(nchol),all) = CholMat.local()(nda::range(nchol),all);
       CholMat = std::move(CholMat_);
@@ -238,7 +239,7 @@ auto embed_cholesky(utils::Communicator auto &comm, long nOrb, functor_diag_t &d
   utils::check(nchol > 0, "Error: Found nchol=0 in embed_cholesky.");
 
   auto Rt = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                  {1,comm.size()},{nchol,nab},{0,0});
+                  {1,comm.size()},{nchol,nab},utils::one_per_tile<2>);
   utils::check(ab_rng == Rt.local_range(1), "Range mismatch.");
   Rt.local() = CholMat.local()(nda::range(nchol),all);
   return Rt; 

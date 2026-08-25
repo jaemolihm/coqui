@@ -162,7 +162,7 @@ namespace solvers {
      * (q,t) transpose W(q,t,P,Q) (axes 0↔1 swapped). The whole τ-side family, plus
      * the t-pool sub-communicator size np_P*np_Q, comes from here, so the SCF
      * memory/distribution report predicts exactly what the allocator builds.
-     * @return {pgrid, bsize} over the (t, q, P, Q) axes.
+     * @return {pgrid, tcount} over the (t, q, P, Q) axes.
      */
     static auto Pi_tau_proc_grid(long nproc, long nt_half, long nqpts_ibz, long ns, long nkpts)
     -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
@@ -280,7 +280,7 @@ namespace solvers {
         const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
         THC_ERI auto &thc,
         const projector_boson_t &proj,
-        std::array<long, 4> pgrid, std::array<long, 4> bsize)
+        std::array<long, 4> pgrid, std::array<long, 4> tcount)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
   private:

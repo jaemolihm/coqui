@@ -30,6 +30,7 @@
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mpi3/communicator.hpp"
 #include "mpi3/shared_communicator.hpp"
@@ -75,7 +76,7 @@ auto distributed_cholesky(math::nda::DistributedArrayOfRank<2> auto const& M,
   utils::check(M.global_shape()[1] == ndim, "Shape mismatch.");
 
   auto CholMat = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                      {1,comm.size()},{ndim,ndim},{0,0});
+                      {1,comm.size()},{ndim,ndim},utils::one_per_tile<2>);
   auto a_rng = CholMat.local_range(1);  
   CholMat.local() = ComplexType(0.0);
 
@@ -235,7 +236,7 @@ auto distributed_cholesky(math::nda::DistributedArrayOfRank<2> auto const& M,
   utils::check(nchol > 0, "Error: Found nchol=0 in utils::distributed_cholesky.");
 
   auto Rt = math::nda::make_distributed_array<CArray_2D_t>(comm,
-                  {comm.size(),1},{ndim,ndim},{0,0});
+                  {comm.size(),1},{ndim,ndim},utils::one_per_tile<2>);
   utils::check(a_rng == Rt.local_range(0), "Range mismatch.");
   Rt.local() = nda::dagger(CholMat.local());
   return Rt;

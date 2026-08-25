@@ -54,13 +54,13 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
     long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)mf->nkpts(), 1.0);
     long np_i = np / (np_s*np_k);
     std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-    long blk_i = std::min( {(long)1024, mf->nbnd()/np_i});
-    std::array<long, 4> bsize = {1, 1, blk_i, 1};
+    long cap_i = std::min( {(long)1024, mf->nbnd()/np_i});
+    std::array<long, 4> tile_cap = {1, 1, cap_i, 1};
     app_log(3, "One-body Hamiltonian in distributed array: ");
     app_log(3, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-    app_log(3, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 1);
+    app_log(3, "  - tile_cap = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
     auto dH0 = hamilt::H0<HOST_MEMORY>(*_MF, _context.comm, _PSP.get(), 
-                                       nda::range(_MF->nkpts()), nda::range(_MF->nbnd()), pgrid, bsize);
+                                       nda::range(_MF->nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
     // gather at root, then broadcast to all nodes
     auto H0_loc = _sH0_skij.local();
     math::nda::gather(0, dH0, &H0_loc);
@@ -72,14 +72,14 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
   long np_k = utils::find_proc_grid_max_npools(np/np_s, (long)dca_mf.nkpts(), 1.0);
   long np_i = np / (np_s*np_k);
   std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
-  long blk_i = std::min( {(long)1024, mf->nbnd()/np_i});
-  std::array<long, 4> bsize = {1, 1, blk_i, 1};
+  long cap_i = std::min( {(long)1024, mf->nbnd()/np_i});
+  std::array<long, 4> tile_cap = {1, 1, cap_i, 1};
   app_log(3, "One-body full-lattice Hamiltonian in distributed array: ");
   app_log(3, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(3, "  - bsize = ({}, {}, {}, {})\n", 1, 1, blk_i, 1);
+  app_log(3, "  - tile_cap = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
   {
     auto dH0_lat = hamilt::H0<HOST_MEMORY>(dca_mf, _context.comm, _PSP.get(),  
-                                           nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, bsize);
+                                           nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
     auto H0_latt_loc = _sH0_lattice_sKij.local();
     math::nda::gather(0, dH0_lat, &H0_latt_loc);
     if (_context.node_comm.root())
@@ -87,7 +87,7 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
   }
   {
     auto dS = hamilt::ovlp<HOST_MEMORY>(dca_mf, _context.comm,
-                                        nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, bsize);
+                                        nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
     auto S_loc = _sS_lattice_sKij.local();
     math::nda::gather(0, dS, &S_loc);
     if (_context.node_comm.root())
@@ -119,7 +119,7 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
 
   // processor grid for Dyson equation
   std::array<long, 5> w_pgrid;
-  std::array<long, 5> w_bsize;
+  std::array<long, 5> w_tcount;
   {
     int np = _context.comm.size();
     int nwpools = utils::find_proc_grid_max_npools(np, _FT->nw_f(), 0.4);
@@ -133,7 +133,7 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
     // square band-band tile count (mt == nt for slate_ops::inverse); the (w, s, k)
     // axes keep one element per tile (0)
     long itiles = utils::balanced_tile_count(_MF->nbnd(), std::max(np_i, np_j), 1024);
-    w_bsize = {0, 0, 0, itiles, itiles};
+    w_tcount = {0, 0, 0, itiles, itiles};
 
     utils::check(nwpools*nkpools*np_i*np_j == _context.comm.size(), "solve_dyson: pgrid mismatches!");
 
@@ -142,9 +142,9 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
     app_log(2, "  - tile count: (w, k, i, j) = ({}, {}, {}, {})", 1, 1, itiles, itiles);
   }
 
-  auto dSigma_wskij = distributed_tau_to_w(_context.comm, _Sigma_shm, *_FT, w_pgrid, w_bsize);
+  auto dSigma_wskij = distributed_tau_to_w(_context.comm, _Sigma_shm, *_FT, w_pgrid, w_tcount);
   auto dG_wskij = make_distributed_array<Array_5D_t>(_context.comm, w_pgrid,
-                                                     {_FT->nw_f(), _MF->nspin(), _MF->nkpts(), _MF->nbnd(), _MF->nbnd()}, w_bsize);
+                                                     {_FT->nw_f(), _MF->nspin(), _MF->nkpts(), _MF->nbnd(), _MF->nbnd()}, w_tcount);
   auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dSigma_wskij.local_shape();
   auto [w_org, s_org, k_org, i_org, j_org] = dSigma_wskij.origin();
   auto i_rng = dSigma_wskij.local_range(3);
@@ -156,7 +156,7 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
   mpi3::communicator wk_intra_comm = _context.comm.split(color, key);
   utils::check(wk_intra_comm.size() == w_pgrid[3]*w_pgrid[4], "wk_intra_comm.size() != pgrid[3]*pgrid[4]");
   auto dX = make_distributed_array<nda::array<ComplexType, 2>>(wk_intra_comm, {w_pgrid[3],w_pgrid[4]},
-                                                               {_MF->nbnd(), _MF->nbnd()}, {w_bsize[3],w_bsize[4]});
+                                                               {_MF->nbnd(), _MF->nbnd()}, {w_tcount[3],w_tcount[4]});
   auto S  = _sS_lattice_sKij.local();
   auto H0 = _sH0_lattice_sKij.local();
   auto F_loc  = _sF_skij.local();

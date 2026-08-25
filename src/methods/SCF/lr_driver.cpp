@@ -242,9 +242,9 @@ void lr_driver::lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
   // of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the G^R cache, both
   // built via lr_W_q_local_dist, so a W_c on a different tiling makes the fused
   // pairing abort: the contiguous PQ split disagrees whenever Np % np_P != 0
-  // (bsize=1 vs bsize=Np/np_P round differently).
+  // (one element per tile vs a Np/np_P-capped tile count round differently).
   long nt_half = (_nts % 2 == 0) ? _nts / 2 : _nts / 2 + 1;
-  auto [tq_pgrid, tq_bsize] =
+  auto [tq_pgrid, tq_tcount] =
       utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
 
   _Timer.start("LR_DRIVER_SETUP_W_FULL");
@@ -252,7 +252,7 @@ void lr_driver::lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
   // when the ΔW Dyson needs it as W_full; otherwise the FT releases it before
   // allocating the output, which a caller-side reset cannot do.
   solvers::scr_coulomb_fourier_t setup_ft(_dyson.FT());
-  auto dW_tqPQ = setup_ft.w_to_tau(*dW_wqPQ_in, tq_pgrid, tq_bsize,
+  auto dW_tqPQ = setup_ft.w_to_tau(*dW_wqPQ_in, tq_pgrid, tq_tcount,
                                    /*reset_input=*/!gw_full,
                                    __app_verbosity__ >= 3);
   if (gw_full) {

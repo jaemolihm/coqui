@@ -256,12 +256,12 @@ namespace methods {
       // term2: t,q,P,Q) put τ on axis 0 and the lattice axis on axis 1.
       auto gshape = dW_ref.global_shape();
       auto grid   = dW_ref.grid();
-      auto bsize  = dW_ref.tile_count();
+      auto tcount  = dW_ref.tile_count();
       auto lshape = dW_ref.local_shape();
       long NP = gshape[2], NQ = gshape[3];
       long NP_loc = lshape[2], NQ_loc = lshape[3];
       long np_P = grid[2], np_Q = grid[3];
-      long P_bs = bsize[2], Q_bs = bsize[3];
+      long P_bs = tcount[2], Q_bs = tcount[3];
       long nkpts   = gshape[1];
       long t_origin = dW_ref.origin()[0];
 

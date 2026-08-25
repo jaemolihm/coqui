@@ -24,7 +24,7 @@ namespace solvers {
       const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
       THC_ERI auto &thc,
       const projector_boson_t &proj,
-      std::array<long, 4> pgrid, std::array<long, 4> bsize)
+      std::array<long, 4> pgrid, std::array<long, 4> tcount)
   -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> {
 
     using local_Array_4D_t = nda::array<ComplexType, 4>;
@@ -34,7 +34,7 @@ namespace solvers {
     app_log(2, "  Upfold local corrections to the polarizability\n"
                "    - processor grid for Pi: (t, q, P, Q) = ({}, {}, {}, {})\n"
                "    - block size: (t, q, P, Q) = ({}, {}, {}, {})\n",
-            pgrid[0], pgrid[1], pgrid[2], pgrid[3], bsize[0], bsize[1], bsize[2], bsize[3]);
+            pgrid[0], pgrid[1], pgrid[2], pgrid[3], tcount[0], tcount[1], tcount[2], tcount[3]);
 
     auto mpi = thc.mpi();
     auto mf = thc.MF();
@@ -51,7 +51,7 @@ namespace solvers {
     auto nImpOrbs = sB_qIPab.shape()[3];
     auto NP = sB_qIPab.shape()[2];
     auto nqpts_ibz = mf->nqpts_ibz();
-    auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, pgrid, {nts_half, nqpts_ibz, NP, NP}, bsize);
+    auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, pgrid, {nts_half, nqpts_ibz, NP, NP}, tcount);
 
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
     auto P_rng = dPi_tqPQ.local_range(2);

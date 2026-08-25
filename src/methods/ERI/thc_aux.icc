@@ -330,15 +330,15 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                                                  {orb_range.size(),rho_g.nnr()},{0,0})};
+                                                  {orb_range.size(),rho_g.nnr()},utils::one_per_tile<2>)};
   auto buff_loc = buff.local();
   auto buff_rng_loc = buff_loc(all,r_range);
   memory::darray_view_t<local_Array_t,mpi3::communicator> buff_rng(std::addressof(q_intra_comm),
                                                                    {q_intra_comm.size(),1}, {orb_range.size(),r_range.size()},
-                                                                   {buff.origin()[0], 0}, {0,0}, buff_rng_loc);
+                                                                   {buff.origin()[0], 0}, utils::one_per_tile<2>, buff_rng_loc);
 
   auto buff_iu{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                                                    {orb_range.size(),nIpts},{0,0})};
+                                                    {orb_range.size(),nIpts},utils::one_per_tile<2>)};
   auto buff_iu_loc = buff_iu.local();
 
   auto phase = memory::unified_array<ComplexType, 3>::zeros({rho_g.mesh(0),
@@ -421,7 +421,7 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                {orb_range.size(),rho_g.nnr()},{0,0})};
+                {orb_range.size(),rho_g.nnr()},utils::one_per_tile<2>)};
   auto buff_loc = buff.local();
   auto buff_loc_4d = nda::reshape(buff_loc, std::array<long,4>{buff_loc.shape()[0],
                                                 rho_g.mesh(0),
@@ -430,10 +430,10 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
   auto buff_rng_loc = buff_loc(all,r_range);
   memory::darray_view_t<local_Array_t,mpi3::communicator> buff_rng(std::addressof(q_intra_comm),
             {q_intra_comm.size(),1}, {orb_range.size(),r_range.size()}, 
-            {buff.origin()[0], 0}, {0,0}, buff_rng_loc);
+            {buff.origin()[0], 0}, utils::one_per_tile<2>, buff_rng_loc);
 
   auto buffuv{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                {orb_range.size(),nIpts},{0,0})};
+                {orb_range.size(),nIpts},utils::one_per_tile<2>)};
   auto buffuv_loc = buffuv.local();
 
   auto phase = memory::unified_array<ComplexType, 3>::zeros({rho_g.mesh(0),
@@ -545,7 +545,7 @@ void thc::get_Tkug(int ispin, int ipol, nda::array<int,1> const& kp_to_ibz,
   auto comm = Tkug_u.communicator();
 
   auto Tkug_g{math::nda::make_distributed_array<local_Array3_t>(*comm,{1,1,comm->size()},
-                Tkug_u.global_shape(),{0,0,0})};
+                Tkug_u.global_shape(),utils::one_per_tile<3>)};
 
   utils::check( kp_order.size() == nk, "Shape mismatch: kp_order.size:{}, nk:{}",kp_order.size(), nk);
   utils::check( psi.global_shape()[2] == na, "Shape mismatch Psi(2):{}, Xkua(2):{}",psi.global_shape()[2], na);
@@ -596,9 +596,9 @@ void thc::get_Tuv_nonuniform_rgrid(bool add_phase, int ispin, int k, nda::range 
                 {orb_range.size(),nIpts},
       {utils::balanced_tile_count(orb_range.size(),grid[0],default_block_size),tv})};
   auto buff_nr{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),rho_g.nnr()}, {0,0})};
+                {orb_range.size(),rho_g.nnr()}, utils::one_per_tile<2>)};
   auto buff_nu{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),nIpts}, {0,0})};
+                {orb_range.size(),nIpts}, utils::one_per_tile<2>)};
 
   auto buff_nr_loc = buff_nr.local();
   auto buff_nu_loc = buff_nu.local();
@@ -662,10 +662,10 @@ void thc::get_Tuv_fft_grid(bool add_phase, int ispin, int k, nda::range orb_rang
       {utils::balanced_tile_count(orb_range.size(),grid[0],default_block_size),tv})};
 
   auto buff{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),rho_g.nnr()},{0,0})};
+                {orb_range.size(),rho_g.nnr()},utils::one_per_tile<2>)};
   auto buff_loc = buff.local();
   auto buffuv{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),nIpts},{0,0})};
+                {orb_range.size(),nIpts},utils::one_per_tile<2>)};
   auto buffuv_loc = buffuv.local();
 
   memory::array<MEM,ComplexType,1> wbuff;
@@ -1373,9 +1373,9 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   // C(q,u,v)
   Timer.start("ALLOC");
   auto Z_qug = math::nda::make_distributed_array<local_3Array_t>(mpi->comm,{1,mpi->comm.size(),1},
-                {nqpts_ibz,nIpts,rho_g.size()},{0,0,0});
+                {nqpts_ibz,nIpts,rho_g.size()},utils::one_per_tile<3>);
   auto C_quv = math::nda::make_distributed_array<local_3Array_t>(mpi->comm,{1,mpi->comm.size(),1},
-                {nqpts_ibz,nIpts,nIpts},{0,0,0});
+                {nqpts_ibz,nIpts,nIpts},utils::one_per_tile<3>);
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
   Timer.start("A_outzero");
@@ -1577,9 +1577,9 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   auto loc_Tkug_g = memory::array_view<MEM,ComplexType,3>({nkloc, ntasks*nI_per_blk, g1-g0},buffer1.data());
   auto loc_Tkug_u = memory::array_view<MEM,ComplexType,3>({nkloc, nI_per_blk, wfc_grid->size()},buffer2.data());
   auto dTkug_g = math::nda::distributed_array_view<decltype(loc_Tkug_g),mpi3::communicator>(std::addressof(mpi->comm),
-           {1,1,mpi->comm.size()},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,0,g0},{0,0,0},loc_Tkug_g); 
+           {1,1,mpi->comm.size()},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,0,g0},utils::one_per_tile<3>,loc_Tkug_g); 
   auto dTkug_u = math::nda::distributed_array_view<decltype(loc_Tkug_u),mpi3::communicator>(std::addressof(mpi->comm),
-           {1,mpi->comm.size(),1},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,rank*nI_per_blk,0},{0,0,0},loc_Tkug_u); 
+           {1,mpi->comm.size(),1},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,rank*nI_per_blk,0},utils::one_per_tile<3>,loc_Tkug_u); 
   Timer.stop("ALLOC");
 
   // R<->k, R<->Q, phase factors exp(-ikr), exp(-iqr)
@@ -2018,10 +2018,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.start("A_darray");
   memory::darray_t<local_3Array_t,mpi3::communicator> Z_qug(std::addressof(mpi->comm), {1,ntasks,1},
                 {nqpts_ibz,nIpts,rho_g.size()},{nqpts_ibz,nI1_core-nI0_core,rho_g.size()},
-                {0,nI0_core,0},{0,0,0});
+                {0,nI0_core,0},utils::one_per_tile<3>);
   memory::darray_t<local_3Array_t,mpi3::communicator> C_quv(std::addressof(mpi->comm), {1,ntasks,1},
                 {nqpts_ibz,nIpts,nIpts},{nqpts_ibz,nI1_core-nI0_core,nIpts},
-                {0,nI0_core,0},{0,0,0});
+                {0,nI0_core,0},utils::one_per_tile<3>);
   Timer.stop("A_darray");
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");

@@ -20,6 +20,7 @@
 
 
 #include <unordered_set>
+#include "utilities/tile_partition.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/thc_solver_comm.hpp"
 #include "methods/GW/g0_div_utils.hpp"
@@ -96,7 +97,7 @@ namespace solvers {
 
     // evaluate screened interaction (dW_tqPQ) and reset polarizability (dPi_tqPQ)
     // a) dPi_tqPQ is reset during dyson_W_from_Pi_tau()
-    // b) pgrid and bsize of dW_tqPQ are forced to be the same as in dPi_tqPQ
+    // b) pgrid and tile counts of dW_tqPQ are forced to be the same as in dPi_tqPQ
     auto dW_tqPQ = dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
     auto [eps_inv_head_q, eps_inv_head] =
         div_utils::eps_inv_head_t(dW_tqPQ, thc, *thc.MF(), _ft, _div_treatment);
@@ -147,7 +148,7 @@ namespace solvers {
       std::array<long, 4> w_pgrid, std::array<long, 4> w_tcount)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    // Gate on the processor grid alone: {0,0,0,0} is a legal tile count now (one
+    // Gate on the processor grid alone: an all-zero tile count is legal now (one
     // element per tile), so it can no longer double as "unset".
     if (w_pgrid[0]*w_pgrid[1]*w_pgrid[2]*w_pgrid[3] <= 0) {
       std::tie(w_pgrid, w_tcount) = scr_coulomb_t::W_omega_proc_grid(

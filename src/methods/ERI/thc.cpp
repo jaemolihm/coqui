@@ -28,6 +28,7 @@
 #include "configuration.hpp"
 #include "IO/ptree/ptree_utilities.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "utilities/freemem.h"
 #include "utilities/proc_grid_partition.hpp"
@@ -539,7 +540,7 @@ auto thc::evaluate(memory::array<MEM,long,1> const& ri,
   nda::range a_range(nbnd);
   // CtX = transpose(C)*Xa
   auto CtX = math::nda::make_distributed_array<memory::array<MEM, ComplexType, 4>>(mpi->comm,
-                          Xa.grid(), {nspins,nkpts,nbnd,nchol}, {0,0,0,0}); 
+                          Xa.grid(), {nspins,nkpts,nbnd,nchol}, utils::one_per_tile<4>); 
   {
     mpi3::communicator k_intra_comm = mpi->comm.split(Xa.origin()[0]*nkpts+Xa.origin()[1],mpi->comm.rank());
     memory::array<MEM, ComplexType, 2> T(nbnd,nchol);

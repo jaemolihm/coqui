@@ -339,14 +339,14 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
 
     std::array<long,2> Pgrid = {P.grid()[1],P.grid()[2]};
     std::array<long,2> Porigin = {P.origin()[1],P.origin()[2]};
-    std::array<long,2> Pbsize = {P.tile_count()[1],P.tile_count()[2]};
+    std::array<long,2> Ptcount = {P.tile_count()[1],P.tile_count()[2]};
 
     std::array<long,2> Vgrid = {V.grid()[1],V.grid()[2]};
     std::array<long,2> Vorigin = {V.origin()[1],V.origin()[2]};
-    std::array<long,2> Vbsize = {V.tile_count()[1],V.tile_count()[2]};
+    std::array<long,2> Vtcount = {V.tile_count()[1],V.tile_count()[2]};
 
     // for fft calculation
-    auto psi_1 = make_distributed_array<local_Array_t,comm_t>(q_comm,{q_comm.size(),1},{np,nnr},{0,0});
+    auto psi_1 = make_distributed_array<local_Array_t,comm_t>(q_comm,{q_comm.size(),1},{np,nnr},utils::one_per_tile<2>);
     psi_1.local() = ComplexType(0.0);
     auto p_local = psi_1.local();
     long np_local = psi_1.local_shape()[0];
@@ -365,9 +365,9 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
     auto Pq2D = P.local()(iq,all,all);
     auto Vq2D = V.local()(iq,all,all);
     distributed_array_view<local_Array_t,decltype(q_comm)> Pq(std::addressof(q_comm),
-                Pgrid, {np,nnr}, Porigin, Pbsize, Pq2D);
+                Pgrid, {np,nnr}, Porigin, Ptcount, Pq2D);
     distributed_array_view<local_Array_t,decltype(q_comm)> Vq(std::addressof(q_comm),
-                Vgrid, {np,np}, Vorigin, Vbsize, Vq2D);
+                Vgrid, {np,np}, Vorigin, Vtcount, Vq2D);
 
     redistribute(Pq,psi_1);
     if( basis == "r" ) {

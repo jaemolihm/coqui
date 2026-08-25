@@ -247,7 +247,7 @@ void orthonormalize_distr_impl(darray_t<memory::array<MEM, ComplexType, 4>, comm
   long nbnd      = psi_full.global_shape()[2];
   long nnr       = psi_full.global_shape()[3];
   auto pgrid     = psi_full.grid();
-  auto bz        = psi_full.tile_count();
+  auto tcount        = psi_full.tile_count();
   auto comm      = psi_full.communicator();
 
   long color = psi_full.origin()[0]*nkpts_tot+psi_full.origin()[1]; 
@@ -270,7 +270,7 @@ void orthonormalize_distr_impl(darray_t<memory::array<MEM, ComplexType, 4>, comm
           {0,0,t0,t0});
   memory::darray_view_t<larray,comm_t> psi(std::addressof(k_comm),S.grid(),
           {nspin,nkpts,nbnd,nnr},{0,0,psi_full.origin()[2],psi_full.origin()[3]},
-          {0,0,bz[2],bz[3]},psi_full.local()); 
+          {0,0,tcount[2],tcount[3]},psi_full.local()); 
   {
     //math::nda::slate_ops::multiply(psi,math::nda::H(psi),S);
 
@@ -354,7 +354,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
   long nkpts_tot = psi.global_shape()[1];;
   long nbnd_tot  = psi.global_shape()[2];
   long npwx      = psi.global_shape()[3];
-  auto bz        = psi.tile_count();
+  auto tcount        = psi.tile_count();
   auto pgrid     = psi.grid();
   auto comm = psi.communicator();
 
@@ -384,7 +384,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
   // redistribute over bands, since gen_F requires full G vectors
   auto psi_k = math::nda::make_distributed_array<larray>(k_comm,{1,1,pgrid[3],1},
             {1,1,nbnd_tot,npwx},
-            utils::balanced_tile_counts<4>({1,1,nbnd_tot,npwx},{1,1,pgrid[3],1},{1,1,2048,2048}));
+            utils::tile_caps<4>{{1,1,2048,2048}});
   auto psi_loc = psi.local();
   {
     nda::array<int,2> idx(k_comm.size(),2);
@@ -397,7 +397,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
         { // redistribute into psi_k
           memory::darray_view_t<larray,comm_t> psit(std::addressof(k_comm),{1,1,1,pgrid[3]},
             {1,1,nbnd_tot,npwx},{0,0,0,psi.origin()[3]},
-            {1,1,bz[2],bz[3]},psi.local()(nda::range(is,is+1),nda::range(ik,ik+1),all,all)); 
+            {1,1,tcount[2],tcount[3]},psi.local()(nda::range(is,is+1),nda::range(ik,ik+1),all,all)); 
           math::nda::redistribute(psit,psi_k);
         }
         // you could avoid all the reallocations by copying body of gen_F here!

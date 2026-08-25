@@ -68,11 +68,11 @@ int main(int argc, char* argv[])
   utils::check(nR*nC == world.size(), "Error: nR*nC != world.size()");
 
   long M = 1800;
-  long bz = utils::balanced_tile_count(M, std::max(nR,nC), 256);
+  long t = utils::balanced_tile_count(M, std::max(nR,nC), 256);
 
-  auto A =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz});
-  auto B =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz});
-  auto C =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz});
+  auto A =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
+  auto B =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
+  auto C =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
 
   {
     local_Array_t At(M,M);

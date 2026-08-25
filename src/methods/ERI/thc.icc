@@ -185,7 +185,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
           [&] (auto const& a, auto const& b) { return a + b.size(); });
   auto distPsia = memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),{1,mpi->comm.size()},
        {nspins*nkpts_ibz*a_range.size(),rho_g.nnr()},{nspins*nkpts_ibz*a_range.size(),ir_rgrid.size()},
-       {0,r0},{0,0});  
+       {0,r0},utils::one_per_tile<2>);  
 
   if( not mf->has_wfc_grid() or mf->fft_grid_dim() == rho_g.mesh() )
   {  
@@ -205,7 +205,7 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
                                      nda::range(0,nspins),nda::range(0,nkpts_ibz),a_range,{1,1});
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1},{dPsia.global_shape()[0],rho_g.nnr()},{dPsia.local_shape()[0],rho_g.nnr()},
-             dPsia.origin(),{0,0});
+             dPsia.origin(),utils::one_per_tile<2>);
     auto psir = dPsir.local();
     auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -827,11 +827,11 @@ auto thc::chol_metric_impl_ibz(int iq, int nIpts, nda::range a_range, nda::range
 
         auto xloc = return_value.local()(nda::range(nchol),all);
         auto Xt = math::nda::distributed_array_view<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
-		return_value.grid(),return_value.global_shape(),return_value.origin(),{0,0},xloc);
+		return_value.grid(),return_value.global_shape(),return_value.origin(),utils::one_per_tile<2>,xloc);
   
         auto rloc = R(nda::range(nchol),all);
         auto Rt = math::nda::make_distributed_array_view<local_CArray_t>(mpi->comm,
-                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{0,0},rloc);
+                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},utils::one_per_tile<2>,rloc);
         utils::check(Rt.local_range(1) == r_range, "Range error.");
 
         Timer.start("COMM");
@@ -971,7 +971,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     auto wfc_to_rho = memory::to_memory_space<MEM>(swfc_to_rho.local());
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1}, {distPsia.global_shape()[0],rho_g.nnr()},
-             {distPsia.local_shape()[0],rho_g.nnr()}, distPsia.origin(),{0,0});
+             {distPsia.local_shape()[0],rho_g.nnr()}, distPsia.origin(),utils::one_per_tile<2>);
     auto psir = dPsir.local();
     auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -979,7 +979,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     psir() = ComplexType(0.0);
     nda::copy_select(true,1,wfc_to_rho,ComplexType(1.0),distPsia.local(),ComplexType(0.0),psir);
     F.backward(P4d);
-    math::nda::redistribute_in_place(dPsir,{1,mpi->comm.size()},{0,0});
+    math::nda::redistribute_in_place(dPsir,{1,mpi->comm.size()},utils::one_per_tile<2>);
     distPsia = std::move(dPsir);
   }
   // If a rotation matrix is provided, rotate orbitals
@@ -990,7 +990,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
     auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{1,mpi->comm.size()},{skap,distPsia.global_shape()[1]},
              {skap,distPsia.local_shape()[1]},
-             distPsia.origin(),{0,0});
+             distPsia.origin(),utils::one_per_tile<2>);
     utils::check(dPsir.local_shape()[1] == nnr_loc, "Shape mismatch.");
 
     // conjugate distPsia and dPsir afterwards, to avoid needing to modify C_skai
@@ -1039,7 +1039,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
                           nda::range(0,nspins),nda::range(0,nkpts),b_range,{1}); 
       auto dPsir = memory::darray_t<local_CArray_t,boost::mpi3::communicator>(
              std::addressof(mpi->comm),{mpi->comm.size(),1},{Psib.global_shape()[0],rho_g.nnr()},{Psib.local_shape()[0],rho_g.nnr()},
-             Psib.origin(),{0,0});
+             Psib.origin(),utils::one_per_tile<2>);
       auto psir = dPsir.local();
       auto P4d = nda::reshape(psir,
           std::array<long,4>{psir.extent(0),rho_g.mesh(0),rho_g.mesh(1),rho_g.mesh(2)});
@@ -1050,7 +1050,7 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
       // stealing the distribution from distPsia 
       distPsib = new memory::darray_t<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
                           {1,mpi->comm.size()},dPsir.global_shape(),{dPsir.global_shape()[0],distPsia.local_shape()[1]},
-                          distPsia.origin(),{0,0});
+                          distPsia.origin(),utils::one_per_tile<2>);
       math::nda::redistribute(dPsir,*distPsib);
     } else {
       auto Psib = mf::read_distributed_orbital_set<local_CArray_t>(*mf,mpi->comm,'r',{1,mpi->comm.size()},
@@ -1772,11 +1772,11 @@ auto thc::chol_metric_impl(int iq, int nIpts, nda::range a_range, nda::range b_r
 
         auto xloc = return_value.local()(nda::range(nchol),all);
         auto Xt = math::nda::distributed_array_view<local_CArray_t,mpi3::communicator>(std::addressof(mpi->comm),
-		return_value.grid(),return_value.global_shape(),return_value.origin(),{0,0},xloc);
+		return_value.grid(),return_value.global_shape(),return_value.origin(),utils::one_per_tile<2>,xloc);
   
         auto rloc = R(nda::range(nchol),all);
         auto Rt = math::nda::make_distributed_array_view<local_CArray_t>(mpi->comm,
-                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},{0,0},rloc);
+                            {1,mpi->comm.size()},{nchol,rho_g.nnr()},utils::one_per_tile<2>,rloc);
         utils::check(Rt.local_range(1) == r_range, "Range error.");
 
         Timer.start("COMM");

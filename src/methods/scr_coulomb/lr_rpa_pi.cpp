@@ -80,7 +80,7 @@ namespace methods {
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
       long Np = dDeltaPi_tqPQ.global_shape()[2];
       auto tau_pgrid = dDeltaPi_tqPQ.grid();
-      auto tau_bsize = dDeltaPi_tqPQ.tile_count();
+      auto tau_tcount = dDeltaPi_tqPQ.tile_count();
       long np_P = tau_pgrid[2], np_Q = tau_pgrid[3];
 
       // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
@@ -125,7 +125,7 @@ namespace methods {
       // factor is supplied precomputed via the G^R cache, so no G buffer here.
       _dDeltaG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
           *_t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
-          {0, 0, tau_bsize[2], tau_bsize[3]}));
+          {0, 0, tau_tcount[2], tau_tcount[3]}));
       // Out-of-place FT buffer (term 1 uses it for ΔG^R, term 2 for ΔG^{-R};
       // the two terms run sequentially, so one buffer suffices).
       _fft_out.resize(nkpts, NP_loc*NQ_loc);
@@ -199,7 +199,7 @@ namespace methods {
                    DeltaG_tskij.shape(0), DeltaG_tskij.shape(1), DeltaG_tskij.shape(2), DeltaG_tskij.shape(3), DeltaG_tskij.shape(4));
 
       // τ-dist: distribute over τ and PQ
-      auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
+      auto [tau_pgrid, tau_tcount] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
 
       app_log(3, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
       app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
@@ -208,7 +208,7 @@ namespace methods {
 
       _Timer.start("PI_LR_ALLOC");
       auto dDeltaPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-          mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_bsize);
+          mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_tcount);
       auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi_tqPQ.origin();
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
 

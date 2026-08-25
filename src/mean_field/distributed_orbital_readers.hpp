@@ -123,7 +123,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
 
     long norb = ispin.size()*kp.size()*orb.size()*npol;
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{norb,nnr},
-                                        utils::balanced_tile_counts<rank>({norb,nnr},pgrid,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(1);
 
@@ -181,7 +181,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{norb,nnr},
-                                        utils::balanced_tile_counts<rank>({norb,nnr},pgrid_out,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     } 
@@ -189,7 +189,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   } else if constexpr(rank==4) {
 
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{nspin,nkpts,nbnd,npol*nnr},
-                                        utils::balanced_tile_counts<rank>({nspin,nkpts,nbnd,npol*nnr},pgrid,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(3);
 
@@ -207,7 +207,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{nspin,nkpts,nbnd,npol*nnr},
-                                        utils::balanced_tile_counts<rank>({nspin,nkpts,nbnd,npol*nnr},pgrid_out,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     }
@@ -215,7 +215,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   } else if constexpr(rank==5) {
 
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{nspin,nkpts,nbnd,npol,nnr},
-                                        utils::balanced_tile_counts<rank>({nspin,nkpts,nbnd,npol,nnr},pgrid,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(4);
 
@@ -233,7 +233,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{nspin,nkpts,nbnd,npol,nnr},
-                                        utils::balanced_tile_counts<rank>({nspin,nkpts,nbnd,npol,nnr},pgrid_out,tile_cap));
+                                        utils::tile_caps<rank>{tile_cap});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     }

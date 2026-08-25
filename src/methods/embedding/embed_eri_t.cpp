@@ -1425,8 +1425,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction. Here we assume particle-hole symmetry
@@ -1465,8 +1465,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction
@@ -1512,8 +1512,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction

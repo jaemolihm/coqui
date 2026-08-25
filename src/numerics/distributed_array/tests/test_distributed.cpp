@@ -30,6 +30,7 @@
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -57,7 +58,7 @@ TEST_CASE("distributed_nda", "[math]")
 		   {10, 2*nx,2*ny},	// global 
 		   {10, 2, 2},		// local
 		   {0, 2*ix, 2*iy},     // origin
-		   {0, 0, 0});	        // tile count (0 = one element per tile)
+		   utils::one_per_tile<3>);	// tile count
     A.local()=1.0;
 
     REQUIRE( A.origin() == shape_t<3>{0, 2*ix, 2*iy} );
@@ -88,7 +89,7 @@ TEST_CASE("distributed_nda", "[math]")
                    {20, 3*nx,3*ny},     // global 
                    {0, 3, 3},           // local
                    {0, 3*ix, 3*iy},     // origin
-		   {0, 0, 0});	        // tile count (0 = one element per tile)
+		   utils::one_per_tile<3>);	// tile count
     B.local() = 2.0;
     {
       auto C{B};
@@ -108,7 +109,7 @@ TEST_CASE("distributed_nda", "[math]")
     darray A(std::addressof(world),{1,nx,ny}, 
                    {10, 2*nx,2*ny},     // global 
                    {0, 2*ix, 2*iy},     // origin
-		   {0, 0, 0},	        // tile count (0 = one element per tile)
+		   utils::one_per_tile<3>,	// tile count
 		   L);
     
     REQUIRE( A.origin() == shape_t<3>{0, 2*ix, 2*iy} );
@@ -141,7 +142,7 @@ TEST_CASE("distributed_nda", "[math]")
     darray B(std::addressof(world),{1,nx,ny}, 
                    {20, 3*nx,3*ny},     // global 
                    {0, 3*ix, 3*iy},     // origin
-		   {0, 0, 0},	        // tile count (0 = one element per tile)
+		   utils::one_per_tile<3>,	// tile count
 		   L2);
     { 
       darray C{A};
@@ -571,11 +572,11 @@ TEST_CASE("redistribute_chunked_equivalence", "[math]")
   }
 
   // The reverse direction, with one element per tile on the split axis.
-  auto C = make_distributed_array<larray>(world, {1,1,size}, gshape, {0,0,0});
+  auto C = make_distributed_array<larray>(world, {1,1,size}, gshape, utils::one_per_tile<3>);
   fill(C);
-  auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape, {0,0,0});
+  auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape, utils::one_per_tile<3>);
   redistribute_alltoallv(C, D_ref, ComplexType(1.0), ComplexType(0.0), size_t(1) << 40);
-  auto D = make_distributed_array<larray>(world, {size,1,1}, gshape, {0,0,0});
+  auto D = make_distributed_array<larray>(world, {size,1,1}, gshape, utils::one_per_tile<3>);
   redistribute_alltoallv(C, D, ComplexType(1.0), ComplexType(0.0), size_t(8));
   {
     auto Dloc = D.local();

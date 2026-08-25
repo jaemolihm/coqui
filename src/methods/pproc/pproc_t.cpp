@@ -32,6 +32,7 @@
 
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "methods/embedding/projector_t.h"
 #include "utilities/kpoint_utils.hpp"
@@ -1077,11 +1078,11 @@ namespace methods {
 
       int np = _context.comm.size();
       int ntpools = utils::find_proc_grid_max_npools(np, ntau, 0.2);
-      auto buffer2 = make_distributed_array<local_Array_5D_t>(_context.comm, {ntpools, 1, np/ntpools, 1, 1}, dG_tau_skij.global_shape(), {0,0,0,0,0});
+      auto buffer2 = make_distributed_array<local_Array_5D_t>(_context.comm, {ntpools, 1, np/ntpools, 1, 1}, dG_tau_skij.global_shape(), utils::one_per_tile<5>);
 
       math::nda::redistribute(buffer1, buffer2);
 
-      auto buffer2_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {ntpools, 1, np/ntpools, 1}, {ntau, ns, nkpts, nbnds}, {0,0,0,0});
+      auto buffer2_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {ntpools, 1, np/ntpools, 1}, {ntau, ns, nkpts, nbnds}, utils::one_per_tile<4>);
 
       auto [ntau_loc, ns_loc, nkpts_loc, nbnd_loc] = buffer2_diag.local_shape();
       for(size_t it = 0; it < ntau_loc; it++)
@@ -1091,7 +1092,7 @@ namespace methods {
           buffer2_diag.local()(it, is, ik, i) = 0.5 * (buffer2.local()(it, is, ik, i, i) + nda::conj(buffer2.local()(it, is, ik, i, i)));
       }
       int nkpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
-      auto GS_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {1, 1, nkpools, np/nkpools}, {ntau, ns, nkpts, nbnds}, {0,0,0,0});
+      auto GS_diag = make_distributed_array<local_Array_4D_t>(_context.comm, {1, 1, nkpools, np/nkpools}, {ntau, ns, nkpts, nbnds}, utils::one_per_tile<4>);
       math::nda::redistribute(buffer2_diag, GS_diag);
       return GS_diag;
    }

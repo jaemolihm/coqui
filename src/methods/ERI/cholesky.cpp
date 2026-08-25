@@ -26,6 +26,7 @@
 
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/mpi_context.h"
 #include "arch/arch.h"
 
@@ -154,7 +155,7 @@ auto cholesky::evaluate(int Qi, nda::range a_range, nda::range b_range,
                  {ncmax,1,nkpts,a_range.size(),b_range.size()},
                  {ncmax,1,k1-k0,Lk[0].local_shape()[1],Lk[0].local_shape()[2]},
                  {0,0,k0,Lk[0].local_range(1).first(),Lk[0].local_range(2).first()},
-                 {0,0,0,0,0}};
+                 utils::one_per_tile<5>};
     auto Lloc = return_value.local();
     Lloc()=ComplexType(0.0); 
     for(int k=0; k<k1-k0; ++k) {

@@ -173,13 +173,13 @@ using Array_view_4D_t = nda::array_view<ComplexType, 4>;
 using Array_view_5D_t = nda::array_view<ComplexType, 5>;
 
 /**
- * Processor grid and block size for the ω-side band-basis arrays of the Dyson
+ * Processor grid and tile counts for the ω-side band-basis arrays of the Dyson
  * equation, Sigma(iw) and G(iw), over the (w, s, k, i, j) axes. Note the pool
  * tolerance is 0.4 here, not the 0.2 used on the tau side.
  *
  * Kept in one place because the up-front SCF distribution report has to agree
  * with what simple_dyson::solve_dyson actually allocates.
- * @return {pgrid, bsize}
+ * @return {pgrid, tcount}
  */
 inline auto dyson_omega_proc_grid(long nproc, long nw, long nkpts_ibz, int nbnd)
 -> std::tuple<std::array<long, 5>, std::array<long, 5>> {
@@ -223,7 +223,7 @@ template<math::shm::SharedArray sArr_t>
 auto distributed_tau_to_w(mpi3::communicator& comm,
                           const sArr_t& X_tau_shm,
                           const imag_axes_ft::IAFT& FT,
-                          std::array<long, 5> w_grid, std::array<long, 5> w_bsize={0},
+                          std::array<long, 5> w_grid, std::array<long, 5> w_tcount={0},
                           bool check_leakage = true)
   requires( ::nda::get_rank<std::decay_t<sArr_t>> == 5 ) {
   decltype(nda::range::all) all;
@@ -253,7 +253,7 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   }
 
   auto dX_wskij_out = make_distributed_array<Array_5D_t>(
-      comm, w_grid, {nw, ns, nkpts, nbnd, nbnd}, w_bsize);
+      comm, w_grid, {nw, ns, nkpts, nbnd, nbnd}, w_tcount);
   math::nda::redistribute(dX_wskij, dX_wskij_out);
   return dX_wskij_out;
 }

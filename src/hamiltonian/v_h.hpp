@@ -26,6 +26,7 @@
 #include "configuration.hpp"
 #include "nda/nda.hpp"
 #include "utilities/mpi_context.h"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -406,9 +407,9 @@ void v_h(mpi_context_t<communicator,shared_communicator> &mpi,
     using local_Array_t = memory::array<MEM,ComplexType,2>; 
     using math::nda::distributed_array_view;
     distributed_array_view<local_Array_t,decltype(k_comm)> dpsi_b(std::addressof(k_comm),
-            {k_comm.size(),1},{nbnd,nnr},{psi.origin()[2],0},{0,0},psi_b);
+            {k_comm.size(),1},{nbnd,nnr},{psi.origin()[2],0},utils::one_per_tile<2>,psi_b);
     distributed_array_view<local_Array_t,decltype(k_comm)> dpsi_r(std::addressof(k_comm),
-            {1,k_comm.size()},{nbnd,nnr},{0,r0},{0,0},psi_r);
+            {1,k_comm.size()},{nbnd,nnr},{0,r0},utils::one_per_tile<2>,psi_r);
 
     auto pb4d = nda::reshape(psi_b,std::array<long,4>{psi_b.extent(0),mesh(0),mesh(1),mesh(2)});
     math::nda::fft<true> F(pb4d);
