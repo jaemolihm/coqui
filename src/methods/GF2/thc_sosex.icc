@@ -72,17 +72,17 @@ namespace methods {
       auto [sG_tskQj, sG_tskiQ] = prepare_G_sosex(G_tskij, thc);
 
       auto dA_tsqkQuv = build_GG_Quv_all_full_t(thc, sG_tskiQ, sG_tskQj);
-      std::array<long,7> w_bsize_out = {1,1,1,1,1,1,1};
+      std::array<long,7> w_tcount_out = utils::one_per_tile<7>;
       std::array<long,7> w_pgrid_out = dA_tsqkQuv.grid();
 
       app_log(2, "Performing tau-to-w transform of GG_Quv");
-      auto dA_wsqkQuv = tau_to_w_full(dA_tsqkQuv, w_pgrid_out, w_bsize_out, "GG_Quv", true);
+      auto dA_wsqkQuv = tau_to_w_full(dA_tsqkQuv, w_pgrid_out, w_tcount_out, "GG_Quv", true);
 
       app_log(2, "Building WGG_Puv(w)");
       auto dWA_wsqkPuv = build_WGG(thc, dA_wsqkQuv);
 
       app_log(2, "Performing w-to-tau transform of WGG_Puv");
-      auto dWA_tsqkPuv = w_to_tau_full(dWA_wsqkPuv, w_pgrid_out, w_bsize_out, "WGG_Quv", true);
+      auto dWA_tsqkPuv = w_to_tau_full(dWA_wsqkPuv, w_pgrid_out, w_tcount_out, "WGG_Quv", true);
 
       app_log(2, "Building B_PRv(t)");
       auto dB_tsqkPRv = build_B_WA(dWA_tsqkPuv, thc);
@@ -162,7 +162,7 @@ namespace methods {
       for(size_t v = 0; v < nbnd; v++) {
         app_log(2, "v = {}", v);
         auto dA_tsqkQu = build_GG_Qu_all_full_t_4D(thc, sG_tskiQ, sG_tskQj, v);
-        std::array<long,6> w_bsize_out = {1,1,1,1,1,1};
+        std::array<long,6> w_tcount_out = utils::one_per_tile<6>;
         std::array<long,6> t_pgrid_out = dA_tsqkQu.grid();
         std::array<long,6> w_pgrid_out = t_pgrid_out;
       {
@@ -180,13 +180,13 @@ namespace methods {
                      "w_pgrid_out has inconsistent processors");
       }
         app_log(2, "Performing tau-to-w transform of GG_Qu");
-        auto dA_wsqkQu_v = tau_to_w_full(dA_tsqkQu, w_pgrid_out, w_bsize_out, "GG_Qu_v", true);
+        auto dA_wsqkQu_v = tau_to_w_full(dA_tsqkQu, w_pgrid_out, w_tcount_out, "GG_Qu_v", true);
 
         app_log(2, "Building WGG_Pu_v(w)");
         auto dWA_wsqkPu = build_WGG_4D(thc, dA_wsqkQu_v, Wloc_wqPQ_opt, true); // reuse cached Wloc for all v
 
         app_log(2, "Performing w-to-tau transform of WGG_Pu_v");
-        auto dWA_tsqkPu = w_to_tau_full(dWA_wsqkPu, t_pgrid_out, w_bsize_out, "WGG_Qu_v", true);
+        auto dWA_tsqkPu = w_to_tau_full(dWA_wsqkPu, t_pgrid_out, w_tcount_out, "WGG_Qu_v", true);
 
         app_log(2, "Building B_PRv(t)");
         auto dB_tsqkPR = build_B_WA_4D(dWA_tsqkPu, thc, true);
@@ -443,7 +443,7 @@ namespace methods {
     template<nda::MemoryArray local_Array_t, typename communicator_t>
     auto gf2_t::tau_to_w_full(memory::darray_t<local_Array_t, communicator_t> &dA_tx,
                         std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_pgrid_out,
-                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_bsize_out,
+                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_tcount_out,
                         std::string name,
                         bool reset_input)
       -> memory::darray_t<local_Array_t, mpi3::communicator>
@@ -527,7 +527,7 @@ namespace methods {
 
         _Timer.start("ALLOC_SOSEX");
       auto dA_wx = make_distributed_array<local_Array_t>(
-          _context->comm, w_pgrid_out, w_gshape, w_bsize_out);
+          _context->comm, w_pgrid_out, w_gshape, w_tcount_out);
         _Timer.stop("ALLOC_SOSEX");
 
       _Timer.start("FT_REDISTRIBUTE");
@@ -638,7 +638,7 @@ namespace methods {
       auto C_grid = dC_tsqkPRv_opt.value().grid();
       auto C_gshape = dC_tsqkPRv_opt.value().global_shape();
       _Timer.start("ALLOC_SOSEX");
-      auto dC_tsqkPR = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {C_grid[0], C_grid[1], C_grid[2], C_grid[3], C_grid[4], C_grid[5]}, {C_gshape[0], C_gshape[1], C_gshape[2], C_gshape[3], C_gshape[4], C_gshape[5]}, {0,0,0,0,0,0});
+      auto dC_tsqkPR = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {C_grid[0], C_grid[1], C_grid[2], C_grid[3], C_grid[4], C_grid[5]}, {C_gshape[0], C_gshape[1], C_gshape[2], C_gshape[3], C_gshape[4], C_gshape[5]}, utils::one_per_tile<6>);
       _Timer.stop("ALLOC_SOSEX");
 
       auto C_lshape7 = dC_tsqkPRv_opt.value().local_shape();
@@ -667,7 +667,7 @@ namespace methods {
     template<nda::MemoryArray local_Array_t, typename communicator_t>
     auto gf2_t::w_to_tau_full(memory::darray_t<local_Array_t, communicator_t> &dA_wx,
                         std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_pgrid_out,
-                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_bsize_out,
+                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_tcount_out,
                         std::string name,
                         bool reset_input)
       -> memory::darray_t<local_Array_t, mpi3::communicator>
@@ -771,7 +771,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto dA_tx = make_distributed_array<local_Array_t>(
-          _context->comm, t_pgrid_out, t_gshape, t_bsize_out);
+          _context->comm, t_pgrid_out, t_gshape, t_tcount_out);
       _Timer.stop("ALLOC_SOSEX");
 
       _Timer.start("FT_REDISTRIBUTE");
@@ -945,11 +945,11 @@ namespace methods {
 
       long np_Z_bigger = utils::find_proc_grid_min_diff(wqk_intra_comm.size(), 1, 1);
       long np_Z_smaller = wqk_intra_comm.size() / np_Z_bigger;
-      long Z_bsize = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
+      long Z_tcount = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
 
-      auto dA_Quv_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd*nbnd}, {Z_bsize, Z_bsize });
-      auto dWA_Puv_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd*nbnd}, {Z_bsize, Z_bsize });
-      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_bsize, Z_bsize });
+      auto dA_Quv_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd*nbnd}, {Z_tcount, Z_tcount });
+      auto dWA_Puv_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd*nbnd}, {Z_tcount, Z_tcount });
+      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_tcount, Z_tcount });
       _Timer.stop("ALLOC_SOSEX");
 
       utils::check(nbnd == nbnd_loc1,
@@ -1077,11 +1077,11 @@ namespace methods {
 
       long np_Z_bigger = utils::find_proc_grid_min_diff(wqk_intra_comm.size(), 1, 1);
       long np_Z_smaller = wqk_intra_comm.size() / np_Z_bigger;
-      long Z_bsize = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
+      long Z_tcount = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
 
-      auto dA_Qu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_bsize, Z_bsize });
-      auto dWA_Pu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_bsize, Z_bsize });
-      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_bsize, Z_bsize });
+      auto dA_Qu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_tcount, Z_tcount });
+      auto dWA_Pu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_tcount, Z_tcount });
+      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_tcount, Z_tcount });
       _Timer.stop("ALLOC_SOSEX");
 
       utils::check(nbnd == nbnd_loc1, "gf2_t::build_WGG, nbnd != nbnd_loc1");
@@ -1245,11 +1245,11 @@ namespace methods {
 
       long np_Z_bigger = utils::find_proc_grid_min_diff(wqk_intra_comm.size(), 1, 1);
       long np_Z_smaller = wqk_intra_comm.size() / np_Z_bigger;
-      long Z_bsize = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
+      long Z_tcount = utils::balanced_tile_count(Np, std::max(np_Z_smaller,np_Z_bigger), 1024);
 
-      auto dA_Qu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_bsize, Z_bsize });
-      auto dWA_Pu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_bsize, Z_bsize });
-      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_bsize, Z_bsize });
+      auto dA_Qu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_tcount, Z_tcount });
+      auto dWA_Pu_mult  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, nbnd}, {Z_tcount, Z_tcount });
+      auto dW_PQ  = make_distributed_array<Array_2D_t>(wqk_intra_comm, {np_Z_smaller, np_Z_bigger}, {Np, Np}, {Z_tcount, Z_tcount });
       _Timer.stop("ALLOC_SOSEX");
 
       utils::check(nbnd == nbnd_loc1, "gf2_t::build_WGG, nbnd != nbnd_loc1");
@@ -1476,11 +1476,11 @@ namespace methods {
       // grids and distributed setup
       auto WA_pgrid =  dWA_tsqkPuv.grid();
       auto WA_gshape = dWA_tsqkPuv.global_shape();
-      auto WA_bsize =  dWA_tsqkPuv.tile_count();
+      auto WA_tcount =  dWA_tsqkPuv.tile_count();
 
       _Timer.start("ALLOC_SOSEX");
       auto dB_tsqkPRv = make_distributed_array<Array_7D_t1>(
-          _context->comm, WA_pgrid, {WA_gshape[0], ns, nkpts, nkpts, Np, Np, nbnd}, WA_bsize);
+          _context->comm, WA_pgrid, {WA_gshape[0], ns, nkpts, nkpts, Np, Np, nbnd}, WA_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       // local shapes
@@ -1550,11 +1550,11 @@ namespace methods {
       // grids and distributed setup
       auto WA_pgrid =  dWA_tsqkPu.grid();
       auto WA_gshape = dWA_tsqkPu.global_shape();
-      auto WA_bsize =  dWA_tsqkPu.tile_count();
+      auto WA_tcount =  dWA_tsqkPu.tile_count();
 
       _Timer.start("ALLOC_SOSEX");
       auto dB_tsqkPR = make_distributed_array<Array_6D_t1>(
-          _context->comm, WA_pgrid, {WA_gshape[0], ns, nkpts, nkpts, Np, Np}, WA_bsize);
+          _context->comm, WA_pgrid, {WA_gshape[0], ns, nkpts, nkpts, Np, Np}, WA_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       // local shapes
@@ -1666,7 +1666,7 @@ namespace methods {
       size_t Np = thc.Np();
 
       std::array<long,7> B_pgrid = {1,1,1,1,1,1,1};
-      std::array<long,7> B_bsize = {0,0,0,0,0,0,0};   // 0 = one element per tile
+      std::array<long,7> B_tcount = utils::one_per_tile<7>;
       {
         size_t np = _context->comm.size();
         //long ntpools = utils::find_proc_grid_max_npools(np, nt_half, 0.2);
@@ -1682,7 +1682,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto buffer_B  = math::nda::make_distributed_array<Array_7D_t1>(
-        _context->comm, B_pgrid,dB_tsqkPRv.global_shape(), B_bsize);
+        _context->comm, B_pgrid,dB_tsqkPRv.global_shape(), B_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       _Timer.start("REDISTRIBUTE_SOSEX");
@@ -1694,7 +1694,7 @@ namespace methods {
       buffer_B.reset();
       _Timer.start("ALLOC_SOSEX");
       buffer_B  = math::nda::make_distributed_array<Array_7D_t1>(
-        _context->comm, B_pgrid,dC_tsqkPRv_opt.value().global_shape(), B_bsize);
+        _context->comm, B_pgrid,dC_tsqkPRv_opt.value().global_shape(), B_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       _Timer.start("REDISTRIBUTE_SOSEX");
@@ -1712,7 +1712,7 @@ namespace methods {
       auto B_pgrid = dB_tsqkPRv.grid();
       auto B_gshape = dB_tsqkPRv.global_shape();
 
-      std::array<long,6> D_bsize = {0,0,0,0,0,0};     // 0 = one element per tile
+      std::array<long,6> D_tcount = utils::one_per_tile<6>;
       std::array<long,6> D_pgrid = {1,1,1,1,1,1};
       std::array<long,6> D_gshape = {1,1,1,1,1,1};
       for(long i = 0; i < 6; i++) {
@@ -1722,7 +1722,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto D  = math::nda::make_distributed_array<Array_6D_t>(
-          _context->comm, D_pgrid, D_gshape, D_bsize);
+          _context->comm, D_pgrid, D_gshape, D_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       return D;
@@ -1756,7 +1756,7 @@ namespace methods {
       size_t nbnd = thc.nbnd();
 
       std::array<long,6> A_pgrid = {1,1,1,1, 1,1};
-      std::array<long,6> A_bsize = {0,0,0,0, 0,0};    // 0 = one element per tile
+      std::array<long,6> A_tcount = utils::one_per_tile<6>;
       {
         size_t np = _context->comm.size();
         long nqpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
@@ -1771,10 +1771,10 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto dA_tsqkQu_v = make_distributed_array<Array_6D_t>(
-          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd}, A_bsize);
+          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd}, A_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
-      std::array<long,6> w_bsize_out = {1,1,1,1,1,1};
+      std::array<long,6> w_tcount_out = utils::one_per_tile<6>;
       std::array<long,6> t_pgrid_out = dA_tsqkQu_v.grid();
       std::array<long,6> w_pgrid_out = t_pgrid_out;
       std::array<long,6> w_gshape = dA_tsqkQu_v.global_shape();
@@ -1796,7 +1796,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto dA_wsqkQu_v = make_distributed_array<Array_6D_t>(
-          _context->comm, w_pgrid_out, w_gshape, w_bsize_out);
+          _context->comm, w_pgrid_out, w_gshape, w_tcount_out);
       _Timer.stop("ALLOC_SOSEX");
 
 /*
@@ -1849,7 +1849,7 @@ namespace methods {
       auto pgrid =  dB_tsqkPRv.grid();
       auto gshape = dB_tsqkPRv.global_shape();
       auto lshape = dB_tsqkPRv.local_shape();
-      auto bsize =  dB_tsqkPRv.tile_count();
+      auto tcount =  dB_tsqkPRv.tile_count();
 
       // consistency check for both arrays
       utils::check(pgrid == dC_tsqkPRv.grid(), "gf2_t::build_D_sosex, dB_qkPRv.grid() != dC_qkPRv.grid()");
@@ -1859,7 +1859,7 @@ namespace methods {
       for(long i = 1; i < 7; i++)
       utils::check(lshape[i] == dC_tsqkPRv.local_shape()[i], "gf2_t::build_D_sosex, dB_qkPRv.local_shape() != dC_qkPRv.local_shape()");
 
-      utils::check(bsize == dC_tsqkPRv.tile_count(), "gf2_t::build_D_sosex, dB_qkPRv.tile_count() != dC_qkPRv.tile_count()");
+      utils::check(tcount == dC_tsqkPRv.tile_count(), "gf2_t::build_D_sosex, dB_qkPRv.tile_count() != dC_qkPRv.tile_count()");
 
 
       // need to have full dimensions by q and k
@@ -1924,14 +1924,14 @@ namespace methods {
       // grids and distributed setup
       auto pgrid =  dB_tsqkPR.grid();
       auto lshape = dB_tsqkPR.local_shape();
-      auto bsize =  dB_tsqkPR.tile_count();
+      auto tcount =  dB_tsqkPR.tile_count();
 
       // consistency check for both arrays
       utils::check(pgrid == dC_tsqkPR.grid(), "gf2_t::build_D_sosex, dB_qkPR.grid() != dC_qkPR.grid()");
       utils::check(dB_tsqkPR.local_shape() == dC_tsqkPR.local_shape(), "gf2_t::build_D_sosex, dB_qkPR.local_shape() != dC_qkPR.local_shape()");
       utils::check(dD_tsqkPR.local_shape() == dC_tsqkPR.local_shape(), "gf2_t::build_D_sosex, dD_qkPR.local_shape() != dC_qkPR.local_shape()");
 
-      utils::check(bsize == dC_tsqkPR.tile_count(), "gf2_t::build_D_sosex, dB_qkPR.tile_count() != dC_qkPR.tile_count()");
+      utils::check(tcount == dC_tsqkPR.tile_count(), "gf2_t::build_D_sosex, dB_qkPR.tile_count() != dC_qkPR.tile_count()");
 
       // need to have full dimensions by q and k
       utils::check(pgrid[2] == 1, "gf2_t::build_D_sosex, dB_tsqkPR.grid()[2] != 1");
@@ -2041,7 +2041,7 @@ namespace methods {
       _Timer.start("BUILD_GG_SOSEX");
 
       std::array<long,7> A_pgrid = {1,1,1,1,1,1,1};
-      std::array<long,7> A_bsize = {0,0,0,0,0,0,0};   // 0 = one element per tile
+      std::array<long,7> A_tcount = utils::one_per_tile<7>;
       {
         size_t np = _context->comm.size();
         long nqpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
@@ -2061,7 +2061,7 @@ namespace methods {
   
       _Timer.start("ALLOC_SOSEX");
       auto dA_tsqkQuv = make_distributed_array<Array_7D_t>(
-          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd, nbnd}, A_bsize);
+          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd, nbnd}, A_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       _context->comm.barrier();
@@ -2127,7 +2127,7 @@ namespace methods {
       _Timer.start("BUILD_GG_SOSEX");
 
       std::array<long,6> A_pgrid = {1,1,1,1, 1,1};
-      std::array<long,6> A_bsize = {0,0,0,0, 0,0};    // 0 = one element per tile
+      std::array<long,6> A_tcount = utils::one_per_tile<6>;
       {
         size_t np = _context->comm.size();
         long nqpools = utils::find_proc_grid_max_npools(np, nkpts, 0.2);
@@ -2147,7 +2147,7 @@ namespace methods {
   
       _Timer.start("ALLOC_SOSEX");
       auto dA_tsqkQu_v = make_distributed_array<Array_6D_t>(
-          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd}, A_bsize);
+          _context->comm, A_pgrid, {nt_f, ns, nkpts, nkpts, Np, nbnd}, A_tcount);
       _Timer.stop("ALLOC_SOSEX");
 
       _context->comm.barrier();
