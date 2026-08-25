@@ -298,31 +298,34 @@ struct lr_params {
 struct lr_kernel_split;
 
 /**
- * One kernel channel, fully described: everything that differs between K_sc and
- * K_pert, resolved once by lr_driver::sc_channel() / pert_channel().
+ * ONE of the two kernels a run splits K into — K_sc or K_pert — fully described:
+ * everything that differs between them, resolved once by
+ * lr_driver::make_sc_kernel() / make_pert_kernel().
  *
- * This is what makes apply_kernel channel-agnostic: `ch` carries as data which
- * evaluator instances to drive, which component switches to pass them, and which of
- * the self-consistent channel's privileges this channel has.
+ * The relation to its neighbours in this header:
+ *   lr_kernel_spec  - WHICH components (Hartree, exchange, the two Σ terms) a
+ *                     kernel contains. A component mask, nothing more.
+ *   lr_kernel_split - HOW K is divided: the pair of specs (sc, pert) plus the
+ *                     derived predicates, from lr_params alone.
+ *   lr_kernel       - one side of that division, ready to evaluate: which
+ *                     lr_hf/lr_gw instance to drive, which switches to pass it, and
+ *                     which of the self-consistent kernel's privileges it holds.
  *
- * "Kernel" vs "channel": lr_kernel_split says WHICH components of K are resummed
- * self-consistently and which are applied perturbatively — the decomposition
- * K = K_sc + K_pert. lr_kernel_channel is ONE side of that decomposition with
- * everything needed to evaluate it resolved. Timing is per function, not per
- * channel, so the clocks are named inside apply_kernel and both channels bill the
- * same regions.
+ * This is what makes apply_kernel agnostic about which of the two it is handed.
+ * Timing is per function rather than per kernel, so the clocks are named inside
+ * apply_kernel and both kernels bill the same regions.
  */
-struct lr_kernel_channel {
-  /// The Σ component flags (term 1 / term 2) this channel carries.
+struct lr_kernel {
+  /// The Σ component flags (term 1 / term 2) this kernel carries.
   lr_kernel_spec mask{};
 
-  bool hf_active = false;      ///< this channel evaluates ΔF at all
+  bool hf_active = false;      ///< this kernel evaluates ΔF at all
   /// The exchange switch lr_hf is given. Resolved rather than read off `mask`
   /// because the perturbative channel turns exchange on for the counter-term even
   /// when the mask leaves exchange wholly in K_sc. Hartree needs no such
   /// resolution and is read from `mask` directly.
   bool exchange = false;
-  bool sigma_active = false;   ///< this channel evaluates ΔΣ at all
+  bool sigma_active = false;   ///< this kernel evaluates ΔΣ at all
 
   solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
   solvers::lr_gw* gw = nullptr;
@@ -473,7 +476,7 @@ public:
    * arrays hold.
    */
   template<THC_ERI THC_t>
-  void get_kernel_before_mixing(sArray_t<Array_view_4D_t>& sDeltaF_skij,
+  void get_full_kernel_result(sArray_t<Array_view_4D_t>& sDeltaF_skij,
                               sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
                               const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                               const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -502,7 +505,7 @@ public:
   }
 
   /// The one hessian clock lr_driver owns: the K_pert refresh inside
-  /// get_kernel_before_mixing. Reported by lr_hessian_t::print_timers, which holds
+  /// get_full_kernel_result. Reported by lr_hessian_t::print_timers, which holds
   /// the rest of the table — this is not in print_timers() because that runs at the
   /// end of every lr_solve_one, before the refresh of that same solve.
   double hessian_refresh_sec() { return _Timer.elapsed("LR_HESS_PERT_REFRESH"); }
@@ -606,18 +609,18 @@ private:
   /// Resolve the two channels of `k` into apply_kernel descriptors. Both read only
   /// `k`, `p` and the driver's own evaluator instances, so every phase of a run
   /// builds the identical channels.
-  lr_kernel_channel sc_channel(lr_kernel_split const& k, lr_params const& p);
-  lr_kernel_channel pert_channel(lr_kernel_split const& k, lr_params const& p);
+  lr_kernel make_sc_kernel(lr_kernel_split const& k, lr_params const& p);
+  lr_kernel make_pert_kernel(lr_kernel_split const& k, lr_params const& p);
 
   /**
    * Apply one whole kernel channel to the supplied ΔDm / ΔG.
    *
-   * Channel-agnostic: `ch` says which components, which evaluators, which clocks
+   * Channel-agnostic: `kernel` says which components, which evaluators, which clocks
    * and which privileges, so K_sc and K_pert are the same code with different
    * data. Both branches are optional — a channel carrying only ΔF does no Σ work,
    * and vice versa.
    *
-   * @param ch              - [INPUT]  from sc_channel() / pert_channel()
+   * @param kernel              - [INPUT]  from make_sc_kernel() / make_pert_kernel()
    * @param sDeltaF_out     - [OUTPUT] this channel's ΔF, OVERWRITTEN (not
    *                                   accumulated): the ΔG it is applied to
    *                                   already carries every lower order. Untouched
@@ -628,10 +631,10 @@ private:
    * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
    * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
    * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
-   *                                   ch.split_sigma_terms
+   *                                   kernel.split_sigma_terms
    */
   template<THC_ERI THC_t>
-  void apply_kernel(lr_kernel_channel const& ch,
+  void apply_kernel(lr_kernel const& kernel,
                     sArray_t<Array_view_4D_t>& sDeltaF_out,
                     sArray_t<Array_view_5D_t>* pDeltaSigma_out,
                     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
@@ -652,7 +655,7 @@ private:
    * pipeline behind it.
    */
   template<THC_ERI THC_t>
-  void apply_kernel_gw(lr_kernel_channel const& ch,
+  void apply_kernel_gw(lr_kernel const& kernel,
                        sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                        const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
                        const sArray_t<Array_view_5D_t>& sG_tskij,
@@ -740,19 +743,21 @@ private:
     long n_flat = 0;                  ///< elements of the flattened array (0 = inactive)
     long i0 = 0, i1 = 0;              ///< this rank's slice
     nda::array<ComplexType, 1> prev;  ///< previous iterate over [i0, i1)
-    /// The same slice of the RAW (pre-mixing) kernel output, for the hessian
-    /// estimator. Empty unless alloc_raw() was called, since nothing else reads it.
-    nda::array<ComplexType, 1> raw;
+    /// The same slice of this iteration's kernel output BEFORE mixing, i.e. what
+    /// K returned rather than what the accelerator wrote back. `prev` is the
+    /// previous MIXED value; this is the current UNMIXED one. Read only by the
+    /// hessian estimator, and empty unless alloc_kernel_out() was called.
+    nda::array<ComplexType, 1> kernel_out;
 
     void alloc(utils::part_map const& pmap, long n) {
       n_flat = n;
       std::tie(i0, i1) = pmap.my_slice(n);
       prev = nda::array<ComplexType, 1>(i1 - i0);
     }
-    /// Add the raw buffer. Separate from alloc() so the ordinary path allocates
+    /// Add the kernel_out buffer. Separate from alloc() so the ordinary path allocates
     /// nothing extra; call after alloc().
-    void alloc_raw() { raw = nda::array<ComplexType, 1>(i1 - i0); }
-    bool has_raw() const { return raw.size() > 0; }
+    void alloc_kernel_out() { kernel_out = nda::array<ComplexType, 1>(i1 - i0); }
+    bool has_kernel_out() const { return kernel_out.size() > 0; }
     void zero() { prev() = ComplexType{0}; }
     /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
     auto slice(auto&& A) const {
@@ -785,7 +790,7 @@ private:
   // --- State of the last lr_solve_one, read by the hessian hooks.
   /// The returned ΔF/ΔΣ went through the mixing block in the final iteration,
   /// hence are the mixed iterate rather than the raw kernel output. The raw values
-  /// themselves live in _DeltaF.raw / _DeltaSigma.raw, filled the moment the
+  /// themselves live in _DeltaF.kernel_out / _DeltaSigma.kernel_out, filled the moment
   /// accelerator stores them: reading the ring later cannot work, since it is
   /// reset at every split-kernel stage boundary.
   bool _mixed_last_iter = false;

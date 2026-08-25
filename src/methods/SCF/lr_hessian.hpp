@@ -74,7 +74,7 @@ struct lr_hessian_result_t {
  *
  *   (ΔF, ΔΣ) = K(ΔDm, ΔG)                                        [holds]
  *
- * because the loop applies K after the Dyson solve and get_kernel_before_mixing
+ * because the loop applies K after the Dyson solve and get_full_kernel_result
  * hands back the value before mixing touched it. What it does NOT satisfy is the
  * Dyson equation,
  *
@@ -163,11 +163,17 @@ struct lr_hessian_result_t {
  *
  * Everything is striped over the *global* communicator by a contiguous element
  * slice of the flattened (s,k,i,j) band array, the `utils::part_map` partition the
- * LR driver already uses. Reads are local (both ΔG and ΔΣ are node-replicated
- * shm), the ω axis of each stored slab is whole so the IAFT transforms stay
- * rank-local, and the collectives are confined to assemble()'s accumulator
- * reductions plus the shm completions in rebuild_raw_kernel (see its COST NOTE —
- * one per τ point, not one per mode).
+ * LR driver already uses. Reads are local (both ΔG and ΔΣ are node-replicated shm)
+ * and the ω axis of each stored slab is whole, so the IAFT transforms stay
+ * rank-local.
+ *
+ * The collectives are: one all_reduce per mode PAIR inside trace_matsubara (the
+ * striped c(iω_n) has to be summed before the FT that closes the ω sum), the
+ * reduction of the four static accumulators in assemble(), and the shm completions
+ * in rebuild_raw_kernel (see its COST NOTE — one per τ point, not one per mode).
+ * The per-pair reduction is the deliberate cost of `Tr_ω` being a function that
+ * returns a number; it is 2·nmodes² small collectives, so a large mode batch pays
+ * for it in latency rather than in bytes.
  *
  * ## 6. Hermiticity is measured, never assumed
  *
@@ -240,7 +246,7 @@ public:
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
    * @param sDeltaH0   - [INPUT] ΔH0_p
-   * @param sDeltaF    - [INPUT] raw ΔF_p (get_kernel_before_mixing must have run)
+   * @param sDeltaF    - [INPUT] raw ΔF_p (get_full_kernel_result must have run)
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel (never read then)
    */
@@ -301,7 +307,7 @@ public:
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
   /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail. The
   /// K_pert refresh is the one clock this object does not own — it is billed inside
-  /// lr_driver::get_kernel_before_mixing — so it is passed in from
+  /// lr_driver::get_full_kernel_result — so it is passed in from
   /// lr_driver::hessian_refresh_sec() rather than reported separately.
   void print_timers(double pert_refresh_sec, int pert_refresh_calls);
 
@@ -344,10 +350,27 @@ private:
   ComplexType trace_static_local(nda::array<ComplexType, 1> const& a,
                          nda::array<ComplexType, 1> const& b) const;
 
-  /// acc(n) += Σ_e conj(A[refl(n), e]) B[n, e], with the w_k folded into B.
-  void trace_matsubara_local(nda::array<ComplexType, 2> const& Aw,
-                  nda::array<ComplexType, 2> const& Bw,
-                  nda::array_view<ComplexType, 1> acc) const;
+  /**
+   * @brief Tr_ω(A,B), whole: the ω sum included, so this returns the number the
+   *        equation asks for rather than a per-ω accumulator to be finished later.
+   *
+   *   c(iω_n) = Σ_e conj(A[refl(n), e]) B[n, e]        (w_k already folded into B)
+   *   Tr_ω(A,B) = (1/β) Σ_n c(iω_n) = −c(τ = β⁻)
+   *
+   * COLLECTIVE on mpi->comm, unlike trace_static_local — c is striped, so it has to
+   * be reduced before the FT, and doing the FT here means the reduction happens per
+   * mode PAIR. That is 2·nmodes² all_reduces of nw elements rather than one of
+   * nw·nmodes²: far fewer bytes, but latency in proportion to the batch, so a large
+   * mode batch pays for the clean signature in collective count. The FT itself is
+   * nothing either way.
+   */
+  ComplexType trace_matsubara(nda::array<ComplexType, 2> const& Aw,
+                              nda::array<ComplexType, 2> const& Bw) const;
+
+  /// Reduce a striped c(iω_n) and return (1/β) Σ_n c(iω_n) = −c(τ = β⁻).
+  /// Collective; shared by trace_matsubara and self_pairing, which build their
+  /// c(iω_n) differently but finish it identically. `c` is consumed.
+  ComplexType matsubara_sum(nda::array<ComplexType, 2>& c) const;
 
   /// Pack this rank's element slice of a node-replicated (nt,ns,nk,nb,nb) array
   /// into `(nt, nloc)` and transform it to `(nw, nloc)`. `weighted` folds in w_k,
@@ -387,10 +410,14 @@ private:
   std::vector<nda::array<ComplexType, 1>> _dF;    ///< ΔF_λ, unweighted
   std::vector<nda::array<ComplexType, 1>> _dDm;  ///< ΔDm_p, weighted
 
-  // Mode-pair accumulators, one pair of arrays per TERM of the functional. Each
-  // term is Tr(static) + Tr_ω(dynamic); the two halves are accumulated apart
-  // because the ω half needs the Matsubara tail before it can be summed. All are
-  // reduced once, in assemble().
+  // Mode-pair accumulators. Each term of the functional is Tr(static) +
+  // Tr_ω(dynamic), and the two halves are held apart for one reason: they differ in
+  // whether they are already reduced.
+  //
+  //   *_stat  are RANK-LOCAL partials (trace_static_local), summed over comm once
+  //           in assemble().
+  //   *_dyn   are COMPLETE (trace_matsubara reduces internally) and must NOT be
+  //           reduced again — doing so would multiply them by the rank count.
   //
   //   H_plain = plain
   //   H_sym   = static' + M' − M
@@ -398,9 +425,9 @@ private:
   nda::array<ComplexType, 2> _plain_stat;         ///< Tr(ΔH0_λ, ΔDm_p)
   nda::array<ComplexType, 2> _static_prime_stat;  ///< Tr(ΔH0_λ, ΔDm'_p)
   nda::array<ComplexType, 2> _M_stat;             ///< Tr(ΔF_λ, ΔDm_p)
-  nda::array<ComplexType, 3> _M_mats;             ///< Tr_ω(ΔΣ_λ, ΔG_p)
+  nda::array<ComplexType, 2> _M_dyn;              ///< Tr_ω(ΔΣ_λ, ΔG_p)
   nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)
-  nda::array<ComplexType, 3> _Mp_mats;            ///< Tr_ω(ΔΣ_λ, ΔG'_p)
+  nda::array<ComplexType, 2> _Mp_dyn;             ///< Tr_ω(ΔΣ_λ, ΔG'_p)
 
   std::vector<bool> _stored, _improved;
   /// assemble() reduces the accumulators in place, so it is single-shot.

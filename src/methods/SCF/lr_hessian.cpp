@@ -66,7 +66,7 @@ lr_hessian_t::lr_hessian_t(
       _Timer() {
 
   for (auto& v : {"LR_HESS_STORE", "LR_HESS_REBUILD", "LR_HESS_DYSON",
-                  "LR_HESS_CONTRACT", "LR_HESS_FT"})
+                  "LR_HESS_CONTRACT"})
     _Timer.add(v);
 
   utils::check(nmodes > 0, "lr_hessian_t: nmodes must be > 0, got {}.", nmodes);
@@ -125,14 +125,8 @@ lr_hessian_t::lr_hessian_t(
   _dF.resize(_nmodes);
   _dDm.resize(_nmodes);
 
-  if (_has_sigma) {
-    for (auto* a : {&_M_mats, &_Mp_mats}) {
-      *a = nda::array<ComplexType, 3>(_nw, _nmodes, _nmodes);
-      (*a)() = ComplexType(0.0);
-    }
-  }
-
-  for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat}) {
+  for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat,
+                  &_M_dyn, &_Mp_dyn}) {
     *a = nda::array<ComplexType, 2>(_nmodes, _nmodes);
     (*a)() = ComplexType(0.0);
   }
@@ -289,12 +283,28 @@ ComplexType lr_hessian_t::trace_static_local(nda::array<ComplexType, 1> const& a
 }
 
 
-void lr_hessian_t::trace_matsubara_local(nda::array<ComplexType, 2> const& Aw,
-                                       nda::array<ComplexType, 2> const& Bw,
-                                       nda::array_view<ComplexType, 1> acc) const {
-  if (_nloc == 0) return;
-  for (long n = 0; n < _nw; ++n)
-    acc(n) += nda::blas::dotc(Aw(_refl(n), nda::range::all), Bw(n, nda::range::all));
+ComplexType lr_hessian_t::matsubara_sum(nda::array<ComplexType, 2>& c) const {
+  // c is a per-rank partial over the element slice, so it is reduced before the FT.
+  _mpi->comm.all_reduce_in_place_n(c.data(), c.size(), std::plus<>{});
+  // (1/β) Σ_n c(iω_n) = −c(τ = β⁻); the second form is the one evaluated.
+  nda::array<ComplexType, 2> c_tau(_nt, 1);
+  nda::array<ComplexType, 1> c_beta(1);
+  _FT->w_to_tau(c, c_tau, imag_axes_ft::fermion);
+  _FT->tau_to_beta(c_tau, c_beta);
+  return -c_beta(0);
+}
+
+
+ComplexType lr_hessian_t::trace_matsubara(nda::array<ComplexType, 2> const& Aw,
+                                          nda::array<ComplexType, 2> const& Bw) const {
+  nda::array<ComplexType, 2> c(_nw, 1);
+  c() = ComplexType(0.0);
+  // A rank owning no elements still enters matsubara_sum: the reduction is
+  // collective and every rank must reach it.
+  if (_nloc > 0)
+    for (long n = 0; n < _nw; ++n)
+      c(n, 0) = nda::blas::dotc(Aw(_refl(n), nda::range::all), Bw(n, nda::range::all));
+  return matsubara_sum(c);
 }
 
 
@@ -327,8 +337,7 @@ void lr_hessian_t::accumulate_improved(long p,
   for (long l = 0; l < _nmodes; ++l) {
     _static_prime_stat(l, p) += trace_static_local(_dH0[l], dDm2);
     _Mp_stat(l, p)      += trace_static_local(_dF[l], dDm2);
-    if (_has_sigma)
-      trace_matsubara_local(_Sw[l], G2w, _Mp_mats(nda::range::all, l, p));
+    if (_has_sigma) _Mp_dyn(l, p) += trace_matsubara(_Sw[l], G2w);
   }
   _improved[p] = true;
   _Timer.stop("LR_HESS_CONTRACT");
@@ -401,12 +410,7 @@ ComplexType lr_hessian_t::self_pairing() const {
       sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
     }
   }
-  _mpi->comm.all_reduce_in_place_n(sp.data(), sp.size(), std::plus<>{});
-  nda::array<ComplexType, 2> sp_t(_nt, 1);
-  nda::array<ComplexType, 1> sp_b(1);
-  _FT->w_to_tau(sp, sp_t, imag_axes_ft::fermion);
-  _FT->tau_to_beta(sp_t, sp_b);
-  return -sp_b(0);
+  return matsubara_sum(sp);
 }
 
 
@@ -433,46 +437,27 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   // The two terms whose operands are all still in the stores are taken here, over
   // ALL mode pairs and both triangles. No symmetry is used to build any entry — the
   // Hermiticity numbers below are measurements of the finished matrices.
+  //
+  // trace_matsubara is COLLECTIVE, so this double loop must be entered by every
+  // rank with the same bounds. _nmodes and _has_sigma are the same everywhere, so
+  // it is.
   _Timer.start("LR_HESS_CONTRACT");
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
       _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm[p]);
       _M_stat(l, p)     += trace_static_local(_dF[l], _dDm[p]);
-      if (_has_sigma)
-        trace_matsubara_local(_Sw[l], _Gw[p], _M_mats(nda::range::all, l, p));
+      if (_has_sigma) _M_dyn(l, p) += trace_matsubara(_Sw[l], _Gw[p]);
     }
 
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
   _Timer.stop("LR_HESS_CONTRACT");
 
-  // Every term's static half is striped over comm, so each needs one reduction.
+  // Only the static halves are rank-local partials. The dynamic ones came back
+  // complete from trace_matsubara, which reduced them itself, so they are left
+  // alone here — reducing them again would multiply them by the rank count.
   const long nm2 = _nmodes * _nmodes;
   for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat})
     _mpi->comm.all_reduce_in_place_n(a->data(), nm2, std::plus<>{});
-
-  // Matsubara tail: (1/β) Σ_n c(iω_n) = −c(τ=β⁻). Replicated on every rank, so
-  // assemble() returns the same matrices everywhere.
-  nda::array<ComplexType, 2> M_mats(_nmodes, _nmodes), Mp_mats(_nmodes, _nmodes);
-  M_mats()  = ComplexType(0.0);
-  Mp_mats() = ComplexType(0.0);
-  if (_has_sigma) {
-    _Timer.start("LR_HESS_FT");
-    nda::array<ComplexType, 2> tail(_nt, nm2);
-    // Tr_ω(A,B) = (1/β) Σ_n c(iω_n) = −c(τ=β⁻): reduce the per-ω accumulator, then
-    // take it to τ = β⁻ and flip the sign.
-    auto matsubara_tail = [&](nda::array<ComplexType, 3>& acc,
-                              nda::array<ComplexType, 2>& out) {
-      _mpi->comm.all_reduce_in_place_n(acc.data(), acc.size(), std::plus<>{});
-      auto acc_2d = nda::reshape(acc, std::array<long, 2>{_nw, nm2});
-      _FT->w_to_tau(acc_2d, tail, imag_axes_ft::fermion);
-      auto out_1d = nda::reshape(out, std::array<long, 1>{nm2});
-      _FT->tau_to_beta(tail, out_1d);
-      for (long i = 0; i < nm2; ++i) out_1d(i) *= ComplexType(-1.0);
-    };
-    matsubara_tail(_M_mats, M_mats);
-    matsubara_tail(_Mp_mats, Mp_mats);
-    _Timer.stop("LR_HESS_FT");
-  }
 
   lr_hessian_result_t r;
   r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
@@ -486,8 +471,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
     for (long p = 0; p < _nmodes; ++p) {
       r.hessian_plain(l, p) = sf * _plain_stat(l, p);
       r.static_prime(l, p)       = sf * _static_prime_stat(l, p);
-      r.M(l, p)             = sf * (_M_stat(l, p)  + M_mats(l, p));
-      r.M_prime(l, p)            = sf * (_Mp_stat(l, p) + Mp_mats(l, p));
+      r.M(l, p)             = sf * (_M_stat(l, p)  + _M_dyn(l, p));
+      r.M_prime(l, p)       = sf * (_Mp_stat(l, p) + _Mp_dyn(l, p));
       r.hessian_sym(l, p)   = r.static_prime(l, p) + r.M_prime(l, p) - r.M(l, p);
     }
 
@@ -554,10 +539,8 @@ void lr_hessian_t::print_timers(double pert_refresh_sec, int pert_refresh_calls)
           _Timer.elapsed("LR_HESS_REBUILD"), _Timer.number_of_calls("LR_HESS_REBUILD"));
   app_log(2, "    Extra Dyson (per mode):    {0:8.3f} sec  {1:4d} calls",
           _Timer.elapsed("LR_HESS_DYSON"), _Timer.number_of_calls("LR_HESS_DYSON"));
-  app_log(2, "    Pair contractions:         {0:8.3f} sec  {1:4d} calls",
+  app_log(2, "    Pair contractions:         {0:8.3f} sec  {1:4d} calls\n",
           _Timer.elapsed("LR_HESS_CONTRACT"), _Timer.number_of_calls("LR_HESS_CONTRACT"));
-  app_log(2, "    Matsubara tail (FT):       {0:8.3f} sec  {1:4d} calls\n",
-          _Timer.elapsed("LR_HESS_FT"), _Timer.number_of_calls("LR_HESS_FT"));
 }
 
 } // namespace methods

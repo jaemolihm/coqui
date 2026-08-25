@@ -2166,7 +2166,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // taken here, before the next perturbation destroys them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
-      driver.get_kernel_before_mixing(
+      driver.get_full_kernel_result(
           lr_state.sDeltaF_skij.value(), pDeltaSigma,
           lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
           sG_tskij, thc, p);
