@@ -2089,8 +2089,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // factor follow lr_dyson::compute_lr_Nelec, which is what makes the C++ matrices
   // directly comparable with the Python reference implementation.
   std::optional<lr_hessian_t> opt_hessian;
-  nda::array<double, 1> Delta_mu_improved_m(nmodes);
-  Delta_mu_improved_m() = 0.0;
   if (hessian) {
     nda::array<double, 1> k_weight(mf->k_weight());
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
@@ -2223,14 +2221,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // the mode loop's own shm arrays — free scratch after the last dump — so no array
   // is allocated here and ΔDm' is never persisted.
   if (opt_hessian) {
-    Delta_mu_improved_m = opt_hessian->solve_improved(
+    auto c1 = opt_hessian->evaluate(
         driver.dyson(), lr_state.sDeltaH0_skij.value(),
         lr_state.sDeltaDm_skij.value(), lr_state.sDeltaF_skij.value(),
         pDeltaSigma,
         include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr,
         DeltaH0_mskij_root, fix_density);
-
-    auto c1 = opt_hessian->assemble();
     // The K_pert refresh is the one clock lr_driver owns; the rest of the table is
     // lr_hessian's own.
     opt_hessian->print_timers(driver.hessian_refresh_sec(),
@@ -2263,7 +2259,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
       nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
       nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
-      nda::h5_write(lr_grp, "Delta_mu_improved", Delta_mu_improved_m, false);
+      nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
       h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
       h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);

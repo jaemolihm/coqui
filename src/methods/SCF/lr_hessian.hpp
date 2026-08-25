@@ -50,6 +50,9 @@ struct lr_hessian_result_t {
   double herm_plain = 0.0;   ///< ‖hessian_plain − hessian_plain†‖ / ‖hessian_plain‖
   double herm_sym = 0.0;     ///< ‖hessian_sym − hessian_sym†‖ / ‖hessian_sym‖
   double herm_M = 0.0;       ///< ‖M − M†‖ / ‖M‖  (self-adjointness of K, measured)
+  /// Δμ of each mode's extra Dyson solve, as that solve recomputed it. Zero
+  /// throughout unless the run is fix_density at q = Γ.
+  nda::array<double, 1> Delta_mu_improved;
 };
 
 /**
@@ -101,7 +104,7 @@ struct lr_hessian_result_t {
  * is stationary about the exact solution, so its error is quadratic. The price is
  * the one extra Dyson solve per mode. At convergence ΔX' = ΔX and the correction
  * `M' − M + Tr(ΔH0, ΔDm') − Tr(ΔH0, ΔDm)` cancels identically, which is what
- * `assemble` reports as ‖hessian_sym − hessian_plain‖.
+ * `evaluate` reports as ‖hessian_sym − hessian_plain‖.
  *
  * ## 4. The two traces, and why the dynamic one carries a conj and a −iω_n
  *
@@ -132,7 +135,7 @@ struct lr_hessian_result_t {
  *   Tr_ω(A,B) = spin · (1/β) Σ_n c(iω_n) = −spin · c(τ = β⁻)
  *
  * The single minus sign belongs to the τ = β⁻ form, not to the (1/β) Σ_n one —
- * they are the same number, via (1/β) Σ_n A(iω_n) = −A(τ=β⁻), and `assemble`
+ * they are the same number, via (1/β) Σ_n A(iω_n) = −A(τ=β⁻), and `trace_matsubara`
  * evaluates the second by the first.
  *
  * No k → k+q map appears, and should not. At finite q every operand is stored at
@@ -169,7 +172,8 @@ struct lr_hessian_result_t {
  *
  * The collectives are: one all_reduce per mode PAIR inside trace_matsubara (the
  * striped c(iω_n) has to be summed before the FT that closes the ω sum), the
- * reduction of the four static accumulators in assemble(), and the shm completions
+ * reduction of the four static accumulators at the end of evaluate(), and the shm
+ * completions
  * in rebuild_raw_kernel (see its COST NOTE — one per τ point, not one per mode).
  * The per-pair reduction is the deliberate cost of `Tr_ω` being a function that
  * returns a number; it is 2·nmodes² small collectives, so a large mode batch pays
@@ -193,19 +197,24 @@ struct lr_hessian_result_t {
  * lr_solve_one resets per solve, and ΔDm/ΔG live in shm windows the next solve
  * overwrites in place. Storing is a copy-out, not a first half of the arithmetic.
  *
- * Evaluation is then `solve_improved`: one loop that, for each mode p, solves
- * ΔX'_p and hands it to `contract_mode`, which takes column p of ALL FOUR terms —
- * primed and unprimed together, so the equation appears in exactly one place.
- * `assemble` afterwards takes no trace at all; it reduces, applies the prefactors
- * and combines.
+ * Evaluation is then all of `evaluate`: one loop over p that solves ΔX'_p and
+ * takes column p of all four terms against every stored λ, followed by the
+ * reduction and the combination. The equation appears in exactly one place.
  *
- * Why the traces are per mode rather than one double loop at the end: only the
- * PRIMED right operands force it. ΔDm'_p / ΔG'_p are dropped as soon as mode p is
- * done, so their traces have to be taken while they exist. Keeping them for every
+ * Why the traces are inside that loop rather than in one double loop after it: only
+ * the PRIMED right operands force it. ΔDm'_p / ΔG'_p are dropped as soon as mode p
+ * is done, so their traces have to be taken while they exist. Keeping them for every
  * mode instead would add a THIRD ω store beside `_Sw` and `_Gw` — +50% on the
  * largest allocation the feature makes. The unprimed operands are in the stores and
  * could have been contracted at any later point; they ride along in the same loop
  * because splitting them out bought nothing but a second copy of the equation.
+ *
+ * ## 8. Entry points
+ *
+ * Four, and no more: the constructor sizes the stores, `store_mode` copies one
+ * mode out of the caller's mode loop, `evaluate` computes everything, and
+ * `print_timers` reports. Everything else is private vocabulary — packing, the two
+ * traces, the shm rebuild.
  */
 class lr_hessian_t {
 public:
@@ -257,20 +266,30 @@ public:
                   sArray_t<Array_view_5D_t> const* sDeltaG);
 
   /**
-   * @brief For every stored mode, solve the extra Dyson equation on its raw kernel
-   *        output and contract the improved solution in.
+   * @brief Evaluate the whole functional: for every stored mode, solve the extra
+   *        Dyson equation and contract the result against every other mode.
    *
-   * Per mode p: refill ΔH0 from the caller's stack, put the stored raw ΔF_p / ΔΣ_p
-   * back into shm, solve ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], and accumulate ΔX'_p
-   * against every stored λ before moving on — which is what lets ΔDm'_p / ΔG'_p be
-   * dropped rather than stored (§7). `dyson` must be the SAME solver the original
-   * solves used — the same operator with the same cached setup — and `fix_density`
-   * the flag they were given, so this solve recomputes Δμ from its own ΔV and
-   * applies the same constrained (still self-adjoint) bubble.
+   * One pass over the perturbations, and the only entry point that computes
+   * anything. Per mode p it refills ΔH0 from the caller's stack, puts mode p's
+   * stored raw ΔF/ΔΣ back into shm, solves ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], and
+   * takes column p of all four terms of the functional against every stored λ.
+   * Then it reduces, applies the prefactors, forms hessian_sym and measures the
+   * diagnostics.
    *
-   * The shm arrays are the mode loop's own, free scratch once the last checkpoint
-   * dump has run: ΔG'' lands in `sDeltaG`, ΔDm'' in `sDeltaDm`, and neither is
-   * persisted. Collective on mpi->comm.
+   * Every mode must already be stored: λ runs over all of them, so nothing can be
+   * contracted until store_mode has seen the last one.
+   *
+   * `dyson` must be the SAME solver the original solves used — the same operator
+   * with the same cached setup — and `fix_density` the flag they were given, so
+   * each extra solve recomputes Δμ from its own ΔV and applies the same constrained
+   * (still self-adjoint) bubble.
+   *
+   * The shm arrays are the caller's own mode-loop buffers, free scratch once the
+   * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
+   * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
+   *
+   * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
+   * and every rank returns the same matrices.
    *
    * @param dyson      - [IN/OUT] the run's LR Dyson solver
    * @param sDeltaH0   - [IN/OUT] ΔH0 window, refilled per mode from the stack
@@ -281,10 +300,8 @@ public:
    * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
    *                                     the global root only
    * @param fix_density- [INPUT] the flag the original solves used
-   *
-   * @return Δμ' of each mode, as the extra solve recomputed it
    */
-  nda::array<double, 1> solve_improved(
+  lr_hessian_result_t evaluate(
       lr_dyson& dyson,
       sArray_t<Array_view_4D_t>& sDeltaH0,
       sArray_t<Array_view_4D_t>& sDeltaDm,
@@ -293,17 +310,6 @@ public:
       sArray_t<Array_view_5D_t>* sDeltaG,
       std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
       bool fix_density);
-
-  /**
-   * @brief Finish: reduce the static accumulators, apply the prefactors, form
-   *        `hessian_sym` and measure the diagnostics.
-   *
-   * Takes no trace of its own — contract_mode has already built all four terms, so
-   * this is arithmetic on nmodes×nmodes matrices and nothing more.
-   *
-   * Collective on mpi->comm; every rank returns the same matrices.
-   */
-  lr_hessian_result_t assemble();
 
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
   /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail. The
@@ -333,27 +339,6 @@ private:
   void rebuild_raw_kernel(long p,
                           sArray_t<Array_view_4D_t>& sDeltaF_out,
                           sArray_t<Array_view_5D_t>* sDeltaSigma_out);
-
-  /**
-   * @brief Column p of ALL FOUR terms: contract mode p, primed and unprimed,
-   *        against every stored λ.
-   *
-   *   plain  [λ,p] += Tr  (ΔH0_λ, ΔDm_p )
-   *   M      [λ,p] += Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
-   *   static'[λ,p] += Tr  (ΔH0_λ, ΔDm'_p)
-   *   M'     [λ,p] += Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
-   *
-   * Every trace of the functional is taken here, in one loop, so the equation lives
-   * in one place; assemble() only finishes and combines the accumulators.
-   *
-   * The unprimed right operands come from the stores and could have been contracted
-   * at any point after the last store_mode. The primed pair is handed in and is
-   * gone on return, and THAT is what makes this per mode: it must run while ΔX'_p
-   * exists. Every mode must already be stored, since λ runs over all of them.
-   */
-  void contract_mode(long p,
-                     sArray_t<Array_view_4D_t> const& sDeltaDm_prime,
-                     sArray_t<Array_view_5D_t> const* sDeltaG_prime);
 
   /// Σ_e w_e conj(a_e) b_e over this rank's elements, `b` already weighted.
   ComplexType trace_static_local(nda::array<ComplexType, 1> const& a,
@@ -393,7 +378,7 @@ private:
 
   /// ⟨A,A⟩ on the stored ΔΣ of mode 0: real and positive by construction, so its
   /// sign is what a wrong pairing breaks. Collective; a pure diagnostic, kept out
-  /// of assemble() so that reads as the equation.
+  /// of the assembly so that reads as the equation.
   ComplexType self_pairing() const;
 
   std::shared_ptr<mpi_context_t> _mpi;
@@ -424,7 +409,7 @@ private:
   // whether they are already reduced.
   //
   //   *_stat  are RANK-LOCAL partials (trace_static_local), summed over comm once
-  //           in assemble().
+  //           at the end of evaluate().
   //   *_dyn   are COMPLETE (trace_matsubara reduces internally) and must NOT be
   //           reduced again — doing so would multiply them by the rank count.
   //
@@ -438,9 +423,9 @@ private:
   nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)
   nda::array<ComplexType, 2> _Mp_dyn;             ///< Tr_ω(ΔΣ_λ, ΔG'_p)
 
-  std::vector<bool> _stored, _contracted;
-  /// assemble() reduces the accumulators in place, so it is single-shot.
-  bool _assembled = false;
+  std::vector<bool> _stored;
+  /// evaluate() reduces the accumulators in place, so it is single-shot.
+  bool _evaluated = false;
   utils::TimerManager _Timer;
 };
 

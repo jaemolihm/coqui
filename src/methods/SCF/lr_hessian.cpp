@@ -132,7 +132,6 @@ lr_hessian_t::lr_hessian_t(
   }
 
   _stored.assign(_nmodes, false);
-  _contracted.assign(_nmodes, false);
 
   // The ω stores are the largest allocation the feature makes; they are sized and
   // reported by lr_driver::print_memory_estimate along with every other large LR
@@ -315,55 +314,7 @@ ComplexType lr_hessian_t::trace_matsubara(nda::array<ComplexType, 2> const& Aw,
 //
 // accumulated for every λ against this one p, so ΔDm'_p / ΔG'_p never have to
 // persist. That is also why every mode must already be stored.
-void lr_hessian_t::contract_mode(long p,
-                                 sArray_t<Array_view_4D_t> const& sDeltaDm_prime,
-                                 sArray_t<Array_view_5D_t> const* sDeltaG_prime) {
-  utils::check(p >= 0 && p < _nmodes && _stored[p],
-               "lr_hessian_t::contract_mode: mode {} was never stored.", p);
-  utils::check(!_contracted[p],
-               "lr_hessian_t::contract_mode: mode {} contracted twice.", p);
-  utils::check(!_has_sigma || sDeltaG_prime != nullptr,
-               "lr_hessian_t::contract_mode: a Σ-carrying kernel needs ΔG'.");
-  for (long l = 0; l < _nmodes; ++l)
-    utils::check(_stored[l],
-                 "lr_hessian_t::contract_mode: every mode must be stored before any "
-                 "pair is contracted; mode {} is missing.", l);
-
-  // Column p of all four terms of the functional, in the order they appear in it:
-  //
-  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )
-  //   M      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
-  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)
-  //   M'     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
-  //
-  // The two right operands differ only in where they come from: the unprimed pair
-  // is in the stores, the primed pair is handed in and is gone after this call.
-  // That is the only reason this runs per mode rather than once at the end.
-  //
-  // Both triangles are built; no symmetry is assumed anywhere. trace_matsubara is
-  // COLLECTIVE, so every rank must enter the loop with the same bounds — _nmodes
-  // and _has_sigma are identical on every rank.
-  _Timer.start("LR_HESS_CONTRACT");
-  auto dDm_prime = pack_static(sDeltaDm_prime, /*weighted=*/true);
-  nda::array<ComplexType, 2> Gw_prime;
-  if (_has_sigma) pack_to_omega(*sDeltaG_prime, Gw_prime, /*weighted=*/true);
-
-  for (long l = 0; l < _nmodes; ++l) {
-    _plain_stat(l, p)        += trace_static_local(_dH0[l], _dDm[p]);
-    _M_stat(l, p)            += trace_static_local(_dF[l],  _dDm[p]);
-    _static_prime_stat(l, p) += trace_static_local(_dH0[l], dDm_prime);
-    _Mp_stat(l, p)           += trace_static_local(_dF[l],  dDm_prime);
-    if (_has_sigma) {
-      _M_dyn(l, p)  += trace_matsubara(_Sw[l], _Gw[p]);
-      _Mp_dyn(l, p) += trace_matsubara(_Sw[l], Gw_prime);
-    }
-  }
-  _contracted[p] = true;
-  _Timer.stop("LR_HESS_CONTRACT");
-}
-
-
-nda::array<double, 1> lr_hessian_t::solve_improved(
+lr_hessian_result_t lr_hessian_t::evaluate(
     lr_dyson& dyson,
     sArray_t<Array_view_4D_t>& sDeltaH0,
     sArray_t<Array_view_4D_t>& sDeltaDm,
@@ -373,82 +324,95 @@ nda::array<double, 1> lr_hessian_t::solve_improved(
     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
     bool fix_density) {
 
+  // The accumulators are reduced and rescaled in place, so a second call would
+  // return a different (wrong) answer rather than the same one.
+  utils::check(!_evaluated, "lr_hessian_t::evaluate: called twice.");
+  _evaluated = true;
   utils::check(!_has_sigma || (sDeltaSigma != nullptr && sDeltaG != nullptr),
-               "lr_hessian_t::solve_improved: a Σ-carrying kernel needs the ΔΣ and "
-               "ΔG scratch arrays.");
+               "lr_hessian_t::evaluate: a Σ-carrying kernel needs the ΔΣ and ΔG "
+               "scratch arrays.");
   for (long p = 0; p < _nmodes; ++p)
     utils::check(_stored[p],
-                 "lr_hessian_t::solve_improved: mode {} was never stored; every "
-                 "mode must be stored before the first extra solve.", p);
+                 "lr_hessian_t::evaluate: mode {} was never stored. Every mode must "
+                 "be stored before evaluation begins, because λ below runs over all "
+                 "of them.", p);
 
-  nda::array<double, 1> Delta_mu(_nmodes);
-  Delta_mu() = 0.0;
+  lr_hessian_result_t r;
+  r.Delta_mu_improved = nda::array<double, 1>(_nmodes);
+  r.Delta_mu_improved() = 0.0;
 
+  // The equation, term by term. Every trace of it is taken in the loop below:
+  //
+  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )
+  //   M      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
+  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)
+  //   M'     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
+  //
+  //   H_plain = spin · plain
+  //   H_sym   = spin · (static' + M' − M)
+  //
+  // Both triangles are built and no symmetry is assumed anywhere; the Hermiticity
+  // numbers at the end are measurements of the finished matrices.
+  //
+  // Why the traces sit inside the p loop rather than in one double loop after it:
+  // the PRIMED right operands ΔDm'_p / ΔG'_p exist only between this mode's Dyson
+  // solve and the next mode's, and are never stored — keeping them for every mode
+  // would be a third ω store beside _Sw and _Gw, +50% on the largest allocation
+  // this object makes. The unprimed operands are in the stores and could be
+  // contracted at any later point; they ride along here so the equation is written
+  // once.
+  //
+  // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
+  // same bounds. _nmodes and _has_sigma are identical on every rank, so they do.
   for (long p = 0; p < _nmodes; ++p) {
-    // Refill the ΔH0 window from this mode's slice: root writes, then
-    // broadcast_to_nodes publishes it. The stack is engaged on the global root
-    // only, which is where the caller validated it.
+
+    // Mode p's ΔH0 into the shm window: root writes its slice, broadcast_to_nodes
+    // publishes it. The stack is engaged on the global root only, which is where
+    // the caller validated its shape.
     if (_mpi->comm.root()) {
       utils::check(DeltaH0_mskij_root.has_value(),
-                   "lr_hessian_t::solve_improved: the ΔH0 stack must be provided on "
-                   "the MPI global root.");
+                   "lr_hessian_t::evaluate: the ΔH0 stack must be provided on the "
+                   "MPI global root.");
       sDeltaH0.local() = (*DeltaH0_mskij_root)(p, nda::ellipsis{});
     }
     sDeltaH0.broadcast_to_nodes(0);
     _mpi->comm.barrier();
 
+    // Mode p's raw (pre-mixing) ΔF/ΔΣ out of the stores and back into shm, which is
+    // the form the Dyson solver takes its right-hand side in.
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
 
     // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
-    // costs. ΔG(τ) is replicated only when the Matsubara term needs it — it is the
-    // most expensive step in LR.
+    // costs. ΔG(τ) is replicated only when the Matsubara term needs it — that
+    // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
-    Delta_mu(p) = dyson.solve_lr_dyson(sDeltaDm, sDeltaH0, sDeltaF, sDeltaSigma,
-                                       fix_density);
+    r.Delta_mu_improved(p) =
+        dyson.solve_lr_dyson(sDeltaDm, sDeltaH0, sDeltaF, sDeltaSigma, fix_density);
     if (_has_sigma) dyson.materialize_DeltaG_tau(*sDeltaG);
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");
 
-    contract_mode(p, sDeltaDm, _has_sigma ? sDeltaG : nullptr);
+    // Column p of all four terms, against every stored λ.
+    _Timer.start("LR_HESS_CONTRACT");
+    auto dDm_prime = pack_static(sDeltaDm, /*weighted=*/true);
+    nda::array<ComplexType, 2> Gw_prime;
+    if (_has_sigma) pack_to_omega(*sDeltaG, Gw_prime, /*weighted=*/true);
+
+    for (long l = 0; l < _nmodes; ++l) {
+      _plain_stat(l, p)        += trace_static_local(_dH0[l], _dDm[p]);
+      _M_stat(l, p)            += trace_static_local(_dF[l],  _dDm[p]);
+      _static_prime_stat(l, p) += trace_static_local(_dH0[l], dDm_prime);
+      _Mp_stat(l, p)           += trace_static_local(_dF[l],  dDm_prime);
+      if (_has_sigma) {
+        _M_dyn(l, p)  += trace_matsubara(_Sw[l], _Gw[p]);
+        _Mp_dyn(l, p) += trace_matsubara(_Sw[l], Gw_prime);
+      }
+    }
+    _Timer.stop("LR_HESS_CONTRACT");
     _mpi->comm.barrier();
   }
-  return Delta_mu;
-}
 
-
-ComplexType lr_hessian_t::self_pairing() const {
-  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
-  // so it is real by construction; the sign is what a wrong pairing breaks. A
-  // static operand cannot serve here — a constant has no fermionic FT.
-  nda::array<ComplexType, 2> sp(_nw, 1);
-  sp() = ComplexType(0.0);
-  if (_nloc > 0) {
-    nda::array<ComplexType, 1> bw(_nloc);
-    for (long n = 0; n < _nw; ++n) {
-      for (long l = 0; l < _nloc; ++l) bw(l) = _Sw[0](n, l) * _wloc(l);
-      sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
-    }
-  }
-  return matsubara_sum(sp);
-}
-
-
-lr_hessian_result_t lr_hessian_t::assemble() {
-  // The accumulators are reduced and rescaled in place, so a second call would
-  // return a different (wrong) answer rather than the same one.
-  utils::check(!_assembled, "lr_hessian_t::assemble: called twice.");
-  _assembled = true;
-  for (long p = 0; p < _nmodes; ++p)
-    utils::check(_stored[p] && _contracted[p],
-                 "lr_hessian_t::assemble: mode {} is missing its store or its "
-                 "contraction.", p);
-
-  // Every trace was taken by contract_mode; nothing is contracted here. What is
-  // left is to finish the four accumulators and combine them:
-  //
-  //   H_plain = spin * plain
-  //   H_sym   = spin * (static' + M' - M)
-  //
+  // ---- finish: reduce, scale, combine, measure -----------------------------
   _Timer.start("LR_HESS_CONTRACT");
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
   _Timer.stop("LR_HESS_CONTRACT");
@@ -460,9 +424,8 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat})
     _mpi->comm.all_reduce_in_place_n(a->data(), nm2, std::plus<>{});
 
-  lr_hessian_result_t r;
   r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
-  r.M        = nda::array<ComplexType, 2>(_nmodes, _nmodes);
+  r.M             = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.M_prime       = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.static_prime  = nda::array<ComplexType, 2>(_nmodes, _nmodes);
   r.hessian_sym   = nda::array<ComplexType, 2>(_nmodes, _nmodes);
@@ -471,7 +434,7 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
       r.hessian_plain(l, p) = sf * _plain_stat(l, p);
-      r.static_prime(l, p)       = sf * _static_prime_stat(l, p);
+      r.static_prime(l, p)  = sf * _static_prime_stat(l, p);
       r.M(l, p)             = sf * (_M_stat(l, p)  + _M_dyn(l, p));
       r.M_prime(l, p)       = sf * (_Mp_stat(l, p) + _Mp_dyn(l, p));
       r.hessian_sym(l, p)   = r.static_prime(l, p) + r.M_prime(l, p) - r.M(l, p);
@@ -493,7 +456,7 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   app_log(1, "  -----------------------------------------");
   app_log(1, "    ||H_sym - H_sym^dag|| / ||H_sym||  = {:.3e}   [H1: mixed instead "
              "of raw ΔF/ΔΣ]", r.herm_sym);
-  app_log(1, "    ||N - N^dag|| / ||N||              = {:.3e}   [H1, direct]",
+  app_log(1, "    ||M - M^dag|| / ||M||              = {:.3e}   [H1, direct]",
           r.herm_M);
   // M is Hermitian exactly insofar as K is self-adjoint under this pairing, and
   // the same self-adjointness is what makes the estimator second order. So this
@@ -526,6 +489,23 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   app_log(1, "");
 
   return r;
+}
+
+
+ComplexType lr_hessian_t::self_pairing() const {
+  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
+  // so it is real by construction; the sign is what a wrong pairing breaks. A
+  // static operand cannot serve here — a constant has no fermionic FT.
+  nda::array<ComplexType, 2> sp(_nw, 1);
+  sp() = ComplexType(0.0);
+  if (_nloc > 0) {
+    nda::array<ComplexType, 1> bw(_nloc);
+    for (long n = 0; n < _nw; ++n) {
+      for (long l = 0; l < _nloc; ++l) bw(l) = _Sw[0](n, l) * _wloc(l);
+      sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
+    }
+  }
+  return matsubara_sum(sp);
 }
 
 
