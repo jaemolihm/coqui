@@ -491,7 +491,7 @@ public:
    * a caller-supplied ΔV = ΔH0 + ΔF_raw + ΔΣ_raw, and must use *this* object: the
    * same operator with the same cached setup the original solves applied.
    *
-   * `lr_hessian_t::solve_improved` drives it — `solve_lr_dyson(...)` and, only when
+   * `lr_hessian_t::evaluate` drives it — `solve_lr_dyson(...)` and, only when
    * the functional's Matsubara term needs ΔG(τ), `materialize_DeltaG_tau(...)`. Note
    * that `fix_density` must be the flag the original solves used: with it the solve
    * recomputes Δμ self-consistently from this ΔV, which keeps the constrained bubble
@@ -613,7 +613,7 @@ private:
   lr_kernel make_pert_kernel(lr_kernel_split const& k, lr_params const& p);
 
   /**
-   * Apply one whole kernel channel to the supplied ΔDm / ΔG.
+   * Apply one whole kernel — K_sc or K_pert — to the supplied ΔDm / ΔG.
    *
    * Channel-agnostic: `kernel` says which components, which evaluators, which clocks
    * and which privileges, so K_sc and K_pert are the same code with different
@@ -621,11 +621,11 @@ private:
    * and vice versa.
    *
    * @param kernel              - [INPUT]  from make_sc_kernel() / make_pert_kernel()
-   * @param sDeltaF_out     - [OUTPUT] this channel's ΔF, OVERWRITTEN (not
+   * @param sDeltaF_out     - [OUTPUT] this kernel's ΔF, OVERWRITTEN (not
    *                                   accumulated): the ΔG it is applied to
    *                                   already carries every lower order. Untouched
    *                                   when the channel carries no ΔF.
-   * @param pDeltaSigma_out - [OUTPUT] this channel's ΔΣ, overwritten; may be null
+   * @param pDeltaSigma_out - [OUTPUT] this kernel's ΔΣ, overwritten; may be null
    *                                   exactly when the channel carries no ΔΣ.
    * @param sDeltaDm_skij   - [INPUT]  ΔDm the ΔF branch contracts
    * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts

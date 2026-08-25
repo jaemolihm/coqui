@@ -2214,12 +2214,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
   }
 
-  // Every mode is stored now, so the estimator can be evaluated. lr_hessian_t
-  // drives it: per mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
-  // ΔV = ΔH0 + ΔF + ΔΣ, and contracts the improved solution against every stored
-  // mode; assemble() then takes the traces that need no extra solve. It works in
-  // the mode loop's own shm arrays — free scratch after the last dump — so no array
-  // is allocated here and ΔDm' is never persisted.
+  // Every mode is stored now, so the estimator can be evaluated. One call does all
+  // of it: per mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
+  // ΔV = ΔH0 + ΔF + ΔΣ and contracts the result against every stored mode, then
+  // reduces and combines. It works in the mode loop's own shm arrays — free scratch
+  // after the last dump — so no array is allocated here and ΔDm' is never
+  // persisted.
   if (opt_hessian) {
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), lr_state.sDeltaH0_skij.value(),

@@ -656,7 +656,7 @@ void lr_driver::lr_setup(
       ? math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {1, 1, 1, 1}));
 
-  // Split-kernel channel buffers. sDeltaF_skij / sDeltaSigma_tskij always hold
+  // Per-kernel buffers of a split run. sDeltaF_skij / sDeltaSigma_tskij always hold
   // the TOTAL (sc + pert) quantities that the Dyson RHS and the checkpoint dump
   // consume. A per-channel buffer exists only for a *split* quantity; otherwise
   // the sole contributing channel writes the caller's array directly, so the
@@ -1008,7 +1008,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
   auto& sS_skij            = _dyson.sS_skij();
-  // The two kernel channels, resolved once: which evaluators, which component
+  // The two kernels, resolved once: which evaluators, which component
   // switches, which clocks. apply_kernel is agnostic to which one it is handed.
   const lr_kernel K_sc   = make_sc_kernel(k, p);
   const lr_kernel K_pert = make_pert_kernel(k, p);

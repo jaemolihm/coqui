@@ -133,16 +133,6 @@ public:
     _head = 0;
     _B = nda::matrix<ComplexType>(0, 0);
   }
-  /**
-   * @brief True when this accelerator only ever damps, never extrapolates.
-   *
-   * The subspace is capped at _max_subsp_size, so a _min_subsp above that makes
-   * the warmup gate `_n < _min_subsp` fire on every step for the lifetime of the
-   * object: every call takes the damping write. It is how a damping run is
-   * expressed as an lr_diis, and it is what lets the B-matrix work be skipped.
-   */
-  bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
-
   /// Subspace depth, and whether a residual vector is kept per entry. Both follow
   /// from the algorithm, so the caller's memory report reads them here instead of
   /// re-deriving them from lr_iter_params.
@@ -305,6 +295,19 @@ public:
   }
 
 private:
+  /**
+   * @brief True when this accelerator only ever damps, never extrapolates.
+   *
+   * The subspace is capped at _max_subsp_size, so a _min_subsp above that makes
+   * the warmup gate `_n < _min_subsp` fire on every step for the lifetime of the
+   * object: every call takes the damping write. It is how a damping run is
+   * expressed as an lr_diis, and it is what lets the B-matrix work be skipped.
+   *
+   * Not public: callers ask `stores_residuals()`, which is the same fact stated as
+   * what it costs them.
+   */
+  bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
+
   size_t _max_subsp_size;
   size_t _warmup_iter;
   double _mixing;
