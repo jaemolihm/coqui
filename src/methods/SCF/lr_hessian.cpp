@@ -132,7 +132,7 @@ lr_hessian_t::lr_hessian_t(
   }
 
   _stored.assign(_nmodes, false);
-  _improved.assign(_nmodes, false);
+  _contracted.assign(_nmodes, false);
 
   // The ω stores are the largest allocation the feature makes; they are sized and
   // reported by lr_driver::print_memory_estimate along with every other large LR
@@ -315,31 +315,50 @@ ComplexType lr_hessian_t::trace_matsubara(nda::array<ComplexType, 2> const& Aw,
 //
 // accumulated for every λ against this one p, so ΔDm'_p / ΔG'_p never have to
 // persist. That is also why every mode must already be stored.
-void lr_hessian_t::accumulate_improved(long p,
-                                       sArray_t<Array_view_4D_t> const& sDeltaDm,
-                                       sArray_t<Array_view_5D_t> const* sDeltaG) {
+void lr_hessian_t::contract_mode(long p,
+                                 sArray_t<Array_view_4D_t> const& sDeltaDm_prime,
+                                 sArray_t<Array_view_5D_t> const* sDeltaG_prime) {
   utils::check(p >= 0 && p < _nmodes && _stored[p],
-               "lr_hessian_t::accumulate_improved: mode {} was never stored.", p);
-  utils::check(!_improved[p],
-               "lr_hessian_t::accumulate_improved: mode {} contracted twice.", p);
-  utils::check(!_has_sigma || sDeltaG != nullptr,
-               "lr_hessian_t::accumulate_improved: a Σ-carrying kernel needs ΔG'.");
+               "lr_hessian_t::contract_mode: mode {} was never stored.", p);
+  utils::check(!_contracted[p],
+               "lr_hessian_t::contract_mode: mode {} contracted twice.", p);
+  utils::check(!_has_sigma || sDeltaG_prime != nullptr,
+               "lr_hessian_t::contract_mode: a Σ-carrying kernel needs ΔG'.");
   for (long l = 0; l < _nmodes; ++l)
     utils::check(_stored[l],
-                 "lr_hessian_t::accumulate_improved: every mode must be stored "
-                 "before any pair is contracted; mode {} is missing.", l);
+                 "lr_hessian_t::contract_mode: every mode must be stored before any "
+                 "pair is contracted; mode {} is missing.", l);
 
+  // Column p of all four terms of the functional, in the order they appear in it:
+  //
+  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )
+  //   M      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
+  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)
+  //   M'     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
+  //
+  // The two right operands differ only in where they come from: the unprimed pair
+  // is in the stores, the primed pair is handed in and is gone after this call.
+  // That is the only reason this runs per mode rather than once at the end.
+  //
+  // Both triangles are built; no symmetry is assumed anywhere. trace_matsubara is
+  // COLLECTIVE, so every rank must enter the loop with the same bounds — _nmodes
+  // and _has_sigma are identical on every rank.
   _Timer.start("LR_HESS_CONTRACT");
-  auto dDm2 = pack_static(sDeltaDm, /*weighted=*/true);
-  nda::array<ComplexType, 2> G2w;
-  if (_has_sigma) pack_to_omega(*sDeltaG, G2w, /*weighted=*/true);
+  auto dDm_prime = pack_static(sDeltaDm_prime, /*weighted=*/true);
+  nda::array<ComplexType, 2> Gw_prime;
+  if (_has_sigma) pack_to_omega(*sDeltaG_prime, Gw_prime, /*weighted=*/true);
 
   for (long l = 0; l < _nmodes; ++l) {
-    _static_prime_stat(l, p) += trace_static_local(_dH0[l], dDm2);
-    _Mp_stat(l, p)      += trace_static_local(_dF[l], dDm2);
-    if (_has_sigma) _Mp_dyn(l, p) += trace_matsubara(_Sw[l], G2w);
+    _plain_stat(l, p)        += trace_static_local(_dH0[l], _dDm[p]);
+    _M_stat(l, p)            += trace_static_local(_dF[l],  _dDm[p]);
+    _static_prime_stat(l, p) += trace_static_local(_dH0[l], dDm_prime);
+    _Mp_stat(l, p)           += trace_static_local(_dF[l],  dDm_prime);
+    if (_has_sigma) {
+      _M_dyn(l, p)  += trace_matsubara(_Sw[l], _Gw[p]);
+      _Mp_dyn(l, p) += trace_matsubara(_Sw[l], Gw_prime);
+    }
   }
-  _improved[p] = true;
+  _contracted[p] = true;
   _Timer.stop("LR_HESS_CONTRACT");
 }
 
@@ -390,7 +409,7 @@ nda::array<double, 1> lr_hessian_t::solve_improved(
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");
 
-    accumulate_improved(p, sDeltaDm, _has_sigma ? sDeltaG : nullptr);
+    contract_mode(p, sDeltaDm, _has_sigma ? sDeltaG : nullptr);
     _mpi->comm.barrier();
   }
   return Delta_mu;
@@ -420,35 +439,17 @@ lr_hessian_result_t lr_hessian_t::assemble() {
   utils::check(!_assembled, "lr_hessian_t::assemble: called twice.");
   _assembled = true;
   for (long p = 0; p < _nmodes; ++p)
-    utils::check(_stored[p] && _improved[p],
+    utils::check(_stored[p] && _contracted[p],
                  "lr_hessian_t::assemble: mode {} is missing its store or its "
-                 "improved solution.", p);
+                 "contraction.", p);
 
-  // The equation this function evaluates, term by term:
-  //
-  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )                        <- here
-  //   M      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )    <- here
-  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)                        <- accumulate_improved
-  //   M'     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)    <- accumulate_improved
+  // Every trace was taken by contract_mode; nothing is contracted here. What is
+  // left is to finish the four accumulators and combine them:
   //
   //   H_plain = spin * plain
   //   H_sym   = spin * (static' + M' - M)
   //
-  // The two terms whose operands are all still in the stores are taken here, over
-  // ALL mode pairs and both triangles. No symmetry is used to build any entry — the
-  // Hermiticity numbers below are measurements of the finished matrices.
-  //
-  // trace_matsubara is COLLECTIVE, so this double loop must be entered by every
-  // rank with the same bounds. _nmodes and _has_sigma are the same everywhere, so
-  // it is.
   _Timer.start("LR_HESS_CONTRACT");
-  for (long l = 0; l < _nmodes; ++l)
-    for (long p = 0; p < _nmodes; ++p) {
-      _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm[p]);
-      _M_stat(l, p)     += trace_static_local(_dF[l], _dDm[p]);
-      if (_has_sigma) _M_dyn(l, p) += trace_matsubara(_Sw[l], _Gw[p]);
-    }
-
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
   _Timer.stop("LR_HESS_CONTRACT");
 

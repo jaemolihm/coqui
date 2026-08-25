@@ -193,20 +193,19 @@ struct lr_hessian_result_t {
  * lr_solve_one resets per solve, and ΔDm/ΔG live in shm windows the next solve
  * overwrites in place. Storing is a copy-out, not a first half of the arithmetic.
  *
- * The evaluation is then split in two, for one reason — memory:
+ * Evaluation is then `solve_improved`: one loop that, for each mode p, solves
+ * ΔX'_p and hands it to `contract_mode`, which takes column p of ALL FOUR terms —
+ * primed and unprimed together, so the equation appears in exactly one place.
+ * `assemble` afterwards takes no trace at all; it reduces, applies the prefactors
+ * and combines.
  *
- *   - `solve_improved` loops the modes again and, for each p, solves ΔX'_p and
- *     contracts it against every λ on the spot. It contracts inside its own loop
- *     because ΔDm'_p / ΔG'_p are dropped as soon as mode p is done. Keeping them
- *     for every mode instead — so that `assemble` could take these traces too —
- *     would add a THIRD ω store beside `_Sw` and `_Gw`, +50% on the largest
- *     allocation the feature makes.
- *   - `assemble` takes the two traces whose operands are all still in the stores
- *     (`plain` and `M`), then reduces, applies the Matsubara tail and the
- *     prefactors, and forms hessian_sym.
- *
- * So the ONLY thing that has to be interleaved with the extra Dyson solves is the
- * primed pair of traces. Everything unprimed is left to `assemble`.
+ * Why the traces are per mode rather than one double loop at the end: only the
+ * PRIMED right operands force it. ΔDm'_p / ΔG'_p are dropped as soon as mode p is
+ * done, so their traces have to be taken while they exist. Keeping them for every
+ * mode instead would add a THIRD ω store beside `_Sw` and `_Gw` — +50% on the
+ * largest allocation the feature makes. The unprimed operands are in the stores and
+ * could have been contracted at any later point; they ride along in the same loop
+ * because splitting them out bought nothing but a second copy of the equation.
  */
 class lr_hessian_t {
 public:
@@ -296,11 +295,13 @@ public:
       bool fix_density);
 
   /**
-   * @brief Finish: `N` over all mode pairs, reduce, apply the Matsubara tail and
-   *        the prefactors, assemble `hessian_sym` and measure the diagnostics.
+   * @brief Finish: reduce the static accumulators, apply the prefactors, form
+   *        `hessian_sym` and measure the diagnostics.
    *
-   * Collective on mpi->comm; every rank returns the same matrices (the tail is
-   * replicated, not root-only).
+   * Takes no trace of its own — contract_mode has already built all four terms, so
+   * this is arithmetic on nmodes×nmodes matrices and nothing more.
+   *
+   * Collective on mpi->comm; every rank returns the same matrices.
    */
   lr_hessian_result_t assemble();
 
@@ -334,17 +335,25 @@ private:
                           sArray_t<Array_view_5D_t>* sDeltaSigma_out);
 
   /**
-   * @brief Contract the improved solution ΔX'_p of one mode against every stored λ.
+   * @brief Column p of ALL FOUR terms: contract mode p, primed and unprimed,
+   *        against every stored λ.
    *
+   *   plain  [λ,p] += Tr  (ΔH0_λ, ΔDm_p )
+   *   M      [λ,p] += Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
    *   static'[λ,p] += Tr  (ΔH0_λ, ΔDm'_p)
    *   M'     [λ,p] += Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
    *
-   * Both are accumulated over all λ here and now, which is why ΔDm'_p / ΔG'_p never
-   * have to persist and why every mode must already be stored.
+   * Every trace of the functional is taken here, in one loop, so the equation lives
+   * in one place; assemble() only finishes and combines the accumulators.
+   *
+   * The unprimed right operands come from the stores and could have been contracted
+   * at any point after the last store_mode. The primed pair is handed in and is
+   * gone on return, and THAT is what makes this per mode: it must run while ΔX'_p
+   * exists. Every mode must already be stored, since λ runs over all of them.
    */
-  void accumulate_improved(long p,
-                           sArray_t<Array_view_4D_t> const& sDeltaDm,
-                           sArray_t<Array_view_5D_t> const* sDeltaG);
+  void contract_mode(long p,
+                     sArray_t<Array_view_4D_t> const& sDeltaDm_prime,
+                     sArray_t<Array_view_5D_t> const* sDeltaG_prime);
 
   /// Σ_e w_e conj(a_e) b_e over this rank's elements, `b` already weighted.
   ComplexType trace_static_local(nda::array<ComplexType, 1> const& a,
@@ -429,7 +438,7 @@ private:
   nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)
   nda::array<ComplexType, 2> _Mp_dyn;             ///< Tr_ω(ΔΣ_λ, ΔG'_p)
 
-  std::vector<bool> _stored, _improved;
+  std::vector<bool> _stored, _contracted;
   /// assemble() reduces the accumulators in place, so it is single-shot.
   bool _assembled = false;
   utils::TimerManager _Timer;
