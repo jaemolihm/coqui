@@ -247,14 +247,7 @@ TEST_CASE("determinant", "[math]") {
                     shape_t<2>{N, N}, shape_t<2>{bsize, bsize});
       dA.local() = A(dA.local_range(0), dA.local_range(1));
 
-      auto [Ni_loc, Nj_loc] = dA.local_shape();
-      auto [i_origin, j_origin] = dA.origin();
-      std::vector<std::pair<long,long> > diag_idx;
-      for (long ii = 0; ii < Ni_loc; ++ii)
-        for (long jj = 0; jj < Nj_loc; ++jj)
-          if (ii + i_origin == jj + j_origin) diag_idx.push_back({ii, jj});
-
-      auto det = math::nda::slate_ops::determinant(dA, diag_idx);
+      auto det = math::nda::slate_ops::determinant(dA);
 
       auto ratio = det/det_ref;
       app_log(2, "  determinant: N = {}, pgrid = ({}, {}), bsize = {}, "

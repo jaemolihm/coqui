@@ -148,7 +148,7 @@ namespace methods {
           A_loc *= -1.0; // A = I - A now
 
           // Tr{ln(B)} = ln(det(B))
-          ComplexType det_A = math::nda::slate_ops::determinant(dA_PQ, diag_idx);
+          ComplexType det_A = math::nda::slate_ops::determinant(dA_PQ);
           // log(det) is undefined for a non-positive determinant. On the imaginary
           // axis -Pi is positive semidefinite, so I - Pi*Z has all eigenvalues >= 1
           // and det > 0 for any sound polarizability.
