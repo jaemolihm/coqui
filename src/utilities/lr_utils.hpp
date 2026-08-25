@@ -33,6 +33,7 @@
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/element_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "mpi3/communicator.hpp"
@@ -256,13 +257,13 @@ inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
   long np_Q = np_PQ / np_P;
 
   std::array<long, 4> pgrid = {tpools, 1, np_P, np_Q};
-  // Per-dimension block sizes: each rank gets 1 SLATE tile per PQ dimension.
-  // This ensures the block distribution is recognized as 2D cyclic by SLATE.
-  long P_bs = std::max(NP / std::max(np_P, 1L), 1L);
-  long Q_bs = std::max(NP / std::max(np_Q, 1L), 1L);
-  std::array<long, 4> bsize = {1, 1, P_bs, Q_bs};
+  // One SLATE tile per rank on the larger PQ axis, and the SAME tile count on
+  // both, so the two axes are partitioned identically. This ensures the block
+  // distribution is recognized as 2D cyclic by SLATE.
+  long PQ_tiles = balanced_tile_count(NP, std::max(np_P, np_Q), 1024);
+  std::array<long, 4> tcount = {0, 0, PQ_tiles, PQ_tiles};
 
-  return {pgrid, bsize};
+  return {pgrid, tcount};
 }
 
 /**
@@ -304,7 +305,7 @@ inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
     -> std::pair<std::array<long,4>, std::array<long,4>>
 {
   std::array<long, 4> b_pgrid = {1, 1, 1, 1};
-  std::array<long, 4> b_bsize = {1, 1, 1, 1};
+  std::array<long, 4> b_tcount = {0, 0, 0, 0};
   b_pgrid[1] = find_proc_grid_max_npools(nproc, nq, 0.2);
   long np_PQ = nproc / b_pgrid[1];
   if (NP * NP >= np_PQ) {
@@ -314,11 +315,9 @@ inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
     check(np_PQ == 1,
           "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
   }
-  b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
-                                NP / std::max(b_pgrid[3], 1L)});
-  b_bsize[2] = std::max(b_bsize[2], 1L);
-  b_bsize[3] = b_bsize[2];
-  return {b_pgrid, b_bsize};
+  b_tcount[2] = balanced_tile_count(NP, std::max(b_pgrid[2], b_pgrid[3]), 1024);
+  b_tcount[3] = b_tcount[2];
+  return {b_pgrid, b_tcount};
 }
 
 /// Aux-basis kernel distribution: pgrid = {1, np_P, np_Q} over (q, P, Q), q
@@ -364,7 +363,7 @@ auto transpose_axes_01(
     communicator_t& comm) {
   auto [g0, g1, g2, g3] = d_in.grid();
   auto [s0, s1, s2, s3] = d_in.global_shape();
-  auto [b0, b1, b2, b3] = d_in.block_size();
+  auto [b0, b1, b2, b3] = d_in.tile_count();
 
   check(g0 == 1 || g1 == 1,
       "transpose_axes_01: one of the first two axes must be undivided "

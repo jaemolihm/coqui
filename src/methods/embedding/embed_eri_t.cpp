@@ -58,7 +58,8 @@ namespace methods {
         {nsym, ns, nkpts, nImps, thc.Np(), nImpOrbs},
         {nsym, ns, nkpts, nImps, u_rng.size(), nImpOrbs},
         {0,0,0,0,u_rng.first(),0},
-        {nsym,ns, nkpts, nImps, u_rng.size(), nImpOrbs});
+        // one tile per rank on the split Np axis; every other axis is undivided
+        {1,1,1,1,mpi->comm.size(),1});
     auto T_skIPa = dT_skIPa.local();
     nda::array<ComplexType, 2> Cfull_jb(_MF->nbnd(), nImpOrbs);
     nda::array<ComplexType, 2> tmp_ib(_MF->nbnd(), nImpOrbs);
@@ -1424,8 +1425,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction. Here we assume particle-hole symmetry
@@ -1464,8 +1465,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction
@@ -1511,8 +1512,8 @@ namespace methods {
     solvers::scr_coulomb_t scr_coulomb(&ft, screen_type, _div_treatment);
     auto dPi_tqPQ = scr_coulomb.eval_Pi_qdep(mb_state, thc);
 
-    auto[w_pgrid, w_bsize] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
-    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_bsize, true);
+    auto[w_pgrid, w_tcount] = solvers::scr_coulomb_t::W_omega_proc_grid(mpi->comm.size(), _MF->nqpts_ibz(), ft.nw_b(), thc.Np());
+    auto dW_wqPQ = scr_coulomb.tau_to_w(dPi_tqPQ, w_pgrid, w_tcount, true);
     auto pi_head_wq = solvers::div_utils::head_from_prod_basis(dW_wqPQ, thc);
 
     // Dyson for screened interaction
@@ -1524,8 +1525,10 @@ namespace methods {
     // dV_qPQ = dV_qPQ + dW_wqPQ[0,...]
     {
       // lazy for now, add redistribute routine that can operate on a submatrix, or eval_W_selected_frequencies
+      // one tile per rank on the undivided (w, q, P) axes, and dV's own tile count
+      // on the Q axis so the two arrays share that partition
       math::nda::redistribute_in_place(dW_wqPQ,{1,1,1,mpi->comm.size()},
-                     {dW_wqPQ.global_shape()[0],dW_wqPQ.global_shape()[1],dW_wqPQ.global_shape()[2],dV_qPQ.block_size()[2]}); 
+                     {1,1,1,dV_qPQ.tile_count()[2]}); 
       utils::check(dV_qPQ.local_shape()[0] == dW_wqPQ.local_shape()[1] and
                    dV_qPQ.local_shape()[1] == dW_wqPQ.local_shape()[2] and
                    dV_qPQ.local_shape()[2] == dW_wqPQ.local_shape()[3] and

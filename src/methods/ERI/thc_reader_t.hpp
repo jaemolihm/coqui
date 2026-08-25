@@ -500,12 +500,12 @@ namespace methods {
         auto Zq_loc = dZq_uv.local();
         if (q == 0) {
           auto pgrid = dZq_uv.grid();
-          auto block_size = dZq_uv.block_size();
+          auto tcount = dZq_uv.tile_count();
           auto gshape = dZq_uv.global_shape();
           // choose distribution of _dZ based on dZq_uv at q = 0
           _dZ = make_distributed_array<Array_t<HOST_MEMORY,3>>(
               _mpi->comm, {1, pgrid[0], pgrid[1]}, {_nqpts_ibz, gshape[0], gshape[1]},
-              {1, block_size[0], block_size[1]});
+              {0, tcount[0], tcount[1]});
         }
         auto Z_loc = _dZ.local();
         Z_loc(q, nda::ellipsis{}) = Zq_loc;
@@ -943,10 +943,10 @@ namespace methods {
     }
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
-    auto dZ(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+    auto dZ(std::array<long, 3> pgrid, std::array<long, 3> tcount = {0, 0, 0}) const {
       _check_initialized("dZ");
       _Timer.start("READ_V");
-      auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+      auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, tcount);
       if (_storage == eri_storage_e::incore) {
         math::nda::redistribute(_dZ, dZ_qPQ);
       } else {
@@ -964,7 +964,7 @@ namespace methods {
       if constexpr (MEM == HOST_MEMORY) {
         return dZ_qPQ;
       } else {
-        auto dZ_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);  
+        auto dZ_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, tcount);  
         dZ_qPQ_d.local() = dZ_qPQ.local();
         return dZ_qPQ_d; 
       }
@@ -982,18 +982,18 @@ namespace methods {
 
     // Vxc(q,P,Q) redistributed onto the requested processor grid, mirroring dZ().
     template<MEMORY_SPACE MEM = HOST_MEMORY>
-    auto dVxc(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+    auto dVxc(std::array<long, 3> pgrid, std::array<long, 3> tcount = {0, 0, 0}) const {
       _check_initialized("dVxc");
       utils::check(_Vxc.has_value(),
                    "thc_reader_t::dVxc: no xc-kernel matrix. Build the THC with "
                    "Vxc_file set, or point 'save' at a THC file containing the "
                    "'Vxc' dataset.");
-      auto dVxc_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+      auto dVxc_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, tcount);
       math::nda::redistribute(_Vxc.value(), dVxc_qPQ);
       if constexpr (MEM == HOST_MEMORY) {
         return dVxc_qPQ;
       } else {
-        auto dVxc_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+        auto dVxc_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, tcount);
         dVxc_qPQ_d.local() = dVxc_qPQ.local();
         return dVxc_qPQ_d;
       }

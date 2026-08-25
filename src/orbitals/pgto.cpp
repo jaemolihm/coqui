@@ -35,6 +35,7 @@
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
 #include "numerics/fft/nda.hpp"
+#include "utilities/tile_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "mean_field/MF.hpp"
 #include "orbitals/pgto.h"
@@ -364,7 +365,7 @@ void pgto::make_orbital(nda::ArrayOfRank<2> auto const& kpts,
 template<MEMORY_SPACE MEM, typename comm_t>
 memory::darray_t<memory::array<MEM,ComplexType,4>, comm_t>
 pgto::generate_basis_set(comm_t& comm, mf::MF& mf, bool normalize, 
-                         std::array<long,4> const pgrid_out,std::array<long,4> const bz)
+                         std::array<long,4> const pgrid_out,std::array<long,4> const tile_cap)
 {
   decltype(nda::range::all) all;
   using larray = memory::array<MEM,ComplexType,4>;
@@ -406,7 +407,8 @@ pgto::generate_basis_set(comm_t& comm, mf::MF& mf, bool normalize,
 
   {
     // redistribute into layout appropriate for fft
-    auto psi2 = math::nda::make_distributed_array<larray>(comm,pgrid,{1,nkpts,nbnd,nnr},bz);
+    auto psi2 = math::nda::make_distributed_array<larray>(comm,pgrid,{1,nkpts,nbnd,nnr},
+                                          utils::tile_caps<4>{tile_cap});
     math::nda::redistribute(psir,psi2);  
     psir = std::move(psi2);
   }
@@ -416,7 +418,8 @@ pgto::generate_basis_set(comm_t& comm, mf::MF& mf, bool normalize,
 						                    fft_mesh(1),fft_mesh(2)});
   math::fft::fwdfft_many(psir_4d);
 
-  auto psig = math::nda::make_distributed_array<larray>(comm,pgrid,{1,nkpts,nbnd,ngm},bz);
+  auto psig = math::nda::make_distributed_array<larray>(comm,pgrid,{1,nkpts,nbnd,ngm},
+                                        utils::tile_caps<4>{tile_cap});
 
   // MAM: need to zero out contributions outside ecutwfc
   for( auto [is,s] : itertools::enumerate(psir.local_range(0)) )
@@ -445,7 +448,8 @@ pgto::generate_basis_set(comm_t& comm, mf::MF& mf, bool normalize,
   if(pgrid == pgrid_out or pgrid_out == std::array<long,4>{0}) {
     return psig;
   } else {
-    auto psi_ = math::nda::make_distributed_array<larray>(comm,pgrid_out,{1,nkpts,nbnd,ngm},bz); 
+    auto psi_ = math::nda::make_distributed_array<larray>(comm,pgrid_out,{1,nkpts,nbnd,ngm},
+                                        utils::tile_caps<4>{tile_cap}); 
     math::nda::redistribute(psig,psi_);
     return psi_;
   }

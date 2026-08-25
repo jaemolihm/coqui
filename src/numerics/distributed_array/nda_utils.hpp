@@ -27,8 +27,10 @@
 #include <numeric>
 #include <utility>
 #include <tuple>
+#include <string_view>
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "nda/nda.hpp"
 #include "nda/tensor.hpp"
@@ -47,124 +49,96 @@ namespace math::nda
 /*
  * Factories for distributed_array
  */ 
+/*
+ * `tcount[n]` is the number of tiles axis n is cut into, not a tile size: the
+ * partition is utils::tile_partition's balanced one, so per-rank loads differ by
+ * at most one element per tile and the boundaries depend on (shape[n], tcount[n])
+ * only -- never on grid[n]. `tcount[n] == 0` means "one element per tile", i.e.
+ * tcount[n] = shape[n], which is the plain balanced element distribution and the
+ * default. Callers wanting a tile-size cap go through
+ * utils::balanced_tile_count(N, max(grid over the paired axes), cap).
+ *
+ * Out-of-range tile counts are rejected, not repaired: a silently clamped count
+ * gives two axes different tile boundaries, which slate's gemm does not check.
+ */
+namespace detail
+{
+
+// (origin, local extent) per axis, walking the proc grid in the order the memory
+// layout wants: column major over the grid for Fortran layout, row major otherwise.
+template<bool is_stride_order_Fortran, int rank>
+auto local_block(long ip,
+                 std::array<long,rank> const& shape,
+                 std::array<long,rank> const& grid,
+                 std::array<long,rank> const& tcount)
+{
+  std::array<long,rank> origin, lshape;
+  auto set = [&](int n) {
+    auto [f,l] = utils::local_range_of_rank(shape[n],tcount[n],grid[n],ip%grid[n]);
+    origin[n] = f;
+    lshape[n] = l-f;
+    ip /= grid[n];
+  };
+  if constexpr (is_stride_order_Fortran) {
+    for(int n=0; n<rank; ++n) set(n);
+  } else {
+    for(int n=rank-1; n>=0; --n) set(n);
+  }
+  return std::make_pair(origin,lshape);
+}
+
+}
+
 template<::nda::Array Array_base_t, typename communicator_t>
 auto make_distributed_array(communicator_t& comm, 
 		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
 		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
-		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> bsize = {},
-		bool squared_blocks = false)
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> tcount = {})
 {
   using local_Array_t = typename std::decay_t<Array_base_t>::regular_type;
   static_assert( local_Array_t::layout_t::is_stride_order_Fortran() or
 		 local_Array_t::layout_t::is_stride_order_C(), "Ordering mismatch.");
   static constexpr int rank = ::nda::get_rank<local_Array_t>;
   using Array_t = distributed_array<local_Array_t,communicator_t>;
-  using larray_t = typename std::array<long,rank>;
-  larray_t origin,lshape;
   long np = std::accumulate(grid.cbegin(), grid.cend(), 1, std::multiplies<>{});
   utils::check( comm.size() == np, 
       "make_distributed_array: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
   for(int n=0; n<rank; ++n) 
     utils::check( shape[n] >= grid[n], 
       "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]); 
+  utils::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array");
 
-  // setting defaults by hand until I figure a better way
-  for(long n=0; n<rank; ++n) 
-    bsize[n] = std::min( std::max(1l,bsize[n]), shape[n]/grid[n]);   
-
-  if(squared_blocks) {
-    auto bmin = *std::min_element(std::begin(bsize),std::end(bsize));
-    for(auto& v: bsize) v=bmin;
-  }
-
-  long ip = long(comm.rank());
-  // distribute blocks based on memory layout, useful for slate backend
-  if constexpr (local_Array_t::layout_t::is_stride_order_Fortran()) {   
-    // column major over proc grid for Fortran layout
-    for(int n=0; n<rank; ++n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-    }
-  } else {
-    // row major over proc grid for all other cases
-    for(int n=rank-1; n>=0; --n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-    }
-  }
-  return Array_t{ std::addressof(comm), grid, shape, lshape, origin, bsize}; 
+  auto [origin,lshape] = detail::local_block<
+        local_Array_t::layout_t::is_stride_order_Fortran(),rank>(long(comm.rank()),shape,grid,tcount);
+  return Array_t{ std::addressof(comm), grid, shape, lshape, origin, tcount}; 
 }
 
+/*
+ * Same, from per-axis tile-size caps instead of tile counts: the caller says how big
+ * a tile may get and the factory -- which already has the shape and the grid --
+ * derives the balanced counts. Use it whenever no two axes of the array have to
+ * share a partition; when they do, pass explicit counts from
+ * utils::balanced_tile_counts with the paired `p` on both axes.
+ */
 template<::nda::Array Array_base_t, typename communicator_t>
 auto make_distributed_array(communicator_t& comm,
-                std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
-                std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
-		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> bsize, 
-		typename std::decay_t<Array_base_t>::regular_type&& A_)
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
+		utils::tile_caps<::nda::get_rank<std::decay_t<Array_base_t>>> caps)
 {
-  using local_Array_t = typename std::decay_t<Array_base_t>::regular_type;
-  static_assert( local_Array_t::layout_t::is_stride_order_Fortran() or
-                 local_Array_t::layout_t::is_stride_order_C(), "Ordering mismatch.");
-  static constexpr int rank = ::nda::get_rank<local_Array_t>;
-  using Array_t = distributed_array<local_Array_t,communicator_t>;
-  using larray_t = typename std::array<long,rank>;
-  larray_t origin,lshape;
-  long np = std::accumulate(grid.cbegin(), grid.cend(), 1, std::multiplies<>{});
-  utils::check( comm.size() == np,
-      "make_distributed_array: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
-  for(int n=0; n<rank; ++n) { 
+  static constexpr int rank = ::nda::get_rank<std::decay_t<Array_base_t>>;
+  for(int n=0; n<rank; ++n)
     utils::check( shape[n] >= grid[n],
       "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
-    utils::check( bsize[n] > 0,
-      "make_distributed_array: block size must be positive- rank:{}, dim:{}, block size:{}",rank,n,bsize[n]);
-    utils::check( bsize[n] <= shape[n]/grid[n], 
-      "make_distributed_array: block size error ( > shape/grid)- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
-      rank,n,bsize[n],shape[n],grid[n]);
-  }
-
-  long ip = long(comm.rank());
-  // distribute blocks based on memory layout, useful for slate backend
-  if constexpr (local_Array_t::layout_t::is_stride_order_Fortran()) {
-    // column major over proc grid for Fortran layout
-    for(int n=0; n<rank; ++n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-      // check that everything is consistent!!!
-      utils::check(A_.shape(n) == lshape[n], "Size mismatch.");
-    }
-  } else {
-    // row major over proc grid for all other cases
-    for(int n=rank-1; n>=0; --n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-      // check that everything is consistent!!!
-      utils::check(A_.shape(n) == lshape[n], "Size mismatch.");
-    }
-  }
-  return std::move(Array_t{ std::addressof(comm), grid, shape, origin, bsize, std::move(A_) });
+  return make_distributed_array<Array_base_t>(comm,grid,shape,
+      utils::balanced_tile_counts(shape,grid,caps.cap));
 }
 
 template<::nda::Array Array_base_t, typename communicator_t>
 auto make_distributed_array_view(communicator_t& comm,
                 std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
                 std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
-                std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> bsize,
+                std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> tcount,
                 Array_base_t&& A_)
 { 
   using local_Array_t = typename std::decay_t<Array_base_t>::regular_type;
@@ -172,49 +146,20 @@ auto make_distributed_array_view(communicator_t& comm,
                  local_Array_t::layout_t::is_stride_order_C(), "Ordering mismatch.");
   static constexpr int rank = ::nda::get_rank<local_Array_t>;
   using Array_t = distributed_array_view<local_Array_t,communicator_t>;
-  using larray_t = typename std::array<long,rank>;
-  larray_t origin,lshape;
   long np = std::accumulate(grid.cbegin(), grid.cend(), 1, std::multiplies<>{});
   utils::check( comm.size() == np,
       "make_distributed_array_view: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
-  for(int n=0; n<rank; ++n) {
+  for(int n=0; n<rank; ++n)
     utils::check( shape[n] >= grid[n],
       "make_distributed_array_view: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
-    utils::check( bsize[n] > 0,
-      "make_distributed_array_view: block size must be positive- rank:{}, dim:{}, block size:{}",rank,n,bsize[n]);
-    utils::check( bsize[n] <= shape[n]/grid[n], 
-      "make_distributed_array_view: block size error ( > shape/grid)- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
-      rank,n,bsize[n],shape[n],grid[n]);
-  }
+  utils::resolve_tile_counts<rank>(tcount,shape,grid,"make_distributed_array_view");
 
-  long ip = long(comm.rank());
-  // distribute blocks based on memory layout, useful for slate backend
-  if constexpr (local_Array_t::layout_t::is_stride_order_Fortran()) {
-    // column major over proc grid for Fortran layout
-    for(int n=0; n<rank; ++n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-      // check that everything is consistent!!!
-      utils::check(A_.shape[n] == lshape[n], "Size mismatch.");
-    }
-  } else {
-    // row major over proc grid for all other cases
-    for(int n=rank-1; n>=0; --n) {
-      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
-      origin[n] *= bsize[n];
-      lshape[n] *= bsize[n];
-      lshape[n] -= origin[n];
-      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
-      ip /= grid[n];
-      // check that everything is consistent!!!
-      utils::check(A_.shape(n) == lshape[n], "Size mismatch.");
-    }
-  }
-  return Array_t{ std::addressof(comm), grid, shape, origin, bsize, A_ };
+  auto [origin,lshape] = detail::local_block<
+        local_Array_t::layout_t::is_stride_order_Fortran(),rank>(long(comm.rank()),shape,grid,tcount);
+  for(int n=0; n<rank; ++n)
+    utils::check(A_.shape(n) == lshape[n],
+      "make_distributed_array_view: Size mismatch - dim:{}, local:{}, expected:{}",n,A_.shape(n),lshape[n]);
+  return Array_t{ std::addressof(comm), grid, shape, origin, tcount, A_ };
 }
 
 namespace detail 
@@ -1022,10 +967,10 @@ void redistribute(Arr1_t& A, Arr2_t& B, get_value_t<Arr1_t> a = 1, get_value_t<A
 
 template<DistributedArray Arr1_t> // , int alg_type>
 void redistribute_in_place(Arr1_t& A, std::array<long,get_rank<Arr1_t>> grid,  
-        std::array<long,get_rank<Arr1_t>> bz, get_value_t<Arr1_t> a = 1)
+        std::array<long,get_rank<Arr1_t>> tcount, get_value_t<Arr1_t> a = 1)
 {
   using local_Array_t = typename std::decay_t<Arr1_t>::Array_t::regular_type;
-  auto B{make_distributed_array<local_Array_t>(*(A.communicator()),grid,A.global_shape(),bz)};
+  auto B{make_distributed_array<local_Array_t>(*(A.communicator()),grid,A.global_shape(),tcount)};
   redistribute(A,B,a,get_value_t<Arr1_t>{0});
   A = std::move(B);
 }

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "configuration.hpp"
+#include "utilities/tile_partition.hpp"
 #include "IO/app_loggers.h"
 
 #include "methods/SCF/scf_common.hpp"
@@ -127,7 +128,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // The single t-pool sub-communicator size of the run: Pi splits comm on t_origin
   // into np_P*np_Q, and the k-space Sigma splits dW_tqPQ's comm the same way
   // (asserted equal at thc_gw.icc:269), so one divisor serves every t-pool row.
-  auto [pi_pgrid, pi_bsize] =
+  auto [pi_pgrid, pi_tcount] =
       solvers::scr_coulomb_t::Pi_tau_proc_grid(nproc, p.nth, p.nqi, p.ns, p.nk);
   const long ntpools  = std::max(1L, pi_pgrid[0]);
   const long np_P     = std::max(1L, pi_pgrid[2]);
@@ -223,22 +224,25 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // Only the THC path builds the auxiliary-basis grids; ft_buffer_dist and
   // W_omega_proc_grid have no meaning (and reject NP = 0) without them.
   const bool aux_path = p.thc_eri and p.have_scr;
-  std::array<long, 4> ftb_pgrid{}, ftb_bsize{}, wo_pgrid{}, wo_bsize{};
+  std::array<long, 4> ftb_pgrid{}, ftb_tcount{}, wo_pgrid{}, wo_tcount{};
   if (aux_path) {
     // redistribute_alltoallv stages the local block of both endpoints and chunks
     // those buffers to a per-rank byte budget; nchunk follows the largest local
     // block of either endpoint, exactly as nda_utils.hpp computes it.
     const std::array<long, 4> t_gshape = {p.nth, p.nqi, p.NP, p.NP};
     const std::array<long, 4> w_gshape = {p.nwh, p.nqi, p.NP, p.NP};
-    std::tie(ftb_pgrid, ftb_bsize) =
+    std::tie(ftb_pgrid, ftb_tcount) =
         solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, t_gshape);
-    std::tie(wo_pgrid, wo_bsize) =
+    std::tie(wo_pgrid, wo_tcount) =
         solvers::scr_coulomb_t::W_omega_proc_grid(nproc, p.nqi, p.nw_b, p.NP);
     // When the W(iw) distribution is already the FT buffer distribution, both
     // Fourier calls take their fast branch: tau_to_w transforms straight into
     // W(iw) and w_to_tau straight out of it, so there is no omega-side staging
     // buffer and one redistribute each instead of two.
-    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and wo_bsize == ftb_bsize);
+    const std::array<long, 4> w_gs{p.nwh, p.nqi, p.NP, p.NP};
+    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and
+        utils::resolved_tile_counts<4>(wo_tcount, w_gs) ==
+        utils::resolved_tile_counts<4>(ftb_tcount, w_gs));
     auto max_local = [&](std::array<long, 4> const& gs, std::array<long, 4> const& pg) {
       double n = 1.0;
       for (int i = 0; i < 4; ++i) n *= double(ceil_div(gs[i], std::max(1L, pg[i])));
@@ -397,42 +401,52 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     return fmt::format("{}=({},{},{},{})", ax, g[0], g[1], g[2], g[3]); };
   auto pg5 = [](const std::array<long, 5>& g, const char* ax) {
     return fmt::format("{}=({},{},{},{},{})", ax, g[0], g[1], g[2], g[3], g[4]); };
-  auto bs4 = [](const std::array<long, 4>& b) {
-    return fmt::format("({},{},{},{})", b[0], b[1], b[2], b[3]); };
-  auto bs5 = [](const std::array<long, 5>& b) {
-    return fmt::format("({},{},{},{},{})", b[0], b[1], b[2], b[3], b[4]); };
+  // 0 is the "one element per tile" sentinel; print what the factory will resolve
+  // it to, so the column reads as an actual tile count.
+  auto tc4 = [](const std::array<long, 4>& b, const std::array<long, 4>& n) {
+    return fmt::format("({},{},{},{})", b[0]?b[0]:n[0], b[1]?b[1]:n[1],
+                                        b[2]?b[2]:n[2], b[3]?b[3]:n[3]); };
+  auto tc5 = [](const std::array<long, 5>& b, const std::array<long, 5>& n) {
+    return fmt::format("({},{},{},{},{})", b[0]?b[0]:n[0], b[1]?b[1]:n[1],
+                       b[2]?b[2]:n[2], b[3]?b[3]:n[3], b[4]?b[4]:n[4]); };
 
   auto row = [&](std::string const& pattern, std::string const& grid,
-                 std::string const& bsize, std::string const& arrs) {
-    app_log(2, "    {}{}{}{}", pad(pattern, 22), pad(grid, 30), pad(bsize, 18), arrs);
+                 std::string const& tiles, std::string const& arrs) {
+    app_log(2, "    {}{}{}{}", pad(pattern, 22), pad(grid, 30), pad(tiles, 18), arrs);
   };
 
   app_log(2, "\n  SCF distribution patterns (nproc = {}):", nproc);
   app_log(2, "  {}", std::string(112, '-'));
-  row("pattern", "pgrid", "bsize", "arrays");
+  row("pattern", "pgrid", "tiles", "arrays");
 
   if (aux_path) {
-    row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"), bs4(pi_bsize),
+    row("aux τ (q-local)", pg4(pi_pgrid, "(t,q,P,Q)"),
+        tc4(pi_tcount, {p.nth, p.nqi, p.NP, p.NP}),
         "dPi_tqPQ, dW_tqPQ");
-    row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q), "(1,1,1,1)",
+    row("aux G^R pool", fmt::format("(s,R,P,Q)=(1,1,{},{})", np_P, np_Q),
+        fmt::format("({},{},{},{})", p.ns, p.nk, p.NP, p.NP),
         "dGp_sRPQ, dGn_sRPQ, dbuf_skPQ  [on t_intra_comm]");
-    row("aux FT buffer", pg4(ftb_pgrid, "(·,q,P,Q)"), bs4(ftb_bsize),
+    row("aux FT buffer", pg4(ftb_pgrid, "(·,q,P,Q)"),
+        tc4(ftb_tcount, {p.nth, p.nqi, p.NP, p.NP}),
         "buffer_ti, buffer_wi");
-    row("aux ω (W Dyson)", pg4(wo_pgrid, "(w,q,P,Q)"), bs4(wo_bsize), "W(iω) (dPi_wqPQ)");
+    row("aux ω (W Dyson)", pg4(wo_pgrid, "(w,q,P,Q)"),
+        tc4(wo_tcount, {p.nwh, p.nqi, p.NP, p.NP}), "W(iω) (dPi_wqPQ)");
   }
 
   if (p.thc_eri and p.have_corr) {
     // The Sigma solver takes dW_tqPQ on the aux tau grid and forces qpools to 1.
     if (p.sigma_alg == "R") {
       std::array<long, 5> s_pgrid = {ntpools, 1, 1, np_P, np_Q};
-      std::array<long, 5> s_bsize = {pi_bsize[0], 1, pi_bsize[1],
-                                     pi_bsize[2], pi_bsize[3]};
-      row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"), bs5(s_bsize),
+      std::array<long, 5> s_tcount = {pi_tcount[0], 0, pi_tcount[1],
+                                     pi_tcount[2], pi_tcount[3]};
+      row("aux Σ(τ), R-space", pg5(s_pgrid, "(t,s,k,P,Q)"),
+          tc5(s_tcount, {p.nth, p.ns, p.nk, p.NP, p.NP}),
           "dG_tskPQ, dSigma_tskPQ");
     } else {
       std::array<long, 4> k_pgrid = {1, 1, np_P, np_Q};
-      std::array<long, 4> k_bsize = {1, pi_bsize[1], pi_bsize[2], pi_bsize[3]};
-      row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"), bs4(k_bsize),
+      std::array<long, 4> k_tcount = {0, pi_tcount[1], pi_tcount[2], pi_tcount[3]};
+      row("aux Σ, k-space", pg4(k_pgrid, "(s,k,P,Q)"),
+          tc4(k_tcount, {p.ns, p.nki, p.NP, p.NP}),
           "dSigma_skPQ, dG_skPQ  [on t_intra_comm]");
       // Mirrors thc_gw.icc:277-279 (the aux->primary redistribute target), whose
       // input comm is t_intra_comm, i.e. nproc/ntpools ranks.
@@ -445,8 +459,9 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     }
   }
 
-  auto [dyw_pgrid, dyw_bsize] = dyson_omega_proc_grid(nproc, p.nw_f, p.nki, int(p.nb));
-  row("band Dyson(ω)", pg5(dyw_pgrid, "(w,s,k,i,j)"), bs5(dyw_bsize),
+  auto [dyw_pgrid, dyw_tcount] = dyson_omega_proc_grid(nproc, p.nw_f, p.nki, int(p.nb));
+  row("band Dyson(ω)", pg5(dyw_pgrid, "(w,s,k,i,j)"),
+      tc5(dyw_tcount, {p.nw_f, p.ns, p.nki, p.nb, p.nb}),
       "dSigma_wskij, dG_wskij");
   auto dyt_pgrid = dyson_tau_proc_grid(nproc, p.nki);
   row("band Dyson(τ)", pg5(dyt_pgrid, "(·,·,k,i,j)"), "default",

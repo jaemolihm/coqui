@@ -28,6 +28,7 @@
 #include "IO/app_loggers.h"
 
 #include "utilities/concepts.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
@@ -217,7 +218,7 @@ void orthonormalize_serial_impl(darray_t<memory::array<MEM, ComplexType, 4>, com
     auto psit = math::nda::make_distributed_array<memory::array<MEM,ComplexType,4>>(*comm,
            psi.grid(),{psi.global_shape()[0],psi.global_shape()[1],
             nbnd-nremove,psi.global_shape()[3]},
-           {psi.block_size()[0],psi.block_size()[1],nbnd-nremove,psi.block_size()[3]});
+           {psi.tile_count()[0],psi.tile_count()[1],psi.grid()[2],psi.tile_count()[3]});
     utils::check(psi.local_range(0) == psi.local_range(0), "Range mismatch");
     utils::check(psi.local_range(1) == psi.local_range(1), "Range mismatch");
     utils::check(psi.local_range(3) == psi.local_range(3), "Range mismatch");
@@ -246,7 +247,7 @@ void orthonormalize_distr_impl(darray_t<memory::array<MEM, ComplexType, 4>, comm
   long nbnd      = psi_full.global_shape()[2];
   long nnr       = psi_full.global_shape()[3];
   auto pgrid     = psi_full.grid();
-  auto bz        = psi_full.block_size();
+  auto tcount        = psi_full.tile_count();
   auto comm      = psi_full.communicator();
 
   long color = psi_full.origin()[0]*nkpts_tot+psi_full.origin()[1]; 
@@ -261,13 +262,15 @@ void orthonormalize_distr_impl(darray_t<memory::array<MEM, ComplexType, 4>, comm
   // MAM: since the code currently requires the same number of orbitals per kpoint, 
   //      we truncate based on the smallest set of orbitals in any kpoint
   long nremove = 0;
-  long bz0 = std::min( nbnd/pgrid[2],nbnd/pgrid[3] );
+  // square band-band tile count: the same count on both axes, which is what the
+  // slate ops on S need (mt == nt)
+  long t0 = utils::balanced_tile_count(nbnd, std::max(pgrid[2],pgrid[3]), 1024);
   auto S = math::nda::make_distributed_array<memory::array<MEM,ComplexType,4>>(k_comm,
           {1,1,pgrid[2],pgrid[3]},{nspin,nkpts,nbnd,nbnd},
-          {1,1,bz0,bz0},true);
+          {0,0,t0,t0});
   memory::darray_view_t<larray,comm_t> psi(std::addressof(k_comm),S.grid(),
           {nspin,nkpts,nbnd,nnr},{0,0,psi_full.origin()[2],psi_full.origin()[3]},
-          {1,1,bz[2],bz[3]},psi_full.local()); 
+          {0,0,tcount[2],tcount[3]},psi_full.local()); 
   {
     //math::nda::slate_ops::multiply(psi,math::nda::H(psi),S);
 
@@ -296,7 +299,7 @@ void orthonormalize_distr_impl(darray_t<memory::array<MEM, ComplexType, 4>, comm
     auto psit = math::nda::make_distributed_array<memory::array<MEM,ComplexType,4>>(*comm,
            psi.grid(),{psi.global_shape()[0],psi.global_shape()[1],
             nbnd-nremove,psi.global_shape()[3]},
-           {nspin,nkpts,nbnd-nremove,psi.block_size()[3]});
+           {psi.grid()[0],psi.grid()[1],psi.grid()[2],psi.tile_count()[3]});
     utils::check(psi.local_range(0) == psi.local_range(0), "Range mismatch");
     utils::check(psi.local_range(1) == psi.local_range(1), "Range mismatch");
     utils::check(psi.local_range(3) == psi.local_range(3), "Range mismatch");
@@ -351,7 +354,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
   long nkpts_tot = psi.global_shape()[1];;
   long nbnd_tot  = psi.global_shape()[2];
   long npwx      = psi.global_shape()[3];
-  auto bz        = psi.block_size();
+  auto tcount        = psi.tile_count();
   auto pgrid     = psi.grid();
   auto comm = psi.communicator();
 
@@ -380,7 +383,8 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
   auto F1 = Fl(1,0,all,all);
   // redistribute over bands, since gen_F requires full G vectors
   auto psi_k = math::nda::make_distributed_array<larray>(k_comm,{1,1,pgrid[3],1},
-            {1,1,nbnd_tot,npwx},{1,1,2048,2048});
+            {1,1,nbnd_tot,npwx},
+            utils::tile_caps<4>{{1,1,2048,2048}});
   auto psi_loc = psi.local();
   {
     nda::array<int,2> idx(k_comm.size(),2);
@@ -393,7 +397,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
         { // redistribute into psi_k
           memory::darray_view_t<larray,comm_t> psit(std::addressof(k_comm),{1,1,1,pgrid[3]},
             {1,1,nbnd_tot,npwx},{0,0,0,psi.origin()[3]},
-            {1,1,bz[2],bz[3]},psi.local()(nda::range(is,is+1),nda::range(ik,ik+1),all,all)); 
+            {1,1,tcount[2],tcount[3]},psi.local()(nda::range(is,is+1),nda::range(ik,ik+1),all,all)); 
           math::nda::redistribute(psit,psi_k);
         }
         // you could avoid all the reallocations by copying body of gen_F here!
