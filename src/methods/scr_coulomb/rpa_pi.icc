@@ -45,7 +45,7 @@ namespace solvers {
     size_t nt_half = (nt_f % 2 == 0)? nt_f / 2 : nt_f / 2 + 1;
     double sp_factor = (ns == 2)? -1.0 : -2.0;
 
-    auto [t_pgrid, t_bsize] = scr_coulomb_t::Pi_tau_proc_grid(
+    auto [t_pgrid, t_tcount] = scr_coulomb_t::Pi_tau_proc_grid(
         mpi->comm.size(), nt_half, nqpts_ibz, ns, nkpts);
     long ntpools = t_pgrid[0];
     long np_P = t_pgrid[2];
@@ -60,7 +60,7 @@ namespace solvers {
 
     _Timer.start("PI_ALLOC_R");
     auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-        mpi->comm, t_pgrid, {nt_half, nqpts_ibz, Np, Np}, t_bsize);
+        mpi->comm, t_pgrid, {nt_half, nqpts_ibz, Np, Np}, t_tcount);
     auto [t_origin, q_origin, P_origin, Q_origin] = dPi_tqPQ.origin();
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
 

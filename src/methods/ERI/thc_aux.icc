@@ -7,6 +7,7 @@
 
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "hamiltonian/potentials.hpp"
 
 #include "mpi3/communicator.hpp"
@@ -226,29 +227,20 @@ auto thc::interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq,
                  "Error in interpolating_basis: Too many processors. Decrease # of processors or increase distr_tol. ");
 
   nda::range k_subrange(1), a_subrange(1), b_subrange(1);
-  long arng_bsize = std::min( default_block_size, a_range.size()/nproc_per_pool);
-  long brng_bsize = std::min( default_block_size, b_range.size()/nproc_per_pool);
+  long arng_tiles = utils::balanced_tile_count(a_range.size(), nproc_per_pool, default_block_size);
+  long brng_tiles = utils::balanced_tile_count(b_range.size(), nproc_per_pool, default_block_size);
   {
-    auto [a,b] = itertools::chunk_range(0,a_range.size()/arng_bsize,
-                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
-    a *= arng_bsize;
-    if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
-      b = a_range.size();
-    else
-      b *= arng_bsize;
+    // The local ranges must be exactly the ones the (extent, tile count) partition
+    // assigns, since that is what the darray built below advertises.
+    long ip = mpi->comm.rank()%nproc_per_pool;
+    auto [a,b] = utils::local_range_of_rank(a_range.size(),arng_tiles,nproc_per_pool,ip);
     a_subrange = nda::range(a,b);
-    std::tie(a,b) = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
-    k_subrange = nda::range(a,b);
+    auto [k0,k1] = itertools::chunk_range(0,nkpts,nkpool,mpi->comm.rank()/nproc_per_pool);
+    k_subrange = nda::range(k0,k1);
     if(not single_psi)
     {
-      std::tie(a,b) = itertools::chunk_range(0,b_range.size()/brng_bsize,
-                 nproc_per_pool,mpi->comm.rank()%nproc_per_pool);
-      a *= brng_bsize;
-      if(mpi->comm.rank()%nproc_per_pool == nproc_per_pool-1)
-        b = b_range.size();
-      else
-        b *= brng_bsize;
-      b_subrange = nda::range(a,b);
+      auto [c,d] = utils::local_range_of_rank(b_range.size(),brng_tiles,nproc_per_pool,ip);
+      b_subrange = nda::range(c,d);
     }
   }
 
@@ -264,7 +256,7 @@ auto thc::interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq,
   auto Xskau = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
        {nspins*npol,nkpts,a_range.size(),Np},
        {nspins*npol,k_subrange.size(),a_subrange.size(),Np},
-       {0,k_subrange.first(),a_subrange.first(),0},{1,1,arng_bsize,Np});
+       {0,k_subrange.first(),a_subrange.first(),0},{0,0,arng_tiles,0});
   Xskau.local() = Pa;
 
   // redistribute into more slate friendly layout (as in chol_metric_impl)
@@ -273,9 +265,9 @@ auto thc::interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq,
            a_range.size() / default_block_size) );
     while( nproc_per_pool%nx != 0 ) --nx;
     long ny = nproc_per_pool/nx;
-    long bu = std::min( Np/std::max(nx,ny), default_block_size );
     math::nda::redistribute_in_place(Xskau,{1,nkpool,nx,ny},
-                                     {1,1,default_block_size,bu});
+        {0,0,utils::balanced_tile_count(a_range.size(),nx,default_block_size),
+             utils::balanced_tile_count(Np,std::max(nx,ny),default_block_size)});
   }
 
   std::optional<_darray_t_<MEM,4>> Xskbu;
@@ -284,16 +276,16 @@ auto thc::interpolating_basis(memory::array<MEM,long,1> const& IPts, int iq,
     Xskbu = _darray_t_<MEM,4>(std::addressof(mpi->comm),{1,nkpool,nproc_per_pool,1},
        {nspins*npol,nkpts,b_range.size(),Np},
        {nspins*npol,k_subrange.size(),b_subrange.size(),Np},
-       {0,k_subrange.first(),b_subrange.first(),0},{1,1,brng_bsize,Np});
+       {0,k_subrange.first(),b_subrange.first(),0},{0,0,brng_tiles,0});
     Xskbu->local() = Pb;
     if(nproc_per_pool > 1) {
       long nx = std::max(1l, std::min( nproc_per_pool,
              b_range.size() / default_block_size) );
       while( nproc_per_pool%nx != 0 ) --nx;
       long ny = nproc_per_pool/nx;
-      long bu = std::min( Np/std::max(nx,ny), default_block_size );
       math::nda::redistribute_in_place(*Xskbu,{1,nkpool,nx,ny},
-                                       {1,1,default_block_size,bu});
+          {0,0,utils::balanced_tile_count(b_range.size(),nx,default_block_size),
+               utils::balanced_tile_count(Np,std::max(nx,ny),default_block_size)});
     }
   }
   mpi->comm.barrier();
@@ -315,8 +307,8 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
   long nIpts = IPts.shape()[0];
   long nkpts = mf->nkpts();
   auto kpts = mf->kpts();
-  auto bu = Tkur.block_size()[1];
-  auto br = Tkur.block_size()[2];
+  auto tu = Tkur.tile_count()[1];
+  auto tr = Tkur.tile_count()[2];
   auto grid = Tkur.grid();
 
   utils::check( nkpts==1 and kpts(0,0)*kpts(0,0)*kpts(0,1)*kpts(0,1)*kpts(0,2)*kpts(0,2) < 1e-8,
@@ -330,9 +322,11 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
   utils::check( rho_g.nnr() == mf->nnr(), "Error: Incompatible grids, oh oh...");
 
   auto Psiu{make_distributed_array<local_Array_t>(q_intra_comm,{grid[1],grid[2]},
-                                                  {orb_range.size(),nIpts},{default_block_size,bu})};
+                                                  {orb_range.size(),nIpts},
+      {utils::balanced_tile_count(orb_range.size(),grid[1],default_block_size),tu})};
   auto Psir{make_distributed_array<local_Array_t>(q_intra_comm,{grid[1],grid[2]},
-                                                  {orb_range.size(),r_range.size()},{default_block_size,br})};
+                                                  {orb_range.size(),r_range.size()},
+      {utils::balanced_tile_count(orb_range.size(),grid[1],default_block_size),tr})};
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
@@ -341,7 +335,7 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
   auto buff_rng_loc = buff_loc(all,r_range);
   memory::darray_view_t<local_Array_t,mpi3::communicator> buff_rng(std::addressof(q_intra_comm),
                                                                    {q_intra_comm.size(),1}, {orb_range.size(),r_range.size()},
-                                                                   {buff.origin()[0], 0}, {1,1}, buff_rng_loc);
+                                                                   {buff.origin()[0], 0}, utils::one_per_tile<2>, buff_rng_loc);
 
   auto buff_iu{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
                                                     {orb_range.size(),nIpts})};
@@ -386,7 +380,7 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
     Timer.start("GEMM");
     memory::darray_view_t<local_Array_t,mpi3::communicator> Tur(std::addressof(q_intra_comm),
                                                                 {grid[1],grid[2]}, {nIpts,r_range.size()}, {Tkur.origin()[1], Tkur.origin()[2]},
-                                                                {bu,br}, Tkur.local()(ik,all,all));
+                                                                {tu,tr}, Tkur.local()(ik,all,all));
     math::nda::slate_ops::multiply(dagger(Psiu),Psir,Tur);
     Timer.stop("GEMM");
   }
@@ -406,8 +400,8 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
 
   long nIpts = IPts.shape()[0];
   auto kpts = mf->kpts();
-  auto bu = Tkur.block_size()[1];
-  auto br = Tkur.block_size()[2];
+  auto tu = Tkur.tile_count()[1];
+  auto tr = Tkur.tile_count()[2];
   auto grid = Tkur.grid();
 
   utils::check( Tkur.global_shape()[1] == nIpts, "Size mismatch.");
@@ -419,9 +413,11 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
   utils::check( rho_g.nnr() == mf->nnr(), "Error: Incompatible grids, oh oh...");
 
   auto Psiu{make_distributed_array<local_Array_t>(q_intra_comm,{grid[1],grid[2]},
-                {orb_range.size(),nIpts},{default_block_size,bu})};
+                {orb_range.size(),nIpts},
+      {utils::balanced_tile_count(orb_range.size(),grid[1],default_block_size),tu})};
   auto Psir{make_distributed_array<local_Array_t>(q_intra_comm,{grid[1],grid[2]},
-                {orb_range.size(),r_range.size()},{default_block_size,br})};
+                {orb_range.size(),r_range.size()},
+      {utils::balanced_tile_count(orb_range.size(),grid[1],default_block_size),tr})};
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
@@ -434,7 +430,7 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
   auto buff_rng_loc = buff_loc(all,r_range);
   memory::darray_view_t<local_Array_t,mpi3::communicator> buff_rng(std::addressof(q_intra_comm),
             {q_intra_comm.size(),1}, {orb_range.size(),r_range.size()}, 
-            {buff.origin()[0], 0}, {1,1}, buff_rng_loc);
+            {buff.origin()[0], 0}, utils::one_per_tile<2>, buff_rng_loc);
 
   auto buffuv{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
                 {orb_range.size(),nIpts})};
@@ -487,7 +483,7 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
     Timer.start("GEMM");
     memory::darray_view_t<local_Array_t,mpi3::communicator> Tur(std::addressof(q_intra_comm),
 		{grid[1],grid[2]}, {nIpts,r_range.size()}, {Tkur.origin()[1], Tkur.origin()[2]},
-		{bu,br}, Tkur.local()(ik,all,all));   
+		{tu,tr}, Tkur.local()(ik,all,all));   
     math::nda::slate_ops::multiply(dagger(Psiu),Psir,Tur);
     Timer.stop("GEMM"); 
   }
@@ -590,14 +586,15 @@ void thc::get_Tuv_nonuniform_rgrid(bool add_phase, int ispin, int k, nda::range 
   utils::check(mf->npol()==1, "Non-collinear not yet implemented");
 
   long nIpts = IPts.shape()[0];
-  auto mb = Tuv.block_size()[0];
+  auto tv = Tuv.tile_count()[0];
   auto grid = Tuv.grid();
 
   utils::check( Tuv.global_shape()[0] == nIpts, "Size mismatch.");
   utils::check( Tuv.global_shape()[1] == nIpts, "Size mismatch.");
 
   auto Psiu{make_distributed_array<local_Array_t>(mpi->comm,grid,
-                {orb_range.size(),nIpts}, {default_block_size,mb})};
+                {orb_range.size(),nIpts},
+      {utils::balanced_tile_count(orb_range.size(),grid[0],default_block_size),tv})};
   auto buff_nr{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
                 {orb_range.size(),rho_g.nnr()})};
   auto buff_nu{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
@@ -644,7 +641,7 @@ void thc::get_Tuv_fft_grid(bool add_phase, int ispin, int k, nda::range orb_rang
 
   auto kpts = mf->kpts();
   long nIpts = IPts.shape()[0];
-  auto mb = Tuv.block_size()[0];
+  auto tv = Tuv.tile_count()[0];
   auto grid = Tuv.grid();
   bool custom_grid = (mf->has_wfc_grid() and mf->fft_grid_dim() != rho_g.mesh());
   auto wfc_to_rho = memory::to_memory_space<MEM>(swfc_to_rho.local());
@@ -661,7 +658,8 @@ void thc::get_Tuv_fft_grid(bool add_phase, int ispin, int k, nda::range orb_rang
     utils::rspace_phase_factor(mf->lattv(),kpts(k,all),phase);
 
   auto Psiu{make_distributed_array<local_Array_t>(mpi->comm,grid,
-                {orb_range.size(),nIpts},{default_block_size,mb})};
+                {orb_range.size(),nIpts},
+      {utils::balanced_tile_count(orb_range.size(),grid[0],default_block_size),tv})};
 
   auto buff{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
                 {orb_range.size(),rho_g.nnr()})};
@@ -927,17 +925,20 @@ auto thc::get_ZquG_Cquv(nda::MemoryArrayOfRank<1> auto const& IPts,
     utils::check(mf->orb_on_fft_grid(),
                  "thc::get_ZquG_Cquv: mf->orb_on_fft_grid()==false while mf->has_wfc_grid()==true. "
                  "                    This is not implemented yet. ");
-    std::array<long, 3> block_size = { 
-      1,  // keep at one to minimize load imbalance 
-      std::min(long(default_block_size), std::min(nIpts/pgrid[1], nIpts/pgrid[2]) ),
-      std::min(long(default_block_size), rho_g.size()/pgrid[2] )
+    // Tile counts, not tile sizes. The u axis is used with both pgrid[1] and
+    // pgrid[2] downstream (C_quv is (q,u,v) with the same count on both u and v),
+    // so its count is taken over the larger of the two.
+    std::array<long, 3> tile_count = { 
+      0,  // one element per tile on q, to minimize load imbalance
+      utils::balanced_tile_count(nIpts, std::max(pgrid[1],pgrid[2]), default_block_size),
+      utils::balanced_tile_count(rho_g.size(), pgrid[2], default_block_size)
     };
-    app_log(2," - block sizes: ({},{},{})",block_size[0],block_size[1],block_size[2]);
+    app_log(2," - tile counts: ({},{},{})",tile_count[0],tile_count[1],tile_count[2]);
     app_log(2," - Calculating Zqur with fft algorithm ");
     if constexpr (MEM == HOST_MEMORY) {
-      return get_ZquG_Cquv_fft_shared_memory(IPts,Xa,Xb,a_range,b_range,pgrid,block_size);
+      return get_ZquG_Cquv_fft_shared_memory(IPts,Xa,Xb,a_range,b_range,pgrid,tile_count);
     } else {
-      return get_ZquG_Cquv_fft<MEM>(IPts,Xa,Xb,a_range,b_range,pgrid,block_size);
+      return get_ZquG_Cquv_fft<MEM>(IPts,Xa,Xb,a_range,b_range,pgrid,tile_count);
     }
   } else {
     utils::check(mf->npol()==1, "Non-collinear not yet implemented");
@@ -947,14 +948,14 @@ auto thc::get_ZquG_Cquv(nda::MemoryArrayOfRank<1> auto const& IPts,
     utils::check(not exclude_unprotected_pairs,
                  "Error in get_ZquG_Cquv: exclude_unprotected_pairs not implemented for the "
                  "r-space algorithm (non-FFT orbital grids). Set exclude_unprotected_pairs = false.");
-    std::array<long, 3> block_size = {
-      1,  // keep at one to minimize load imbalance
-      std::min(long(default_block_size), std::min(nIpts/pgrid[1], nIpts/pgrid[2]) ),
-      std::min(long(default_block_size), rho_g.nnr()/pgrid[2] )
+    std::array<long, 3> tile_count = {
+      0,  // one element per tile on q, to minimize load imbalance
+      utils::balanced_tile_count(nIpts, std::max(pgrid[1],pgrid[2]), default_block_size),
+      utils::balanced_tile_count(rho_g.nnr(), pgrid[2], default_block_size)
     };
-    app_log(2," - block sizes: ({},{},{})",block_size[0],block_size[1],block_size[2]);
+    app_log(2," - tile counts: ({},{},{})",tile_count[0],tile_count[1],tile_count[2]);
     app_log(2," - Calculating Zqur with r-space algorithm ");
-    return get_ZquG_Cquv_rspace<MEM>(IPts,a_range,b_range,pgrid,block_size);
+    return get_ZquG_Cquv_rspace<MEM>(IPts,a_range,b_range,pgrid,tile_count);
   }
 }
 
@@ -967,7 +968,7 @@ template<MEMORY_SPACE MEM>
 auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts, 
                         nda::range a_range, nda::range b_range, 
                         std::array<long, 3> pgrid, 
-                        std::array<long, 3> block_size) 
+                        std::array<long, 3> tile_count) 
 {
   using math::nda::make_distributed_array;
   using local_Array_t = memory::array<MEM,ComplexType,3>;
@@ -1035,7 +1036,9 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
         // temporary array with proper data distribution for get_Tkur 
         Timer.start("ALLOC");
         auto Tk{make_distributed_array<local_Array_t>(mpi->comm,{nqpools,nx2,ny2},
-            {nkpts,nIpts,nnr_range.size()},{1,nIpts/std::max(nx2,ny2),default_block_size})};
+            {nkpts,nIpts,nnr_range.size()},
+            {0,utils::balanced_tile_count(nIpts,std::max(nx2,ny2),default_block_size),
+               utils::balanced_tile_count(nnr_range.size(),ny2,default_block_size)})};
         Timer.stop("ALLOC");
 
         // calculate Ta(k,u,r) for all k-points
@@ -1133,7 +1136,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
         memory::darray_view_t<local_uArray_t,mpi3::communicator> Z_qur_rng(std::addressof(mpi->comm),
               Z_qur.grid(), {nqpts_ibz,nIpts,nnr_range.size()},
               {Z_qur.origin()[0], Z_qur.origin()[1], 0}, 
-              {Z_qur.block_size()[0],Z_qur.block_size()[1],1}, Z_qur_rng_loc);
+              {Z_qur.tile_count()[0],Z_qur.tile_count()[1],0}, Z_qur_rng_loc);
         utils::check(Z_qur_rng.local_range(0) == Z_qur.local_range(0), "Range mismatch: Z_qur");
         utils::check(Z_qur_rng.local_range(1) == Z_qur.local_range(1), "Range mismatch: Z_qur");
         math::nda::redistribute(Zq,Z_qur_rng,ComplexType(1.0));
@@ -1147,7 +1150,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   // quv distributed array 
   Timer.start("ALLOC");
   auto C_quv{make_distributed_array<local_uArray_t>(mpi->comm,pgrid,
-                {nqpts_ibz,nIpts,nIpts},{block_size[0],block_size[1],block_size[1]})};
+                {nqpts_ibz,nIpts,nIpts},{tile_count[0],tile_count[1],tile_count[1]})};
   Timer.stop("ALLOC");
 
   // ur -> uv
@@ -1216,7 +1219,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
     Z_qur.reset(); // returning memory in case it is needed!
     auto Z2_{make_distributed_array<local_uArray_t>(mpi->comm,pgrid,
                                                     {nqpts_ibz,nIpts,rho_g.size()},
-                                                    block_size)};
+                                                    tile_count)};
     Timer.start("COMM");
     math::nda::redistribute(Z_,Z2_);
     Z_qur = std::move(Z2_);
@@ -1224,7 +1227,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   } else {
     auto Z_{make_distributed_array<local_uArray_t>(mpi->comm,pgrid,
                                                    Z_qur.global_shape(),
-                                                   block_size)};
+                                                   tile_count)};
     Timer.start("COMM");
     math::nda::redistribute(Z_qur,Z_);
     Z_qur.reset();
@@ -1264,7 +1267,7 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
                         Tensor2_t const* Xb,
                         nda::range a_range, nda::range b_range, 
                         std::array<long, 3> pgrid, 
-                        std::array<long, 3> block_size) 
+                        std::array<long, 3> tile_count) 
 {
   using math::nda::make_distributed_array;
   using local_3Array_t = memory::array<MEM,ComplexType,3>;
@@ -1406,7 +1409,7 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
               {1,1,1,1,mpi->comm.size()},nda::range(0,nspins),nda::range(0,nkpts_ibz),b_range,{1,1,1,1,1});
     dPsib = new memory::darray_t<local_5Array_t,mpi3::communicator>(std::addressof(mpi->comm),
                         Psib.grid(),Psib.global_shape(),Psib.local_shape(),
-                        Psib.origin(),Psib.block_size());
+                        Psib.origin(),Psib.tile_count());
     *dPsib = std::move(Psib);
     apply_band_weights_psi<MEM>(*dPsib, b_range);
   } else {
@@ -1574,9 +1577,9 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   auto loc_Tkug_g = memory::array_view<MEM,ComplexType,3>({nkloc, ntasks*nI_per_blk, g1-g0},buffer1.data());
   auto loc_Tkug_u = memory::array_view<MEM,ComplexType,3>({nkloc, nI_per_blk, wfc_grid->size()},buffer2.data());
   auto dTkug_g = math::nda::distributed_array_view<decltype(loc_Tkug_g),mpi3::communicator>(std::addressof(mpi->comm),
-           {1,1,mpi->comm.size()},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,0,g0},{1,1,1},loc_Tkug_g); 
+           {1,1,mpi->comm.size()},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,0,g0},utils::one_per_tile<3>,loc_Tkug_g); 
   auto dTkug_u = math::nda::distributed_array_view<decltype(loc_Tkug_u),mpi3::communicator>(std::addressof(mpi->comm),
-           {1,mpi->comm.size(),1},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,rank*nI_per_blk,0},{1,1,1},loc_Tkug_u); 
+           {1,mpi->comm.size(),1},{nkloc,ntasks*nI_per_blk,wfc_grid->size()},{0,rank*nI_per_blk,0},utils::one_per_tile<3>,loc_Tkug_u); 
   Timer.stop("ALLOC");
 
   // R<->k, R<->Q, phase factors exp(-ikr), exp(-iqr)
@@ -1897,8 +1900,8 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   ZRur_1d.resize(1);
   Timer.start("ALLOC");
   Timer.start("A_redist");
-  math::nda::redistribute_in_place(C_quv,pgrid,{block_size[0],block_size[1],block_size[1]});
-  math::nda::redistribute_in_place(Z_qug,pgrid,block_size);
+  math::nda::redistribute_in_place(C_quv,pgrid,{tile_count[0],tile_count[1],tile_count[1]});
+  math::nda::redistribute_in_place(Z_qug,pgrid,tile_count);
   Timer.stop("A_redist");
   Timer.stop("ALLOC");
 
@@ -1915,7 +1918,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
                         Tensor2_t const* Xb,
                         nda::range a_range, nda::range b_range, 
                         std::array<long, 3> pgrid, 
-                        std::array<long, 3> block_size) 
+                        std::array<long, 3> tile_count) 
 {
   constexpr MEMORY_SPACE MEM = HOST_MEMORY;
   using math::nda::make_distributed_array;
@@ -2015,10 +2018,10 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   Timer.start("A_darray");
   memory::darray_t<local_3Array_t,mpi3::communicator> Z_qug(std::addressof(mpi->comm), {1,ntasks,1},
                 {nqpts_ibz,nIpts,rho_g.size()},{nqpts_ibz,nI1_core-nI0_core,rho_g.size()},
-                {0,nI0_core,0},{1,1,1});
+                {0,nI0_core,0},utils::one_per_tile<3>);
   memory::darray_t<local_3Array_t,mpi3::communicator> C_quv(std::addressof(mpi->comm), {1,ntasks,1},
                 {nqpts_ibz,nIpts,nIpts},{nqpts_ibz,nI1_core-nI0_core,nIpts},
-                {0,nI0_core,0},{1,1,1});
+                {0,nI0_core,0},utils::one_per_tile<3>);
   Timer.stop("A_darray");
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
@@ -2064,7 +2067,7 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
               {1,1,1,1,mpi->comm.size()},nda::range(0,nspins),nda::range(0,nkpts_ibz),b_range,{1,1,1,1,1});
     dPsib = new memory::darray_t<local_5Array_t,mpi3::communicator>(std::addressof(mpi->comm),
                         Psib.grid(),Psib.global_shape(),Psib.local_shape(),
-                        Psib.origin(),Psib.block_size());
+                        Psib.origin(),Psib.tile_count());
     *dPsib = std::move(Psib);
     apply_band_weights_psi<HOST_MEMORY>(*dPsib, b_range);
   } else {
@@ -2686,8 +2689,8 @@ auto thc::get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& 
   sTRur_1d = math::shm::shared_array<nda::array_view<ComplexType,1>>(*mpi,{1});
   Timer.start("ALLOC");
   Timer.start("A_redist");
-  math::nda::redistribute_in_place(C_quv,pgrid,{block_size[0],block_size[1],block_size[1]});
-  math::nda::redistribute_in_place(Z_qug,pgrid,block_size);
+  math::nda::redistribute_in_place(C_quv,pgrid,{tile_count[0],tile_count[1],tile_count[1]});
+  math::nda::redistribute_in_place(Z_qug,pgrid,tile_count);
   Timer.stop("A_redist");
   Timer.stop("ALLOC");
 

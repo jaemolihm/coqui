@@ -30,6 +30,7 @@
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -57,7 +58,7 @@ TEST_CASE("distributed_nda", "[math]")
 		   {10, 2*nx,2*ny},	// global 
 		   {10, 2, 2},		// local
 		   {0, 2*ix, 2*iy},     // origin
-		   {1, 1, 1});	        // block size
+		   utils::one_per_tile<3>);	// tile count
     A.local()=1.0;
 
     REQUIRE( A.origin() == shape_t<3>{0, 2*ix, 2*iy} );
@@ -88,7 +89,7 @@ TEST_CASE("distributed_nda", "[math]")
                    {20, 3*nx,3*ny},     // global 
                    {0, 3, 3},           // local
                    {0, 3*ix, 3*iy},     // origin
-		   {1, 1, 1});	        // block size
+		   utils::one_per_tile<3>);	// tile count
     B.local() = 2.0;
     {
       auto C{B};
@@ -108,7 +109,7 @@ TEST_CASE("distributed_nda", "[math]")
     darray A(std::addressof(world),{1,nx,ny}, 
                    {10, 2*nx,2*ny},     // global 
                    {0, 2*ix, 2*iy},     // origin
-		   {1, 1, 1},	        // block size
+		   utils::one_per_tile<3>,	// tile count
 		   L);
     
     REQUIRE( A.origin() == shape_t<3>{0, 2*ix, 2*iy} );
@@ -141,7 +142,7 @@ TEST_CASE("distributed_nda", "[math]")
     darray B(std::addressof(world),{1,nx,ny}, 
                    {20, 3*nx,3*ny},     // global 
                    {0, 3*ix, 3*iy},     // origin
-		   {1, 1, 1},	        // block size
+		   utils::one_per_tile<3>,	// tile count
 		   L2);
     { 
       darray C{A};
@@ -514,7 +515,7 @@ TEST_CASE("redistribute_nda", "[math]")
  * bit-identical to the unchunked transfer for any nchunk.
  *
  * Cases: a ragged global shape (so the block boundaries do not divide the rank
- * count), a block size of 1 on the split axis, and caps from "one element per
+ * count), one element per tile on the split axis, and caps from "one element per
  * chunk" (nchunk saturates at comm.size()) up to "no chunking at all".
  *
  * Needs >= 2 ranks: at one rank redistribute_alltoallv takes the serial branch
@@ -570,7 +571,7 @@ TEST_CASE("redistribute_chunked_equivalence", "[math]")
     REQUIRE(err == 0.0);  // pure data movement: bit-identical, not "close"
   }
 
-  // The reverse direction, with a block size of 1 on the split axis.
+  // The reverse direction, with one element per tile on the split axis.
   auto C = make_distributed_array<larray>(world, {1,1,size}, gshape);
   fill(C);
   auto D_ref = make_distributed_array<larray>(world, {size,1,1}, gshape);

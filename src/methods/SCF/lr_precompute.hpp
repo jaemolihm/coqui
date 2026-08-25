@@ -256,7 +256,7 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
   long Np = thc.Np();
   long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
 
-  auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
+  auto [tau_pgrid, tau_tcount] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
   auto [tpools, q_dummy, np_P, np_Q] = tau_pgrid;
 
   app_log(2, "lr_precompute_G_R_pair: caching G^R(τ) / G^R(β−τ) in aux basis");
@@ -265,10 +265,10 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
 
   auto dG_tsRPQ = make_distributed_array<local_Array_5D_t>(
       mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
-      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
+      {0, 0, 0, tau_tcount[2], tau_tcount[3]});
   auto dG_mtau_tsRPQ = make_distributed_array<local_Array_5D_t>(
       mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
-      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
+      {0, 0, 0, tau_tcount[2], tau_tcount[3]});
 
   long t_origin = dG_tsRPQ.origin()[0];
   auto [nt_loc, ns_loc, nk_loc, NP_loc, NQ_loc] = dG_tsRPQ.local_shape();
@@ -280,7 +280,7 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
                t_intra_comm.size());
   auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
       t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
-      {1, 1, tau_bsize[2], tau_bsize[3]});
+      {0, 0, tau_tcount[2], tau_tcount[3]});
 
   // f_Rk (same transform as Π's term factors and Σ term 2)
   math::shm::shared_array<nda::array_view<ComplexType, 2>> sf_Rk(*mpi, {nkpts, nkpts});

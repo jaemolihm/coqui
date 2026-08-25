@@ -33,6 +33,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "utilities/lr_utils.hpp"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 
 namespace methods {
 
@@ -74,7 +75,7 @@ namespace methods {
  * Kept in one place because lr_driver's distribution report has to agree with
  * what solve_lr_dyson_impl actually allocates.
  *
- * @return {pgrid, bsize} over the (w, s, k, i, j) axes.
+ * @return {pgrid, tile count} over the (w, s, k, i, j) axes.
  */
 inline std::pair<std::array<long, 5>, std::array<long, 5>>
 lr_dyson_omega_pgrid(long nproc, long nw, long nkpts_ibz, long nbnd) {
@@ -116,9 +117,10 @@ lr_dyson_omega_pgrid(long nproc, long nw, long nkpts_ibz, long nbnd) {
     }
   }
 
-  long ibsize = std::min({1024L, nbnd / np_i, nbnd / np_j});
-  if (ibsize < 1) ibsize = 1;
-  return {{nwpools, 1, nkpools, np_i, np_j}, {1, 1, 1, ibsize, ibsize}};
+  // Square band-band tile count (mt == nt for slate_ops::inverse); the (w, s, k)
+  // axes keep one element per tile (0).
+  long itiles = utils::balanced_tile_count(nbnd, std::max(np_i, np_j), 1024);
+  return {{nwpools, 1, nkpools, np_i, np_j}, {0, 0, 0, itiles, itiles}};
 }
 
 /**

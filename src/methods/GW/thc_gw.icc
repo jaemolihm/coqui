@@ -81,7 +81,7 @@ namespace methods {
       auto [nt_loc, nk_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
       auto [nt_half, nkpts, NP, NQ] = dW_tqPQ.global_shape();
       auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
-      auto bsize = dW_tqPQ.block_size();   // (t, q, P, Q)
+      auto tcount = dW_tqPQ.tile_count();   // (t, q, P, Q)
       utils::check(nk_loc == nkpts, "gw_t::eval_Sigma_all_Rspace: nq_loc = {} != nkpts", nk_loc);
       utils::check(qpools == 1, "gw_t::eval_Sigma_all_Rspace: qpools = {} != 1", qpools);
 
@@ -116,7 +116,7 @@ namespace methods {
       // transpose or extra staging array is needed.
       _Timer.start("SIGMA_ALLOC_R");
       auto dG_tskPQ = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[0], 1, bsize[1], bsize[2], bsize[3]});
+          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {tcount[0], 0, tcount[1], tcount[2], tcount[3]});
       _Timer.stop("SIGMA_ALLOC_R");
 
       _Timer.start("SIGMA_PRIM_TO_AUX");
@@ -272,7 +272,7 @@ namespace methods {
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
       auto [t_origin, q_origin, P_origin, Q_origin] = dW_tqPQ.origin();
       auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
-      auto bsize = dW_tqPQ.block_size();   // (t, q, P, Q)
+      auto tcount = dW_tqPQ.tile_count();   // (t, q, P, Q)
       long nt_loc_max = nt_loc;
       dW_tqPQ.communicator()->broadcast_n(&nt_loc_max, 1, 0);
       long tpool_id = (nt_loc==nt_loc_max)? t_origin/nt_loc : (t_origin-nt_half%tpools)/nt_loc;
@@ -290,7 +290,7 @@ namespace methods {
       // The total memory requirement is tpools*ns*nkpts_no_trev*Np*Np rather than nt_half*ns*nkpts_no_trev*Np*Np
       auto dSigma_skPQ = make_distributed_array<local_Array_4D_t>(
           t_intra_comm, {1, qpools, np_P, np_Q}, {ns, nkpts_ibz, NP, NQ},
-          {1, bsize[1], bsize[2], bsize[3]});
+          {0, tcount[1], tcount[2], tcount[3]});
       // different types of distribution for sigma to improve performance of aux_to_primary()
       long qpools_2 = utils::find_proc_grid_max_npools(t_intra_comm.size(), nkpts_ibz, 0.2);
       int np_P_2 = utils::find_proc_grid_min_diff(t_intra_comm.size()/qpools_2, 1, 1);
@@ -302,7 +302,7 @@ namespace methods {
 
       auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
           t_intra_comm, {1, qpools, np_P, np_Q}, {ns, nkpts_no_trev, NP, NQ},
-          {1, bsize[1], bsize[2], bsize[3]});
+          {0, 0, tcount[2], tcount[3]});   // (s,k) untiled; nkpts_no_trev != dW's q extent
       // CNY: the t dimension is tpools not nt_half! Since each t_intra_comm processes one t-point
       //      at a time, we only need tpools along t-axis.
       auto sSigma_tskab = make_shared_array<nda::array_view<ComplexType, 5>>(

@@ -74,7 +74,7 @@ void qe_one_body_components(mpi_context_t& mpi_context, mf::MF& mfobj)
   // psi(is,ik,ia,g)
   auto psi = mf::read_distributed_orbital_set_ibz<larray>(mfobj,world,'w');
   // (is, ik, ia, g)
-  auto hpsi = make_distributed_array<larray>(world,psi.grid(),psi.global_shape(),psi.block_size());  
+  auto hpsi = make_distributed_array<larray>(world,psi.grid(),psi.global_shape(),psi.tile_count());  
   hpsi.local() = ComplexType{0.0};
 
   long npol = mfobj.npol();
@@ -86,7 +86,7 @@ void qe_one_body_components(mpi_context_t& mpi_context, mf::MF& mfobj)
   auto b_range = nda::range(nbnd);
 
   auto Hij = make_distributed_array<larray>(world,psi.grid(),{nspin,nkpts,nbnd,nbnd},
-                 {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});  
+                 {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});  
   Hij.local() = ComplexType(0.0);
 
   // kinetic part
