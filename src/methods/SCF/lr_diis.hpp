@@ -47,6 +47,11 @@ struct lr_iter_params {
   double mixing = 1.0;
   size_t max_subsp_size = 5;
   size_t diis_warmup = 3;
+
+  /// True when the accelerator is allowed to extrapolate. "damping" never does,
+  /// and lr_diis collapses its subspace accordingly. Single source of the string
+  /// comparison, so no caller repeats the literal.
+  bool use_diis() const { return alg == "DIIS"; }
 };
 
 
@@ -87,22 +92,31 @@ public:
   using Vec1D    = nda::array<ComplexType, 1>;
 
   /**
-   * @param max_subsp_size - maximum number of history vectors kept
-   * @param warmup_iter    - damping-only steps before extrapolation is allowed
-   * @param mixing         - damping factor used while in warmup (>= 1 is a no-op)
-   * @param min_subsp      - history vectors required before extrapolating,
-   *                         counted AFTER the current step is stored. 3 (the
-   *                         default) puts the first extrapolation on the third
-   *                         call; 2 enables a two-term (secant / Aitken) step
-   *                         at the second call.
+   * @param params    - the whole iteration spec: alg, mixing, subspace depth,
+   *                    warmup. "damping" collapses the subspace to depth 1 and the
+   *                    warmup to 0, which is what puts a damping run on the damping
+   *                    write for good (see is_simple_mixing).
+   * @param min_subsp - history vectors required before extrapolating, counted
+   *                    AFTER the current step is stored. 3 (the default) puts the
+   *                    first extrapolation on the third call; 2 enables a two-term
+   *                    (secant / Aitken) step at the second call.
    */
-  lr_diis(size_t max_subsp_size, size_t warmup_iter, double mixing,
-          size_t min_subsp = 3)
-      : _max_subsp_size(max_subsp_size),
-        _warmup_iter(warmup_iter),
-        _mixing(mixing),
+  explicit lr_diis(lr_iter_params const& params, size_t min_subsp = 3)
+      : _max_subsp_size(params.use_diis() ? params.max_subsp_size : 1),
+        _warmup_iter(params.use_diis() ? params.diis_warmup : 0),
+        _mixing(params.mixing),
         _min_subsp(min_subsp),
-        _B(0, 0) {}
+        _B(0, 0) {
+    // A DIIS run whose max_subsp_size is below min_subsp gets the permanent
+    // warmup gate is_simple_mixing() describes, and silently degrades to plain
+    // damping — which would otherwise show up only as "DIIS converges exactly
+    // like mixing".
+    utils::check(!params.use_diis() or !is_simple_mixing(),
+                 "lr_diis: DIIS was requested but a subspace of depth {} can never "
+                 "reach min_subsp = {}, so it would never extrapolate. Raise "
+                 "iter_params.max_subsp_size or use damping explicitly.",
+                 _max_subsp_size, _min_subsp);
+  }
 
   /**
    * @brief Empty the subspace, keeping every history buffer allocated.
@@ -129,16 +143,11 @@ public:
    */
   bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
 
-  /**
-   * @brief True when this accelerator is the identity: undamped Picard.
-   *
-   * Simple mixing with mixing = 1 writes back exactly what it was handed. There
-   * is then nothing to extrapolate from and nothing to damp against, so
-   * next_step_combined takes its fast path: it returns without touching — and
-   * therefore without ever allocating — the ring. Callers do not branch on this;
-   * they read the bool next_step_combined returns.
-   */
-  bool is_identity() const { return is_simple_mixing() && _mixing >= 1.0; }
+  /// Subspace depth, and whether a residual vector is kept per entry. Both follow
+  /// from the algorithm, so the caller's memory report reads them here instead of
+  /// re-deriving them from lr_iter_params.
+  size_t max_subsp_size() const { return _max_subsp_size; }
+  bool stores_residuals() const { return !is_simple_mixing(); }
 
   /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
@@ -164,20 +173,17 @@ public:
    * @param DeltaSigma_prev  - [INPUT]  this rank's slice of the previous ΔΣ
    * @param iter             - [INPUT]  current iteration number (1-based)
    *
-   * @return whether the arrays were modified. False only on the identity
-   *         (undamped Picard) fast path, where the caller's arrays are already
-   *         the kernel output and no history is kept. This is what lets every
-   *         mixing option share one call site: the caller asks what happened
-   *         instead of deciding beforehand.
+   * Every mixing option takes the same path through here, undamped Picard
+   * included: its damping write is a no-op (mixing >= 1 leaves the arrays
+   * untouched) and its ring is never read, but it is still stored, so the caller
+   * needs no per-algorithm branch and the raw pre-mixing slice is available for
+   * every configuration.
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
-  bool next_step_combined(Comm& comm, utils::part_map const& pmap,
+  void next_step_combined(Comm& comm, utils::part_map const& pmap,
                           FView DeltaF, FPrev const& DeltaF_prev,
                           SView DeltaSigma, SPrev const& DeltaSigma_prev,
                           int iter) {
-    // Undamped Picard: the mixed value IS the input. Return before push_slot, so
-    // a run that never mixes never grows the ring.
-    if (is_identity()) return false;
     const bool has_sigma = (DeltaSigma.size() > 0);
 
     // This rank's contiguous slice of the flattened ΔF. The "prev" arrays are
@@ -247,7 +253,7 @@ public:
       app_log(3, "    DIIS: warmup iter {} -> damping (mixing={:.2f}, subspace={})",
               iter, _mixing, _n);
       write_damping();
-      return true;
+      return;
     }
 
     auto C = compute_coefs();
@@ -263,7 +269,7 @@ public:
     if (c_norm < 1e-14) {
       app_log(2, "    DIIS: extrapolation failed (ill-conditioned B) -> fallback to damping");
       write_damping();
-      return true;
+      return;
     }
 
     // Extrapolate: out_slice <- Σ_i C(i) * trial_i  (in place).
@@ -274,7 +280,6 @@ public:
     }
 
     app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
-    return true;
   }
 
   /**
@@ -287,15 +292,15 @@ public:
    * hold once mixing has run. Invalidated by reset(), and by the next
    * next_step_combined call.
    *
-   * newest_xS() is meaningful only when the second slot actually carried a
+   * newest_raw_Sigma() is meaningful only when the second slot actually carried a
    * quantity; a ΔF-only call leaves it empty.
    */
-  Vec1D const& newest_xF() const {
-    utils::check(_n > 0, "lr_diis::newest_xF: the subspace is empty.");
+  Vec1D const& newest_raw_F() const {
+    utils::check(_n > 0, "lr_diis::newest_raw_F: the subspace is empty.");
     return _xF[slot(_n - 1)];
   }
-  Vec1D const& newest_xS() const {
-    utils::check(_n > 0, "lr_diis::newest_xS: the subspace is empty.");
+  Vec1D const& newest_raw_Sigma() const {
+    utils::check(_n > 0, "lr_diis::newest_raw_Sigma: the subspace is empty.");
     return _xS[slot(_n - 1)];
   }
 

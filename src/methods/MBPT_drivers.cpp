@@ -1705,8 +1705,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
-                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP",
-                  "LR_HESS_DYSON"}) {
+                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP"}) {
     lr_init_timer.add(v);
   }
   lr_init_timer.start("LR_INIT");
@@ -2072,7 +2071,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.qp_static        = pQpStatic;
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
-  p.hessian = hessian;
+  p.hessian_nmodes = hessian ? nmodes : 0;
   // Split-kernel schedule. It selects which solvers lr_setup builds and how many
   // ΔΣ-sized buffers it allocates, so it has to be in `p` rather than per-solve.
   p.sc_kernel        = sc_kernel;
@@ -2216,44 +2215,24 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
   }
 
-  // Pass 2 of the stationary hessian estimator. Per mode: put the stored raw
-  // ΔF'/ΔΣ' back into the mode-loop shm arrays (free scratch after the last
-  // dump), run the extra Dyson on ΔV' = ΔH0 + ΔF' + ΔΣ', and accumulate against
-  // every stored mode. No new shm array: ΔG'' lands in sDeltaG_tskij and ΔDm'' in
-  // sDeltaDm_skij, and ΔDm'' is never persisted.
+  // Pass 2 of the stationary hessian estimator, driven by lr_hessian_t itself: per
+  // mode it rebuilds the stored raw ΔF/ΔΣ, runs the extra Dyson on
+  // ΔV = ΔH0 + ΔF + ΔΣ, and contracts the improved solution against every stored
+  // mode. It works in the mode loop's own shm arrays — free scratch after the last
+  // dump — so no array is allocated here and ΔDm' is never persisted.
   if (opt_hessian) {
-    for (long m = 0; m < nmodes; ++m) {
-      auto& sDeltaH0 = lr_state.sDeltaH0_skij.value();
-      if (mpi->comm.root())
-        sDeltaH0.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
-      sDeltaH0.broadcast_to_nodes(0);
-      mpi->comm.barrier();
-
-      opt_hessian->rebuild_raw_kernel(m, lr_state.sDeltaF_skij.value(), pDeltaSigma);
-      // The extra Dyson solve on ΔV = ΔH0 + ΔF_raw + ΔΣ_raw. fix_density is the
-      // flag pass 1 used, so this recomputes Δμ from this ΔV and applies the same
-      // (constrained) bubble. ΔG(τ) is replicated only when the Matsubara term
-      // needs it — it is the most expensive step in LR.
-      lr_init_timer.start("LR_HESS_DYSON");
-      Delta_mu_improved_m(m) = driver.dyson().solve_lr_dyson(
-          lr_state.sDeltaDm_skij.value(), sDeltaH0,
-          lr_state.sDeltaF_skij.value(), pDeltaSigma, fix_density);
-      if (include_gw_sigma)
-        driver.dyson().materialize_DeltaG_tau(lr_state.sDeltaG_tskij.value());
-      mpi->comm.barrier();
-      lr_init_timer.stop("LR_HESS_DYSON");
-      opt_hessian->set_improved(
-          m, lr_state.sDeltaDm_skij.value(),
-          include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr);
-      mpi->comm.barrier();
-    }
+    Delta_mu_improved_m = opt_hessian->solve_improved(
+        driver.dyson(), lr_state.sDeltaH0_skij.value(),
+        lr_state.sDeltaDm_skij.value(), lr_state.sDeltaF_skij.value(),
+        pDeltaSigma,
+        include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr,
+        DeltaH0_mskij_root, fix_density);
 
     auto c1 = opt_hessian->assemble();
-    opt_hessian->print_timers();
-    // Reported here, not from lr_solve_one's own table: the extra Dyson happens
-    // in this pass, after every lr_solve_one has already printed.
-    driver.print_hessian_timers(lr_init_timer.elapsed("LR_HESS_DYSON"),
-                                lr_init_timer.number_of_calls("LR_HESS_DYSON"));
+    // The K_pert refresh is the one clock lr_driver owns; the rest of the table is
+    // lr_hessian's own.
+    opt_hessian->print_timers(driver.hessian_refresh_sec(),
+                              driver.hessian_refresh_calls());
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
     // mode-PAIR matrices. dump_lr rebinds its group to mode{m} for a batched run,
@@ -2278,14 +2257,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                     grp.create_group("linear_response");
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
       nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
-      nda::h5_write(lr_grp, "hessian_N", c1.N, false);
-      nda::h5_write(lr_grp, "hessian_M2", c1.M2, false);
-      nda::h5_write(lr_grp, "hessian_static2", c1.static2, false);
+      nda::h5_write(lr_grp, "hessian_M", c1.M, false);
+      nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
+      nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
       nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
       nda::h5_write(lr_grp, "Delta_mu_improved", Delta_mu_improved_m, false);
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
       h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
-      h5::h5_write(lr_grp, "hessian_N_herm_dev", c1.herm_N);
+      h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
       app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
               nmodes);
     }

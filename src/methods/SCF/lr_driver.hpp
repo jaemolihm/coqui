@@ -266,12 +266,14 @@ struct lr_params {
   /// Gather the unperturbed V_HF in the aux basis during the IBC build.
   bool keep_F_PQ = false;
   /// Evaluate the free-energy hessian through the variationally-stationary
-  /// (quadratic-error) functional as well as the plain contraction. Opt-in: it
-  /// costs one extra Dyson solve per perturbation plus two striped ω stores, and
-  /// it needs the RAW (pre-mixing) ΔF/ΔΣ of the final iteration, which is why
-  /// lr_solve_one keeps track of whether the returned arrays are mixed.
-  /// See lr_hessian.hpp for the functional and its conventions.
-  bool hessian = false;
+  /// (quadratic-error) functional as well as the plain contraction, for a batch of
+  /// this many perturbations; 0 leaves it off. Opt-in: it costs one extra Dyson
+  /// solve per perturbation plus two striped ω stores, and it needs the RAW
+  /// (pre-mixing) ΔF/ΔΣ of the final iteration.
+  ///
+  /// A count rather than a flag because print_memory_estimate sizes the ω stores
+  /// from it. See lr_hessian.hpp for the functional and its conventions.
+  long hessian_nmodes = 0;
 
   bool need_hf() const { return include_hartree || include_exchange; }
   bool include_gw_sigma() const { return gw_mode != lr_gw_update_mode::none; }
@@ -284,8 +286,9 @@ struct lr_params {
   bool has_Vcorr() const { return qp_mode(); }
   bool has_Sigma() const { return include_gw_sigma() && !qp_mode(); }
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
-  bool use_diis() const { return iter_params.alg == "DIIS"; }
+  bool use_diis() const { return iter_params.use_diis(); }
   double mixing() const { return iter_params.mixing; }
+  bool hessian() const { return hessian_nmodes > 0; }
 };
 
 /// The kernel split a run executes: which components the inner SCF loop resums
@@ -299,9 +302,15 @@ struct lr_kernel_split;
  * K_pert, resolved once by lr_driver::sc_channel() / pert_channel().
  *
  * This is what makes apply_kernel channel-agnostic: `ch` carries as data which
- * evaluator instances to drive, which component switches to pass them, which timer
- * regions to bill, and which of the self-consistent channel's privileges this
- * channel has.
+ * evaluator instances to drive, which component switches to pass them, and which of
+ * the self-consistent channel's privileges this channel has.
+ *
+ * "Kernel" vs "channel": lr_kernel_split says WHICH components of K are resummed
+ * self-consistently and which are applied perturbatively — the decomposition
+ * K = K_sc + K_pert. lr_kernel_channel is ONE side of that decomposition with
+ * everything needed to evaluate it resolved. Timing is per function, not per
+ * channel, so the clocks are named inside apply_kernel and both channels bill the
+ * same regions.
  */
 struct lr_kernel_channel {
   /// The Σ component flags (term 1 / term 2) this channel carries.
@@ -317,14 +326,6 @@ struct lr_kernel_channel {
 
   solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
   solvers::lr_gw* gw = nullptr;
-
-  /// Timer regions of THIS channel. Both channels run the same evaluators, and the
-  /// cost argument for a split kernel is exactly the sc/pert breakdown, so each
-  /// gets its own clocks.
-  const char* clk_hf = nullptr;
-  const char* clk_pi = nullptr;
-  const char* clk_w = nullptr;
-  const char* clk_sigma = nullptr;
 
   /// Contract -W_c(iν=0) as the static counter-term instead of V + W_c(iν=0). Only
   /// a split run's remainder owes it. See lr_params::exchange_static_W.
@@ -451,8 +452,15 @@ public:
    * The mixing block destroys the raw output: it overwrites the shared arrays in
    * place, and the "previous iterate" buffers hold the previous *already mixed*
    * value. The raw slice survives in the inner accelerator's ring, which stores it
-   * ahead of both the extrapolation and the damping write. Nothing to do when the
-   * final iteration did not mix (a one-iteration stage, or undamped Picard).
+   * ahead of both the extrapolation and the damping write.
+   *
+   * Reading that ring is not, however, the whole of it, which is why this exists as
+   * a function at all. The ring holds each rank's element STRIPE of the SC CHANNEL
+   * alone, and every consumer wants the node-replicated TOTAL. So this also adds the
+   * perturbative source back in and republishes — the same fence / node-barrier /
+   * allgatherv-among-node-roots epilogue the SCF loop's own mixing block runs.
+   * Nothing to do when the final iteration did not mix at all (a one-iteration
+   * stage), since the arrays are then already the kernel output.
    *
    * On a split-kernel run the perturbative source is additionally frozen at
    * K_pert(ΔG at stage start), so this re-evaluates K_pert on the returned ΔG
@@ -480,8 +488,8 @@ public:
    * a caller-supplied ΔV = ΔH0 + ΔF_raw + ΔΣ_raw, and must use *this* object: the
    * same operator with the same cached setup pass 1 applied.
    *
-   * The caller drives it directly — `solve_lr_dyson(...)` and, only when the
-   * functional's Matsubara term needs ΔG(τ), `materialize_DeltaG_tau(...)`. Note
+   * `lr_hessian_t::solve_improved` drives it — `solve_lr_dyson(...)` and, only when
+   * the functional's Matsubara term needs ΔG(τ), `materialize_DeltaG_tau(...)`. Note
    * that `fix_density` must be the flag pass 1 used: with it the solve recomputes
    * Δμ self-consistently from this ΔV, which keeps the constrained bubble
    * P_fd = P − u u†/⟨S,u⟩ — still self-adjoint — that pass 1 applied. lr_dyson
@@ -493,18 +501,12 @@ public:
     return _lr_dyson;
   }
 
-  /**
-   * Report (verbosity 2) the hessian timing table: the one clock lr_driver owns
-   * (the K_pert refresh) plus the extra-Dyson figures the caller supplies, since
-   * the caller drives dyson() itself and so clocks that solve on its own
-   * TimerManager.
-   *
-   * Separate from print_timers() because that one runs at the end of every
-   * lr_solve_one, i.e. inside the mode loop, where the extra Dyson has not
-   * happened yet — the feature's dominant cost would read 0.000 sec in every run.
-   * Call it after the pass-2 loop.
-   */
-  void print_hessian_timers(double extra_dyson_sec, int extra_dyson_calls);
+  /// The one hessian clock lr_driver owns: the K_pert refresh inside
+  /// get_kernel_before_mixing. Reported by lr_hessian_t::print_timers, which holds
+  /// the rest of the table — this is not in print_timers() because that runs at the
+  /// end of every lr_solve_one, before the refresh of that same solve.
+  double hessian_refresh_sec() { return _Timer.elapsed("LR_HESS_PERT_REFRESH"); }
+  int hessian_refresh_calls() { return _Timer.number_of_calls("LR_HESS_PERT_REFRESH"); }
 
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
@@ -531,6 +533,11 @@ public:
    * lr_dyson's Δμ response dG/dμ(τ), a second ΔG(τ)-sized distributed array.
    *
    * `exchange_static_W` marks the HSEX kernel, which keeps W_c(iν=0) resident.
+   *
+   * `hessian_nmodes` is the perturbation batch of the stationary hessian estimator
+   * (0 = off). Its two striped ω stores scale with it and are the largest thing the
+   * feature allocates, so they are listed here with everything else rather than
+   * reported separately by lr_hessian_t.
    */
   void print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
                              std::vector<std::string> const& extra_sigma = {},
@@ -538,7 +545,8 @@ public:
                              lr_diis_hist_t inner_hist = {},
                              lr_diis_hist_t outer_hist = {},
                              bool need_Delta_mu = false,
-                             bool exchange_static_W = false);
+                             bool exchange_static_W = false,
+                             long hessian_nmodes = 0);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large

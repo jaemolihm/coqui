@@ -23,6 +23,7 @@
 #define COQUI_LR_HESSIAN_HPP
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "nda/nda.hpp"
@@ -31,6 +32,7 @@
 #include "utilities/Timer.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/shared_array/nda.hpp"
+#include "methods/SCF/lr_dyson.hpp"
 
 namespace methods {
 
@@ -41,13 +43,13 @@ namespace methods {
  */
 struct lr_hessian_result_t {
   nda::array<ComplexType, 2> hessian_plain;  ///< Tr(ΔH0_λ, ΔDm_p), the plain estimator
-  nda::array<ComplexType, 2> hessian_sym;    ///< static2 + M2 − N, the stationary one
-  nda::array<ComplexType, 2> N;              ///< ⟨K ΔX_λ, ΔX_p⟩, computed in full
-  nda::array<ComplexType, 2> M2;             ///< ⟨K ΔX_λ, ΔX'_p⟩
-  nda::array<ComplexType, 2> static2;        ///< Tr(ΔH0_λ, ΔDm'_p)
+  nda::array<ComplexType, 2> hessian_sym;    ///< static' + M' − M, the stationary one
+  nda::array<ComplexType, 2> M;              ///< ⟨K ΔX_λ, ΔX_p⟩, computed in full
+  nda::array<ComplexType, 2> M_prime;        ///< ⟨K ΔX_λ, ΔX'_p⟩
+  nda::array<ComplexType, 2> static_prime;   ///< Tr(ΔH0_λ, ΔDm'_p)
   double herm_plain = 0.0;   ///< ‖hessian_plain − hessian_plain†‖ / ‖hessian_plain‖
   double herm_sym = 0.0;     ///< ‖hessian_sym − hessian_sym†‖ / ‖hessian_sym‖
-  double herm_N = 0.0;       ///< ‖N − N†‖ / ‖N‖  (self-adjointness of K, measured)
+  double herm_M = 0.0;       ///< ‖M − M†‖ / ‖M‖  (self-adjointness of K, measured)
 };
 
 /**
@@ -92,13 +94,13 @@ struct lr_hessian_result_t {
  *
  * Then
  *
- *   hessian_sym[λ,p] = Tr(ΔH0_λ, ΔDm'_p) + M2[λ,p] − N[λ,p]
- *   N [λ,p] = Tr(ΔF_λ, ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )    = ⟨K ΔX_λ, ΔX_p⟩
- *   M2[λ,p] = Tr(ΔF_λ, ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)    = ⟨K ΔX_λ, ΔX'_p⟩
+ *   hessian_sym[λ,p] = Tr(ΔH0_λ, ΔDm'_p) + M'[λ,p] − M[λ,p]
+ *   M [λ,p] = Tr(ΔF_λ, ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )    = ⟨K ΔX_λ, ΔX_p⟩
+ *   M'[λ,p] = Tr(ΔF_λ, ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)    = ⟨K ΔX_λ, ΔX'_p⟩
  *
  * is stationary about the exact solution, so its error is quadratic. The price is
  * the one extra Dyson solve per mode. At convergence ΔX' = ΔX and the correction
- * `M2 − N + Tr(ΔH0, ΔDm') − Tr(ΔH0, ΔDm)` cancels identically, which is what
+ * `M' − M + Tr(ΔH0, ΔDm') − Tr(ΔH0, ΔDm)` cancels identically, which is what
  * `assemble` reports as ‖hessian_sym − hessian_plain‖.
  *
  * ## 4. The two traces, and why the dynamic one carries a conj and a −iω_n
@@ -149,8 +151,8 @@ struct lr_hessian_result_t {
  *
  * This pairing is the one under which both the bubble P (ω-local) and the kernel
  * K (τ-local) are self-adjoint, which is the same property that makes the
- * estimator second order — hence `herm_N` below is a diagnostic of the estimator
- * and not merely of `N`.
+ * estimator second order — hence `herm_M` below is a diagnostic of the estimator
+ * and not merely of `M`.
  *
  * A static left operand is n-independent under `refl`, so its share of every
  * ⟨ΔΣ,·⟩ collapses onto `Tr` against ΔDm = −ΔG(β⁻). ΔF is therefore never fed
@@ -169,12 +171,30 @@ struct lr_hessian_result_t {
  *
  * ## 6. Hermiticity is measured, never assumed
  *
- * `N` and `hessian_sym` are computed in full, both triangles, and their
+ * `M` and `hessian_sym` are computed in full, both triangles, and their
  * antihermitian parts are reported. `A^{−q} = [A^{q}]†` in §4 holds for a
  * perturbation with the real-potential TRS structure; a perturbation without it
  * (a random Hermitian test ΔH0, say) breaks the τ-evenness the ΔΠ→ΔW path relies
- * on, and `herm_N` is what detects that. Physical phonon perturbations have the
- * structure, so on those `herm_N` sits at the roundoff floor.
+ * on, and `herm_M` is what detects that. Physical phonon perturbations have the
+ * structure, so on those `herm_M` sits at the roundoff floor.
+ *
+ * ## 7. Why two passes over the perturbations
+ *
+ * `store_mode` runs inside the caller's mode loop and only stores; `solve_improved`
+ * is a second loop afterwards. The split is forced from both ends.
+ *
+ * Pass 1 cannot contract, because `M'[λ,p]` pairs mode p's improved solution
+ * against EVERY λ, including the ones not solved yet. Pass 2 cannot be merged back
+ * into the mode loop for the same reason.
+ *
+ * The alternative — do the extra Dyson in the mode loop and keep ΔG'_p for all
+ * modes, contracting at the end — needs a THIRD ω store the size of `_Gw`, i.e.
+ * +50% on the largest allocation the feature makes. Contracting ΔX'_p against every
+ * stored λ the moment it exists is what keeps it at two.
+ *
+ * What pass 1 must capture, then, is exactly what the next solve destroys: the RAW
+ * (pre-mixing) ΔF/ΔΣ live in the inner accelerator's ring, which is reset per
+ * solve. Everything else pass 2 needs it reconstructs.
  */
 class lr_hessian_t {
 public:
@@ -225,42 +245,41 @@ public:
                   sArray_t<Array_view_5D_t> const* sDeltaG);
 
   /**
-   * @brief Pass-2 step: put the stored raw ΔF_p / ΔΣ_p back into shm, so the
-   *        extra Dyson solve can be handed ΔV = ΔH0 + ΔF + ΔΣ.
+   * @brief Pass 2, whole: for every stored mode, solve the extra Dyson equation on
+   *        its raw kernel output and contract the improved solution in.
    *
-   * ΔΣ(τ) is rebuilt by a rank-local `w_to_tau` of this rank's ω slab followed
-   * by one completion collective per τ point; the τ axis is never split, which
-   * is why the partition runs over the (s,k,i,j) elements only.
+   * Per mode p: refill ΔH0 from the caller's stack, put the stored raw ΔF_p / ΔΣ_p
+   * back into shm, solve ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], and accumulate ΔX'_p
+   * against every stored λ. `dyson` must be the SAME solver pass 1 used — the same
+   * operator with the same cached setup — and `fix_density` the flag pass 1 passed,
+   * so the solve recomputes Δμ from this ΔV and applies the same constrained
+   * (still self-adjoint) bubble.
    *
-   * COST NOTE. That is `nt` internode allgathervs per mode (~100 at production),
-   * serialized on the node root, where a single ΔΣ-wide completion was budgeted.
-   * The total bytes are the same and it is a no-op on one node
-   * (`complete_node_slices` returns immediately for n_nodes <= 1), so nothing
-   * below np ~ 100 on a single node measures it at all: read `LR_HESS_REBUILD` from
-   * a genuine multi-node run before quoting an overhead for this feature. A
-   * single collective would need the store transposed to (element, τ), which
-   * would in turn split the ω axis the IAFT transforms need whole.
+   * The shm arrays are the mode loop's own, free scratch once the last checkpoint
+   * dump has run: ΔG'' lands in `sDeltaG`, ΔDm'' in `sDeltaDm`, and neither is
+   * persisted. Collective on mpi->comm.
    *
-   * Collective on mpi->comm. The destinations are the mode loop's shm arrays,
-   * free scratch after the last checkpoint dump.
+   * @param dyson      - [IN/OUT] the run's LR Dyson solver
+   * @param sDeltaH0   - [IN/OUT] ΔH0 window, refilled per mode from the stack
+   * @param sDeltaDm   - [OUT] scratch for ΔDm'_p
+   * @param sDeltaF    - [OUT] scratch for the rebuilt raw ΔF_p
+   * @param sDeltaSigma- [OUT] scratch for the rebuilt raw ΔΣ_p; null if Σ-free
+   * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free
+   * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
+   *                                     the global root only
+   * @param fix_density- [INPUT] the flag pass 1 solved with
+   *
+   * @return Δμ' of each mode, as the extra solve recomputed it
    */
-  void rebuild_raw_kernel(long p,
-                          sArray_t<Array_view_4D_t>& sDeltaF_out,
-                          sArray_t<Array_view_5D_t>* sDeltaSigma_out);
-
-  /**
-   * @brief Pass-2 step: accumulate everything the improved solution contributes.
-   *
-   * `M2(:,λ,p)` and the `Tr(ΔF_λ, ΔDm'_p)` / `Tr(ΔH0_λ, ΔDm'_p)` parts are
-   * accumulated for every λ against this one p, so ΔG'_p / ΔDm'_p never persist.
-   *
-   * @param p        - [INPUT] mode index
-   * @param sDeltaDm - [INPUT] ΔDm'_p
-   * @param sDeltaG  - [INPUT] ΔG'_p, null for a Σ-free kernel
-   */
-  void set_improved(long p,
-                    sArray_t<Array_view_4D_t> const& sDeltaDm,
-                    sArray_t<Array_view_5D_t> const* sDeltaG);
+  nda::array<double, 1> solve_improved(
+      lr_dyson& dyson,
+      sArray_t<Array_view_4D_t>& sDeltaH0,
+      sArray_t<Array_view_4D_t>& sDeltaDm,
+      sArray_t<Array_view_4D_t>& sDeltaF,
+      sArray_t<Array_view_5D_t>* sDeltaSigma,
+      sArray_t<Array_view_5D_t>* sDeltaG,
+      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
+      bool fix_density);
 
   /**
    * @brief Finish: `N` over all mode pairs, reduce, apply the Matsubara tail and
@@ -271,14 +290,48 @@ public:
    */
   lr_hessian_result_t assemble();
 
-  /// Report (verbosity 2) the pass-1/pass-2 clocks owned by this object: the
-  /// stores, the shm rebuild, the pair contractions and the Matsubara tail. The
-  /// K_pert refresh is lr_driver's clock, and the extra Dyson is the caller's,
-  /// since the caller drives lr_driver::dyson() itself; both appear in
-  /// lr_driver::print_hessian_timers().
-  void print_timers();
+  /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
+  /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail. The
+  /// K_pert refresh is the one clock this object does not own — it is billed inside
+  /// lr_driver::get_kernel_before_mixing — so it is passed in from
+  /// lr_driver::hessian_refresh_sec() rather than reported separately.
+  void print_timers(double pert_refresh_sec, int pert_refresh_calls);
 
 private:
+  /**
+   * @brief Put the stored raw ΔF_p / ΔΣ_p back into shm, so the extra Dyson solve
+   *        can be handed ΔV = ΔH0 + ΔF + ΔΣ.
+   *
+   * ΔΣ(τ) is rebuilt by a rank-local `w_to_tau` of this rank's ω slab followed by
+   * one completion collective per τ point; the τ axis is never split, which is why
+   * the partition runs over the (s,k,i,j) elements only.
+   *
+   * COST NOTE. That is `nt` internode allgathervs per mode (~100 at production),
+   * serialized on the node root, where a single ΔΣ-wide completion was budgeted.
+   * The total bytes are the same and it is a no-op on one node
+   * (`complete_node_slices` returns immediately for n_nodes <= 1), so nothing below
+   * np ~ 100 on a single node measures it at all: read `LR_HESS_REBUILD` from a
+   * genuine multi-node run before quoting an overhead for this feature. A single
+   * collective would need the store transposed to (element, τ), which would in turn
+   * split the ω axis the IAFT transforms need whole.
+   */
+  void rebuild_raw_kernel(long p,
+                          sArray_t<Array_view_4D_t>& sDeltaF_out,
+                          sArray_t<Array_view_5D_t>* sDeltaSigma_out);
+
+  /**
+   * @brief Contract the improved solution ΔX'_p of one mode against every stored λ.
+   *
+   *   static'[λ,p] += Tr  (ΔH0_λ, ΔDm'_p)
+   *   M'     [λ,p] += Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
+   *
+   * Both are accumulated over all λ here and now, which is why ΔDm'_p / ΔG'_p never
+   * have to persist and why every mode must already be stored.
+   */
+  void accumulate_improved(long p,
+                           sArray_t<Array_view_4D_t> const& sDeltaDm,
+                           sArray_t<Array_view_5D_t> const* sDeltaG);
+
   /// Σ_e w_e conj(a_e) b_e over this rank's elements, `b` already weighted.
   ComplexType trace_static_local(nda::array<ComplexType, 1> const& a,
                          nda::array<ComplexType, 1> const& b) const;
@@ -324,7 +377,7 @@ private:
   std::vector<nda::array<ComplexType, 2>> _Gw;    ///< ΔG_p(iω), weighted
   std::vector<nda::array<ComplexType, 1>> _dH0;   ///< ΔH0_λ, unweighted
   std::vector<nda::array<ComplexType, 1>> _dF;    ///< ΔF_λ, unweighted
-  std::vector<nda::array<ComplexType, 1>> _dDm1;  ///< ΔDm_p, weighted
+  std::vector<nda::array<ComplexType, 1>> _dDm;  ///< ΔDm_p, weighted
 
   // Mode-pair accumulators, one pair of arrays per TERM of the functional. Each
   // term is Tr(static) + Tr_ω(dynamic); the two halves are accumulated apart
@@ -332,14 +385,14 @@ private:
   // reduced once, in assemble().
   //
   //   H_plain = plain
-  //   H_sym   = static2 + M2 − N
+  //   H_sym   = static' + M' − M
   //
-  nda::array<ComplexType, 2> _plain_stat;              ///< Tr(ΔH0_λ, ΔDm_p)
-  nda::array<ComplexType, 2> _static2_stat;            ///< Tr(ΔH0_λ, ΔDm'_p)
-  nda::array<ComplexType, 2> _N_stat;                  ///< Tr(ΔF_λ, ΔDm_p)
-  nda::array<ComplexType, 3> _N_mats;                  ///< Tr_ω(ΔΣ_λ, ΔG_p)
-  nda::array<ComplexType, 2> _M2_stat;                 ///< Tr(ΔF_λ, ΔDm'_p)
-  nda::array<ComplexType, 3> _M2_mats;                 ///< Tr_ω(ΔΣ_λ, ΔG'_p)
+  nda::array<ComplexType, 2> _plain_stat;         ///< Tr(ΔH0_λ, ΔDm_p)
+  nda::array<ComplexType, 2> _static_prime_stat;  ///< Tr(ΔH0_λ, ΔDm'_p)
+  nda::array<ComplexType, 2> _M_stat;             ///< Tr(ΔF_λ, ΔDm_p)
+  nda::array<ComplexType, 3> _M_mats;             ///< Tr_ω(ΔΣ_λ, ΔG_p)
+  nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)
+  nda::array<ComplexType, 3> _Mp_mats;            ///< Tr_ω(ΔΣ_λ, ΔG'_p)
 
   std::vector<bool> _stored, _improved;
   /// assemble() reduces the accumulators in place, so it is single-shot.

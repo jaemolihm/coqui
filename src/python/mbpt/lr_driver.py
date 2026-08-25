@@ -268,9 +268,12 @@ def read_lr_hessian(filename: str) -> dict:
     -------
     dict
         ``hessian`` (the plain estimator), ``hessian_sym`` (the stationary one),
-        the diagnostics ``hessian_N`` / ``hessian_M2`` / ``hessian_static2``, the
-        ``hessian_call_index`` list, ``Delta_mu_improved``, the scalar
-        ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_N_herm_dev``
+        the two kernel pairings ``hessian_M`` = <K dX_l, dX_p> and
+        ``hessian_M_prime`` = <K dX_l, dX'_p> together with
+        ``hessian_static_prime`` = Tr(dH0_l, dDm'_p), so that
+        ``hessian_sym = hessian_static_prime + hessian_M_prime - hessian_M``, the
+        ``hessian_call_index`` list, ``Delta_mu_improved``, and the scalar
+        ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_M_herm_dev``
         residuals.
 
     Raises
@@ -294,10 +297,10 @@ def read_lr_hessian(filename: str) -> dict:
     Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the same
     file can contend on the file lock.
     """
-    complex_keys = ("hessian", "hessian_sym", "hessian_N", "hessian_M2",
-                    "hessian_static2")
+    complex_keys = ("hessian", "hessian_sym", "hessian_M", "hessian_M_prime",
+                    "hessian_static_prime")
     real_keys = ("hessian_call_index", "Delta_mu_improved")
-    scalar_keys = ("hessian_herm_dev", "hessian_sym_herm_dev", "hessian_N_herm_dev")
+    scalar_keys = ("hessian_herm_dev", "hessian_sym_herm_dev", "hessian_M_herm_dev")
 
     with h5py.File(filename, 'r') as f:
         if 'linear_response' not in f:

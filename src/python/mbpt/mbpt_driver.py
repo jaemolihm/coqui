@@ -517,9 +517,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         linearly in it, at the cost of one extra Dyson solve per perturbation
         plus two striped omega stores of the per-mode dSigma / dG.
 
-        Writes the mode-PAIR matrices hessian, hessian_sym, hessian_N,
-        hessian_M2, hessian_static2, hessian_call_index, Delta_mu_improved and the
-        hessian_*_herm_dev diagnostics into the TOP-LEVEL
+        Writes the mode-PAIR matrices hessian, hessian_sym, hessian_M,
+        hessian_M_prime, hessian_static_prime, hessian_call_index,
+        Delta_mu_improved and the hessian_*_herm_dev diagnostics into the TOP-LEVEL
         "linear_response/" group; the per-mode subgroups are untouched. Shapes
         are (npert, npert) over the perturbations solved in this call, never
         padded to a full mode count, so a partial batch yields a sub-block for
