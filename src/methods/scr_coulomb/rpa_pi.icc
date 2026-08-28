@@ -64,14 +64,7 @@ namespace solvers {
     auto [t_origin, q_origin, P_origin, Q_origin] = dPi_tqPQ.origin();
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();
 
-    // k<->R transform: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1 or a
-    // symmetry-reduced q-mesh (nqpts_ibz < nkpts) selects the dense-gemm path.
-    // The FFT needs the full, Gamma-centered MP mesh, so Qpts_ibz == full Qpts.
-#if defined(ENABLE_FFTW)
-    const bool use_fft = (nkpts != 1) && (nqpts_ibz == nkpts) && !utils::debug_gemm_ft();
-#else
-    const bool use_fft = false;
-#endif
+    const bool use_fft = scr_coulomb_t::Pi_use_fft(nkpts, nqpts_ibz);
     if (use_fft && !_fft_k) {
       _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
       _fft_q.emplace(MF->Qpts_ibz(), MF->lattv(), MF->kp_grid());
@@ -105,7 +98,10 @@ namespace solvers {
         t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
     auto dbuf_skPQ  = make_distributed_array<local_Array_4D_t>(
         t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np}, {1, 1, 1, 1});
-    nda::matrix<ComplexType> X_R_PQ(nkpts, NP_loc*NQ_loc);
+    // gemm-path staging only: nda zero-fills on construction, so allocating this
+    // on the FFT path would fault in pages that are never read.
+    nda::matrix<ComplexType> X_R_PQ;
+    if (!use_fft) X_R_PQ = nda::matrix<ComplexType>(nkpts, NP_loc*NQ_loc);
     utils::check(dGp_sRPQ.local_shape()[2] == NP_loc, "dGp_sRPQ.local_shape[2] != NP_loc");
     utils::check(dGp_sRPQ.local_shape()[3] == NQ_loc, "dGp_sRPQ.local_shape[3] != NQ_loc");
     _Timer.stop("PI_ALLOC_R");

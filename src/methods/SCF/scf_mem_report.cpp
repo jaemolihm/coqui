@@ -262,8 +262,9 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     // Rank-local scratch, so its "one copy" is the largest rank's local block.
     const long NP_loc = ceil_div(p.NP, np_P);
     const long NQ_loc = ceil_div(p.NP, np_Q);
-    arrays.push_back({"X_R_PQ", fmt::format("({},{})", p.nk, NP_loc * NQ_loc),
-                      double(p.nk) * NP_loc * NQ_loc, PERRANK, G_PI});
+    if (!solvers::scr_coulomb_t::Pi_use_fft(p.nk, p.nqi))
+      arrays.push_back({"X_R_PQ", fmt::format("({},{})", p.nk, NP_loc * NQ_loc),
+                        double(p.nk) * NP_loc * NQ_loc, PERRANK, G_PI});
     arrays.push_back({"sf_Rk", fmt::format("({},{})", p.nk, p.nk),
                       double(p.nk) * p.nk, SHARED, G_PI});
     arrays.push_back({"sf_qR", fmt::format("({},{})", p.nqi, p.nk),
