@@ -1648,6 +1648,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   utils::check(lr_two_step || outer_is_default,
                "run_lr_calc: the two_step_outer_* keys require lr_two_step = true; "
                "there is no outer (perturbative-source) loop to accelerate otherwise.");
+  // Rejected here rather than in lr_setup so the caller is told before the basis
+  // and the ERI are opened. Must stay in step with
+  // lr_outer_accel_params::active() (lr_driver.hpp), which is not built yet.
+  const bool outer_requested =
+      (two_step_outer_alg == "DIIS" || two_step_outer_tol > 0.0);
+  utils::check(!outer_requested || two_step_order > 0,
+               "run_lr_calc: the two_step_outer_* keys require two_step_order >= 1; "
+               "there is no outer sequence at order 0.");
   utils::check(two_step_outer_subsp >= 2,
                "run_lr_calc: two_step_outer_subsp must be >= 2, got {}.",
                two_step_outer_subsp);
@@ -1858,9 +1866,21 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // (a ΔΣ, an exchange ΔF) that stayed identically zero, and would pay for the
   // W load they need. Everything downstream — allocation, W load, dump_lr — keys
   // off this, and it matches what run_lr derives internally.
-  const lr_kernel_spec run_kernel = (pert_order > 0) ? total_kernel : sc_kernel;
-  const bool dump_hartree = run_kernel.hartree;
-  const bool dump_exchange = run_kernel.exchange;
+  // The exception is order 0 WITH the hessian: its refresh evaluates K_pert once
+  // on the returned ΔG, so the run does need the total kernel's ΔΣ store and W
+  // load. This is lr_params::has_pert_kernel(), recomputed here because `p` is
+  // not filled in until below.
+  const bool has_pert_kernel = !pert_kernel.empty() && (pert_order > 0 || hessian);
+  const lr_kernel_spec run_kernel = has_pert_kernel ? total_kernel : sc_kernel;
+  // What the DATASETS are, which at order 0 is not what was allocated: the
+  // schedule applies K_pert never, so ΔF/ΔΣ come from the pure-K_sc solve, and
+  // the refresh that does apply it runs after the dump. Describing them with
+  // run_kernel would stamp include_exchange on a Hartree-only ΔF, and
+  // include_gw_sigma on an identically zero ΔΣ.
+  const lr_kernel_spec dumped_kernel = (pert_order > 0) ? run_kernel : sc_kernel;
+  const bool dump_hartree = dumped_kernel.hartree;
+  const bool dump_exchange = dumped_kernel.exchange;
+  const bool dump_gw_sigma = dumped_kernel.has_sigma();
   // Only allocate ΔΣ array when GW is active
   bool include_gw_sigma = run_kernel.has_sigma();
   if (include_gw_sigma) {
@@ -2146,17 +2166,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     if (exchange_static_W) hsex_head = driver.hsex_head_factor();
     chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
                    lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-                   lr_state.sDeltaF_skij.value(), pDeltaSigma,
+                   lr_state.sDeltaF_skij.value(),
+                   dump_gw_sigma ? pDeltaSigma : nullptr,
                    Delta_mu, niter,
-                   dump_hartree, dump_exchange, include_gw_sigma,
+                   dump_hartree, dump_exchange, dump_gw_sigma,
                    pDeltaSigma2, pDeltaVcorr,
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
-                   gw_mode_str(gw_mode_of(run_kernel)),
+                   gw_mode_str(gw_mode_of(dumped_kernel)),
                    lr_two_step, two_step_inner_method_in,
                    static_cast<int>(two_step_order),
                    outer_active, two_step_outer_alg, two_step_outer_tol,
-                   n_pert_applied, hsex_head);
+                   n_pert_applied, has_pert_kernel && hessian, hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 

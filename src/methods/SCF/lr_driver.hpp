@@ -232,15 +232,23 @@ struct lr_params {
   /// runs the sc kernel alone. Costs n K_pert evaluations, each on a converged
   /// inner K_sc solve; max_iter counts total inner iterations across all n+1
   /// stages. With outer_accel active this is an iteration cap, not an order.
+  /// 0 with hessian() still costs one evaluation, made by the refresh rather
+  /// than by the schedule — see has_pert_kernel().
   int pert_order = 0;
   /// Acceleration of the outer (perturbative-source) iteration. Default-valued
   /// leaves the plain Neumann series untouched. Requires a split-kernel run.
   lr_outer_accel_params outer_accel{};
 
-  /// Split-kernel run: the perturbative channel is a distinct kernel evaluated
-  /// outside the SCF resummation. Single source of truth for the extra buffers,
-  /// the outer loop and the checkpoint provenance fields.
+  /// The schedule has outer stages, i.e. there is an outer sequence at all.
+  /// Its one use is gating the outer accelerator.
   bool two_step() const { return !pert_kernel.empty() && pert_order > 0; }
+
+  /// K_pert is evaluated at least once — by the schedule, or at pert_order = 0
+  /// by the hessian's consistency refresh alone. Governs the kernel split, the
+  /// per-channel buffers, the W load and get_full_kernel_result.
+  bool has_pert_kernel() const {
+    return !pert_kernel.empty() && (pert_order > 0 || hessian());
+  }
 
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.

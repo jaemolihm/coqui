@@ -124,7 +124,10 @@ lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc
 struct lr_kernel_split {
   lr_kernel_spec sc{};
   lr_kernel_spec pert{};
-  bool do_pert = false;            ///< a perturbative pass actually runs
+  /// A perturbative pass actually runs. At pert_order = 0 the only one is
+  /// get_full_kernel_result's refresh; the split, the buffers and the W
+  /// operands are the same either way.
+  bool do_pert = false;
 
   bool sc_hf = false,    pert_hf = false;
   bool sc_sigma = false, pert_sigma = false;
@@ -157,7 +160,7 @@ lr_kernel_split make_kernel_split(lr_params const& p) {
   const lr_kernel_spec total{p.include_hartree, p.include_exchange,
                              p.include_gw_sigma(), p.gw_full()};
   const bool split_requested = !p.pert_kernel.empty();
-  k.do_pert = p.two_step();
+  k.do_pert = p.has_pert_kernel();
   k.sc   = (split_requested || !p.sc_kernel.empty()) ? p.sc_kernel : total;
   k.pert = k.do_pert ? p.pert_kernel : lr_kernel_spec{};
 
@@ -324,10 +327,14 @@ void lr_driver::lr_setup(
   utils::check(outer_tol >= 0.0,
                "lr_driver::lr_setup: the outer tolerance must be >= 0, got {}.",
                outer_tol);
-  utils::check(!outer_track || k.do_pert,
-               "lr_driver::lr_setup: outer-loop acceleration requires a "
-               "split-kernel run (pert_order >= 1 with a non-empty K_pert). "
-               "There is no outer sequence to accelerate otherwise.");
+  // two_step(), not k.do_pert: at order 0 K_pert is evaluated only after the
+  // solve, so there is no outer sequence.
+  utils::check(!outer_track || p.two_step(),
+               "lr_driver::lr_setup: outer-loop acceleration requires at least one "
+               "outer stage (pert_order >= 1 with a non-empty K_pert); got "
+               "pert_order = {}. At pert_order = 0 K_pert is evaluated only by the "
+               "hessian refresh, and there is no outer sequence to accelerate.",
+               p.pert_order);
 
   if (k.include_gw_sigma) {
     utils::check(dW_wqPQ_in != nullptr && p.eps_inv_head != nullptr,
@@ -434,6 +441,12 @@ void lr_driver::lr_setup(
     app_log(1, "  K_pert (perturbative)   = {}", k.pert.to_string());
     app_log(1, "  pert_order = {}  ({} stage(s); max_iter counts total inner iterations)",
             p.pert_order, p.pert_order + 1);
+    if (p.pert_order == 0)
+      app_log(1, "    no stage boundary: the solve is the pure-K_sc response and "
+                 "K_pert is evaluated once per perturbation, by the hessian refresh");
+    else if (p.hessian())
+      app_log(1, "    the hessian refresh adds one more K_pert evaluation per "
+                 "perturbation, on top of whatever the schedule applies");
   }
   app_log(1, "  include_xc = {}", p.include_xc ? "true" : "false");
   if (p.exchange_static_W) {
@@ -1126,8 +1139,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   // SCF iteration header
   if (do_pert) {
-    app_log(1, "\n  (split kernel: the iter column carries the stage index as "
-               "[s<n>]; K_pert is re-evaluated at each stage boundary)");
+    if (p.pert_order == 0)
+      app_log(1, "\n  (split kernel at order 0: no stage boundaries, so the loop "
+                 "below is the single-kernel K_sc solve; K_pert is evaluated once "
+                 "afterwards, by the hessian refresh)");
+    else
+      app_log(1, "\n  (split kernel: the iter column carries the stage index as "
+                 "[s<n>]; K_pert is re-evaluated at each stage boundary)");
     if (outer_diis_on)
       app_log(1, "  (outer acceleration on: each stage boundary extrapolates the "
                  "perturbative source and prints the outer residual; the stage "
@@ -1342,8 +1360,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // (head extrapolation, outer residual) then follow their iteration's row
     // instead of splitting it from the previous one.
     _Timer.start("LR_CONVERGENCE");
-    std::string iter_lbl = do_pert ? fmt::format("{}[s{}]", iter, stage)
-                                   : fmt::format("{}", iter);
+    std::string iter_lbl = (do_pert && p.pert_order > 0)
+                               ? fmt::format("{}[s{}]", iter, stage)
+                               : fmt::format("{}", iter);
     if (first_of_stage) {
       if (log_sigma_col) {
         app_log(1, "  {:>4s}    {:.6e}     {:13s}     {:.6e}   {:13s}   {:.6e}   {:13s}   {:.3e}",
@@ -1531,7 +1550,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
   } else if (p.max_iter > 1) {
-    if (do_pert)
+    // "applied 0 of 0" would read as a mid-schedule stop, which order 0 is not.
+    if (do_pert && p.pert_order > 0)
       app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations "
                  "(K_pert applied {} of {} times).", p.max_iter, n_applied, p.pert_order);
     else
