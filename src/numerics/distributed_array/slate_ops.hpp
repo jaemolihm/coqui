@@ -413,6 +413,16 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
   using value_type = typename dA_t::value_type;
   value_type det_A = value_type(1.0);
 
+  // getrf needs mt == nt (slate/src/getri.cc), and the pivot bookkeeping below
+  // needs the row and column tile boundaries to coincide.  Neither slate nor
+  // is_slate_compatible checks it.
+  utils::check(A.global_shape()[0] == A.global_shape()[1],
+      "determinant: matrix is not square: ({}, {}).",
+      A.global_shape()[0], A.global_shape()[1]);
+  utils::check(A.block_size()[0] == A.block_size()[1],
+      "determinant: row and column blockings differ: ({}, {}).",
+      A.block_size()[0], A.block_size()[1]);
+
   if constexpr (::nda::mem::on_host<local_Array_t>) {
     if (A.communicator()->size() == 1) {
       auto A_loc = A.local();
@@ -429,20 +439,38 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
     slate::getrf ( As , pivots );
 
     auto A_loc = A.local();
+    // slate::Pivots is indexed by the GLOBAL panel (tile row) index and is
+    // replicated on every rank; each Pivot is relative to its own panel, so
+    // "row ia of panel ib did not move" is (tileIndex, elementOffset) == (0, ia)
+    // -- the same test slate::internal::permuteRows applies.  diag_idx carries
+    // LOCAL indices, so the global index has to be recovered from the origin.
+    //
+    // Counting the parity over the local diagonal visits every panel exactly
+    // once: the owner of the diagonal tile (k,k) holds precisely the diag_len
+    // rows that pivots[k] describes, and the product all-reduce below then
+    // accumulates one factor of -1 per row interchange over the whole matrix.
+    // This needs the row and column partitions to agree, which is also the
+    // getrf/getri precondition mt == nt.
     long rows_per_blk = A.block_size()[0];
+    long row_origin = A.origin()[0];
+    long ndiag = long(diag_idx.size());
+    A.communicator()->all_reduce_in_place_n(&ndiag, 1, std::plus<>{});
+    utils::check(ndiag == std::min(A.global_shape()[0], A.global_shape()[1]),
+        "determinant: diag_idx does not cover the diagonal: {} of {} entries.",
+        ndiag, std::min(A.global_shape()[0], A.global_shape()[1]));
     for (auto idx: diag_idx) {
       det_A *= A_loc(idx.first, idx.second);
 
-      // idx.first = ib * rows_per_blk + ia
-      long ib = idx.first / rows_per_blk;
-      long ia = idx.first % rows_per_blk;
-      if (pivots[ib][ia].tileIndex() != ib and pivots[ib][ia].elementOffset() != ia) {
+      long i_glob = idx.first + row_origin;
+      long ib = i_glob / rows_per_blk;   // global panel index
+      long ia = i_glob % rows_per_blk;   // row offset within the panel
+      utils::check(ib < long(pivots.size()) and ia < long(pivots[ib].size()),
+          "determinant: pivot index out of range: ({},{}) for {} panels.",
+          ib, ia, pivots.size());
+      if (pivots[ib][ia].tileIndex() != 0 or pivots[ib][ia].elementOffset() != ia)
         det_A *= -1;
-      }
     }
     A.communicator()->all_reduce_in_place_n(&det_A, 1, std::multiplies<>{});
-    // temporary workaround before the pivots configuration is understood.
-    //if (det_A < 0) det_A *= -1.0;
   } else {
     utils::check(false, "determinant: requires GPU supports.");
   }
