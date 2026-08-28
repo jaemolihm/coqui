@@ -698,6 +698,7 @@ void dump_lr(communicator_t& comm,
              std::string const& two_step_outer_alg,
              double two_step_outer_tol,
              int two_step_stages_applied,
+             bool hessian_pert_refresh,
              std::optional<double> exchange_static_W_head) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
@@ -786,16 +787,14 @@ void dump_lr(communicator_t& comm,
       h5::h5_write(lr_grp, "lr_two_step", 1);
       h5::h5_write(lr_grp, "two_step_inner_method", two_step_inner_method);
       h5::h5_write(lr_grp, "two_step_order", two_step_order);
-      // Outer-loop acceleration. Written only when it is actually active, so a
-      // plain two-step checkpoint keeps exactly the fields it had before. With
-      // acceleration on, two_step_order is an iteration cap rather than a
-      // truncation order and the result carries no order interpretation, so
-      // two_step_stages_applied — the number of K_pert evaluations actually
-      // made — is the only honest cost/provenance record.
+      // The cost record: two_step_stages_applied + hessian_pert_refresh is the
+      // K_pert count per perturbation, which two_step_order cannot give.
+      h5::h5_write(lr_grp, "two_step_stages_applied", two_step_stages_applied);
+      h5::h5_write(lr_grp, "hessian_pert_refresh",
+                   static_cast<int>(hessian_pert_refresh));
       if (two_step_outer_accel) {
         h5::h5_write(lr_grp, "two_step_outer_alg", two_step_outer_alg);
         h5::h5_write(lr_grp, "two_step_outer_tol", two_step_outer_tol);
-        h5::h5_write(lr_grp, "two_step_stages_applied", two_step_stages_applied);
       }
     }
 
@@ -921,7 +920,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&,
                       bool, std::string const&, int,
-                      bool, std::string const&, double, int,
+                      bool, std::string const&, double, int, bool,
                       std::optional<double>);
 
   } // chkpt

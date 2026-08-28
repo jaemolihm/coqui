@@ -583,10 +583,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         lr_two_step. The total kernel comes from method / include_hartree /
         include_exchange / gw_mode, and K_pert is the difference.
     two_step_order : int, optional
-        Truncation order n of the K_pert expansion (default 1). n = 0 runs the
-        self-consistent kernel alone. max_iter counts total inner iterations
-        across all n+1 stages. With outer acceleration on it is an iteration
-        cap rather than a truncation order (see two_step_outer_iter_alg).
+        Truncation order n of the K_pert expansion (default 1). n = 0 solves
+        with the self-consistent kernel alone, and rejects the
+        two_step_outer_* keys: there is no outer sequence to accelerate. With
+        lr_hessian it still costs one K_pert evaluation per perturbation, made
+        by the hessian's consistency refresh after the solve, so the stationary
+        estimator there is the TOTAL kernel's at the K_sc solution. max_iter
+        counts total inner iterations across all n+1 stages. With outer
+        acceleration on, n is an iteration cap rather than a truncation order
+        (see two_step_outer_iter_alg).
     two_step_outer_iter_alg : dict or None, optional
         DIIS acceleration of the OUTER (perturbative-source) iteration,
         mirroring iter_alg but as a fully independent accelerator:
@@ -605,9 +610,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     two_step_outer_tol : float, optional
         > 0 turns two_step_order into a cap and stops the outer loop once the
         stage-to-stage change of ΔDm falls below it (default 0.0 = run exactly
-        two_step_order stages). The number of K_pert evaluations actually made
-        is written to the checkpoint as
-        ``linear_response/two_step_stages_applied``.
+        two_step_order stages).
+
+        Every split-kernel run records what it cost, in K_pert evaluations per
+        perturbation: ``linear_response/two_step_stages_applied`` (the
+        schedule's) plus ``linear_response/hessian_pert_refresh`` (0/1, the
+        hessian's). Their sum is the cost; two_step_order alone cannot give
+        it.
 
     Returns
     -------
