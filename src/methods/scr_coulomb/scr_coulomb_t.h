@@ -31,6 +31,7 @@
 #include "utilities/mpi_context.h"
 #include "utilities/Timer.hpp"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/kpoint_utils.hpp"
 #include "IO/app_loggers.h"
 
 #include "mean_field/MF.hpp"
@@ -174,6 +175,21 @@ namespace solvers {
 
       return std::make_tuple(std::array<long, 4>{ntpools, 1, np_P, np_Q},
                              std::array<long, 4>{1, 1, 1, 1});
+    }
+
+    /**
+     * Does eval_Pi_rpa_Rspace take the blocked-FFT k<->R path? The FFT needs the
+     * full Gamma-centered MP mesh, hence nqpts_ibz == nkpts. The dense-gemm
+     * fallback stages through X_R_PQ; the FFT path transforms in place. Shared
+     * with the SCF memory report so its prediction matches what is allocated.
+     */
+    static bool Pi_use_fft([[maybe_unused]] long nkpts,
+                           [[maybe_unused]] long nqpts_ibz) {
+#if defined(ENABLE_FFTW)
+      return (nkpts != 1) && (nqpts_ibz == nkpts) && !utils::debug_gemm_ft();
+#else
+      return false;
+#endif
     }
 
     /**
