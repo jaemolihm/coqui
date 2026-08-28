@@ -62,23 +62,19 @@ namespace utils
 template<size_t R>
 inline constexpr std::array<long,R> one_per_tile = {};
 
-/// [first,last) of tile `i` of the partition of [0,N) into `t` tiles.
-inline std::pair<long,long> tile_range(long N, long t, long i)
+/// First element of tile `i` of the partition of [0,N) into `t` tiles, i.e.
+/// `i*a + min(i,r)` with `a = N/t`, `r = N%t`.
+inline long tile_offset(long N, long t, long i)
 {
-  utils::check(t > 0 and t <= N, "tile_range: invalid tile count t:{} for N:{}", t, N);
-  utils::check(i >= 0 and i < t, "tile_range: tile index out of range i:{} t:{}", i, t);
-  auto [f,l] = itertools::chunk_range(0, N, t, i);
-  return {long(f), long(l)};
+  utils::check(t > 0 and t <= N, "tile_offset: invalid tile count t:{} for N:{}", t, N);
+  utils::check(i >= 0 and i < t, "tile_offset: tile index out of range i:{} t:{}", i, t);
+  return long(itertools::chunk_range(0, N, t, i).first);
 }
 
-/// First element of tile `i`.
-inline long tile_offset(long N, long t, long i) { return tile_range(N,t,i).first; }
-
-/// Number of elements in tile `i`.
+/// Number of elements in tile `i`: `a+1` for the first `r` tiles, `a` for the rest.
 inline long tile_extent(long N, long t, long i)
 {
-  auto [f,l] = tile_range(N,t,i);
-  return l-f;
+  return (i+1 == t ? N : tile_offset(N,t,i+1)) - tile_offset(N,t,i);
 }
 
 /// Tile owning element `idx`: the inverse of tile_offset.
@@ -165,16 +161,35 @@ inline std::pair<long,long> local_range_of_rank(long N, long t, long np, long ip
 }
 
 /**
- * Resolve and validate a per-axis tile-count array in place.
+ * Resolve the `0` sentinels of a per-axis tile count against the extents of the
+ * array it describes, without validating: `t[n] == 0` means "one element per tile",
+ * i.e. `t[n] = extents[n]`, which reproduces a tile size of one.
  *
- * `t[n] == 0` is the sentinel for "one element per tile", i.e. `t[n] = extents[n]`,
- * which reproduces a tile size of one. Anything else must satisfy
- * `grid[n] <= t[n] <= extents[n]`; out-of-range counts are rejected rather than
+ * Needed on its own because distribution helpers return the sentinel (they are
+ * deliberately extent-agnostic on the pooled axes) while a constructed array stores
+ * the resolved count, so the two are only comparable after this. Use it wherever a
+ * stored tile_count() is tested against a helper's output -- an unresolved
+ * comparison silently reports "different distribution".
+ *
+ * Axes with a non-positive extent carry no partition (reset or dummy-constructed
+ * arrays) and are left alone.
+ */
+template<size_t R>
+inline std::array<long,R> resolved_tile_counts(std::array<long,R> t,
+                                               std::array<long,R> const& extents)
+{
+  for(size_t n=0; n<R; ++n) if(t[n] == 0 and extents[n] > 0) t[n] = extents[n];
+  return t;
+}
+
+/**
+ * Resolve the sentinels in place and validate: every resolved count must satisfy
+ * `grid[n] <= t[n] <= extents[n]`. Out-of-range counts are rejected rather than
  * clamped, because a silently clamped count gives two axes different tile
  * boundaries and slate's gemm does not check that.
  *
- * Axes with a non-positive extent or grid are left alone: those are reset or
- * dummy-constructed arrays, which carry no partition.
+ * Axes with a non-positive extent or grid are left alone, as in
+ * resolved_tile_counts.
  */
 template<size_t R>
 inline void resolve_tile_counts(std::array<long,R>& t,
@@ -182,30 +197,14 @@ inline void resolve_tile_counts(std::array<long,R>& t,
                                 std::array<long,R> const& grid,
                                 std::string_view who)
 {
+  t = resolved_tile_counts(t, extents);
   for(size_t n=0; n<R; ++n) {
     if(extents[n] <= 0 or grid[n] <= 0) continue;
-    if(t[n] == 0) t[n] = extents[n];
     utils::check(t[n] >= grid[n] and t[n] <= extents[n],
       "{}: tile count out of range - dim:{}, tile count:{}, extent:{}, grid:{}. "
       "It must satisfy grid <= tile count <= extent (0 means one element per tile).",
       who, n, t[n], extents[n], grid[n]);
   }
-}
-
-/**
- * Resolve the `0` sentinels of a *requested* tile count against the extents of the
- * array it will describe, without validating. Distribution helpers return the
- * sentinel (they are deliberately extent-agnostic on the pooled axes) while a
- * constructed array stores the resolved count, so the two are only comparable
- * after this. Use it wherever a stored tile_count() is tested against a helper's
- * output -- an unresolved comparison silently reports "different distribution".
- */
-template<size_t R>
-inline std::array<long,R> resolved_tile_counts(std::array<long,R> t,
-                                               std::array<long,R> const& extents)
-{
-  for(size_t n=0; n<R; ++n) if(t[n] == 0) t[n] = extents[n];
-  return t;
 }
 
 } // namespace utils

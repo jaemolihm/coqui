@@ -53,7 +53,6 @@ std::vector<std::pair<long,long>> factorizations(long np)
 
 TEST_CASE("tile_partition_invariants", "[utilities]")
 {
-  using utils::tile_range;
   using utils::tile_offset;
   using utils::tile_extent;
   using utils::tile_of;
@@ -79,7 +78,7 @@ TEST_CASE("tile_partition_invariants", "[utilities]")
       long covered = 0, prev_last = 0;
       long emin = N+1, emax = -1;
       for (long i = 0; i < t; ++i) {
-        auto [f,l] = tile_range(N,t,i);
+        const long f = tile_offset(N,t,i), l = f + tile_extent(N,t,i);
         // (1) no gap, no overlap
         REQUIRE(f == prev_last);
         REQUIRE(l > f);
@@ -101,7 +100,7 @@ TEST_CASE("tile_partition_invariants", "[utilities]")
       for (long i = 0; i < t; ++i) REQUIRE(tile_of(N,t,tile_offset(N,t,i)) == i);
       for (long idx = 0; idx < N; ++idx) {
         long i = tile_of(N,t,idx);
-        auto [f,l] = tile_range(N,t,i);
+        const long f = tile_offset(N,t,i), l = f + tile_extent(N,t,i);
         REQUIRE(idx >= f);
         REQUIRE(idx < l);
       }
@@ -132,9 +131,9 @@ TEST_CASE("tile_partition_invariants", "[utilities]")
           // reason the stored quantity is a count and not a size: the partition
           // must be a function of (N, t) alone.
           for (long i = 0; i < t; ++i) {
-            REQUIRE(tile_range(N,t,i) ==
-                    std::make_pair(long(i*(N/t) + std::min(i,N%t)),
-                                   long((i+1)*(N/t) + std::min(i+1,N%t))));
+            REQUIRE(tile_offset(N,t,i) == i*(N/t) + std::min(i,N%t));
+            REQUIRE(tile_offset(N,t,i) + tile_extent(N,t,i) ==
+                    (i+1)*(N/t) + std::min(i+1,N%t));
             REQUIRE(local_range_of_rank(N,t,1,0) == std::pair<long,long>{0,N});
           }
 
