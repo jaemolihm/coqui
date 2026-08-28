@@ -40,6 +40,41 @@ from coqui._lib.mbpt_module import calculate_kpq_map as calculate_kpq_map_cpp
 from .mbpt_driver import run_lr
 
 
+# Kernel a run_lr `method` name expands to, mirroring kernel_spec_from_method
+# (src/methods/SCF/lr_driver.cpp:93) plus the "HSEX" rewrite one level up
+# (src/methods/MBPT_drivers.cpp). Shared by every driver that wraps run_lr with a
+# `method` alias -- run_chi, the phonon drivers -- because `method` silently
+# *overwrites* include_hartree / include_exchange / gw_mode, so a wrapper that
+# has to reason about the kernel it is actually running must resolve it first.
+METHOD_KERNEL = {
+    "none":    (False, False, "none"),
+    "Hartree": (True,  False, "none"),
+    "HF":      (True,  True,  "none"),
+    "HSEX":    (True,  True,  "none"),
+    "GW0":     (True,  True,  "fixed_W"),
+    "GW":      (True,  True,  "full"),
+}
+
+
+def resolve_kernel(method, include_hartree=True, include_exchange=True,
+                   gw_mode="none", caller="resolve_kernel"):
+    """
+    (include_hartree, include_exchange, gw_mode) as run_lr_calc will see them.
+
+    `method` defines all three when given, so the explicit flags are consulted
+    only for ``method is None``. Raises ValueError on an unknown name, where
+    run_lr itself would reach a C++ check and MPI_Abort.
+    """
+    if method is None:
+        return bool(include_hartree), bool(include_exchange), str(gw_mode)
+    if method not in METHOD_KERNEL:
+        raise ValueError(
+            f"{caller}: unknown method {method!r}. Must be one of "
+            f"{', '.join(sorted(METHOD_KERNEL))} (spelling is case-sensitive; a "
+            "lowercase name dies in a C++ check).")
+    return METHOD_KERNEL[method]
+
+
 def calculate_kpq_map(kpts_crys: np.ndarray, q_vec: np.ndarray,
                        threshold: float = 1e-6) -> np.ndarray:
     """
