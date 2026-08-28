@@ -43,10 +43,10 @@ namespace methods {
  * Mirrors the ground-state iter_alg pattern (damping vs DIIS).
  */
 struct lr_iter_params {
-  std::string alg = "damping";
+  std::string alg = "DIIS";
   double mixing = 1.0;
-  size_t max_subsp_size = 5;
-  size_t diis_warmup = 3;
+  size_t max_subsp_size = 10;
+  size_t diis_warmup = 0;
 
   /// True when the accelerator is allowed to extrapolate. "damping" never does,
   /// and lr_diis collapses its subspace accordingly. Single source of the string

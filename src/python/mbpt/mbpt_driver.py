@@ -458,12 +458,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
     iter_alg : dict or None, optional
-        Iteration algorithm configuration. If None, uses damping with mixing=1.0.
-        Keys:
-        - alg : str - "damping" (default) or "DIIS"
+        Iteration algorithm configuration. If None, uses DIIS with mixing=1.0
+        and a subspace of 10. Keys:
+        - alg : str - "DIIS" (default) or "damping"
         - mixing : float - Damping/mixing parameter (default 1.0)
-        - max_subsp_size : int - DIIS subspace size (default 5)
-        - diis_warmup : int - Warmup iterations before DIIS (default 3)
+        - max_subsp_size : int - DIIS subspace size (default 10)
+        - diis_warmup : int - Warmup iterations before DIIS (default 0)
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
         False -> "none". Overrides gw_mode if both are specified.
@@ -666,12 +666,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     # Parse iter_alg dict with defaults
     if iter_alg is None:
         iter_alg = {}
-    alg = str(iter_alg.get("alg", "damping"))
+    alg = str(iter_alg.get("alg", "DIIS"))
     if alg not in ("damping", "DIIS"):
         raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
     mixing = float(iter_alg.get("mixing", 1.0))
-    max_subsp_size = int(iter_alg.get("max_subsp_size", 5))
-    diis_warmup = int(iter_alg.get("diis_warmup", 3))
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 10))
+    diis_warmup = int(iter_alg.get("diis_warmup", 0))
 
     if MPI.COMM_WORLD.Get_rank() == 0:
         if (DeltaX_left is None) != (DeltaX_right is None):

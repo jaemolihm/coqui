@@ -137,7 +137,10 @@ struct lr_qp_static_params {
 struct lr_outer_accel_params {
   /// alg, subspace depth and warmup of the OUTER accelerator. "damping" means
   /// no acceleration; `mixing` only damps the accelerator's own warmup steps.
-  lr_iter_params iter;
+  /// For outer iteration, default to plain iteration: damping, mixing 1.0,
+  /// history 1 (the depth lr_diis forces under damping, lr_diis.hpp:105).
+  lr_iter_params iter{.alg = "damping", .mixing = 1.0,
+                      .max_subsp_size = 1, .diis_warmup = 0};
   /// > 0 switches the outer loop from "run exactly pert_order stages" to
   /// "iterate until the stage-to-stage ‖ΔDm‖ change is below tol, capped at
   /// pert_order stages".
