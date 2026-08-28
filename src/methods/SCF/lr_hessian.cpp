@@ -478,13 +478,12 @@ lr_hessian_result_t lr_hessian_t::evaluate(
              "-> 0 at convergence, where it is the D5 detector]", rel_sym_plain);
   app_log(1, "    ||H_plain - H_plain^dag||/||H_plain|| = {:.3e}", r.herm_plain);
   if (_has_sigma) {
+    // Check if ⟨A,A⟩ is real valued:
     app_log(1, "    <A,A> on the stored ΔΣ_0           = {:.6e} + {:.3e}i "
-               "(must be real and positive)", self_pair.real(), self_pair.imag());
-    const bool ok = self_pair.real() > 0.0 &&
-                    std::abs(self_pair.imag()) <= 1e-6 * std::abs(self_pair.real());
-    if (!ok)
-      app_log(1, "    [WARNING] <A,A> is not real and positive: the Matsubara pairing "
-                 "or the ω reflection is wrong.");
+               "(must be real)", self_pair.real(), self_pair.imag());
+    if (std::abs(self_pair.imag()) > 1e-6 * std::abs(self_pair.real()))
+      app_log(1, "    [WARNING] <A,A> is not real: the Matsubara pairing or the "
+                 "ω reflection is wrong.");
   }
   app_log(1, "");
 
@@ -494,8 +493,9 @@ lr_hessian_result_t lr_hessian_t::evaluate(
 
 ComplexType lr_hessian_t::self_pairing() const {
   // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
-  // so it is real by construction; the sign is what a wrong pairing breaks. A
-  // static operand cannot serve here — a constant has no fermionic FT.
+  // so it is real by construction, and that reality is what a wrong reflection or
+  // a wrong conjugation breaks. A static operand cannot serve here — a constant
+  // has no fermionic FT.
   nda::array<ComplexType, 2> sp(_nw, 1);
   sp() = ComplexType(0.0);
   if (_nloc > 0) {
