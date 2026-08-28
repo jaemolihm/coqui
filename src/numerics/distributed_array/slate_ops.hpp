@@ -407,7 +407,54 @@ void inverse(DistributedMatrix auto&& A)
 #endif
 }
 
-auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &diag_idx) {
+#if defined(ENABLE_SLATE)
+namespace detail
+{
+
+/*
+ * Parity of the row interchange getrf applied to global row `i_glob`: -1 if the
+ * row moved, +1 if it did not.
+ *
+ * slate::Pivots is indexed by the GLOBAL panel (tile row) index and is replicated
+ * on every rank, while each Pivot is relative to its own panel -- slate documents
+ * Pivot::tileIndex() as "tile index in the panel submatrix". So "row ia of panel
+ * ib did not move" is (tileIndex, elementOffset) == (0, ia), the same test
+ * slate::internal::permuteRows applies.
+ *
+ * That convention appears in no installed slate header -- it is read off
+ * slate::internal::permuteRows -- so it is an assumption about slate's internals
+ * rather than about its API. Verified against slate ded15290.
+ *
+ * It cannot be pinned by comparing this parity against LAPACK's ipiv: slate is
+ * free to choose a different set of pivots than reference LAPACK, and does (at
+ * one tile per element, N = 12, they disagree on 3 rows and the parities differ).
+ * Both factorizations are valid, so diag(U) differs in sign between them and the
+ * parity differs to compensate; only the product, the determinant, is invariant.
+ * The guard is therefore TEST_CASE("determinant") in test_slate.cpp, which sweeps
+ * grids and blockings against serial LAPACK's determinant -- it caught this
+ * function's original miscount, and would catch a convention change the same way.
+ */
+inline int pivot_parity(slate::Pivots const& pivots, long i_glob, long rows_per_tile)
+{
+  long ib = i_glob/rows_per_tile;   // global panel index
+  long ia = i_glob%rows_per_tile;   // row offset within the panel
+  utils::check(ib < long(pivots.size()) and ia < long(pivots[ib].size()),
+      "pivot_parity: pivot index out of range: ({},{}) for {} panels.",
+      ib, ia, pivots.size());
+  return (pivots[ib][ia].tileIndex() != 0 or pivots[ib][ia].elementOffset() != ia)? -1 : 1;
+}
+
+} // namespace detail
+#endif
+
+/*
+ * det(A) of a square, square-tiled distributed matrix, from slate::getrf: the
+ * product of the diagonal of U times the parity of the row permutation.
+ *
+ * The diagonal is derived from the array's own origin and local shape, so no
+ * caller has to know which local entries lie on it.
+ */
+auto determinant(DistributedMatrix auto&&A) {
   using dA_t = typename std::decay_t<decltype(A)>;
   using local_Array_t = typename dA_t::Array_t;
   using value_type = typename dA_t::value_type;
@@ -439,37 +486,27 @@ auto determinant(DistributedMatrix auto&&A, std::vector<std::pair<long,long>> &d
     slate::getrf ( As , pivots );
 
     auto A_loc = A.local();
-    // slate::Pivots is indexed by the GLOBAL panel (tile row) index and is
-    // replicated on every rank; each Pivot is relative to its own panel, so
-    // "row ia of panel ib did not move" is (tileIndex, elementOffset) == (0, ia)
-    // -- the same test slate::internal::permuteRows applies.  diag_idx carries
-    // LOCAL indices, so the global index has to be recovered from the origin.
-    //
-    // Counting the parity over the local diagonal visits every panel exactly
-    // once: the owner of the diagonal tile (k,k) holds precisely the diag_len
-    // rows that pivots[k] describes, and the product all-reduce below then
-    // accumulates one factor of -1 per row interchange over the whole matrix.
-    // This needs the row and column partitions to agree, which is also the
-    // getrf/getri precondition mt == nt.
-    long rows_per_blk = A.block_size()[0];
-    long row_origin = A.origin()[0];
-    long ndiag = long(diag_idx.size());
-    A.communicator()->all_reduce_in_place_n(&ndiag, 1, std::plus<>{});
-    utils::check(ndiag == std::min(A.global_shape()[0], A.global_shape()[1]),
-        "determinant: diag_idx does not cover the diagonal: {} of {} entries.",
-        ndiag, std::min(A.global_shape()[0], A.global_shape()[1]));
-    for (auto idx: diag_idx) {
-      det_A *= A_loc(idx.first, idx.second);
-
-      long i_glob = idx.first + row_origin;
-      long ib = i_glob / rows_per_blk;   // global panel index
-      long ia = i_glob % rows_per_blk;   // row offset within the panel
-      utils::check(ib < long(pivots.size()) and ia < long(pivots[ib].size()),
-          "determinant: pivot index out of range: ({},{}) for {} panels.",
-          ib, ia, pivots.size());
-      if (pivots[ib][ia].tileIndex() != 0 or pivots[ib][ia].elementOffset() != ia)
-        det_A *= -1;
+    // Walk the local part of the diagonal.  Because the row and column partitions
+    // agree (checked above), every global row is on exactly one rank's diagonal,
+    // so the product all-reduce below accumulates one factor of -1 per row
+    // interchange over the whole matrix -- each panel's parity counted once.
+    long rows_per_tile = A.block_size()[0];
+    auto [i_origin, j_origin] = A.origin();
+    auto [ni_loc, nj_loc] = A.local_shape();
+    long ndiag = 0;
+    for (long ii = 0; ii < ni_loc; ++ii) {
+      long jj = ii + i_origin - j_origin;
+      if (jj < 0 or jj >= nj_loc) continue;
+      det_A *= A_loc(ii,jj);
+      if (detail::pivot_parity(pivots,ii+i_origin,rows_per_tile) < 0) det_A *= -1;
+      ++ndiag;
     }
+    // The local diagonals must tile the global one, or a row's parity is counted
+    // twice or not at all.
+    A.communicator()->all_reduce_in_place_n(&ndiag, 1, std::plus<>{});
+    utils::check(ndiag == A.global_shape()[0],
+        "determinant: the local diagonals cover {} of {} rows.",
+        ndiag, A.global_shape()[0]);
     A.communicator()->all_reduce_in_place_n(&det_A, 1, std::multiplies<>{});
   } else {
     utils::check(false, "determinant: requires GPU supports.");
