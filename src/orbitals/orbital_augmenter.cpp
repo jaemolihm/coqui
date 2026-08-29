@@ -532,7 +532,7 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
   // raw (non-orthonormal) augmentation states, same grid/G-distribution
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
                     {nspin,nkpts_ibz,n_raw,ngm},
-                    utils::tile_caps<4>{cap_raw});
+                    utils::max_tile_sizes<4>{cap_raw});
   {
     long g0 = psi_base.local_range(3).first();
     auto base_loc = psi_base.local();
@@ -751,7 +751,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   // psi_orig = first M bands (the kept originals) as its own distributed array.
   auto psi_orig = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
                     {nspin,nkpts_ibz,M,ngm},
-                    utils::tile_caps<4>{cap_orig});
+                    utils::max_tile_sizes<4>{cap_orig});
   psi_orig.local() = psi_all.local()(all,all,nda::range(0,M),all);
 
   if(R == 0) {
@@ -780,7 +780,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   // raw (non-orthonormal) augmentation states on the 'w' grid, zeroed
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
                     {nspin,nkpts_ibz,n_raw,ngm},
-                    utils::tile_caps<4>{cap_raw});
+                    utils::max_tile_sizes<4>{cap_raw});
   raw_aug.local() = ComplexType(0.0);
 
   utils::check(psi_all.local_range(1) == raw_aug.local_range(1),

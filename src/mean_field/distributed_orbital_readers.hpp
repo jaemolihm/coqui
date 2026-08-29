@@ -45,7 +45,7 @@ namespace mf
  * @param ispin      - spin index range
  * @param kp         - k-point range
  * @param orb        - orbital range
- * @param tile_cap - maximum tile size per axis for the output distributed array
+ * @param max_tile_size - maximum tile size per axis for the output distributed array
  *                   (converted to a balanced tile count; 1 means one element per tile)
  * @return           - Bloch orbitals in a distributed array. 
  *                     Structure depends on the rank of the template array.
@@ -61,7 +61,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
 		nda::range ispin = {-1,-1}, 
 		nda::range kp = {-1,-1},   
 		nda::range orb = {-1,-1},
-		std::array<long,rank> tile_cap = {-1})
+		std::array<long,rank> max_tile_size = {-1})
 {
   decltype(nda::range::all) all;
   static_assert(rank==size_t(::nda::get_rank<local_Array_t>) and 
@@ -79,7 +79,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   if(OT=='w') utils::check( mfobj.has_wfc_grid(), "Error: OT==w and has_wfc_grid==false");
   utils::check(OT=='g' or OT=='r' or OT=='w', "orbital type mismatch: {}",OT);
   char OT_in = (OT=='r')? ( (mfobj.orb_on_fft_grid())? 'g' : OT) : OT;
-  if(tile_cap[0]<0) tile_cap.fill(2048);
+  if(max_tile_size[0]<0) max_tile_size.fill(2048);
 
   long nspin = ispin.size();
   long nkpts = kp.size(); 
@@ -123,7 +123,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
 
     long norb = ispin.size()*kp.size()*orb.size()*npol;
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{norb,nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(1);
 
@@ -181,7 +181,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{norb,nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     } 
@@ -189,7 +189,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   } else if constexpr(rank==4) {
 
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{nspin,nkpts,nbnd,npol*nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(3);
 
@@ -207,7 +207,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{nspin,nkpts,nbnd,npol*nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     }
@@ -215,7 +215,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   } else if constexpr(rank==5) {
 
     auto Psi0 = math::nda::make_distributed_array<local_Array_t>(comm,pgrid,{nspin,nkpts,nbnd,npol,nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
     auto Psi0loc = Psi0.local();
     auto g_range = Psi0.local_range(4);
 
@@ -233,7 +233,7 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       return Psi0;
     } else {
       auto Psi = math::nda::make_distributed_array<local_Array_t>(comm,pgrid_out,{nspin,nkpts,nbnd,npol,nnr},
-                                        utils::tile_caps<rank>{tile_cap});
+                                        utils::max_tile_sizes<rank>{max_tile_size});
       math::nda::redistribute(Psi0,Psi);
       return Psi;
     }
@@ -258,14 +258,14 @@ auto read_distributed_orbital_set_ibz(MF& mfobj, comm_t& comm, char OT,
                 nda::range ispin = {-1,-1},
                 nda::range kp = {-1,-1},
                 nda::range orb = {-1,-1},
-                std::array<long,rank> tile_cap = {-1})
+                std::array<long,rank> max_tile_size = {-1})
 {
-  if(tile_cap[0]<0) tile_cap.fill(2048);
+  if(max_tile_size[0]<0) max_tile_size.fill(2048);
   if(kp == nda::range{-1,-1}) kp = {0,mfobj.nkpts_ibz()};
   utils::check(mfobj.has_orbital_set(), "Error in read_distributed_orbital_set: Invalid mf type. ");
   utils::check(kp.first() >= 0, "Range mismatch.");
   utils::check(kp.last() <= mfobj.nkpts_ibz(), "Range mismatch.");
-  return read_distributed_orbital_set<local_Array_t>(mfobj,comm,OT,pgrid_out,ispin,kp,orb,tile_cap);
+  return read_distributed_orbital_set<local_Array_t>(mfobj,comm,OT,pgrid_out,ispin,kp,orb,max_tile_size);
 }
 
 } // namespace mf

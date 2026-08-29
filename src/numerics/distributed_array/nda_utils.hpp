@@ -50,17 +50,29 @@ namespace math::nda
  * Factories for distributed_array
  */ 
 /*
- * `tcount[n]` is the number of tiles axis n is cut into, not a tile size: the
- * partition is utils::tile_partition's balanced one, so per-rank loads differ by
- * at most one element per tile and the boundaries depend on (shape[n], tcount[n])
- * only -- never on grid[n]. `tcount[n] == 0` means "one element per tile", i.e.
- * tcount[n] = shape[n], which is the plain balanced element distribution and the
- * default. Callers wanting a tile-size cap go through
- * utils::balanced_tile_count(N, max(grid over the paired axes), cap).
+ * `tcount[n]` is the number of TILES axis n is cut into, not a tile size. The
+ * partition is the balanced one of utilities/tile_partition.hpp -- read the worked
+ * example at the top of that header for what a tile count means and which rank ends
+ * up with which elements. Two of its properties matter here:
+ *
+ *  - tile boundaries depend on (shape[n], tcount[n]) alone, never on grid[n], so two
+ *    axes of equal extent and equal tile count are tiled identically whatever grids
+ *    they live on;
+ *  - per-rank loads differ by at most one element per tile, and no rank or tile is
+ *    empty, as long as grid[n] <= tcount[n] <= shape[n].
+ *
+ * `tcount[n] == 0` means "one element per tile", i.e. tcount[n] = shape[n]: the plain
+ * balanced element distribution, and what an omitted tcount argument gives.
+ *
+ * Callers who want to bound the tile SIZE rather than fix a count pass
+ * utils::max_tile_sizes and let the overload below derive the counts; two axes that
+ * must share a partition instead pass explicit counts from
+ * utils::balanced_tile_count(N, max(grid over the paired axes), max_tile_size).
  *
  * Out-of-range tile counts are rejected, not repaired: a silently clamped count
  * gives two axes different tile boundaries, which slate's gemm does not check.
  */
+
 namespace detail
 {
 
@@ -114,8 +126,8 @@ auto make_distributed_array(communicator_t& comm,
 }
 
 /*
- * Same, from per-axis tile-size caps instead of tile counts: the caller says how big
- * a tile may get and the factory -- which already has the shape and the grid --
+ * Same, from per-axis maximum tile SIZES instead of tile counts: the caller says how
+ * big a tile may get and the factory -- which already has the shape and the grid --
  * derives the balanced counts. Use it whenever no two axes of the array have to
  * share a partition; when they do, pass explicit counts from
  * utils::balanced_tile_counts with the paired `p` on both axes.
@@ -124,14 +136,14 @@ template<::nda::Array Array_base_t, typename communicator_t>
 auto make_distributed_array(communicator_t& comm,
 		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
 		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
-		utils::tile_caps<::nda::get_rank<std::decay_t<Array_base_t>>> caps)
+		utils::max_tile_sizes<::nda::get_rank<std::decay_t<Array_base_t>>> max_sizes)
 {
   static constexpr int rank = ::nda::get_rank<std::decay_t<Array_base_t>>;
   for(int n=0; n<rank; ++n)
     utils::check( shape[n] >= grid[n],
       "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
   return make_distributed_array<Array_base_t>(comm,grid,shape,
-      utils::balanced_tile_counts(shape,grid,caps.cap));
+      utils::balanced_tile_counts(shape,grid,max_sizes.max_size));
 }
 
 template<::nda::Array Array_base_t, typename communicator_t>

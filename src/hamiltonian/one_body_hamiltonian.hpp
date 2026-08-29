@@ -89,14 +89,14 @@ void assemble_one_body(math::shm::shared_array<Array_4D_t>& sX, long n_active, B
  * @param comm  [input] - communicator 
  * @param psp   [input] - pseudopotential object 
  * @param pgrid [input] - processor grid for the distributed array
- * @param tile_cap    [input] - maximum tile size per axis for the distributed array
+ * @param max_tile_size    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */ 
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,  
         nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1}, 
-        std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+        std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -105,7 +105,7 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     using larray = memory::array<MEM,ComplexType,4>;
     utils::check(psp != nullptr, "Error in H0: Missing pseudopot object.");
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                               nda::range(-1,-1), k_range, b_range, tile_cap); 
+                               nda::range(-1,-1), k_range, b_range, max_tile_size); 
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_range,b_range,psi,p3,p4);
@@ -113,7 +113,7 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismacth");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,max_tile_size);
   }
 }
 
@@ -127,16 +127,16 @@ void set_H0(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sH0
   long np = sH0_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})\n", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})\n", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
 
   detail::assemble_one_body(sH0_skij, n_active, [&](boost::mpi3::communicator& c) {
     return hamilt::H0<HOST_MEMORY>(mf, c, psp,
                                    nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                   pgrid, tile_cap);
+                                   pgrid, max_tile_size);
   });
 }
 
@@ -148,14 +148,14 @@ void set_H0(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sH0
  * @param psp   [input] - pseudopotential object 
  * @param rhoij [input] - density matrix 
  * @param pgrid [input] - processor grid for the distributed array
- * @param tile_cap    [input] - maximum tile size per axis for the distributed array
+ * @param max_tile_size    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
         nda::ArrayOfRank<4> auto const& nij,
-        std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+        std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 { 
   using nij_type = decltype(nij);
   static_assert(memory::get_memory_space<nij_type>() == MEM, "Memory Space mismatch.");
@@ -166,12 +166,12 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     nda::range b_rng(mf.nbnd());
     nda::range k_rng(mf.nkpts_ibz());
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                               nda::range(mf.nspin()),k_rng,b_rng,tile_cap);
+                               nda::range(mf.nspin()),k_rng,b_rng,max_tile_size);
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_rng,b_rng,psi,p3,std::addressof(nij));
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,max_tile_size);
   }
 }
 
@@ -183,14 +183,14 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
  * @param psp   [input] - pseudopotential object 
  * @param rhoij [input] - density matrix 
  * @param pgrid [input] - processor grid for the distributed array
- * @param tile_cap    [input] - maximum tile size per axis for the distributed array
+ * @param max_tile_size    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
         nda::ArrayOfRank<3> auto const& nii,
-        std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+        std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   // this is, unfortunately, code dependent, so fork here!
   if (mf.mf_type() == mf::qe_source or mf.mf_type() == mf::bdft_source) {
@@ -199,12 +199,12 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     nda::range b_rng(mf.nbnd());
     nda::range k_rng(mf.nkpts_ibz());
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                               nda::range(mf.nspin()),k_rng,b_rng,tile_cap);
+                               nda::range(mf.nspin()),k_rng,b_rng,max_tile_size);
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_rng,b_rng,psi,std::addressof(nii),p4);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,max_tile_size);
   }
 }
 
@@ -221,7 +221,7 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto F(mf::MF& mf, boost::mpi3::communicator& comm, 
        nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1}, 
-       std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048}, 
+       std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048}, 
        bool evaluate = false)
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
@@ -254,7 +254,7 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
       long p_M = std::max(pgrid[2],pgrid[3]);
       auto Fij = math::nda::make_distributed_array<larray>(comm,pgrid,{nspin,nkpts,M,M},
                   utils::balanced_tile_counts<4>({nspin,nkpts,M,M},
-                      {pgrid[0],pgrid[1],p_M,p_M},{tile_cap[0],tile_cap[1],tile_cap[2],tile_cap[2]}));
+                      {pgrid[0],pgrid[1],p_M,p_M},{max_tile_size[0],max_tile_size[1],max_tile_size[2],max_tile_size[2]}));
       auto Floc = Fij.local();
       Floc = ComplexType(0.0);
       for( auto [is, s] : itertools::enumerate(Fij.local_range(0)))
@@ -269,7 +269,7 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"Fock",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"Fock",comm,pgrid,max_tile_size);
   }
 }
 
@@ -285,7 +285,7 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
                nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-               std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+               std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -294,7 +294,7 @@ auto V_Hxc_aug(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
   using larray = memory::array<MEM,ComplexType,4>;
   utils::check(psp != nullptr, "V_Hxc_aug: Missing pseudopot object.");
   auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                                                          nda::range(-1,-1), k_range, b_range, tile_cap);
+                                                          nda::range(-1,-1), k_range, b_range, max_tile_size);
   return detail::gen_V_Hxc_aug<MEM>(mf,psp,k_range,b_range,psi);
 }
 
@@ -375,15 +375,15 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
   long np = sF_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})\n", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})\n", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
 
   detail::assemble_one_body(sF_skij, n_active, [&](boost::mpi3::communicator& c) {
     auto dF = hamilt::F<HOST_MEMORY>(mf, c, nda::range(mf.nkpts_ibz()),
-                                     nda::range(mf.nbnd()), pgrid, tile_cap);
+                                     nda::range(mf.nbnd()), pgrid, max_tile_size);
     if (exclude_H0) {
       if (sH0_skij != nullptr) {
         // subtract the caller-provided H0 restricted to dF's local block
@@ -392,7 +392,7 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
                              dF.local_range(2), dF.local_range(3));
       } else {
         auto dH0 = hamilt::H0<HOST_MEMORY>(mf, c, psp, nda::range(mf.nkpts_ibz()),
-                                           nda::range(mf.nbnd()), pgrid, tile_cap);
+                                           nda::range(mf.nbnd()), pgrid, max_tile_size);
         dF.local() -= dH0.local();
       }
     }
@@ -411,7 +411,7 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
  * @param k_range [input] - index range for k-points
  * @param b_range [input] - indenx range for orbitals
  * @param pgrid   [input] - processor grid for the distributed array
- * @param tile_cap      [input] - maximum tile size per axis for the distributed array
+ * @param max_tile_size      [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of the Hartree Hamiltonian
  *           with global shape = (nspin, k_range.size(), b_range.size(), b_range.size())
  */
@@ -419,7 +419,7 @@ template<MEMORY_SPACE MEM = HOST_MEMORY, nda::ArrayOfRank<4> Arr4_t>
 auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
         Arr4_t const& nij,
         nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-        std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+        std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -428,7 +428,7 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     using larray = memory::array<MEM,ComplexType,4>;
     utils::check(psp != nullptr, "Error in Vhartree: Missing pseudopot object.");
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                                                            nda::range(-1,-1), k_range, b_range, tile_cap);
+                                                            nda::range(-1,-1), k_range, b_range, max_tile_size);
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     return detail::gen_Vhartree<MEM>(mf,comm,psp,k_range,b_range,psi,p3,std::addressof(nij),false);
   } else {
@@ -438,7 +438,7 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     utils::check(false, "Vhartree: Hartree potential using FFT is not implemented for non-orthogonal basis yet!");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,max_tile_size);
   }
 }
 
@@ -446,7 +446,7 @@ template<MEMORY_SPACE MEM = HOST_MEMORY, nda::ArrayOfRank<3> Arr3_t>
 auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
               Arr3_t const& nii,
               nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-              std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+              std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -455,7 +455,7 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     using larray = memory::array<MEM,ComplexType,4>;
     utils::check(psp != nullptr, "Error in Vhartree: Missing pseudopot object.");
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                                                            nda::range(-1,-1), k_range, b_range, tile_cap);
+                                                            nda::range(-1,-1), k_range, b_range, max_tile_size);
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_Vhartree<MEM>(mf,comm,psp,k_range,b_range,psi,std::addressof(nii),p4,false);
   } else {
@@ -465,7 +465,7 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     utils::check(false, "Vhartree: Hartree potential using FFT is not implemented for non-orthogonal basis yet!");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,max_tile_size);
   }
 }
 
@@ -474,10 +474,10 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
   long np = mpi.comm.size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})\n", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})\n", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
 
   // logic of iteration
   if (scf_iter == -1) {
@@ -506,7 +506,7 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
   if (color == 0) {
     auto dVH = hamilt::Vhartree<HOST_MEMORY>(mf, active, psp,
                                              sDm_skij.local(), nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                             pgrid, tile_cap);
+                                             pgrid, max_tile_size);
     h5::group iter_grp;
     if (active.root()) {
       h5::file file(filename, 'a');
@@ -529,7 +529,7 @@ void dump_hartree(MPI_t &mpi, mf::MF &mf, pseudopot *psp, std::string coqui_outp
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto ovlp(mf::MF& mf, boost::mpi3::communicator& comm, 
           nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-          std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+          std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -537,13 +537,13 @@ auto ovlp(mf::MF& mf, boost::mpi3::communicator& comm,
   if (mf.mf_type() == mf::qe_source or mf.mf_type() == mf::bdft_source) {
     using larray = memory::array<MEM,ComplexType,4>;
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                               nda::range(-1,-1), k_range, b_range, tile_cap); 
+                               nda::range(-1,-1), k_range, b_range, max_tile_size); 
     return detail::gen_ovlp<MEM,false>(comm,psi);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,max_tile_size);
   }
 }
 /**
@@ -553,7 +553,7 @@ auto ovlp(mf::MF& mf, boost::mpi3::communicator& comm,
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm, 
           nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-          std::array<long,3> pgrid = {0}, std::array<long,3> tile_cap = {1,1,2048})
+          std::array<long,3> pgrid = {0}, std::array<long,3> max_tile_size = {1,1,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -562,13 +562,13 @@ auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm,
     using larray = memory::array<MEM,ComplexType,4>;
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',
              {pgrid[0],pgrid[1],pgrid[2],1},nda::range(-1,-1), k_range, b_range,
-             {tile_cap[0],tile_cap[1],tile_cap[2],2048});
+             {max_tile_size[0],max_tile_size[1],max_tile_size[2],2048});
     return detail::gen_ovlp<MEM,true>(comm,psi);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_diag_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,tile_cap);
+    return detail::pyscf_read_diag_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,max_tile_size);
   }
 }
 
@@ -581,15 +581,15 @@ void set_ovlp(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sS_skij) {
   long np = sS_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})\n", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})\n", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
 
   detail::assemble_one_body(sS_skij, n_active, [&](boost::mpi3::communicator& c) {
     return ovlp<HOST_MEMORY>(mf, c, nda::range(mf.nkpts_ibz()),
-                             nda::range(mf.nbnd()), pgrid, tile_cap);
+                             nda::range(mf.nbnd()), pgrid, max_tile_size);
   });
 }
 
@@ -598,14 +598,14 @@ void set_ovlp(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sS_skij) {
  * @param mf    [input] - mean-field object
  * @param comm  [input] - communicator
  * @param pgrid [input] - processor grid for the distributed array
- * @param tile_cap    [input] - maximum tile size per axis for the distributed array
+ * @param max_tile_size    [input] - maximum tile size per axis for the distributed array
  * @return - A distributed array of non-interacting one-body Hamiltonian
  *           with global shape = (nspin, nkpts, nbnd, nbnd)
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto Vxc(mf::MF &mf, boost::mpi3::communicator &comm,
          nda::range k_range = {-1,-1}, nda::range b_range = {-1,-1},
-         std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+         std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   if(k_range == nda::range{-1,-1}) k_range = nda::range(mf.nkpts_ibz());
   if(b_range == nda::range{-1,-1}) b_range = nda::range(mf.nbnd());
@@ -613,13 +613,13 @@ auto Vxc(mf::MF &mf, boost::mpi3::communicator &comm,
   if (mf.mf_type() == mf::qe_source or mf.mf_type() == mf::bdft_source) {
     using larray = memory::array<MEM,ComplexType,4>;
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
-                                                            nda::range(-1,-1), k_range, b_range, tile_cap);
+                                                            nda::range(-1,-1), k_range, b_range, max_tile_size);
     return detail::gen_Vxc<MEM>(mf,k_range,b_range,psi);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
-    return detail::pyscf_read_1B_from_file<MEM>(mf,"Vxc",comm,pgrid,tile_cap);
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"Vxc",comm,pgrid,max_tile_size);
   }
 }
 
@@ -634,16 +634,16 @@ void set_Vxc(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sVxc_skij) {
   long np = sVxc_skij.internode_comm()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(4, "One-body Hamiltonian in distributed array: ");
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})\n", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})\n", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
 
   detail::assemble_one_body(sVxc_skij, n_active, [&](boost::mpi3::communicator& c) {
     return hamilt::Vxc<HOST_MEMORY>(mf, c,
                                     nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                    pgrid, tile_cap);
+                                    pgrid, max_tile_size);
   });
 }
 
@@ -652,12 +652,12 @@ void dump_vxc(MPI_t &mpi, mf::MF &mf, std::string coqui_output) {
   long np = mpi.comm.size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
-  std::array<long, 4> tile_cap = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
+  std::array<long, 4> max_tile_size = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
                                      2048l};
   app_log(2, "Evaluate the matrix elements of the exchange-correlation potential: ");
   app_log(2, "  - mean-field backend = {}", mf::mf_source_enum_to_string(mf.mf_type()));
   app_log(4, "  - pgrid = ({}, {}, {}, {}), active ranks = {}/{}", pgrid[0], pgrid[1], pgrid[2], pgrid[3], n_active, np);
-  app_log(4, "  - tile_cap = ({}, {}, {}, {})", tile_cap[0], tile_cap[1], tile_cap[2], tile_cap[3]);
+  app_log(4, "  - max_tile_size = ({}, {}, {}, {})", max_tile_size[0], max_tile_size[1], max_tile_size[2], max_tile_size[3]);
   app_log(2, "");
 
   std::string filename = coqui_output + ".mbpt.h5";
@@ -673,7 +673,7 @@ void dump_vxc(MPI_t &mpi, mf::MF &mf, std::string coqui_output) {
   if (color == 0) {
     auto dVxc = hamilt::Vxc<HOST_MEMORY>(mf, active,
                                          nda::range(mf.nkpts_ibz()), nda::range(mf.nbnd()),
-                                         pgrid, tile_cap);
+                                         pgrid, max_tile_size);
     h5::group sys_grp;
     if (active.root()) {
       h5::file file(filename, 'a');
