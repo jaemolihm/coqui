@@ -908,8 +908,7 @@ auto cholesky::evaluate_diagkk_impl(comm_t& k_intra_comm, int iq, int ik,
   long npy = k_intra_comm.size()/npx;
   auto global_Pab = math::nda::make_distributed_array<local_Array_t>(k_intra_comm,
                         {npx,npy,1},
-			{a_range.size(),b_range.size(),ngm},
-			{1,1,1});  // no blocking for now
+			{a_range.size(),b_range.size(),ngm});  // no blocking for now
   auto a_loc_rng = global_Pab.local_range(0);
   auto b_loc_rng = global_Pab.local_range(1);
   long nab_loc = a_loc_rng.size()*b_loc_rng.size();

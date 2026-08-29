@@ -131,7 +131,7 @@ namespace solvers {
     // needs no redistribution — FT in place, skipping all staging buffers.
     if (dW_wqPQ_pos.communicator()->size() == 1) {
       auto dW_tqPQ = make_distributed_array<local_Array_t>(
-          *comm, {1, 1, 1, 1}, t_gshape, {1, 1, 1, 1});
+          *comm, {1, 1, 1, 1}, t_gshape);
       auto W_wi_loc = dW_wqPQ_pos.local();
       auto W_ti_loc = dW_tqPQ.local();
       _ft->w_to_tau_PHsym(W_wi_loc, W_ti_loc);
