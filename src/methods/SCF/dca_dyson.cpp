@@ -55,12 +55,12 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
     long np_i = np / (np_s*np_k);
     std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
     long cap_i = std::min( {(long)1024, mf->nbnd()/np_i});
-    std::array<long, 4> tile_cap = {1, 1, cap_i, 1};
+    std::array<long, 4> max_tile_size = {1, 1, cap_i, 1};
     app_log(3, "One-body Hamiltonian in distributed array: ");
     app_log(3, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-    app_log(3, "  - tile_cap = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
+    app_log(3, "  - max_tile_size = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
     auto dH0 = hamilt::H0<HOST_MEMORY>(*_MF, _context.comm, _PSP.get(), 
-                                       nda::range(_MF->nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
+                                       nda::range(_MF->nkpts()), nda::range(_MF->nbnd()), pgrid, max_tile_size);
     // gather at root, then broadcast to all nodes
     auto H0_loc = _sH0_skij.local();
     math::nda::gather(0, dH0, &H0_loc);
@@ -73,13 +73,13 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
   long np_i = np / (np_s*np_k);
   std::array<long, 4> pgrid = {np_s, np_k, np_i, 1};
   long cap_i = std::min( {(long)1024, mf->nbnd()/np_i});
-  std::array<long, 4> tile_cap = {1, 1, cap_i, 1};
+  std::array<long, 4> max_tile_size = {1, 1, cap_i, 1};
   app_log(3, "One-body full-lattice Hamiltonian in distributed array: ");
   app_log(3, "  - pgrid = ({}, {}, {}, {})", np_s, np_k, np_i, 1);
-  app_log(3, "  - tile_cap = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
+  app_log(3, "  - max_tile_size = ({}, {}, {}, {})\n", 1, 1, cap_i, 1);
   {
     auto dH0_lat = hamilt::H0<HOST_MEMORY>(dca_mf, _context.comm, _PSP.get(),  
-                                           nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
+                                           nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, max_tile_size);
     auto H0_latt_loc = _sH0_lattice_sKij.local();
     math::nda::gather(0, dH0_lat, &H0_latt_loc);
     if (_context.node_comm.root())
@@ -87,7 +87,7 @@ dca_dyson::dca_dyson(utils::mpi_context_t<mpi3::communicator> &context, mf::MF *
   }
   {
     auto dS = hamilt::ovlp<HOST_MEMORY>(dca_mf, _context.comm,
-                                        nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, tile_cap);
+                                        nda::range(dca_mf.nkpts()), nda::range(_MF->nbnd()), pgrid, max_tile_size);
     auto S_loc = _sS_lattice_sKij.local();
     math::nda::gather(0, dS, &S_loc);
     if (_context.node_comm.root())

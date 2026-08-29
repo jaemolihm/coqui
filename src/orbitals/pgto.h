@@ -159,7 +159,7 @@ class pgto
 		     mf::MF& mf,
 		     bool normalize = false,
 		     std::array<long,4> const pgrid = {0},
-		     std::array<long,4> const tile_cap = {1,1,2048,2048});
+		     std::array<long,4> const max_tile_size = {1,1,2048,2048});
 
   private:
 

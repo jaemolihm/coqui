@@ -147,7 +147,7 @@ namespace solvers {
 
       // Square (P,Q) tile count: the same count on both axes, so the two axes get
       // identical tile boundaries and the SUMMA / getri preconditions hold. The
-      // 1024 cap keeps a tile from growing without bound; below it there is
+      // 1024 max tile size keeps a tile from growing without bound; below it there is
       // exactly one tile per rank on the larger of the two PQ axes.
       std::array<long, 4> w_tcount;
       w_tcount.fill(0);   // 0 = one element per tile, i.e. the (w,q) axes stay untiled

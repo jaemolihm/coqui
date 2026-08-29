@@ -820,8 +820,8 @@ TEST_CASE("ft_buffer_dist", "[math]")
   }
 
   // The production point, spelled out: the P-split grid whose SUMMA was measured.
-  // The 1024 cap is inactive at NP = 1687 over max(3,1) = 3 ranks, so the tile
-  // count is 3 -- one tile per P rank, of 563/562/562 elements, instead of the
+  // The 1024 max tile size is inactive at NP = 1687 over max(3,1) = 3 ranks, so the
+  // tile count is 3 -- one tile per P rank, of 563/562/562 elements, instead of the
   // floor-division 562/562/563 that dumped the remainder on the last rank.
   {
     auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});

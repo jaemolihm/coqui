@@ -384,7 +384,7 @@ auto canonicalize_diagonal_serial_impl(mf::MF& mf,
   // redistribute over bands, since gen_F requires full G vectors
   auto psi_k = math::nda::make_distributed_array<larray>(k_comm,{1,1,pgrid[3],1},
             {1,1,nbnd_tot,npwx},
-            utils::tile_caps<4>{{1,1,2048,2048}});
+            utils::max_tile_sizes<4>{{1,1,2048,2048}});
   auto psi_loc = psi.local();
   {
     nda::array<int,2> idx(k_comm.size(),2);

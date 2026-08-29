@@ -29,12 +29,12 @@ namespace hamilt::detail
  * @param h5_name - [INPUT] name of h5 file
  * @param comm    - [INPUT] communicator for the output distributed array
  * @param pgrid   - [INPUT] processor grid for the distributed array
- * @param tile_cap      - [INPUT] maximum tile size per axis for the distributed array
+ * @param max_tile_size      - [INPUT] maximum tile size per axis for the distributed array
  * @return - one-body Hamiltonian in a distributed array
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto pyscf_read_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::communicator& comm, 
-			     std::array<long,4> pgrid = {0}, std::array<long,4> tile_cap = {1,1,2048,2048})
+			     std::array<long,4> pgrid = {0}, std::array<long,4> max_tile_size = {1,1,2048,2048})
 {
   long nspin = mf.nspin();
   long nkpts = mf.nkpts_ibz();
@@ -53,7 +53,7 @@ auto pyscf_read_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::commu
   // the two band axes must share a partition (same extent, same tile count)
   std::array<long,4> pb = {pgrid[0],pgrid[1],std::max(pgrid[2],pgrid[3]),std::max(pgrid[2],pgrid[3])};
   auto Hij = math::nda::make_distributed_array<larray>(comm,pgrid,{nspin,nkpts,nbnd,nbnd},
-                 utils::balanced_tile_counts<4>({nspin,nkpts,nbnd,nbnd},pb,{tile_cap[0],tile_cap[1],tile_cap[2],tile_cap[2]}));
+                 utils::balanced_tile_counts<4>({nspin,nkpts,nbnd,nbnd},pb,{max_tile_size[0],max_tile_size[1],max_tile_size[2],max_tile_size[2]}));
 
   auto fn = mf.filename();  
   h5::file file;
@@ -75,12 +75,12 @@ auto pyscf_read_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::commu
  * @param h5_name - [INPUT] name of h5 file
  * @param comm    - [INPUT] communicator for the output distributed array
  * @param pgrid   - [INPUT] processor grid for the distributed array
- * @param tile_cap      - [INPUT] maximum tile size per axis for the distributed array
+ * @param max_tile_size      - [INPUT] maximum tile size per axis for the distributed array
  * @return - one-body Hamiltonian in a distributed array
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto pyscf_read_diag_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::communicator& comm, 
-			     std::array<long,3> pgrid = {0}, std::array<long,3> tile_cap = {1,1,2048})
+			     std::array<long,3> pgrid = {0}, std::array<long,3> max_tile_size = {1,1,2048})
 {
   decltype(nda::range::all) all;
   long nspin = mf.nspin();
@@ -101,7 +101,7 @@ auto pyscf_read_diag_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::
   std::array<long,4> pg4 = {pgrid[0],pgrid[1],pgrid[2],1};
   std::array<long,4> pb4 = {pgrid[0],pgrid[1],pgrid[2],pgrid[2]};
   auto Hij = math::nda::make_distributed_array<larray>(comm,pg4,{nspin,nkpts,nbnd,nbnd},
-                 utils::balanced_tile_counts<4>({nspin,nkpts,nbnd,nbnd},pb4,{tile_cap[0],tile_cap[1],tile_cap[2],tile_cap[2]}));
+                 utils::balanced_tile_counts<4>({nspin,nkpts,nbnd,nbnd},pb4,{max_tile_size[0],max_tile_size[1],max_tile_size[2],max_tile_size[2]}));
 
   auto fn = mf.filename();
   h5::file file;
@@ -116,7 +116,7 @@ auto pyscf_read_diag_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::
 
   using larray3D = memory::array<MEM,ComplexType,3>;
   auto Hii = math::nda::make_distributed_array<larray3D>(comm,pgrid,{nspin,nkpts,nbnd},
-                 utils::tile_caps<3>{tile_cap});
+                 utils::max_tile_sizes<3>{max_tile_size});
 
   for( auto [is,s] : itertools::enumerate(Hij.local_range(0)))
     for( auto [ik,k] : itertools::enumerate(Hij.local_range(1))) {
