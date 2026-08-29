@@ -593,6 +593,41 @@ TEST_CASE("multiply_blocking_sweep", "[math]")
   run(283);
 }
 
+// The conformability predicate behind the utils::check in multiply_impl. It is a
+// predicate precisely so that it can be tested: utils::check calls MPI_Abort, so a
+// mismatched gemm cannot be run inside a Catch2 test. Extents and tile counts here are
+// what slate::gemm receives, i.e. already through the transpose op and the C-order
+// row/column swap.
+TEST_CASE("gemm_tile_conformability", "[math]")
+{
+  using math::nda::slate_ops::detail::gemm_operand;
+  using math::nda::slate_ops::detail::gemm_tile_mismatch;
+
+  // (100x60) * (60x40) = (100x40), tile counts agreeing on each shared axis
+  const gemm_operand A{100,60,4,3}, B{60,40,3,2}, C{100,40,4,2};
+  CHECK(gemm_tile_mismatch(A,B,C) == "");
+  // one element per tile is conformable too
+  CHECK(gemm_tile_mismatch({100,60,100,60},{60,40,60,40},{100,40,100,40}) == "");
+
+  // The silent one: extents agree everywhere, only the contracted axis is tiled
+  // differently. slate::gemm runs it and returns a wrong number.
+  CHECK(gemm_tile_mismatch(A,{60,40,4,2},C).find("contracted") != std::string::npos);
+  CHECK(gemm_tile_mismatch({100,60,4,2},B,C).find("contracted") != std::string::npos);
+  // extent mismatch on the contracted axis
+  CHECK(gemm_tile_mismatch(A,{59,40,3,2},C).find("contracted") != std::string::npos);
+  // the outer axes: A/C rows and B/C columns, tile count and extent
+  CHECK(gemm_tile_mismatch(A,B,{100,40,5,2}).find("row") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{101,40,4,2}).find("row") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{100,40,4,3}).find("column") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{100,41,4,2}).find("column") != std::string::npos);
+
+  // the message names the operands it was GIVEN, in the order it was given them.
+  // multiply_impl relies on that: it always passes (A,B,C) in CoQui's own orientation,
+  // undoing the row/column swap to_slate_view applies to a C-order array, so the axis
+  // word and the shape in the message are the ones the caller wrote.
+  CHECK(gemm_tile_mismatch(B,A,C,"B","A","C").find("B is 60x40") != std::string::npos);
+}
+
 // The factory's distribution, checked as a partition rather than through an
 // operation: gather every rank's (origin, local_shape) and verify per axis that
 // the local ranges tile [0,N) exactly, that no rank is empty, and how far the

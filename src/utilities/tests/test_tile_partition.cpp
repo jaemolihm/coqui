@@ -113,17 +113,17 @@ TEST_CASE("tile_partition_invariants", "[utilities]")
         if (p_row > N or p_col > N) continue;
         const long p_max = std::max(p_row,p_col);
 
-        for (long cap : {1l, 16l, 1024l}) {
-          const long t = utils::balanced_tile_count(N, p_max, cap);
+        for (long max_tile_size : {1l, 16l, 1024l}) {
+          const long t = utils::balanced_tile_count(N, p_max, max_tile_size);
           // the helper never returns an unusable count
           REQUIRE(t >= p_max);
           REQUIRE(t <= N);
           // (6) every rank of the p_max axis owns at least one tile
           REQUIRE(t/p_max >= 1);
-          // tiles honour the cap whenever the cap is reachable, i.e. t was not
+          // tiles honour max_tile_size whenever it is reachable, i.e. t was not
           // clamped down to N by the min
-          if (t == p_max*((N + p_max*cap - 1)/(p_max*cap)))
-            REQUIRE(tile_extent(N,t,0) <= cap);
+          if (t == p_max*((N + p_max*max_tile_size - 1)/(p_max*max_tile_size)))
+            REQUIRE(tile_extent(N,t,0) <= max_tile_size);
 
           // (7) equal tile counts on two axes of equal extent => identical
           // boundaries, whatever their process grids. This is the getri mt == nt
@@ -170,7 +170,7 @@ TEST_CASE("tile_partition_reference_values", "[utilities]")
   REQUIRE(utils::balanced_tile_count(403, 1, 1) == 403);
   for (long i = 0; i < 403; ++i) REQUIRE(utils::tile_extent(403,403,i) == 1);
 
-  // N = 403 over the min_diff grids of a few rank counts, cap 1024 inactive
+  // N = 403 over the min_diff grids of a few rank counts, max_tile_size 1024 inactive
   REQUIRE(utils::balanced_tile_count(403, 8, 1024) == 8);
   REQUIRE(utils::balanced_tile_count(403, 32, 1024) == 32);
   REQUIRE(utils::balanced_tile_count(403, 128, 1024) == 128);
@@ -182,7 +182,7 @@ TEST_CASE("tile_partition_reference_values", "[utilities]")
   REQUIRE(utils::local_range_of_rank(403, 8, 8, 0) == std::pair<long,long>{0,51});
   REQUIRE(utils::local_range_of_rank(403, 8, 8, 7) == std::pair<long,long>{353,403});
 
-  // the cap does bite for a large axis: 2229 over 2 ranks needs two tiles per rank
+  // max_tile_size does bite for a large axis: 2229 over 2 ranks needs two tiles per rank
   REQUIRE(utils::balanced_tile_count(2229, 2, 1024) == 4);
   REQUIRE(utils::tile_extent(2229, 4, 0) == 558);
   REQUIRE(utils::tile_extent(2229, 4, 1) == 557);
@@ -200,6 +200,56 @@ TEST_CASE("tile_partition_reference_values", "[utilities]")
   REQUIRE(utils::tile_of(1687, 3, 563) == 1);
   REQUIRE(utils::tile_of(1687, 3, 1124) == 1);
   REQUIRE(utils::tile_of(1687, 3, 1125) == 2);
+}
+
+TEST_CASE("tile_partition_edge_cases", "[utilities]")
+{
+  using utils::tile_offset;
+  using utils::tile_extent;
+  using utils::tile_of;
+  using utils::local_range_of_rank;
+  using utils::balanced_tile_count;
+
+  // N = 1: one element, one tile, one rank
+  REQUIRE(tile_offset(1,1,0) == 0);
+  REQUIRE(tile_extent(1,1,0) == 1);
+  REQUIRE(tile_of(1,1,0) == 0);
+  REQUIRE(local_range_of_rank(1,1,1,0) == std::pair<long,long>{0,1});
+
+  // t = 1: the whole axis in one tile, so every element maps to tile 0
+  REQUIRE(tile_offset(7,1,0) == 0);
+  REQUIRE(tile_extent(7,1,0) == 7);
+  for (long idx = 0; idx < 7; ++idx) REQUIRE(tile_of(7,1,idx) == 0);
+
+  // t = N: one element per tile, and the index maps are the identity
+  for (long i = 0; i < 7; ++i) {
+    REQUIRE(tile_offset(7,7,i) == i);
+    REQUIRE(tile_extent(7,7,i) == 1);
+    REQUIRE(tile_of(7,7,i) == i);
+  }
+
+  // a ragged partition, 7 = 3*2 + 1: tiles [0,3), [3,5), [5,7)
+  REQUIRE(tile_offset(7,3,0) == 0);
+  REQUIRE(tile_offset(7,3,2) == 5);          // first element of the last tile
+  REQUIRE(tile_extent(7,3,0) == 3);          // the one large tile
+  REQUIRE(tile_extent(7,3,2) == 2);
+  REQUIRE(tile_of(7,3,0) == 0);              // first element of the axis
+  REQUIRE(tile_of(7,3,2) == 0);              // last element of the large tile
+  REQUIRE(tile_of(7,3,3) == 1);              // first element after it
+  REQUIRE(tile_of(7,3,6) == 2);              // last element of the axis
+  REQUIRE(local_range_of_rank(7,3,3,2) == std::pair<long,long>{5,7});   // one tile per rank
+  REQUIRE(local_range_of_rank(7,3,1,0) == std::pair<long,long>{0,7});   // all tiles on one rank
+
+  // r = 0: every tile the same size, no ragged tail
+  for (long i = 0; i < 4; ++i) REQUIRE(tile_extent(8,4,i) == 2);
+
+  // max_tile_size edges: exact fit, one element over, and a size so small that the
+  // count would exceed N and is clamped to it
+  REQUIRE(balanced_tile_count(1024, 1, 1024) == 1);
+  REQUIRE(balanced_tile_count(1025, 1, 1024) == 2);
+  REQUIRE(balanced_tile_count(10, 4, 1) == 10);    // 4*ceil(10/4) = 12, clamped to 10
+  REQUIRE(balanced_tile_count(10, 1, 1) == 10);
+  REQUIRE(balanced_tile_count(10, 10, 1) == 10);
 }
 
 } // bdft_tests

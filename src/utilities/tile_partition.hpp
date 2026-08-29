@@ -36,28 +36,61 @@ namespace utils
 /**
  * Balanced tile partition of an axis.
  *
- * An axis of extent `N` is cut into `t` tiles by itertools::chunk_range, so with
- * `a = N/t` and `r = N%t` the first `r` tiles hold `a+1` elements and the rest hold
- * `a`; tile `i` starts at `i*a + min(i,r)`. Tiles are then handed to the `np` ranks
- * of that axis by the same rule, applied to the tile index. Two consequences are
- * the reason distributed_array stores the tile *count* rather than a tile size:
+ * Three numbers describe one axis of a distributed array, and they are independent:
  *
- *  - the partition is a function of `(N, t)` alone, so two axes with equal extent
- *    and equal tile count have identical tile boundaries whatever their process
- *    grids -- which is what slate's gemm/getri conformability requires;
- *  - no tile and no rank is empty as long as `np <= t <= N`, and per-rank loads
- *    differ by at most one element per tile.
+ *   N   the global extent -- how many elements the axis has;
+ *   t   the TILE COUNT   -- how many contiguous pieces those N elements are cut into;
+ *   p   the process grid extent -- how many ranks the axis is spread over.
  *
- * `t == N` reproduces a tile size of one, i.e. the plain balanced element
- * distribution of chunk_range.
+ * A tile is the unit of distribution and the unit slate blocks on. Elements are cut
+ * into `t` tiles, then the `t` tiles are dealt out to the `p` ranks, so a rank owns
+ * one or more WHOLE tiles and `p <= t <= N` is required: `t < p` would leave a rank
+ * empty, `t > N` an empty tile.
+ *
+ * Both cuts are itertools::chunk_range, i.e. both are balanced: cutting `M` things
+ * into `n` groups gives the first `M%n` groups one extra thing, and group `i` starts
+ * at `i*(M/n) + min(i,M%n)`.
+ *
+ * Worked example -- N = 10 elements, t = 4 tiles, p = 2 ranks:
+ *
+ *   elements -> tiles:  10 = 4*2 + 2, so the first 2 tiles hold 3 elements and the
+ *                       other 2 hold 2.
+ *   tiles -> ranks:     4 = 2*2 + 0, so each rank holds 2 tiles.
+ *
+ *      element   0  1  2 | 3  4  5 | 6  7 | 8  9
+ *      tile          0   |    1    |   2  |  3
+ *      rank      \____ 0 ______/ \____ 1 _____/
+ *
+ *   so tile_offset(10,4,i) = 0,3,6,8, tile_extent(10,4,i) = 3,3,2,2,
+ *   tile_of(10,4,5) = 1, local_range_of_rank(10,4,2,0) = [0,6).
+ *
+ * On the same axis t = 2 would give tiles [0,5), [5,10) and one tile per rank, and
+ * t = 10 would give one element per tile and 5 tiles per rank. All three are legal
+ * partitions of the same array over the same ranks; the tile count is what picks
+ * between them.
+ *
+ * Two consequences are the reason distributed_array stores the tile COUNT rather
+ * than a tile size:
+ *
+ *  - the partition is a function of `(N,t)` alone, so two axes with equal extent and
+ *    equal tile count have identical tile boundaries whatever their process grids --
+ *    which is what slate's gemm and getri require of their operands and do not check;
+ *  - no tile and no rank is empty as long as `p <= t <= N`, and per-rank loads differ
+ *    by at most one element per tile. A tile SIZE cannot express the
+ *    `(a+1)*r + a*(t-r)` split at all, so it has to dump the remainder somewhere.
  */
 
 /**
- * Per-axis tile count meaning "one element per tile" on every axis, i.e. the plain
- * balanced element distribution. It is the `0` sentinel resolved by
- * resolve_tile_counts, spelled so that a tile-count argument is not mistaken for an
- * origin or a shape at the call site, and so that every elementwise-tiled array is
- * greppable.
+ * The tile count meaning "one element per tile on every axis": no blocking, the axis
+ * is spread over its ranks element by element.
+ *
+ * It is a value, not a function -- `utils::one_per_tile<2>` is
+ * `std::array<long,2>{0,0}`. Those zeros are the "not specified" spelling that
+ * resolve_tile_counts fills in, and an omitted tile-count argument gives exactly the
+ * same thing, since std::array value-initializes to zeros. So spell it out only where
+ * the argument cannot simply be left off: a tile count that is not the last argument,
+ * one that has to be a named variable, or one worth seeing at a call site where it
+ * sits next to a grid and a shape that look just like it.
  */
 template<size_t R>
 inline constexpr std::array<long,R> one_per_tile = {};
@@ -89,65 +122,81 @@ inline long tile_of(long N, long t, long idx)
 }
 
 /**
- * Tile count for an axis of extent `N` distributed over `p_max` ranks with tiles of
- * at most `cap` elements: the smallest multiple of `p_max` that keeps every tile at
- * or below `cap`, clamped to `N`.
+ * Pick the tile count for an axis: the smallest multiple of `p_max` that keeps every
+ * tile at or below `max_tile_size` elements, clamped to `N`.
  *
- * A multiple of `p_max` gives every rank the same number of tiles, and `p_max` is
- * the larger of the two grid extents of a 2-D array so that the row and column
- * partitions of a square operand agree (the getrf/getri precondition mt == nt).
+ *     t = min(N, p_max * ceil(N/(p_max*max_tile_size)))
+ *
+ * A multiple of `p_max` so that every rank of that axis gets the same number of
+ * tiles. `p_max` is normally the number of ranks on the axis, but two axes that must
+ * share a partition have to be given the LARGER of their two grid extents -- see
+ * balanced_tile_counts.
+ *
+ * Worked example -- an N x M matrix on an np x mp process grid, max_tile_size = 1024:
+ *
+ *   N = M = 3000, np = 2, mp = 4. Square, so the row and column partitions have to
+ *     agree and both axes take p_max = max(2,4) = 4. ceil(3000/(4*1024)) = 1, so
+ *     t = 4 on both: four tiles of 750, 750, 750, 750.
+ *     Rows are spread over np = 2 ranks -> 2 tiles (1500 elements) each; columns over
+ *     mp = 4 ranks -> 1 tile (750 elements) each. Rank (i,j) holds a 1500 x 750 block.
+ *
+ *   N = 3000, M = 500, np = 2, mp = 4. Not square and nothing pairs the axes, so each
+ *     takes its own grid extent: t_row = 2*ceil(3000/2048) = 4 (tiles of 750) and
+ *     t_col = 4*ceil(500/4096) = 4 (tiles of 125). Rank (i,j) holds 1500 x 125.
+ *
+ *   N = 3000, M = 3000, np = 4, mp = 4, max_tile_size = 256. p_max = 4 and
+ *     ceil(3000/1024) = 3, so t = 12 on both axes: 12 tiles of 250, three per rank.
  */
-inline long balanced_tile_count(long N, long p_max, long cap)
+inline long balanced_tile_count(long N, long p_max, long max_tile_size)
 {
   utils::check(N >= 1, "balanced_tile_count: N must be >= 1, got {}", N);
   utils::check(p_max >= 1, "balanced_tile_count: p_max must be >= 1, got {}", p_max);
-  utils::check(cap >= 1, "balanced_tile_count: cap must be >= 1, got {}", cap);
+  utils::check(max_tile_size >= 1, "balanced_tile_count: max_tile_size must be >= 1, got {}", max_tile_size);
   utils::check(p_max <= N, "balanced_tile_count: p_max:{} exceeds N:{}", p_max, N);
-  long per_rank = (N + p_max*cap - 1)/(p_max*cap);   // ceil(N/(p_max*cap)) >= 1
+  long per_rank = (N + p_max*max_tile_size - 1)/(p_max*max_tile_size);   // >= 1
   return std::min(N, p_max*per_rank);
 }
 
 /**
- * Per-axis tile counts from per-axis tile-size caps: axis n gets
- * balanced_tile_count(shape[n], p[n], cap[n]), or shape[n] (one element per tile)
- * when cap[n] <= 0.
+ * Per-axis tile counts from per-axis maximum tile sizes: axis n gets
+ * balanced_tile_count(shape[n], p[n], max_tile_size[n]), or shape[n] (one element per
+ * tile) when max_tile_size[n] <= 0.
  *
- * Pass the SAME p on two axes that have to share a partition -- the square
- * operand of getrf/getri, or the contracted axis of a gemm -- normally the
- * larger of their two grid extents. p[n] = grid[n] is right for an axis with no
- * such partner.
+ * Pass the SAME p on two axes that have to share a partition -- the square operand of
+ * getrf/getri, or the contracted axis of a gemm -- normally the larger of their two
+ * grid extents. p[n] = grid[n] is right for an axis with no such partner.
  */
 template<size_t R>
 inline std::array<long,R> balanced_tile_counts(std::array<long,R> const& shape,
                                                std::array<long,R> const& p,
-                                               std::array<long,R> const& cap)
+                                               std::array<long,R> const& max_tile_size)
 {
   std::array<long,R> t;
   for(size_t n=0; n<R; ++n)
-    t[n] = (cap[n] <= 0 ? shape[n] : balanced_tile_count(shape[n],p[n],cap[n]));
+    t[n] = (max_tile_size[n] <= 0 ? shape[n] : balanced_tile_count(shape[n],p[n],max_tile_size[n]));
   return t;
 }
 
 /**
- * A per-axis tile-size cap: a request for the balanced tile count that keeps every
- * tile at or below `cap[n]`, left for the factory that knows the array's shape and
- * process grid to resolve. Its own type, so that a cap can never be passed where a
- * count is expected.
+ * Per-axis maximum tile sizes: a request for the balanced tile count that keeps every
+ * tile at or below `max_size[n]` elements, left for the factory -- which knows the
+ * array's shape and process grid -- to turn into counts. Its own type, so that a
+ * maximum size can never be passed where a count is expected.
  *
  * The factory resolves it against the array's OWN grid extent on each axis, which is
  * right only when no two axes have to share a partition. Two axes that do -- the
  * square operand of getrf/getri, or the contracted axis of a gemm -- must go through
  * balanced_tile_counts with the paired `p` on both, and say so.
  *
- * `cap[n] <= 0` means one element per tile, as in balanced_tile_counts.
+ * `max_size[n] <= 0` means one element per tile, as in balanced_tile_counts.
  */
 template<size_t R>
-struct tile_caps {
-  std::array<long,R> cap;
+struct max_tile_sizes {
+  std::array<long,R> max_size;
   // Not an aggregate, and explicit: brace elision would otherwise let a plain
   // `{...}` tile-count argument match this overload too, and every factory call
   // passing a count literal becomes ambiguous.
-  explicit constexpr tile_caps(std::array<long,R> c) : cap(c) {}
+  explicit constexpr max_tile_sizes(std::array<long,R> s) : max_size(s) {}
 };
 
 /// [first,last) of the elements of [0,N) owned by rank `ip` of `np`, when the axis
@@ -161,15 +210,26 @@ inline std::pair<long,long> local_range_of_rank(long N, long t, long np, long ip
 }
 
 /**
- * Resolve the `0` sentinels of a per-axis tile count against the extents of the
- * array it describes, without validating: `t[n] == 0` means "one element per tile",
- * i.e. `t[n] = extents[n]`, which reproduces a tile size of one.
+ * A tile count of `0` on an axis means "not specified: one element per tile". Fill
+ * those in from the extents of the array being described: `t[n] == 0` becomes
+ * `t[n] = extents[n]`, which is the same partition as a tile size of one.
  *
- * Needed on its own because distribution helpers return the sentinel (they are
- * deliberately extent-agnostic on the pooled axes) while a constructed array stores
- * the resolved count, so the two are only comparable after this. Use it wherever a
- * stored tile_count() is tested against a helper's output -- an unresolved
- * comparison silently reports "different distribution".
+ * `0` rather than `N` because a distribution helper has to be able to say "one
+ * element per tile" without knowing how long the axis is -- ft_buffer_dist, for
+ * instance, returns a tile count for an axis whose extent one of its callers has not
+ * fixed yet -- and because it is what an omitted tile-count argument gives you,
+ * std::array being value-initialized to zeros.
+ *
+ * Hence the asymmetry this function exists for. An array that has been CONSTRUCTED
+ * stores filled-in counts, so tile_count() never returns a 0; a helper's return value
+ * still carries them. Comparing the two directly reports "different distribution" for
+ * two identical distributions:
+ *
+ *     W.tile_count()                                  == {48, 8, 1, 1}   // filled in
+ *     scr_coulomb_fourier_t::ft_buffer_dist(...)       == {48, 8, 0, 0}   // as returned
+ *     resolved_tile_counts(ft_buffer_dist(...), shape) == {48, 8, 1, 1}   // comparable
+ *
+ * So put a helper's output through this before testing it against a stored count.
  *
  * Axes with a non-positive extent carry no partition (reset or dummy-constructed
  * arrays) and are left alone.
@@ -183,13 +243,13 @@ inline std::array<long,R> resolved_tile_counts(std::array<long,R> t,
 }
 
 /**
- * Resolve the sentinels in place and validate: every resolved count must satisfy
- * `grid[n] <= t[n] <= extents[n]`. Out-of-range counts are rejected rather than
- * clamped, because a silently clamped count gives two axes different tile
+ * Fill in the `0`s in place, as resolved_tile_counts, and then validate: every
+ * resulting count must satisfy `grid[n] <= t[n] <= extents[n]`, the condition for a
+ * partition with no empty rank and no empty tile. Out-of-range counts are rejected
+ * rather than clamped, because a silently clamped count gives two axes different tile
  * boundaries and slate's gemm does not check that.
  *
- * Axes with a non-positive extent or grid are left alone, as in
- * resolved_tile_counts.
+ * Axes with a non-positive extent or grid are left alone, as in resolved_tile_counts.
  */
 template<size_t R>
 inline void resolve_tile_counts(std::array<long,R>& t,
