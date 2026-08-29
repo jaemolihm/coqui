@@ -336,7 +336,7 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                                                  {orb_range.size(),rho_g.nnr()},{1,1})};
+                                                  {orb_range.size(),rho_g.nnr()})};
   auto buff_loc = buff.local();
   auto buff_rng_loc = buff_loc(all,r_range);
   memory::darray_view_t<local_Array_t,mpi3::communicator> buff_rng(std::addressof(q_intra_comm),
@@ -344,7 +344,7 @@ void thc::get_Tkur_nonuniform_rgrid(bool add_phase, int ispin, nda::range orb_ra
                                                                    {buff.origin()[0], 0}, {1,1}, buff_rng_loc);
 
   auto buff_iu{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                                                    {orb_range.size(),nIpts},{1,1})};
+                                                    {orb_range.size(),nIpts})};
   auto buff_iu_loc = buff_iu.local();
 
   auto phase = memory::unified_array<ComplexType, 3>::zeros({rho_g.mesh(0),
@@ -425,7 +425,7 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
 
   // FIXME breaks when orb_range < q_intra_comm.size()
   auto buff{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                {orb_range.size(),rho_g.nnr()},{1,1})};
+                {orb_range.size(),rho_g.nnr()})};
   auto buff_loc = buff.local();
   auto buff_loc_4d = nda::reshape(buff_loc, std::array<long,4>{buff_loc.shape()[0],
                                                 rho_g.mesh(0),
@@ -437,7 +437,7 @@ void thc::get_Tkur_fft_grid(bool add_phase, int ispin, nda::range orb_range, nda
             {buff.origin()[0], 0}, {1,1}, buff_rng_loc);
 
   auto buffuv{make_distributed_array<local_Array_t>(q_intra_comm,{q_intra_comm.size(),1},
-                {orb_range.size(),nIpts},{1,1})};
+                {orb_range.size(),nIpts})};
   auto buffuv_loc = buffuv.local();
 
   auto phase = memory::unified_array<ComplexType, 3>::zeros({rho_g.mesh(0),

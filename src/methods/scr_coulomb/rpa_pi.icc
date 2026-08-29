@@ -93,11 +93,11 @@ namespace solvers {
 
     // The total memory requirement is ntpools*ns*nkpts*Np*Np rather than nt*ns*nkpts*Np*Np
     auto dGp_sRPQ = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np});
     auto dGn_sRPQ = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np});
     auto dbuf_skPQ  = make_distributed_array<local_Array_4D_t>(
-        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np}, {1, 1, 1, 1});
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts_no_trev, Np, Np});
     // gemm-path staging only: nda zero-fills on construction, so allocating this
     // on the FFT path would fault in pages that are never read.
     nda::matrix<ComplexType> X_R_PQ;
