@@ -549,7 +549,7 @@ void thc::get_Tkug(int ispin, int ipol, nda::array<int,1> const& kp_to_ibz,
   auto comm = Tkug_u.communicator();
 
   auto Tkug_g{math::nda::make_distributed_array<local_Array3_t>(*comm,{1,1,comm->size()},
-                Tkug_u.global_shape(),{1,1,1})};
+                Tkug_u.global_shape())};
 
   utils::check( kp_order.size() == nk, "Shape mismatch: kp_order.size:{}, nk:{}",kp_order.size(), nk);
   utils::check( psi.global_shape()[2] == na, "Shape mismatch Psi(2):{}, Xkua(2):{}",psi.global_shape()[2], na);
@@ -599,9 +599,9 @@ void thc::get_Tuv_nonuniform_rgrid(bool add_phase, int ispin, int k, nda::range 
   auto Psiu{make_distributed_array<local_Array_t>(mpi->comm,grid,
                 {orb_range.size(),nIpts}, {default_block_size,mb})};
   auto buff_nr{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),rho_g.nnr()}, {1,1})};
+                {orb_range.size(),rho_g.nnr()})};
   auto buff_nu{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),nIpts}, {1,1})};
+                {orb_range.size(),nIpts})};
 
   auto buff_nr_loc = buff_nr.local();
   auto buff_nu_loc = buff_nu.local();
@@ -664,10 +664,10 @@ void thc::get_Tuv_fft_grid(bool add_phase, int ispin, int k, nda::range orb_rang
                 {orb_range.size(),nIpts},{default_block_size,mb})};
 
   auto buff{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),rho_g.nnr()},{1,1})};
+                {orb_range.size(),rho_g.nnr()})};
   auto buff_loc = buff.local();
   auto buffuv{make_distributed_array<local_Array_t>(mpi->comm,{mpi->comm.size(),1},
-                {orb_range.size(),nIpts},{1,1})};
+                {orb_range.size(),nIpts})};
   auto buffuv_loc = buffuv.local();
 
   memory::array<MEM,ComplexType,1> wbuff;
@@ -1003,7 +1003,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   long nx = utils::find_proc_grid_max_rows(mpi->comm.size(),nqpts_ibz);
   utils::check(mpi->comm.size()/nx <= nIpts, "Incompatible processor grid.");
   auto Z_qur{make_distributed_array<local_uArray_t>(mpi->comm,{nx,mpi->comm.size()/nx,1},
-		{nqpts_ibz,nIpts,rho_g.nnr()},{1})};
+		{nqpts_ibz,nIpts,rho_g.nnr()})};
   Z_qur.local() = ComplexType(0.0);
   Timer.stop("ALLOC");
 
@@ -1154,7 +1154,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
   { 
     Timer.start("ALLOC");
     auto Cq_{make_distributed_array<local_uArray_t>(mpi->comm,Z_qur.grid(),
-                {nqpts_ibz,nIpts,nIpts},{1})};
+                {nqpts_ibz,nIpts,nIpts})};
     Timer.stop("ALLOC");
     long nab = Cq_.local_shape()[0]*Cq_.local_shape()[1];
     auto Z2D = nda::reshape(Z_qur.local(), shape_t<2>{nab,rho_g.nnr()});
@@ -1204,7 +1204,7 @@ auto thc::get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
 
     Timer.start("ALLOC");
     auto Z_{make_distributed_array<local_uArray_t>(mpi->comm,Z_qur.grid(),
-              {nqpts_ibz,nIpts,rho_g.size()},{1})};
+              {nqpts_ibz,nIpts,rho_g.size()})};
     Timer.stop("ALLOC");
     // copy from fft mesh to reduced g-grid
     for( auto [iq,q] : itertools::enumerate(Z_qur.local_range(0)) ) {
@@ -1370,9 +1370,9 @@ auto thc::get_ZquG_Cquv_fft(nda::MemoryArrayOfRank<1> auto const& IPts,
   // C(q,u,v)
   Timer.start("ALLOC");
   auto Z_qug = math::nda::make_distributed_array<local_3Array_t>(mpi->comm,{1,mpi->comm.size(),1},
-                {nqpts_ibz,nIpts,rho_g.size()},{1,1,1});
+                {nqpts_ibz,nIpts,rho_g.size()});
   auto C_quv = math::nda::make_distributed_array<local_3Array_t>(mpi->comm,{1,mpi->comm.size(),1},
-                {nqpts_ibz,nIpts,nIpts},{1,1,1});
+                {nqpts_ibz,nIpts,nIpts});
   utils::check(Z_qug.local_range(0) == C_quv.local_range(0) and
                Z_qug.local_range(1) == C_quv.local_range(1), "Partition mismatch.");
   Timer.start("A_outzero");
