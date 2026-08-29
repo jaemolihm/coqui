@@ -91,6 +91,12 @@ namespace utils
  * the argument cannot simply be left off: a tile count that is not the last argument,
  * one that has to be a named variable, or one worth seeing at a call site where it
  * sits next to a grid and a shape that look just like it.
+ *
+ * Right for an array that is a distribution and nothing more -- a pooled buffer, a
+ * redistribute target, an axis that is never split. Wrong for a slate operand, where
+ * it asks for `N*M` tiles of a single element each: legal, and ruinous. Nothing checks
+ * that, and it is not new -- an omitted argument and the `{1,1,...}` it replaced both
+ * meant a tile size of one before this change too.
  */
 template<size_t R>
 inline constexpr std::array<long,R> one_per_tile = {};
@@ -127,25 +133,49 @@ inline long tile_of(long N, long t, long idx)
  *
  *     t = min(N, p_max * ceil(N/(p_max*max_tile_size)))
  *
- * A multiple of `p_max` so that every rank of that axis gets the same number of
- * tiles. `p_max` is normally the number of ranks on the axis, but two axes that must
- * share a partition have to be given the LARGER of their two grid extents -- see
- * balanced_tile_counts.
+ * The three arguments are easy to mix up, so, in the vocabulary of the file header:
  *
- * Worked example -- an N x M matrix on an np x mp process grid, max_tile_size = 1024:
+ *   N              the extent of the axis, in ELEMENTS;
+ *   p_max          how many RANKS the axis is spread over -- `grid[n]`, except that
+ *                  two axes forced to share a partition both pass the LARGER of their
+ *                  two grid extents (see balanced_tile_counts);
+ *   max_tile_size  the largest a tile may get, in ELEMENTS.
  *
- *   N = M = 3000, np = 2, mp = 4. Square, so the row and column partitions have to
- *     agree and both axes take p_max = max(2,4) = 4. ceil(3000/(4*1024)) = 1, so
- *     t = 4 on both: four tiles of 750, 750, 750, 750.
- *     Rows are spread over np = 2 ranks -> 2 tiles (1500 elements) each; columns over
- *     mp = 4 ranks -> 1 tile (750 elements) each. Rank (i,j) holds a 1500 x 750 block.
+ * What comes back is a tile COUNT, not a length: tile `i` is `tile_extent(N,t,i)` long,
+ * so with `a = N/t` and `r = N%t` the first `r` tiles hold `a+1` elements and the rest
+ * hold `a`.
  *
- *   N = 3000, M = 500, np = 2, mp = 4. Not square and nothing pairs the axes, so each
- *     takes its own grid extent: t_row = 2*ceil(3000/2048) = 4 (tiles of 750) and
- *     t_col = 4*ceil(500/4096) = 4 (tiles of 125). Rank (i,j) holds 1500 x 125.
+ * A multiple of `p_max` so that every rank of that axis gets the same number of tiles.
+ * The `ceil` is at least 1, so `t >= p_max` ALWAYS: however large `max_tile_size` is,
+ * the count can never fall below the rank count and leave a rank empty. `t == 1`
+ * therefore happens only at `p_max == 1`.
  *
- *   N = 3000, M = 3000, np = 4, mp = 4, max_tile_size = 256. p_max = 4 and
- *     ceil(3000/1024) = 3, so t = 12 on both axes: 12 tiles of 250, three per rank.
+ * Worked -- an N x M matrix on an np x mp process grid, `S` for max_tile_size:
+ *
+ * | N, M | np, mp | S | p_row, p_col | t_row, t_col | tile sizes | rank (i,j) holds |
+ * |---|---|---|---|---|---|---|
+ * | 3000, 3000 | 2, 4 | 1024 | 4, 4 | 4, 4 | 750, 750 | 1500 x 750 |
+ * | 3000, 500 | 2, 4 | 1024 | 2, 4 | 4, 4 | 750, 125 | 1500 x 125 |
+ * | 3000, 3000 | 4, 4 | 256 | 4, 4 | 12, 12 | 250, 250 | 750 x 750 |
+ * | 100, 100 | 10, 10 | 100 | 10, 10 | 10, 10 | 10, 10 | 10 x 10 |
+ * | 100, 100 | 10, 10 | 3 | 10, 10 | 40, 40 | 3 and 2 | 12 x 12, or 8 x 8 |
+ * | 100, 100 | 1, 1 | 100 | 1, 1 | 1, 1 | 100, 100 | 100 x 100 |
+ *
+ * Row 1 is why `p_max` exists: the operand is square, so the row and column partitions
+ * must agree and both axes take `max(2,4) = 4`. Letting each axis take its own grid
+ * extent would give `t_row = 2` against `t_col = 4`, i.e. 1500-element row tiles
+ * against 750-element column ones, `mt() != nt()`, and getri aborting inside slate.
+ *
+ * Row 4 is the case where `max_tile_size` is bigger than any tile could be anyway:
+ * `ceil(100/(10*100)) = 1`, so the bound is inactive and the count lands on `p_max`,
+ * one tile per rank. It does NOT collapse to `t = 1` -- that needs `p_max = 1`, row 6.
+ *
+ * Row 5 is the opposite end: a bound small enough to force 4 tiles per rank, and the
+ * only row where the tiles are ragged -- 20 tiles of 3 elements, then 20 of 2. It is
+ * also the only row where the per-rank loads differ, and the reason the last column
+ * carries two entries: each rank owns 4 whole tiles, so the five ranks holding the
+ * 3-element tiles get 12 elements per axis and the five holding the 2-element ones
+ * get 8. Tiles are dealt out whole, so a ragged tile count is a ragged rank load.
  */
 inline long balanced_tile_count(long N, long p_max, long max_tile_size)
 {

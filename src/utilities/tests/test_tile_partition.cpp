@@ -189,6 +189,15 @@ TEST_CASE("tile_partition_reference_values", "[utilities]")
   REQUIRE(utils::local_range_of_rank(2229, 4, 2, 0) == std::pair<long,long>{0,1115});
   REQUIRE(utils::local_range_of_rank(2229, 4, 2, 1) == std::pair<long,long>{1115,2229});
 
+  // max_tile_size can never pull the count below p_max, so a bound larger than the
+  // axis leaves one tile per rank rather than collapsing to a single tile
+  REQUIRE(utils::balanced_tile_count(100, 10, 100) == 10);
+  REQUIRE(utils::balanced_tile_count(100, 10, 1024) == 10);
+  REQUIRE(utils::balanced_tile_count(100, 10, 10) == 10);
+  REQUIRE(utils::balanced_tile_count(100, 10, 3) == 40);    // 4 tiles per rank
+  REQUIRE(utils::balanced_tile_count(100, 1, 100) == 1);    // t == 1 needs p_max == 1
+  for (long i = 0; i < 10; ++i) REQUIRE(utils::tile_extent(100, 10, i) == 10);
+
   // 1687 over a 3-rank axis: 563/562/562, not the floor-division 562 with a 563 remainder
   REQUIRE(utils::balanced_tile_count(1687, 3, 1024) == 3);
   REQUIRE(utils::tile_extent(1687, 3, 0) == 563);
