@@ -22,6 +22,7 @@
 #undef NDEBUG
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 #include "catch2/catch.hpp"
@@ -259,6 +260,24 @@ TEST_CASE("tile_partition_edge_cases", "[utilities]")
   REQUIRE(balanced_tile_count(10, 4, 1) == 10);    // 4*ceil(10/4) = 12, clamped to 10
   REQUIRE(balanced_tile_count(10, 1, 1) == 10);
   REQUIRE(balanced_tile_count(10, 10, 1) == 10);
+}
+
+TEST_CASE("resolved_tile_counts", "[utilities]")
+{
+  using utils::resolved_tile_counts;
+  const std::array<long,4> shape{36, 512, 1687, 1687};
+
+  // a 0 is filled in with the EXTENT of that axis, not with 1: one element per tile
+  // means as many tiles as there are elements. This is scr_coulomb_fourier_t's
+  // ft_buffer_dist output, which leaves (w,q) unspecified and fixes 3 tiles on (P,Q).
+  REQUIRE(resolved_tile_counts<4>({0, 0, 3, 3}, shape) == std::array<long,4>{36, 512, 3, 3});
+  // already-resolved counts are left alone, so the function is idempotent
+  REQUIRE(resolved_tile_counts<4>({36, 512, 3, 3}, shape) == std::array<long,4>{36, 512, 3, 3});
+  REQUIRE(resolved_tile_counts<4>(resolved_tile_counts<4>({0, 0, 3, 3}, shape), shape)
+          == resolved_tile_counts<4>({0, 0, 3, 3}, shape));
+  // an axis with a non-positive extent carries no partition and keeps its 0
+  REQUIRE(resolved_tile_counts<4>({0, 0, 3, 3}, {0, 512, 1687, 1687})
+          == std::array<long,4>{0, 512, 3, 3});
 }
 
 } // bdft_tests

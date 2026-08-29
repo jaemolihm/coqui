@@ -245,19 +245,27 @@ inline std::pair<long,long> local_range_of_rank(long N, long t, long np, long ip
  * `t[n] = extents[n]`, which is the same partition as a tile size of one.
  *
  * `0` rather than `N` because a distribution helper has to be able to say "one
- * element per tile" without knowing how long the axis is -- ft_buffer_dist, for
- * instance, returns a tile count for an axis whose extent one of its callers has not
- * fixed yet -- and because it is what an omitted tile-count argument gives you,
- * std::array being value-initialized to zeros.
+ * element per tile" without knowing how long the axis is -- one that is deliberately
+ * extent-agnostic on an axis cannot spell it any other way -- and because it is what
+ * an omitted tile-count argument gives you, std::array being value-initialized to
+ * zeros.
  *
- * Hence the asymmetry this function exists for. An array that has been CONSTRUCTED
- * stores filled-in counts, so tile_count() never returns a 0; a helper's return value
- * still carries them. Comparing the two directly reports "different distribution" for
- * two identical distributions:
+ * Hence the asymmetry this function exists for: a helper's return value carries the
+ * `0`s, and anything that has already resolved them does not, so comparing the two
+ * directly reports "different distribution" for two identical distributions. For a
+ * 4-D array of shape {36, 512, 1687, 1687} whose helper leaves the (w,q) axes
+ * unspecified and fixes 3 tiles on each of (P,Q):
  *
- *     W.tile_count()                                  == {48, 8, 1, 1}   // filled in
- *     scr_coulomb_fourier_t::ft_buffer_dist(...)       == {48, 8, 0, 0}   // as returned
- *     resolved_tile_counts(ft_buffer_dist(...), shape) == {48, 8, 1, 1}   // comparable
+ *     as the helper returns it                       == {  0,   0, 3, 3}
+ *     resolved_tile_counts({0,0,3,3}, {36,512,1687,1687})
+ *                                                    == { 36, 512, 3, 3}  // comparable
+ *
+ * Note what the filling in does on the (w,q) axes: `0` becomes the EXTENT, 36 and 512,
+ * not 1. One element per tile means as many tiles as there are elements.
+ *
+ * The concrete pairing this is for -- a stored count on one side, ft_buffer_dist's
+ * return value on the other -- arrives with the tile-count representation itself; see
+ * the follow-up PR.
  *
  * So put a helper's output through this before testing it against a stored count.
  *
