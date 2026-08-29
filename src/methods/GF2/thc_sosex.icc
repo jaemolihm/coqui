@@ -332,7 +332,7 @@ namespace methods {
       auto dC_tsqkPR = make_distributed_array<local_Array_6D_t>(
             _context->comm, {1,dU_sqkRvw.grid()[0],dU_sqkRvw.grid()[1],dU_sqkRvw.grid()[2],
             dU_sqkRvw.grid()[4],dU_sqkRvw.grid()[3]},
-            dB_tsqkPR.global_shape(), {1,1,1,1, 1,1});
+            dB_tsqkPR.global_shape());
       _Timer.stop("ALLOC_SOSEX");
 
 
@@ -630,7 +630,7 @@ namespace methods {
       auto C_grid = dC_tsqkPRv_opt.value().grid();
       auto C_gshape = dC_tsqkPRv_opt.value().global_shape();
       _Timer.start("ALLOC_SOSEX");
-      auto dC_tsqkPR = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {C_grid[0], C_grid[1], C_grid[2], C_grid[3], C_grid[4], C_grid[5]}, {C_gshape[0], C_gshape[1], C_gshape[2], C_gshape[3], C_gshape[4], C_gshape[5]}, {1,1,1,1,1,1});
+      auto dC_tsqkPR = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {C_grid[0], C_grid[1], C_grid[2], C_grid[3], C_grid[4], C_grid[5]}, {C_gshape[0], C_gshape[1], C_gshape[2], C_gshape[3], C_gshape[4], C_gshape[5]});
       _Timer.stop("ALLOC_SOSEX");
 
       auto C_lshape7 = dC_tsqkPRv_opt.value().local_shape();
@@ -1721,7 +1721,7 @@ namespace methods {
       size_t np_R = np / np_P;
 
       _Timer.start("ALLOC_SOSEX");
-      auto dD_tsqkPR_acc = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {1,1,1,1,np_P,np_R}, {nt,ns,nkpts,nkpts,Np,Np}, {1,1,1, 1,1,1});
+      auto dD_tsqkPR_acc = math::nda::make_distributed_array<Array_6D_t>(_context->comm, {1,1,1,1,np_P,np_R}, {nt,ns,nkpts,nkpts,Np,Np});
       _Timer.stop("ALLOC_SOSEX");
       return dD_tsqkPR_acc;
     }
@@ -1804,7 +1804,7 @@ namespace methods {
 
       _Timer.start("ALLOC_SOSEX");
       auto dB_tsqkPR = make_distributed_array<Array_6D_t>(
-          _context->comm, A_tx.grid(), {nt_f, ns, nkpts, nkpts, Np, Np}, {1,1,1, 1,1,1});
+          _context->comm, A_tx.grid(), {nt_f, ns, nkpts, nkpts, Np, Np});
       _Timer.stop("ALLOC_SOSEX");
 
       _Timer.start("ALLOC_SOSEX");

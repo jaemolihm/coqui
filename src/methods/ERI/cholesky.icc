@@ -315,8 +315,7 @@ auto cholesky::evaluate_impl(comm_t& k_intra_comm, int iq, nda::range a_range, n
   long npy = k_intra_comm.size()/npx;
   auto global_Pab = math::nda::make_distributed_array<local_Array_t>(mpi->comm,
 			{1,npools,npx,npy,1},
-			{nspin*npol,nkpts,a_range.size(),b_range.size(),ngm},
-			{1,1,1,1,1});  // no blocking for now
+			{nspin*npol,nkpts,a_range.size(),b_range.size(),ngm});  // no blocking for now
   global_Pab.local()=0.0;
   // partition {kp, a, b} space 
   auto kpt_rng = global_Pab.local_range(1);
@@ -577,8 +576,7 @@ auto cholesky::evaluate_blocked_impl(comm_t& k_intra_comm, int iq,
   long npy = k_intra_comm.size()/npx;
   auto global_Pab = math::nda::make_distributed_array<local_Array_t>(mpi->comm,
                         {1,npools,npx,npy,1},
-			{nspin*npol,nkpts,a_range.size(),b_range.size(),ngm},
-			{1,1,1,1,1});  // no blocking for now
+			{nspin*npol,nkpts,a_range.size(),b_range.size(),ngm});  // no blocking for now
   auto kpt_rng = global_Pab.local_range(1);
   auto a_loc_rng = global_Pab.local_range(2);
   auto b_loc_rng = global_Pab.local_range(3);

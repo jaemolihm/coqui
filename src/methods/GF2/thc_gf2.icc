@@ -163,7 +163,7 @@ namespace methods {
           if(_exchange_type == "dynamic_sosex" || _exchange_type == "dynamic_2sosex") {
 #if W_GATHER_OLD // a switch to the old version for debugging
             dW_wq_PQ_opt = math::nda::make_distributed_array<nda::array<ComplexType, 3>> (
-                      _context->comm, {1, np_P, np_Q}, {dW_wqPQ.global_shape()[0]*dW_wqPQ.global_shape()[1],dW_wqPQ.global_shape()[2],dW_wqPQ.global_shape()[3]}, {1,1,1});
+                      _context->comm, {1, np_P, np_Q}, {dW_wqPQ.global_shape()[0]*dW_wqPQ.global_shape()[1],dW_wqPQ.global_shape()[2],dW_wqPQ.global_shape()[3]});
 
                   for(size_t iw = 0; iw < dW_wqPQ.global_shape()[0]; iw++)
                   for(size_t iq = 0; iq < dW_wqPQ.global_shape()[1]; iq++)
@@ -179,7 +179,7 @@ namespace methods {
             size_t np2_Q = np2 / np2_P;
 
             dW_wqPQ_sosex_opt = math::nda::make_distributed_array<nda::array<ComplexType, 4>> (
-                _context->comm, {nwpools, nqpools, np2_P, np2_Q}, dW_wqPQ.global_shape(), {1,1,1,1});
+                _context->comm, {nwpools, nqpools, np2_P, np2_Q}, dW_wqPQ.global_shape());
             math::nda::redistribute(dW_wqPQ, dW_wqPQ_sosex_opt.value());
 #endif
 
@@ -206,7 +206,7 @@ namespace methods {
           auto w_gshape = dW_wqPQ.global_shape();  // (w, q, P, Q)
           dW0_qPQ_opt = math::nda::make_distributed_array<nda::array<ComplexType, 3>> (
               _context->comm, {1, np_P, np_Q},
-              {w_gshape[1], w_gshape[2], w_gshape[3]}, {1, 1, 1});
+              {w_gshape[1], w_gshape[2], w_gshape[3]});
 
           dW0_qPQ_opt.value().local() = dW_wqPQ.local()(0, nda::ellipsis{});
 
@@ -1107,7 +1107,7 @@ namespace methods {
         size_t np_R = np / np_P;
 
         auto dC_qkPRv = make_distributed_array<Array_5D_t>(_context->comm, {1,1,np_P,np_R,1},
-                                                          {nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1});
+                                                          {nkpts, nkpts, Np, Np, nbnd});
         return std::array<decltype(dC_qkPRv), 2>{dC_qkPRv, dC_qkPRv_contr};
 
 }
@@ -1131,7 +1131,7 @@ namespace methods {
 
         dC_tsqkPRv_opt = make_distributed_array<nda::array<ComplexType, 7>>(
             _context->comm, {1,1,1,1,np_P,np_R,1},
-            {nt, ns, nkpts, nkpts, Np, Np, nbnd}, {1,1,1,1,1,1,1});
+            {nt, ns, nkpts, nkpts, Np, Np, nbnd});
 
         // local shapes
         auto [nt_loc, ns_loc, nq_kpts_loc, nk_kpts_loc, Np_loc2, Np_loc, nbnd_loc1] = dC_tsqkPRv_opt.value().local_shape();
@@ -2060,7 +2060,7 @@ namespace methods {
         auto R_Np_loc = lshape[3];
 
         auto dD_qkPR = make_distributed_array<Array_4D_t>(_context->comm, {1, 1, np_P, np_R},
-                                                          {nkpts, nkpts, Np, Np}, {1,1,1,1});
+                                                          {nkpts, nkpts, Np, Np});
 
         if(is == 0 && it == 0) {
             app_log(2, "Evaluation of the D intermediate:");
