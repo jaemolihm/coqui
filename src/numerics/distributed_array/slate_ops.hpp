@@ -289,6 +289,38 @@ long least_squares_solve(DistributedMatrix auto&& A, DistributedMatrix auto&& B)
 
 #if defined(ENABLE_SLATE)
 
+  // slate's QR needs every tile at or below the diagonal to be at least as tall as
+  // the diagonal one: geqrf -> tpqrt accumulates a panel's k x k triangular factor in
+  // a tile i >= j of tile column j and hands lapack that tile's height as `lda` while
+  // asking for k = the panel width. utils::tile_offset orders the ragged partition
+  // with its larger tiles LAST, so it holds for every (N,t) by construction as long
+  // as the two axes carry the SAME count. A is square here (checked above), but its
+  // two counts need not agree: tiled {N,1} it has one-element row tiles against one
+  // N-element column tile, and tpqrt gets lda = 1 against k = N. Hence the check.
+  {
+    // slate is handed A^T/A^H for a C-order array, so its row axis is CoQui's axis 1.
+    constexpr int r_ax = dA_t::is_stride_order_C() ? 1 : 0, c_ax = 1 - r_ax;
+    const long m = A.global_shape()[r_ax], tm = A.tile_count()[r_ax];
+    const long n = A.global_shape()[c_ax], tn = A.tile_count()[c_ax];
+    // Panel j needs mb(i) >= nb(j) for every tile row i >= j that can hold its
+    // triangular factor. Row extents are non-decreasing, so the smallest such row
+    // tile is mb(j) itself and one comparison per panel settles it. Note this is
+    // NOT "shortest row tile >= widest column tile": with the two counts equal the
+    // partitions are identical, so mb(i) = nb(i) >= nb(j) holds for i >= j even
+    // though the axis mixes a and a+1 element tiles. Panels run to min(tm,tn).
+    for (long j = 0; j < std::min(tm,tn); ++j) {
+      const long mb = utils::tile_extent(m,tm,j), nb = utils::tile_extent(n,tn,j);
+      utils::check(mb >= nb,
+          "least_squares_solve: A's row tile {} is {} elements against a {}-element "
+          "column tile, so slate's tpqrt gets lda < the panel width. The two axes "
+          "carry {} and {} tiles; give the row axis at least as coarse a partition.",
+          j, mb, nb, tm, tn);
+    }
+    utils::check(B.tile_count()[0] == tm,
+        "least_squares_solve: B's row tile count ({}) must match A's ({}).",
+        B.tile_count()[0], tm);
+  }
+
   auto slate_ls = [&](auto &a, auto &b) {
    if constexpr (_dev_) {
       slate::least_squares_solve(a,b, {

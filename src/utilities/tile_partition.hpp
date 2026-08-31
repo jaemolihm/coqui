@@ -47,22 +47,31 @@ namespace utils
  * one or more WHOLE tiles and `p <= t <= N` is required: `t < p` would leave a rank
  * empty, `t > N` an empty tile.
  *
- * Both cuts are itertools::chunk_range, i.e. both are balanced: cutting `M` things
- * into `n` groups gives the first `M%n` groups one extra thing, and group `i` starts
- * at `i*(M/n) + min(i,M%n)`.
+ * Both cuts are balanced -- cutting `M` things into `n` groups gives `M%n` groups of
+ * `M/n + 1` and the rest `M/n` -- but they order the groups differently.
+ *
+ * Tiles are dealt out to ranks by itertools::chunk_range, which puts the larger groups
+ * FIRST. Elements are cut into tiles the other way round, the larger tiles LAST,
+ * because slate's QR requires it: `geqrf` -> `tile::tpqrt` accumulates the panel's
+ * `k x k` triangular factor in some tile `i >= j` of tile column `j`, and hands lapack
+ * that tile's height as `lda` while asking for `k = tile_extent(N,t,j)` columns. So
+ * every tile at or below the diagonal must be at least as tall as the diagonal one,
+ * which non-decreasing tile extents give for free. With the larger tiles first,
+ * `dtpqrt` gets `lda < k` and aborts -- on some process grids and not others, since
+ * which tile becomes the accumulator depends on the grid.
  *
  * Worked example -- N = 10 elements, t = 4 tiles, p = 2 ranks:
  *
- *   elements -> tiles:  10 = 4*2 + 2, so the first 2 tiles hold 3 elements and the
- *                       other 2 hold 2.
+ *   elements -> tiles:  10 = 4*2 + 2, so the first 2 tiles hold 2 elements and the
+ *                       last 2 hold 3.
  *   tiles -> ranks:     4 = 2*2 + 0, so each rank holds 2 tiles.
  *
- *      element   0  1  2 | 3  4  5 | 6  7 | 8  9
- *      tile          0   |    1    |   2  |  3
- *      rank      \____ 0 ______/ \____ 1 _____/
+ *      element   0  1 | 2  3 | 4  5  6 | 7  8  9
+ *      tile         0 |   1  |    2    |    3
+ *      rank      \___ 0 ___/ \______ 1 ______/
  *
- *   so tile_offset(10,4,i) = 0,3,6,8, tile_extent(10,4,i) = 3,3,2,2,
- *   tile_of(10,4,5) = 1, local_range_of_rank(10,4,2,0) = [0,6).
+ *   so tile_offset(10,4,i) = 0,2,4,7, tile_extent(10,4,i) = 2,2,3,3,
+ *   tile_of(10,4,5) = 2, local_range_of_rank(10,4,2,0) = [0,4).
  *
  * On the same axis t = 2 would give tiles [0,5), [5,10) and one tile per rank, and
  * t = 10 would give one element per tile and 5 tiles per rank. All three are legal
@@ -77,7 +86,7 @@ namespace utils
  *    which is what slate's gemm and getri require of their operands and do not check;
  *  - no tile and no rank is empty as long as `p <= t <= N`, and per-rank loads differ
  *    by at most one element per tile. A tile SIZE cannot express the
- *    `(a+1)*r + a*(t-r)` split at all, so it has to dump the remainder somewhere.
+ *    `a*(t-r) + (a+1)*r` split at all, so it has to dump the remainder somewhere.
  */
 
 /**
@@ -101,16 +110,19 @@ namespace utils
 template<size_t R>
 inline constexpr std::array<long,R> one_per_tile = {};
 
-/// First element of tile `i` of the partition of [0,N) into `t` tiles, i.e.
-/// `i*a + min(i,r)` with `a = N/t`, `r = N%t`.
+/// First element of tile `i` of the partition of [0,N) into `t` tiles: with
+/// `a = N/t` and `r = N%t`, the `t-r` tiles of `a` elements come first and the `r`
+/// tiles of `a+1` last, so the offset is `i*a + max(0, i-(t-r))`.
 inline long tile_offset(long N, long t, long i)
 {
   utils::check(t > 0 and t <= N, "tile_offset: invalid tile count t:{} for N:{}", t, N);
   utils::check(i >= 0 and i < t, "tile_offset: tile index out of range i:{} t:{}", i, t);
-  return long(itertools::chunk_range(0, N, t, i).first);
+  long a = N/t, r = N%t;
+  return i*a + std::max<long>(0, i-(t-r));
 }
 
-/// Number of elements in tile `i`: `a+1` for the first `r` tiles, `a` for the rest.
+/// Number of elements in tile `i`: `a` for the first `t-r` tiles, `a+1` for the
+/// last `r`. Non-decreasing in `i`, which is what slate's QR needs.
 inline long tile_extent(long N, long t, long i)
 {
   return (i+1 == t ? N : tile_offset(N,t,i+1)) - tile_offset(N,t,i);
@@ -121,10 +133,10 @@ inline long tile_of(long N, long t, long idx)
 {
   utils::check(t > 0 and t <= N, "tile_of: invalid tile count t:{} for N:{}", t, N);
   utils::check(idx >= 0 and idx < N, "tile_of: index out of range idx:{} N:{}", idx, N);
-  long a = N/t, r = N%t;
-  // first r tiles have a+1 elements, the remaining t-r have a (a >= 1 since t <= N)
-  if (idx < r*(a+1)) return idx/(a+1);
-  return r + (idx - r*(a+1))/a;
+  long a = N/t, s = t - N%t;
+  // first s tiles have a elements, the remaining N%t have a+1 (a >= 1 since t <= N)
+  if (idx < s*a) return idx/a;
+  return s + (idx - s*a)/(a+1);
 }
 
 /**
@@ -142,8 +154,8 @@ inline long tile_of(long N, long t, long idx)
  *   max_tile_size  the largest a tile may get, in ELEMENTS.
  *
  * What comes back is a tile COUNT, not a length: tile `i` is `tile_extent(N,t,i)` long,
- * so with `a = N/t` and `r = N%t` the first `r` tiles hold `a+1` elements and the rest
- * hold `a`.
+ * so with `a = N/t` and `r = N%t` the first `t-r` tiles hold `a` elements and the last
+ * `r` hold `a+1`.
  *
  * A multiple of `p_max` so that every rank of that axis gets the same number of tiles.
  * The `ceil` is at least 1, so `t >= p_max` ALWAYS: however large `max_tile_size` is,
@@ -158,7 +170,7 @@ inline long tile_of(long N, long t, long idx)
  * | 3000, 500 | 2, 4 | 1024 | 2, 4 | 4, 4 | 750, 125 | 1500 x 125 |
  * | 3000, 3000 | 4, 4 | 256 | 4, 4 | 12, 12 | 250, 250 | 750 x 750 |
  * | 100, 100 | 10, 10 | 100 | 10, 10 | 10, 10 | 10, 10 | 10 x 10 |
- * | 100, 100 | 10, 10 | 3 | 10, 10 | 40, 40 | 3 and 2 | 12 x 12, or 8 x 8 |
+ * | 100, 100 | 10, 10 | 3 | 10, 10 | 40, 40 | 2 and 3 | 8 x 8, or 12 x 12 |
  * | 100, 100 | 1, 1 | 100 | 1, 1 | 1, 1 | 100, 100 | 100 x 100 |
  *
  * Row 1 is why `p_max` exists: the operand is square, so the row and column partitions
@@ -171,11 +183,13 @@ inline long tile_of(long N, long t, long idx)
  * one tile per rank. It does NOT collapse to `t = 1` -- that needs `p_max = 1`, row 6.
  *
  * Row 5 is the opposite end: a bound small enough to force 4 tiles per rank, and the
- * only row where the tiles are ragged -- 20 tiles of 3 elements, then 20 of 2. It is
- * also the only row where the per-rank loads differ, and the reason the last column
- * carries two entries: each rank owns 4 whole tiles, so the five ranks holding the
- * 3-element tiles get 12 elements per axis and the five holding the 2-element ones
- * get 8. Tiles are dealt out whole, so a ragged tile count is a ragged rank load.
+ * only row where the tiles are ragged -- 20 tiles of 2 elements, then 20 of 3, the
+ * larger ones last. It is also the only row where the per-rank loads differ, and the
+ * reason the last column carries two entries: each rank owns 4 whole tiles, so the
+ * five ranks holding the 2-element tiles get 8 elements per axis and the five holding
+ * the 3-element ones get 12. Tiles are dealt out whole, so a ragged tile count is a
+ * ragged rank load -- and ordering the tiles large-last moves the heavier ranks to
+ * the end of the axis, it does not remove them.
  */
 inline long balanced_tile_count(long N, long p_max, long max_tile_size)
 {

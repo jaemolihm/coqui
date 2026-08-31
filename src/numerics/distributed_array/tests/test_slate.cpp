@@ -821,15 +821,16 @@ TEST_CASE("ft_buffer_dist", "[math]")
 
   // The production point, spelled out: the P-split grid whose SUMMA was measured.
   // The 1024 max tile size is inactive at NP = 1687 over max(3,1) = 3 ranks, so the
-  // tile count is 3 -- one tile per P rank, of 563/562/562 elements, instead of the
-  // floor-division 562/562/563 that dumped the remainder on the last rank.
+  // tile count is 3 -- one tile per P rank, of 562/562/563 elements. The remainder
+  // lands on the LAST tile by construction, not because a tile size dumped it there:
+  // slate's QR needs the tile extents non-decreasing (see utils::tile_offset).
   {
     auto [pg, bs] = scr_coulomb_fourier_t::ft_buffer_dist(768, {36, 512, 1687, 1687});
     CHECK((pg == grid_t{1, 256, 3, 1}));
     CHECK((bs == grid_t{0, 0, 3, 3}));
-    CHECK(utils::tile_extent(1687, 3, 0) == 563);
+    CHECK(utils::tile_extent(1687, 3, 0) == 562);
     CHECK(utils::tile_extent(1687, 3, 1) == 562);
-    CHECK(utils::tile_extent(1687, 3, 2) == 562);
+    CHECK(utils::tile_extent(1687, 3, 2) == 563);
     CHECK((utils::lr_W_tau_local_dist(768, 36, 512, 1687) == std::make_pair(pg, bs)));
   }
 
