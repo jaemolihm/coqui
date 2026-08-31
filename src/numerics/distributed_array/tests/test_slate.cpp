@@ -593,6 +593,85 @@ TEST_CASE("multiply_blocking_sweep", "[math]")
   run(283);
 }
 
+// multiply_blocking_sweep gives A, B and C the same square shape, grid and block
+// size, so its three operands cannot disagree and the conformability check inside
+// multiply_impl provably never fires there. gemm_tile_conformability drives the
+// predicate directly, with hand-written structs. Neither reaches the plumbing between
+// them -- which branch multiply_impl selects, in which order it passes the operands,
+// and whether it reads the POST-op extents -- and a bug there fails silently, by never
+// firing.
+//
+// So: one M x K times K x N with an independent block size per axis, fed from real
+// distributed arrays, asserted numerically.
+//
+// Choosing those block sizes is the whole subtlety, and it is the reason this test
+// exists. The factory clamps each axis independently, bsize[n] -> min(bsize[n],
+// shape[n]/grid[n]), so the tile count an axis ends up with depends on ITS OWN grid
+// extent. The contracted axis K sits on grid axis 1 of A and on grid axis 0 of B, so
+// the two clamps differ and the SAME requested block size can give A and B different
+// tile counts on the axis they share -- a wrong number out of slate::gemm, or the
+// abort. Requesting K's block size against the LARGER of the two grid extents makes
+// the clamp inactive on both. M is shared by A and C and N by B and C, both on the
+// same grid axis in each pair, so those two need no such care.
+TEST_CASE("multiply_nonsquare_blocking", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+
+  const long M = 96, K = 60, N = 40;
+  const long np_i = utils::find_proc_grid_min_diff(world.size(), M, N);
+  const long np_j = world.size()/np_i;
+  if (std::min({M,K,N}) < std::max(np_i,np_j)) return;
+
+  nda::array<ComplexType, 2> A(M,K), B(K,N);
+  for (long i = 0; i < M; ++i)
+    for (long j = 0; j < K; ++j)
+      A(i,j) = ComplexType(std::sin(0.31*i + 0.17*j), std::cos(0.11*i - 0.43*j));
+  for (long i = 0; i < K; ++i)
+    for (long j = 0; j < N; ++j)
+      B(i,j) = ComplexType(std::cos(0.23*i - 0.29*j), std::sin(0.37*i + 0.13*j));
+  nda::array<ComplexType, 2> Ref = nda::matmul(A, B);
+  double nrm = 0.0;
+  for (auto v : Ref) nrm = std::max(nrm, std::abs(v));
+
+  // one tile per rank on each axis, then two, then the smallest the clamp allows
+  for (long k : {1l, 2l, 4l}) {
+    const long bM = std::max(1l, M/(k*np_i));
+    const long bN = std::max(1l, N/(k*np_j));
+    const long bK = std::max(1l, K/(k*std::max(np_i,np_j)));   // the shared axis
+
+    auto dA = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{M,K}, shape_t<2>{bM,bK});
+    auto dB = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{K,N}, shape_t<2>{bK,bN});
+    auto dC = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{M,N}, shape_t<2>{bM,bN});
+
+    // the clamp must not have bitten, or the operands no longer share a partition on
+    // the axes they contract over. Asserted rather than skipped: a rank count that
+    // cannot express the shape should fail loudly, not vanish from the run.
+    REQUIRE(dA.block_size()[1] == dB.block_size()[0]);
+    REQUIRE(dA.block_size()[0] == dC.block_size()[0]);
+    REQUIRE(dB.block_size()[1] == dC.block_size()[1]);
+
+    dA.local() = A(dA.local_range(0), dA.local_range(1));
+    dB.local() = B(dB.local_range(0), dB.local_range(1));
+
+    math::nda::slate_ops::multiply(dA, dB, dC);
+
+    double err = 0.0;
+    auto Cloc = dC.local();
+    for (auto [i, in] : itertools::enumerate(dC.local_range(0)))
+      for (auto [j, jn] : itertools::enumerate(dC.local_range(1)))
+        err = std::max(err, std::abs(Cloc(i,j) - Ref(in,jn)));
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    app_log(2, "  multiply_nonsquare_blocking: {}x{} * {}x{}, pgrid = ({},{}), "
+               "b = ({},{},{}), max rel error = {:.3e}",
+            M, K, K, N, np_i, np_j, bM, bK, bN, err/nrm);
+    INFO("b = (" << bM << "," << bK << "," << bN << ")");
+    CHECK(err < 1e-12*nrm);
+  }
+}
+
 // The conformability predicate behind the utils::check in multiply_impl. It is a
 // predicate precisely so that it can be tested: utils::check calls MPI_Abort, so a
 // mismatched gemm cannot be run inside a Catch2 test. Extents and tile counts here are

@@ -35,3 +35,20 @@ endif(ENABLE_SLATE)
 
 add_mpi_unit_test(test_${TEST_ID} "${PROJECT_UNIT_TEST_DIR}/test_${TEST_ID}" ${CTEST_NPROC})
 set_tests_properties(test_${TEST_ID} PROPERTIES WORKING_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
+
+# The tiling arms of this binary are grid-dependent, and a partition bug can be
+# invisible at one rank count and fatal at another: the ragged-partition failures were
+# found at 7, 11, 13 and 14 while CTEST_NPROC = 8 stayed green throughout. Register the
+# same binary at three prime counts so the property is actually covered.
+#
+# Their label is "unit-sweep", NOT "unit": these ask for more ranks than the machine
+# may have slots for, and an oversubscribed mpiexec fails outright. `ctest -L unit`
+# therefore keeps its current cost and cannot go red on a small host; run the sweep
+# explicitly with `ctest -L unit-sweep`.
+foreach(SWEEP_NPROC 7 11 13)
+  add_mpi_unit_test(test_${TEST_ID}_np${SWEEP_NPROC}
+                    "${PROJECT_UNIT_TEST_DIR}/test_${TEST_ID}" ${SWEEP_NPROC})
+  set_tests_properties(test_${TEST_ID}_np${SWEEP_NPROC} PROPERTIES
+                       WORKING_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
+  set_property(TEST test_${TEST_ID}_np${SWEEP_NPROC} PROPERTY LABELS "unit-sweep")
+endforeach()
