@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "utilities/tile_partition.hpp"
 #include "numerics/distributed_array/slate_ops.hpp"
 
 namespace methods {
@@ -124,7 +125,7 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
 
   _dW_full_qpQ_wqPQ.emplace(math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
       *dW_full_wqPQ.communicator(), dW_full_wqPQ.grid(),
-      dW_full_wqPQ.global_shape(), dW_full_wqPQ.block_size()));
+      dW_full_wqPQ.global_shape(), dW_full_wqPQ.tile_count()));
   auto& dW_full_qpQ = *_dW_full_qpQ_wqPQ;
 
   auto pgrid = dW_full_wqPQ.grid();
@@ -146,8 +147,14 @@ void lr_scr_coulomb_t::_build_W_full_qpQ(
                "_build_W_full_qpQ: q_pool_comm size {} != pgrid[1] {}",
                (long)q_pool_comm.size(), pgrid[1]);
 
-  // q-pool decomposition (bsize[1]==1, contiguous chunks).
-  // First (nq_g % pgrid[1]) tiles get one extra element; rest get base.
+  // q-pool decomposition: itertools::chunk_range over the q ELEMENTS, the first
+  // (nq_g % pgrid[1]) pools taking one extra. That agrees with the array's own
+  // ownership only while the q axis is at one element per tile, where the
+  // tiles->ranks cut is the same chunk_range -- a coarser q tile count would leave
+  // these two lambdas addressing the wrong q slabs, silently. Hence the check.
+  utils::check(dW_full_wqPQ.tile_count()[1] == nq_g,
+               "_build_W_full_qpQ: the q axis must be at one element per tile "
+               "(tile count {} != extent {}).", dW_full_wqPQ.tile_count()[1], nq_g);
   long base = nq_g / pgrid[1];
   long extra = nq_g % pgrid[1];
   long edge = extra * (base + 1);
@@ -275,26 +282,28 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   _Timer.start("EVALUATE_LR_W");
 
   auto pgrid = dDeltaPi_wqPQ.grid();
-  auto bsize = dDeltaPi_wqPQ.block_size();
+  auto tcount = dDeltaPi_wqPQ.tile_count();
   auto& comm = *dDeltaPi_wqPQ.communicator();
 
   utils::check(pgrid == dW_full_wqPQ.grid() && pgrid == dW_full_qpQ_wqPQ.grid(),
                "lr_dyson_W_in_place: pgrid mismatch between ΔΠ and W_full operands");
-  utils::check(bsize[1] == 1,
-               "lr_dyson_W_in_place: q block size must be 1, got {}", bsize[1]);
-  // The batched multiply cross-checks block_size only on the leading axes, but
-  // each operand's SLATE tile map is built from its own (P, Q) block size, so the
-  // same grid with a different PQ blocking is a silent tile-map mismatch.
+  utils::check(tcount[1] == dDeltaPi_wqPQ.global_shape()[1],
+               "lr_dyson_W_in_place: the q axis must be untiled (one element per "
+               "tile), got tile count {} for extent {}",
+               tcount[1], dDeltaPi_wqPQ.global_shape()[1]);
+  // The batched multiply cross-checks tile counts only on the leading axes, but
+  // each operand's SLATE tile map is built from its own (P, Q) tile count, so the
+  // same grid with a different PQ tiling is a silent tile-map mismatch.
   // Gated above one rank for the same reason as the guard in solve_lr_dyson_W —
   // see there.
   if (comm.size() > 1) {
-    auto w_bs   = dW_full_wqPQ.block_size();
-    auto qpq_bs = dW_full_qpQ_wqPQ.block_size();
-    utils::check(bsize == w_bs and bsize == qpq_bs,
-                 "lr_dyson_W_in_place: block size mismatch between ΔΠ and the "
+    auto w_bs   = dW_full_wqPQ.tile_count();
+    auto qpq_bs = dW_full_qpQ_wqPQ.tile_count();
+    utils::check(tcount == w_bs and tcount == qpq_bs,
+                 "lr_dyson_W_in_place: tile count mismatch between ΔΠ and the "
                  "W_full operands. ΔΠ ({}, {}, {}, {}); W_full ({}, {}, {}, {}); "
                  "W_full(q+Q) ({}, {}, {}, {}).",
-                 bsize[0], bsize[1], bsize[2], bsize[3],
+                 tcount[0], tcount[1], tcount[2], tcount[3],
                  w_bs[0], w_bs[1], w_bs[2], w_bs[3],
                  qpq_bs[0], qpq_bs[1], qpq_bs[2], qpq_bs[3]);
   }
@@ -307,7 +316,7 @@ void lr_scr_coulomb_t::lr_dyson_W_in_place(
   // Intermediate buffer for matrix multiplication. Same distribution as ΔΠ.
   using local_Array_t = std::decay_t<Array_4D_t>;
   auto dTmp_wqPQ = math::nda::make_distributed_array<local_Array_t>(
-      comm, pgrid, dDeltaPi_wqPQ.global_shape(), bsize);
+      comm, pgrid, dDeltaPi_wqPQ.global_shape(), tcount);
 
   // SLATE's tileInsert is not const-correct (takes scalar_t*, not const
   // scalar_t*) even though it does not write to the input matrix. Cast away
@@ -358,16 +367,16 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // so just adopt W_full's distribution. That is the q-dist layout, so both
   // transforms below fuse away their matching redistribute.
   auto w_pgrid = dW_full_wqPQ.grid();
-  auto w_bsize = dW_full_wqPQ.block_size();
+  auto w_tcount = dW_full_wqPQ.tile_count();
 
   // Guard the fusion: if W_full is not on the q-dist distribution, both
   // transforms below silently pay an extra global redistribute (~24% of the
   // LR-GW run). Every LR W(iω) is built on utils::lr_W_tau_local_dist, so a mismatch
   // here is a programming error, not a configuration.
   //
-  // Only above one rank, for the same reason as the block-size check in
+  // Only above one rank, for the same reason as the tile-count check in
   // lr_dyson_W_in_place: tau_to_w's single-rank fast path ignores the requested
-  // distribution and passes the input's block size through, so at one rank
+  // distribution and passes the input's tile count through, so at one rank
   // W_full carries whatever its τ-side producer had. gshape[0] is not read by
   // ft_buffer_dist, hence the 1.
   //
@@ -381,25 +390,29 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // drift between lr_W_tau_local_dist and the ft_buffer_dist it duplicates.
   const long w_nproc = dW_full_wqPQ.communicator()->size();
   if (w_nproc > 1) {
-    auto [b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist(
+    auto [b_pgrid, b_tcount] = scr_coulomb_fourier_t::ft_buffer_dist(
         w_nproc, {1L, dW_full_wqPQ.global_shape()[1],
                   dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
-    utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
+    // W_full's stored tile count is resolved; ft_buffer_dist's is not, and it is
+    // called with a placeholder extent on axis 0, so resolve against W_full's own
+    // global shape before comparing.
+    auto b_tcount_res = utils::resolved_tile_counts<4>(b_tcount, dW_full_wqPQ.global_shape());
+    utils::check(w_pgrid == b_pgrid and w_tcount == b_tcount_res,
                  "solve_lr_dyson_W: W_full is not on the q-dist distribution, so "
                  "both Fourier transforms pay an extra global redistribute (has "
                  "utils::lr_W_tau_local_dist drifted from "
                  "scr_coulomb_fourier_t::ft_buffer_dist?). "
-                 "W_full pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}); "
-                 "q-dist pgrid ({}, {}, {}, {}) bsize ({}, {}, {}, {}).",
+                 "W_full pgrid ({}, {}, {}, {}) tcount ({}, {}, {}, {}); "
+                 "q-dist pgrid ({}, {}, {}, {}) tcount ({}, {}, {}, {}).",
                  w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3],
-                 w_bsize[0], w_bsize[1], w_bsize[2], w_bsize[3],
+                 w_tcount[0], w_tcount[1], w_tcount[2], w_tcount[3],
                  b_pgrid[0], b_pgrid[1], b_pgrid[2], b_pgrid[3],
-                 b_bsize[0], b_bsize[1], b_bsize[2], b_bsize[3]);
+                 b_tcount_res[0], b_tcount_res[1], b_tcount_res[2], b_tcount_res[3]);
   }
 
   // FT ΔΠ: τ → ω, output on the q-dist distribution.
   _Timer.start("LR_W_FT_TAU_TO_W");
-  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_bsize, true, chk_leak);
+  auto dDeltaPi_wqPQ = _scr_fourier.tau_to_w(dDeltaPi_tqPQ, w_pgrid, w_tcount, true, chk_leak);
   _Timer.stop("LR_W_FT_TAU_TO_W");
 
   // LR Dyson in ω-space (overwrites dDeltaPi_wqPQ with ΔW_c(iω)). The (q+Q)
@@ -416,9 +429,9 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   }
 
   // FT back: ω → τ, output in q-local (τ-dist) distribution
-  auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
+  auto [q_pgrid, q_tcount] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true, chk_leak);
+  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_tcount, true, chk_leak);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");

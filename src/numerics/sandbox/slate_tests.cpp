@@ -31,6 +31,7 @@
 #include "mpi3/shared_communicator.hpp"
 
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
@@ -67,11 +68,11 @@ int main(int argc, char* argv[])
   utils::check(nR*nC == world.size(), "Error: nR*nC != world.size()");
 
   long M = 1800;
-  long bz = std::min({256l,M/nR,M/nC});
+  long t = utils::balanced_tile_count(M, std::max(nR,nC), 256);
 
-  auto A =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz}, true);
-  auto B =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz}, true);
-  auto C =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {bz,bz}, true);
+  auto A =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
+  auto B =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
+  auto C =  make_distributed_array<local_Array_t>(world, {nR,nC}, {M,M}, {t,t});
 
   {
     local_Array_t At(M,M);

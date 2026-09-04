@@ -29,6 +29,7 @@
 #include <utility>
 #include <type_traits>
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "numerics/distributed_array/detail/concepts.hpp"
 #include "numerics/distributed_array/detail/ops_aux.hpp"
 #if defined(ENABLE_SLATE)
@@ -68,35 +69,36 @@ auto make_slate(DMat& A_)
 
   auto&& A = math::detail::arg(A_);
 
-  // Must precede any use of block_size below: an unblocked array (block size 0)
-  // would divide by zero in the tile arithmetic.
+  // Must precede any use of tile_count below: it is what guarantees the tile
+  // partition below is the one the local blocks were actually cut on.
   utils::check( A.is_slate_compatible(), "Slate incompatible matrix: grid ({},{}), "
-        "global shape ({},{}), block size ({},{}), local shape ({},{})",
+        "global shape ({},{}), tile count ({},{}), origin ({},{}), local shape ({},{})",
         A.grid()[0],A.grid()[1],A.global_shape()[0],A.global_shape()[1],
-        A.block_size()[0],A.block_size()[1],A.local_shape()[0],A.local_shape()[1]);
+        A.tile_count()[0],A.tile_count()[1],A.origin()[0],A.origin()[1],
+        A.local_shape()[0],A.local_shape()[1]);
   int64_t p = A.grid()[row_index];
   int64_t q = A.grid()[col_index];
   int64_t m = A.global_shape()[row_index];
   int64_t n = A.global_shape()[col_index];  
-  int64_t mb, nb;
+  int64_t mt, nt;
   if constexpr (transpose_layout) {
-    mb = A.block_size()[1]; // block size along rows
-    nb = A.block_size()[0]; // block size along cols
+    mt = A.tile_count()[1]; // # of tiles along rows
+    nt = A.tile_count()[0]; // # of tiles along cols
   } else {
-    mb = A.block_size()[0]; // block size along rows
-    nb = A.block_size()[1]; // block size along cols
+    mt = A.tile_count()[0]; // # of tiles along rows
+    nt = A.tile_count()[1]; // # of tiles along cols
   }
 
   // tile assignment lambdas
-  std::function<int64_t (int64_t i)> tileMb = [m, mb](int64_t i) { return (i + 1)*mb > m ? m%mb : mb; };
-  std::function<int64_t (int64_t i)> tileNb = [n, nb](int64_t i) { return (i + 1)*nb > n ? n%nb : nb; };
+  std::function<int64_t (int64_t i)> tileMb =
+      [m, mt](int64_t i) { return int64_t(utils::tile_extent(m,mt,i)); };
+  std::function<int64_t (int64_t i)> tileNb =
+      [n, nt](int64_t i) { return int64_t(utils::tile_extent(n,nt,i)); };
 
-  int64_t mt = (m/mb); //# of full blocks along rows
-  int64_t nt = (n/nb); //# of full blocks along cols
-  int64_t mx = mt/p;//number of blocks for last rank in row
-  int64_t nx = nt/q;//number of blocks for last rank in col  
-  int64_t mr = mt%p;//number of ranks with an extra block
-  int64_t nr = nt%q;//number of ranks with an extra block 
+  int64_t mx = mt/p;//number of tiles per rank in row
+  int64_t nx = nt/q;//number of tiles per rank in col  
+  int64_t mr = mt%p;//number of ranks with an extra tile
+  int64_t nr = nt%q;//number of ranks with an extra tile 
   //std::function<int (ij_tuple ij)> tileRank = [p,q,mt,nt,mx,nx,mr,nr](ij_tuple ij) {
   std::function<int (ij_tuple ij)> tileRank = [p,q,mx,nx,mr,nr](ij_tuple ij) {
     int64_t i = std::get<0>( ij );
@@ -133,13 +135,13 @@ auto make_slate(DMat& A_)
   for ( int64_t j=0; j < R.nt(); ++j )
     for ( int64_t i=0; i < R.mt(); ++i )
       if ( R.tileIsLocal(i,j) ) {
-        auto x = i*mb - A.origin()[row_index]; 
-        auto y = j*nb - A.origin()[col_index]; 
+        auto x = utils::tile_offset(m,mt,i) - A.origin()[row_index];
+        auto y = utils::tile_offset(n,nt,j) - A.origin()[col_index];
         utils::check(x>=0 and x <= A.local_shape()[row_index], 
 		"Out of range: x:{}, shape:{}",x,A.local_shape()[row_index]);
         utils::check(y>=0 and y <= A.local_shape()[col_index], 
-		"Out of range: y:{}, shape:{}, j:{}, nb:{}, org:{}",
-		y,A.local_shape()[row_index],j,nb,A.origin()[col_index]);
+		"Out of range: y:{}, shape:{}, j:{}, nt:{}, org:{}",
+		y,A.local_shape()[row_index],j,nt,A.origin()[col_index]);
       
         if constexpr (view) {
           if constexpr (transpose_layout) {

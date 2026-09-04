@@ -25,6 +25,7 @@
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "grids/g_grids.hpp"
 #include "utilities/proc_grid_partition.hpp"
 #include "hamiltonian/potentials.hpp"
@@ -156,7 +157,7 @@ void matrix_elements_potential_g(Arr_t& P,
   utils::check( V.global_shape()[1] == np, "Dimension mismatch.");
   utils::check( V.global_shape()[2] == np, "Dimension mismatch.");
   utils::check( *(V.communicator()) == *(P.communicator()), "Communicator mismatch.");
-  utils::check( V.block_size()[1] == V.block_size()[2], "Block size mismatch.");
+  utils::check( V.tile_count()[1] == V.tile_count()[2], "Tile count mismatch.");
 
   
   if( basis == "gt" ) {
@@ -231,7 +232,7 @@ auto matrix_elements_potential_full_g(Arr_t& P,
 
   long np = P.global_shape()[0];
   auto V = make_distributed_array<local_Array_t,comm_t>(*P.communicator(),P.grid(),{np,np},
-                                            {P.block_size()[0],P.block_size()[0]},true);
+                                            {P.tile_count()[0],P.tile_count()[0]});
 
   if(P.grid()[1] > 1) {
     APP_ABORT("matrix_elements_potential_full_g:: Finish!!! \n");
@@ -290,7 +291,7 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
   utils::check( V.global_shape()[1] == np, "Dimension mismatch.");
   utils::check( V.global_shape()[2] == np, "Dimension mismatch.");
   utils::check( *(V.communicator()) == *(P.communicator()), "Communicator mismatch.");
-  utils::check( V.block_size()[1] == V.block_size()[2], "Block size mismatch.");
+  utils::check( V.tile_count()[1] == V.tile_count()[2], "Tile count mismatch.");
 
   /*   Evaluate potential */
   auto Pcomm = V.communicator();
@@ -338,11 +339,11 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
 
     std::array<long,2> Pgrid = {P.grid()[1],P.grid()[2]};
     std::array<long,2> Porigin = {P.origin()[1],P.origin()[2]};
-    std::array<long,2> Pbsize = {P.block_size()[1],P.block_size()[2]};
+    std::array<long,2> Ptcount = {P.tile_count()[1],P.tile_count()[2]};
 
     std::array<long,2> Vgrid = {V.grid()[1],V.grid()[2]};
     std::array<long,2> Vorigin = {V.origin()[1],V.origin()[2]};
-    std::array<long,2> Vbsize = {V.block_size()[1],V.block_size()[2]};
+    std::array<long,2> Vtcount = {V.tile_count()[1],V.tile_count()[2]};
 
     // for fft calculation
     auto psi_1 = make_distributed_array<local_Array_t,comm_t>(q_comm,{q_comm.size(),1},{np,nnr});
@@ -351,7 +352,8 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
     long np_local = psi_1.local_shape()[0];
     // better layout for gemm
     auto psi_2 = make_distributed_array<local_Array_t,comm_t>(q_comm,Vgrid,{np,nnr},
-                                              {V.block_size()[1],2048});
+                     {V.tile_count()[1],
+                      utils::balanced_tile_count(nnr,Vgrid[1],2048)});
     psi_2.local() = ComplexType(0.0);
 
     auto P4d = ::nda::reshape(p_local, std::array<long,4> {np_local,mesh(0),mesh(1),mesh(2)});
@@ -363,9 +365,9 @@ void matrix_elements_potential_full_g(Arr_t& P, Arr_t& V,
     auto Pq2D = P.local()(iq,all,all);
     auto Vq2D = V.local()(iq,all,all);
     distributed_array_view<local_Array_t,decltype(q_comm)> Pq(std::addressof(q_comm),
-                Pgrid, {np,nnr}, Porigin, Pbsize, Pq2D);
+                Pgrid, {np,nnr}, Porigin, Ptcount, Pq2D);
     distributed_array_view<local_Array_t,decltype(q_comm)> Vq(std::addressof(q_comm),
-                Vgrid, {np,np}, Vorigin, Vbsize, Vq2D);
+                Vgrid, {np,np}, Vorigin, Vtcount, Vq2D);
 
     redistribute(Pq,psi_1);
     if( basis == "r" ) {

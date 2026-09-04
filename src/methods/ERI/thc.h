@@ -600,12 +600,12 @@ class thc
    *
    * @param Z_quG      - [INPUT] interpolating vectors zeta^q_u(G), distributed
    * @param pgrid3D    - [INPUT] processor grid of the Coulomb matrix
-   * @param block_size - [INPUT] block sizes of the Coulomb matrix
+   * @param tile_count - [INPUT] tile counts of the Coulomb matrix
    */
   template<typename DArr_t>
   void build_Vxc_quv(DArr_t const& Z_quG,
                      std::array<long, 3> pgrid3D,
-                     std::array<long, 3> block_size);
+                     std::array<long, 3> tile_count);
 
   /**
    * Compute
@@ -640,7 +640,7 @@ class thc
    * @param a_range - [INPUT] range of orbital "a"
    * @param b_range - [INPUT] range of orbital "b"
    * @param pgrid   - [INPUT] processor grid for ZquG and Cquv
-   * @param block_size - [INPUT]
+   * @param tile_count - [INPUT]
    * @return A tuple containing:
    *         - Z^{q}_u(r) or Z^{q}_u(G): Distributed array with interpolating vectors.
    *           dims: (nqpts_ibz, nIpts, nG if (mf->orb_on_fft_grid()) else nr)
@@ -650,7 +650,7 @@ class thc
   auto get_ZquG_Cquv_rspace(nda::MemoryArrayOfRank<1> auto const& IPts,
                      nda::range a_range, nda::range b_range,
                      std::array<long, 3> pgrid,   
-                     std::array<long, 3> block_size);
+                     std::array<long, 3> tile_count);
 
   template<typename Tensor_t, typename Tensor2_t>
   auto get_ZquG_Cquv_fft_shared_memory(nda::MemoryArrayOfRank<1> auto const& IPts,
@@ -658,7 +658,7 @@ class thc
                      Tensor2_t const* Xb,
                      nda::range a_range, nda::range b_range,
                      std::array<long, 3> pgrid,   
-                     std::array<long, 3> block_size);
+                     std::array<long, 3> tile_count);
 
   /**
    * Compute the following quantities on the plane-wave basis using FFT:
@@ -668,7 +668,7 @@ class thc
    * @param a_range - [INPUT] range of orbital "a"
    * @param b_range - [INPUT] range of orbital "b"
    * @param pgrid   - [INPUT] processor grid for ZquG and Cquv
-   * @param block_size - [INPUT]
+   * @param tile_count - [INPUT]
    * @return A tuple containing:
    *         - Z^{q}_u(G): Distributed array with interpolating vectors.
    *           dims: (nqpts_ibz, nIpts, nG)
@@ -680,7 +680,7 @@ class thc
                      Tensor2_t const* Xb,
                      nda::range a_range, nda::range b_range,
                      std::array<long, 3> pgrid,
-                     std::array<long, 3> block_size);
+                     std::array<long, 3> tile_count);
 
   template<MEMORY_SPACE MEM = HOST_MEMORY, bool Ipts_only, bool return_Ruv, typename Tensor_t>
   auto chol_metric_impl(int iq, int nmax, nda::range a_range, nda::range b_range, int block_size, 

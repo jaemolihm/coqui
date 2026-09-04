@@ -5,6 +5,7 @@
 
 #include "configuration.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 //#include "hamiltonian/potentials.hpp"
 
 #include "mpi3/communicator.hpp"
@@ -388,7 +389,7 @@ auto cholesky::evaluate_impl(comm_t& k_intra_comm, int iq, nda::range a_range, n
 	shape_t<5>{nguess,nspin*npol,nkpts,a_range.size(),b_range.size()},
 	shape_t<5>{nguess,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()}, 
 	shape_t<5>{0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()},
-	shape_t<5>{1,1,1,1,1} ));
+	utils::one_per_tile<5> ));
   gL.back()->local() = 0.0;
   int nchol = 0;
   // communication buffer
@@ -410,7 +411,7 @@ auto cholesky::evaluate_impl(comm_t& k_intra_comm, int iq, nda::range a_range, n
 	shape_t<5>{nguess,nspin*npol,nkpts,a_range.size(),b_range.size()},
 	shape_t<5>{nguess,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()}, 
 	shape_t<5>{0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()}, 
-	shape_t<5>{1,1,1,1,1} ));
+	utils::one_per_tile<5> ));
       gL.back()->local()=0.0;
       comm_buff.resize(ngm + nchol+nguess );
       comm_buff()=0.0;
@@ -529,7 +530,7 @@ auto cholesky::evaluate_impl(comm_t& k_intra_comm, int iq, nda::range a_range, n
                  {nchol,nspin*npol,nkpts,a_range.size(),b_range.size()},
                  {nchol,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()},
                  {0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()},
-		 {1,1,1,1,1}}; 
+		 utils::one_per_tile<5>}; 
   {
     auto ___ = nda::ellipsis{};
     auto L = return_value.local();
@@ -646,7 +647,7 @@ auto cholesky::evaluate_blocked_impl(comm_t& k_intra_comm, int iq,
         shape_t<5>{nguess,nspin*npol,nkpts,a_range.size(),b_range.size()},
         shape_t<5>{nguess,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()},
         shape_t<5>{0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()},
-        shape_t<5>{1,1,1,1,1} ));
+        utils::one_per_tile<5> ));
   long nchol = 0;
   long nchol_bucket = 0;  // counter within a bucket
   // communication buffer
@@ -796,7 +797,7 @@ auto cholesky::evaluate_blocked_impl(comm_t& k_intra_comm, int iq,
         shape_t<5>{nguess,nspin*npol,nkpts,a_range.size(),b_range.size()},
         shape_t<5>{nguess,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()},
         shape_t<5>{0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()}, 
-        shape_t<5>{1,1,1,1,1} ));
+        utils::one_per_tile<5> ));
       comm_buff.resize(block_size*(ngm + nchol+2*nguess));
       new_bucket = true;
       nchol_bucket = 0;  // reset bucket counter
@@ -857,7 +858,7 @@ auto cholesky::evaluate_blocked_impl(comm_t& k_intra_comm, int iq,
                  {nchol,nspin*npol,nkpts,a_range.size(),b_range.size()},
                  {nchol,nspin*npol,nkloc,a_loc_rng.size(),b_loc_rng.size()},
                  {0,0,kpt_rng.first(),a_loc_rng.first(),b_loc_rng.first()},
-		 {1,1,1,1,1}}; 
+		 utils::one_per_tile<5>}; 
 
   {
     auto ___ = nda::ellipsis{};
@@ -970,7 +971,7 @@ auto cholesky::evaluate_diagkk_impl(comm_t& k_intra_comm, int iq, int ik,
         shape_t<3>{nguess,a_range.size(),b_range.size()},
         shape_t<3>{nguess,a_loc_rng.size(),b_loc_rng.size()},
         shape_t<3>{0,a_loc_rng.first(),b_loc_rng.first()},
-        shape_t<3>{1,1,1} ));
+        utils::one_per_tile<3> ));
   long nchol = 0;
   long nchol_bucket = 0;  // counter within a bucket
   // communication buffer
@@ -1088,7 +1089,7 @@ auto cholesky::evaluate_diagkk_impl(comm_t& k_intra_comm, int iq, int ik,
         shape_t<3>{nguess,a_range.size(),b_range.size()},
         shape_t<3>{nguess,a_loc_rng.size(),b_loc_rng.size()},
         shape_t<3>{0,a_loc_rng.first(),b_loc_rng.first()}, 
-        shape_t<3>{1,1,1} ));
+        utils::one_per_tile<3> ));
       comm_buff.resize(block_size*(ngm + nchol+2*nguess));
       new_bucket = true;
       nchol_bucket = 0;  // reset bucket counter
@@ -1141,7 +1142,7 @@ auto cholesky::evaluate_diagkk_impl(comm_t& k_intra_comm, int iq, int ik,
                  {nchol,a_range.size(),b_range.size()},
                  {nchol,a_loc_rng.size(),b_loc_rng.size()},
                  {0,a_loc_rng.first(),b_loc_rng.first()},
-		 {1,1,1}}; 
+		 utils::one_per_tile<3>}; 
 
   {
     auto ___ = nda::ellipsis{};

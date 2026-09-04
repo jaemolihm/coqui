@@ -47,7 +47,7 @@ auto gen_H0(mf::MF& mf, boost::mpi3::communicator& comm, pseudopot *psp,
   utils::check(k_range.size() == psi.global_shape()[1], "Shape mismatch.");
   utils::check(b_range.size() == psi.global_shape()[2], "Shape mismatch.");
   // psi(is,ik,ia,g)
-  auto hpsi = math::nda::make_distributed_array<larray>(comm,psi.grid(),psi.global_shape(),psi.block_size());
+  auto hpsi = math::nda::make_distributed_array<larray>(comm,psi.grid(),psi.global_shape(),psi.tile_count());
   hpsi.local() = ComplexType{0.0};
 
   long nspin = psi.global_shape()[0];
@@ -58,7 +58,7 @@ auto gen_H0(mf::MF& mf, boost::mpi3::communicator& comm, pseudopot *psp,
   long npol = mf.npol();
 
   auto Hij = math::nda::make_distributed_array<larray>(comm,psi.grid(),{nspin,nkpts,nbnd,nbnd},
-                {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+                {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});
   Hij.local() = ComplexType(0.0);
     
   // add kinetic part to hpsi
@@ -105,7 +105,7 @@ auto gen_Vhartree(mf::MF& mf, boost::mpi3::communicator& comm, pseudopot *psp,
   utils::check(k_range.size() == psi.global_shape()[1], "Shape mismatch.");
   utils::check(b_range.size() == psi.global_shape()[2], "Shape mismatch.");
   // psi(is,ik,ia,g)
-  auto hpsi = math::nda::make_distributed_array<larray>(comm,psi.grid(),psi.global_shape(),psi.block_size());
+  auto hpsi = math::nda::make_distributed_array<larray>(comm,psi.grid(),psi.global_shape(),psi.tile_count());
   hpsi.local() = ComplexType{0.0};
 
   long nspin = psi.global_shape()[0];
@@ -122,7 +122,7 @@ auto gen_Vhartree(mf::MF& mf, boost::mpi3::communicator& comm, pseudopot *psp,
 
   // Vij = conj(psi(i,:)) * hpsi(j,:) = conj( conj(Vij) + psi(i,:) * conj(hpsi(j,:)) )
   auto Vij = math::nda::make_distributed_array<larray>(comm,psi.grid(),{nspin,nkpts,nbnd,nbnd},
-                                                       {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+                                                       {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});
 
   math::nda::slate_ops::multiply(ComplexType(1.0),psi,math::nda::dagger(hpsi),
                                    ComplexType(0.0),Vij);
@@ -157,7 +157,7 @@ auto gen_Vxc(mf::MF& mf,
   long M = psi.global_shape()[2];
 
   // hpsi(is,ik,ia,g)
-  auto hpsi = make_distributed_array<larray>(*comm,psi.grid(),psi.global_shape(),psi.block_size());
+  auto hpsi = make_distributed_array<larray>(*comm,psi.grid(),psi.global_shape(),psi.tile_count());
   hpsi.local() = ComplexType{0.0};
 
   // add vxc to Vxc_ij 
@@ -165,7 +165,7 @@ auto gen_Vxc(mf::MF& mf,
 
   auto Vxc_ij = make_distributed_array<larray>(
       *comm, psi.grid(), {nspin,nkpts,M,M},
-      {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+      {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});
   Vxc_ij.local() = ComplexType(0.0);
 
   // Vxc_ij = conj(psi(i,:)) * hpsi(j,:) = conj( psi(i,:) * conj(hpsi(j,:)) )
@@ -240,13 +240,13 @@ auto gen_V_Hxc_aug(mf::MF& mf, pseudopot* psp,
   // hpsi(is,ik,ia,g) = V_Hxc * psi
   auto mpi_context = utils::make_mpi_context(*comm);
   auto swfc_to_rho = hamilt::detail::make_wfc_to_rho(mpi_context, mf, fft_mesh);
-  auto hpsi = make_distributed_array<larray>(*comm,psi.grid(),psi.global_shape(),psi.block_size());
+  auto hpsi = make_distributed_array<larray>(*comm,psi.grid(),psi.global_shape(),psi.tile_count());
   hpsi.local() = ComplexType{0.0};
   hamilt::add_vloc(npol, fft_mesh, swfc_to_rho.local(), vr, psi, hpsi);
 
   auto V_ij = make_distributed_array<larray>(
       *comm, psi.grid(), {nspin,nkpts,M,M},
-      {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+      {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});
   V_ij.local() = ComplexType(0.0);
 
   // V_ij = conj(psi(i,:)) * hpsi(j,:) = conj( psi(i,:) * conj(hpsi(j,:)) )
@@ -278,8 +278,14 @@ auto gen_ovlp(boost::mpi3::communicator& comm,
     auto k_comm = comm.split(psi.origin()[0]*nkpts+psi.origin()[1],comm.rank());
     std::array<long,3> pg = {psi.grid()[0], psi.grid()[1], psi.grid()[2]*psi.grid()[3]};
     auto psiloc = psi.local();
+    // The band axis carries psi's (P,G) grid product, so psi's own band tile count
+    // can be short of that grid when grid()[3] > 1 and cannot be reused. When
+    // grid()[3] == 1 it MUST be reused: the branch below writes Hloc at psi's local
+    // band index, so the two band partitions have to be the same one, and pg[2] is
+    // only psi's count when the band tile-size cap does not bite.
+    const long band_tiles = (psi.grid()[3] == 1 ? psi.tile_count()[2] : pg[2]);
     auto Hii = math::nda::make_distributed_array<larray3D>(comm,pg,{nspin,nkpts,nbnd},
-                  {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2]});
+                  {psi.tile_count()[0],psi.tile_count()[1],band_tiles});
     auto Hloc = Hii.local();
     Hloc() = ComplexType(0.0);
     if constexpr (MEM == HOST_MEMORY) {
@@ -296,6 +302,10 @@ auto gen_ovlp(boost::mpi3::communicator& comm,
             k_comm.all_reduce_in_place_n(hk.data(),hk.size(),std::plus<>{});
             Hloc(is,ik,all) = hk(Hii.local_range(2));
           } else {
+            utils::check(Hii.local_range(2) == psi.local_range(2),
+                "gen_ovlp: Hii's band range [{},{}) must be psi's [{},{}).",
+                Hii.local_range(2).first(), Hii.local_range(2).last(),
+                psi.local_range(2).first(), psi.local_range(2).last());
             for( auto [ib,b] : itertools::enumerate(psi.local_range(2)))
               Hloc(is,ik,ib) = nda::blas::dotc(psiloc(is,ik,ib,all),psiloc(is,ik,ib,all));
           }
@@ -319,7 +329,7 @@ auto gen_ovlp(boost::mpi3::communicator& comm,
   } else {
 
     auto Hij = math::nda::make_distributed_array<larray>(comm,psi.grid(),{nspin,nkpts,nbnd,nbnd},
-                    {psi.block_size()[0],psi.block_size()[1],psi.block_size()[2],psi.block_size()[2]});
+                    {psi.tile_count()[0],psi.tile_count()[1],psi.tile_count()[2],psi.tile_count()[2]});
     //  Hij = conj(psi(i,:)) * psi(j,:) 
     math::nda::slate_ops::multiply(psi,math::nda::dagger(psi),Hij);
     nda::tensor::scale(ComplexType(1.0),Hij.local(),nda::tensor::op::CONJ);

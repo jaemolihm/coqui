@@ -1171,13 +1171,13 @@ auto load_W_and_eps_inv_head(
   // axis order: h5_read maps the array's index space onto
   // the dataset's and cannot permute axes.
   // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
-  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
+  auto [tq_pgrid, tq_tcount] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
   std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
-  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+  std::array<long,4> qt_tcount = {tq_tcount[1], tq_tcount[0], tq_tcount[2], tq_tcount[3]};
 
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
+      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_tcount);
 
   // Each rank reads only its local (q,t,P,Q) slab via the distributed h5_read.
   // A "root reads full + broadcast" pattern OOMs at scale: full W for nkpts=512,
@@ -1253,11 +1253,11 @@ auto lr_load_W_omega(
       screened_interaction_file);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
+  auto [w_pgrid, w_tcount] = utils::lr_W_tau_local_dist(
       mpi.comm.size(), nw_half, thc.MF()->nkpts(), thc.Np());
 
   solvers::scr_coulomb_fourier_t setup_ft(&ft);
-  auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
+  auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_tcount, /*reset_input=*/true,
                                    __app_verbosity__ >= 3);
   mpi.comm.barrier();
 
@@ -1323,12 +1323,12 @@ auto recompute_W_and_eps_inv_head(
   solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
+  auto [w_pgrid, w_tcount] = utils::lr_W_tau_local_dist(
       mpi.comm.size(), nw_half, nkpts, thc.Np());
 
   auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi.comm.barrier();
-  auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
+  auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_tcount);
   mpi.comm.barrier();
 
   // eps_inv_head_w returns the head at every (iω, q) plus the q→0 extrapolated
@@ -2761,9 +2761,9 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   (void)div_treatment;
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
-  auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
+  auto [pi_pgrid, pi_tcount] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
   auto dDeltaPi_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_bsize);
+      mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_tcount);
   {
     auto pi_src = sDeltaPi_tqPQ_in.local();
     auto pi_loc = dDeltaPi_tqPQ.local();
@@ -2930,11 +2930,11 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
   // Scatter into a distributed array in the τ-dist (t,q,P,Q) layout the Σ
   // evaluator consumes, transposing the (q,t) input on the fly.
-  auto [tq_pgrid_dw, tq_bsize_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP);
+  auto [tq_pgrid_dw, tq_tcount_dw] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half_dw, NP);
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   auto dDeltaW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, tq_pgrid_dw,
-      {nt_half_dw, nkpts, NP, NP}, tq_bsize_dw);
+      {nt_half_dw, nkpts, NP, NP}, tq_tcount_dw);
   {
     auto dw_src = sDeltaW_qtPQ_in.local();   // (q, t, P, Q), shared, full
     auto dw_loc = dDeltaW_tqPQ.local();      // (t, q, P, Q), this rank's block

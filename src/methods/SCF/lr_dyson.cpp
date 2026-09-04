@@ -84,7 +84,7 @@ double lr_dyson::solve_lr_dyson(
 
   // Processor grid of the ω-side arrays. A pure function of the sizes, so
   // solve_lr_dyson_impl derives the same one and the two agree by construction.
-  auto [w_pgrid, w_bsize] =
+  auto [w_pgrid, w_tcount] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
 
   // ΔΣ(τ) → ΔΣ(iω) is done here rather than inside solve_lr_dyson_impl, keeping
@@ -95,7 +95,7 @@ double lr_dyson::solve_lr_dyson(
     _Timer.start("LR_DYSON_TAU_TO_W");
     // ΔΣ leakage diagnostics gated at verbosity >= 3.
     opt_dDeltaSigma_wskij.emplace(
-        distributed_tau_to_w(_context->comm, *sDeltaSigma_tskij, *_dyson.FT(), w_pgrid, w_bsize,
+        distributed_tau_to_w(_context->comm, *sDeltaSigma_tskij, *_dyson.FT(), w_pgrid, w_tcount,
                              __app_verbosity__ >= 3));
     _Timer.stop("LR_DYSON_TAU_TO_W");
   }
@@ -205,14 +205,14 @@ void lr_dyson::solve_lr_dyson_impl(
   auto G_w = _cached_G_wskij->local();
 
   // Processor grid for ΔG (and ΔΣ if present)
-  auto [w_pgrid, w_bsize] =
+  auto [w_pgrid, w_tcount] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
   utils::check(w_pgrid[0] * w_pgrid[2] * w_pgrid[3] * w_pgrid[4] == _context->comm.size(),
                "lr_dyson: pgrid mismatches!");
 
   _Timer.start("LR_DYSON_ALLOC");
   auto dDeltaG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
-                                                          {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize);
+                                                          {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_tcount);
   _Timer.stop("LR_DYSON_ALLOC");
 
   // Loop bounds from the output distributed array. lr_dyson_omega_pgrid keeps

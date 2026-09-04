@@ -20,6 +20,7 @@
 
 
 #include <unordered_set>
+#include "utilities/tile_partition.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/thc_solver_comm.hpp"
 #include "methods/GW/g0_div_utils.hpp"
@@ -96,7 +97,7 @@ namespace solvers {
 
     // evaluate screened interaction (dW_tqPQ) and reset polarizability (dPi_tqPQ)
     // a) dPi_tqPQ is reset during dyson_W_from_Pi_tau()
-    // b) pgrid and bsize of dW_tqPQ are forced to be the same as in dPi_tqPQ
+    // b) pgrid and tile counts of dW_tqPQ are forced to be the same as in dPi_tqPQ
     auto dW_tqPQ = dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
     auto [eps_inv_head_q, eps_inv_head] =
         div_utils::eps_inv_head_t(dW_tqPQ, thc, *thc.MF(), _ft, _div_treatment);
@@ -144,22 +145,24 @@ namespace solvers {
   auto scr_coulomb_t::dyson_W_from_Pi_tau(
       memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
       THC_ERI auto &thc, bool reset_input,
-      std::array<long, 4> w_pgrid, std::array<long, 4> w_bsize)
+      std::array<long, 4> w_pgrid, std::array<long, 4> w_tcount)
   -> memory::darray_t<local_Array_t, mpi3::communicator>
   {
-    if (w_pgrid[0]*w_pgrid[1]*w_pgrid[2]*w_pgrid[3] <= 0 or w_bsize[0]*w_bsize[1]*w_bsize[2]*w_bsize[3] <= 0) {
-      std::tie(w_pgrid, w_bsize) = scr_coulomb_t::W_omega_proc_grid(
+    // Gate on the processor grid alone: an all-zero tile count is legal now (one
+    // element per tile), so it can no longer double as "unset".
+    if (w_pgrid[0]*w_pgrid[1]*w_pgrid[2]*w_pgrid[3] <= 0) {
+      std::tie(w_pgrid, w_tcount) = scr_coulomb_t::W_omega_proc_grid(
           thc.mpi()->comm.size(), thc.MF()->nqpts_ibz(), _ft->nw_b(), thc.Np());
     }
 
     auto t_pgrid = dPi_tqPQ_pos.grid();
-    auto t_bsize = dPi_tqPQ_pos.block_size();
-    auto dPi_wqPQ = tau_to_w(dPi_tqPQ_pos, w_pgrid, w_bsize, reset_input);
+    auto t_tcount = dPi_tqPQ_pos.tile_count();
+    auto dPi_wqPQ = tau_to_w(dPi_tqPQ_pos, w_pgrid, w_tcount, reset_input);
     dyson_W_in_place(dPi_wqPQ, thc);
     if constexpr (w_out) {
       return dPi_wqPQ;
     } else {
-      return w_to_tau(dPi_wqPQ, t_pgrid, t_bsize, true);
+      return w_to_tau(dPi_wqPQ, t_pgrid, t_tcount, true);
     }
   }
 
@@ -178,12 +181,21 @@ namespace solvers {
     auto P_rng = dPi_wqPQ.local_range(2);
     auto Q_rng = dPi_wqPQ.local_range(3);
     auto pgrid = dPi_wqPQ.grid();
-    auto block_size = dPi_wqPQ.block_size();
+    auto tile_count = dPi_wqPQ.tile_count();
+    // The eps^-1 operand below goes through slate_ops::inverse (getrf+getri), which
+    // needs mt == nt: same extent AND same tile count on both PQ axes. The parent
+    // has to supply an agreeing pair -- this used to be papered over by the factory's
+    // squared_blocks flag, which silently took the min of the two.
+    utils::check(NP == NQ and tile_count[2] == tile_count[3],
+        "scr_coulomb_t::dyson_W_in_place: the (P,Q) block of Pi(iw) must be square in "
+        "both extent and tile count, got extents ({}, {}) and tile counts ({}, {}).",
+        NP, NQ, tile_count[2], tile_count[3]);
+    const long PQ_tiles = tile_count[2];
     long qpool_id = (nq_loc==nq_loc_max)? q_origin/nq_loc : (q_origin-nqpts%pgrid[1])/nq_loc;
 
     app_log(2, "  Evaluation of the screened interaction:");
     app_log(2, "    - processor grid for Pi/W: (w, q, P, Q) = ({}, {}, {}, {})", pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
-    app_log(2, "    - block size: (w, q, P, Q) = ({}, {}, {}, {})\n", block_size[0], block_size[1], block_size[2], block_size[3]);
+    app_log(2, "    - tile count: (w, q, P, Q) = ({}, {}, {}, {})\n", tile_count[0], tile_count[1], tile_count[2], tile_count[3]);
 
     // Setup wq_intra_comm
     mpi3::communicator wq_intra_comm = thc.mpi()->comm.split(w_origin*nqpts + q_origin, thc.mpi()->comm.rank());
@@ -194,9 +206,9 @@ namespace solvers {
 
     using Array_2D_t = memory::array<HOST_MEMORY, ComplexType, 2>;
     using math::nda::make_distributed_array;
-    auto dPi_PQ = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]}, true);
-    auto dZ_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]}, true);
-    auto dA_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {block_size[2], block_size[3]}, true);
+    auto dPi_PQ = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
+    auto dZ_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
+    auto dA_PQ  = make_distributed_array<Array_2D_t>(wq_intra_comm, {pgrid[2], pgrid[3]}, {NP, NQ}, {PQ_tiles, PQ_tiles});
     utils::check(dPi_PQ.local_range(0) == P_rng, "Error: local range mismatches!" );
     utils::check(dPi_PQ.local_range(1) == Q_rng, "Error: local range mismatches!");
     utils::check(dPi_PQ.local_shape()[0] == NP_loc and dPi_PQ.local_shape()[1] == NQ_loc, "Error: local shape mismatched!");
@@ -298,7 +310,7 @@ namespace solvers {
         sPi_correction.local() = *pi_imp - *pi_dc;
       }
       thc.mpi()->comm.barrier();
-      auto dPi_tqPQ_correction = upfold_pi_local(sPi_correction.local(), thc, *proj, dPi_tqPQ.grid(), dPi_tqPQ.block_size());
+      auto dPi_tqPQ_correction = upfold_pi_local(sPi_correction.local(), thc, *proj, dPi_tqPQ.grid(), dPi_tqPQ.tile_count());
       dPi_tqPQ.local() += dPi_tqPQ_correction.local();
       thc.mpi()->comm.barrier();
     }
@@ -378,7 +390,7 @@ namespace solvers {
         thc.mpi()->comm.barrier();
 
         auto dPi_tqPQ_correction = upfold_pi_local(sPi_t_correction.local(), thc, proj_boson,
-                                                   dPi_tqPQ.grid(), dPi_tqPQ.block_size());
+                                                   dPi_tqPQ.grid(), dPi_tqPQ.tile_count());
         dPi_tqPQ.local() += dPi_tqPQ_correction.local();
         thc.mpi()->comm.barrier();
       }

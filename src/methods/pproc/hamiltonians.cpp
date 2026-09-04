@@ -210,7 +210,7 @@ void add_thc_hamiltonian_components(mf::MF &mf,
       auto Z2D = dZ.local()(iq,all,all);
       memory::darray_view_t<lArray_t,mpi3::communicator> Ziq(std::addressof(mpi->comm),
                 {nx,ny}, {nI,nI}, {dZ.origin()[1], dZ.origin()[2]}, 
-                {dZ.block_size()[1],dZ.block_size()[2]}, Z2D);
+                {dZ.tile_count()[1],dZ.tile_count()[2]}, Z2D);
 
       // returns Ziq = L * dagger(L)
       auto L = utils::distributed_cholesky(Ziq,thresh,bsize); 

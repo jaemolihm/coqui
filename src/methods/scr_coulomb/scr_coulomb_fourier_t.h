@@ -33,6 +33,7 @@
 #include "utilities/mpi_context.h"
 #include "utilities/Timer.hpp"
 #include "utilities/proc_grid_partition.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
@@ -83,7 +84,7 @@ namespace solvers {
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto tau_to_w(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
                   std::array<long, 4> w_pgrid_out,
-                  std::array<long, 4> w_bsize_out = {},
+                  std::array<long, 4> w_tcount_out = {},
                   bool reset_input = false,
                   bool check_leakage = true)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
@@ -91,7 +92,7 @@ namespace solvers {
     template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto w_to_tau(memory::darray_t<local_Array_t, communicator_t> &dW_wqPQ_pos,
                   std::array<long, 4> t_pgrid_out,
-                  std::array<long, 4> t_bsize_out = {},
+                  std::array<long, 4> t_tcount_out = {},
                   bool reset_input = false,
                   bool check_leakage = true)
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
@@ -111,15 +112,15 @@ namespace solvers {
      * subgrid instead of a rank-local gemm. solve_lr_dyson_W asserts it, since
      * losing it costs ~24% of the LR-GW run and is otherwise silent.
      *
-     * The returned (P, Q) block is square, and that is load-bearing rather than
-     * cosmetic: the fused branches of tau_to_w / w_to_tau compare block size as
-     * well as processor grid, and the W Dyson runs SLATE on whatever this
+     * The returned (P, Q) tile count is square, and that is load-bearing rather
+     * than cosmetic: the fused branches of tau_to_w / w_to_tau compare tile count
+     * as well as processor grid, and the W Dyson runs SLATE on whatever this
      * returns (see below).
      */
     static std::pair<std::array<long, 4>, std::array<long, 4>>
     ft_buffer_dist(long np, std::array<long, 4> gshape) {
       std::array<long, 4> b_pgrid = {1, 1, 1, 1};
-      std::array<long, 4> b_bsize = {1, 1, 1, 1};
+      std::array<long, 4> b_tcount = {0, 0, 0, 0};
       long nq = gshape[1];
       b_pgrid[1] = utils::find_proc_grid_max_npools(np, nq, 0.2);
       long np_PQ = np / b_pgrid[1];
@@ -130,16 +131,15 @@ namespace solvers {
         utils::check(np_PQ == 1,
             "scr_coulomb_fourier_t::ft_buffer_dist: PQ too small for proc count (NP*NQ < np_PQ)");
       }
-      // Square block size, the same formula as scr_coulomb_t::W_omega_proc_grid:
-      // make sure block sizes produce at least one full block per task. Square is
-      // required because the W Dyson runs slate_ops::multiply on this
+      // Square tile count, the same formula as scr_coulomb_t::W_omega_proc_grid.
+      // Square is required because the W Dyson runs slate_ops::multiply on this
       // distribution, and its C-order branch issues slate::multiply(a,Bs,As,b,Cs),
-      // which needs Bs.nt() == As.mt() — with NP == NQ that is bsize[2] == bsize[3].
-      b_bsize[2] = std::min({1024L, gshape[2] / std::max(b_pgrid[2], 1L),
-                                    gshape[3] / std::max(b_pgrid[3], 1L)});
-      b_bsize[2] = std::max(b_bsize[2], 1L);
-      b_bsize[3] = b_bsize[2];
-      return {b_pgrid, b_bsize};
+      // which needs Bs.nt() == As.mt() — with NP == NQ that is
+      // tcount[2] == tcount[3]. The (τ/ω, q) axes keep one element per tile (0).
+      b_tcount[2] = utils::balanced_tile_count(gshape[2],
+                        std::max(b_pgrid[2], b_pgrid[3]), 1024);
+      b_tcount[3] = b_tcount[2];
+      return {b_pgrid, b_tcount};
     }
 
     utils::TimerManager& timer() { return _Timer; }

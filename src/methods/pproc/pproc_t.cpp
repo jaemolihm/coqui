@@ -32,6 +32,7 @@
 
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "methods/embedding/projector_t.h"
 #include "utilities/kpoint_utils.hpp"
@@ -1042,7 +1043,7 @@ namespace methods {
 
       auto [ntau, ns, nkpts, nbnds, nbnds2] = dG_tau_skij.global_shape();
 
-      auto buffer1 = make_distributed_array<local_Array_5D_t>(_context.comm, dG_tau_skij.grid(), dG_tau_skij.global_shape(), dG_tau_skij.block_size());
+      auto buffer1 = make_distributed_array<local_Array_5D_t>(_context.comm, dG_tau_skij.grid(), dG_tau_skij.global_shape(), dG_tau_skij.tile_count());
 
       {
           auto [tau_origin, s_origin, k_origin, i_origin, j_origin] = dG_tau_skij.origin();

@@ -32,6 +32,7 @@
 #include "utilities/Timer.hpp"
 #include "utilities/proc_grid_partition.hpp"
 #include "utilities/kpoint_utils.hpp"
+#include "utilities/tile_partition.hpp"
 #include "IO/app_loggers.h"
 
 #include "mean_field/MF.hpp"
@@ -111,14 +112,14 @@ namespace solvers {
      * @param thc          - [INPUT] THC ERI
      * @param reset_input  - [INPUT] free the memory of dPi_tqPQ_pos
      * @param w_pgrid      - [OPTIONAL] processor grid for W(iw)
-     * @param w_bsize      - [OPTIONAL] block size for W(iw)
+     * @param w_tcount     - [OPTIONAL] tile count for W(iw)
      * @return - Screened interaction W in the THC product basis
      */
     template<bool w_out, nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
     auto dyson_W_from_Pi_tau(memory::darray_t<local_Array_t, communicator_t> &dPi_tqPQ_pos,
                              THC_ERI auto &thc, bool reset_input,
                              std::array<long, 4> w_pgrid = {0, 0, 0, 0},
-                             std::array<long, 4> w_bsize = {0, 0, 0, 0})
+                             std::array<long, 4> w_tcount = {0, 0, 0, 0})
     -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
     static auto W_omega_proc_grid(long nproc, long nqpts_ibz, long nw_b, long Np)
@@ -144,13 +145,16 @@ namespace solvers {
 
       std::array<long, 4> w_pgrid = {nwpools, nqpools, np_P, np_Q}; // (w, q, P, Q)
 
-      // Setup square block size: make sure block sizes produce at least one full block per task
-      std::array<long, 4> w_bsize;
-      w_bsize.fill(1);
-      w_bsize[2] = std::min( {(long)1024, Np/w_pgrid[2], Np/w_pgrid[3]});
-      w_bsize[3] = w_bsize[2];
+      // Square (P,Q) tile count: the same count on both axes, so the two axes get
+      // identical tile boundaries and the SUMMA / getri preconditions hold. The
+      // 1024 max tile size keeps a tile from growing without bound; below it there is
+      // exactly one tile per rank on the larger of the two PQ axes.
+      std::array<long, 4> w_tcount;
+      w_tcount.fill(0);   // 0 = one element per tile, i.e. the (w,q) axes stay untiled
+      w_tcount[2] = utils::balanced_tile_count(Np, std::max(w_pgrid[2], w_pgrid[3]), 1024);
+      w_tcount[3] = w_tcount[2];
 
-      return std::make_tuple(w_pgrid, w_bsize);
+      return std::make_tuple(w_pgrid, w_tcount);
     }
 
     /**
@@ -159,7 +163,7 @@ namespace solvers {
      * (q,t) transpose W(q,t,P,Q) (axes 0↔1 swapped). The whole τ-side family, plus
      * the t-pool sub-communicator size np_P*np_Q, comes from here, so the SCF
      * memory/distribution report predicts exactly what the allocator builds.
-     * @return {pgrid, bsize} over the (t, q, P, Q) axes.
+     * @return {pgrid, tcount} over the (t, q, P, Q) axes.
      */
     static auto Pi_tau_proc_grid(long nproc, long nt_half, long nqpts_ibz, long ns, long nkpts)
     -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
@@ -174,7 +178,7 @@ namespace solvers {
       long np_Q = np_PQ / np_P;
 
       return std::make_tuple(std::array<long, 4>{ntpools, 1, np_P, np_Q},
-                             std::array<long, 4>{1, 1, 1, 1});
+                             std::array<long, 4>{0, 0, 0, 0});
     }
 
     /**
@@ -292,7 +296,7 @@ namespace solvers {
         const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
         THC_ERI auto &thc,
         const projector_boson_t &proj,
-        std::array<long, 4> pgrid, std::array<long, 4> bsize)
+        std::array<long, 4> pgrid, std::array<long, 4> tcount)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
   private:

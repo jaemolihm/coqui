@@ -318,7 +318,7 @@ namespace lr_dyson_tests {
     {
       auto [pg, bs] = lr_dyson_omega_pgrid(context->comm.size(), ft.nw_f(), nk, nb);
       app_log(2, "lr_dyson_dm_hermiticity_q0: nw = {}, nk_ibz = {}, nbnd = {}, "
-                 "LR pgrid (w,s,k,i,j) = ({},{},{},{},{}), band bsize = {}",
+                 "LR pgrid (w,s,k,i,j) = ({},{},{},{},{}), band tcount = {}",
               ft.nw_f(), nk, nb, pg[0], pg[1], pg[2], pg[3], pg[4], bs[3]);
     }
 
@@ -442,7 +442,7 @@ namespace lr_dyson_tests {
     for (long nw : {40L, 72L}) {
       for (long nk : {8L, 64L}) {
         for (long nproc : {1L, 2L, 8L, 12L, 64L, 192L, 384L, 768L, 960L, 1920L}) {
-          auto [pgrid, bsize] = methods::lr_dyson_omega_pgrid(nproc, nw, nk, 130);
+          auto [pgrid, tcount] = methods::lr_dyson_omega_pgrid(nproc, nw, nk, 130);
           INFO("nproc=" << nproc << " nw=" << nw << " nk=" << nk << " -> ("
                << pgrid[0] << "," << pgrid[1] << "," << pgrid[2] << ","
                << pgrid[3] << "," << pgrid[4] << ")");
@@ -452,8 +452,8 @@ namespace lr_dyson_tests {
           // Pools can never exceed the axis they divide.
           CHECK(pgrid[0] <= nw);
           CHECK(pgrid[2] <= nk);
-          CHECK(bsize[3] >= 1);
-          CHECK(bsize[4] >= 1);
+          CHECK(tcount[3] >= 1);
+          CHECK(tcount[4] >= 1);
 
           if (has_factorisation(nproc, nw, nk)) {
             CHECK(pgrid[3] * pgrid[4] == 1);   // bands undivided => LR-GW usable
@@ -472,7 +472,7 @@ namespace lr_dyson_tests {
      * all-to-all inside one k column. Pinned here because nothing downstream fails
      * if it silently flips — it only gets slower.
      */
-    auto [pgrid, bsize] = methods::lr_dyson_omega_pgrid(960, 40, 64, 130);
+    auto [pgrid, tcount] = methods::lr_dyson_omega_pgrid(960, 40, 64, 130);
     CHECK(pgrid[0] == 15);
     CHECK(pgrid[2] == 64);
     CHECK(pgrid[3] * pgrid[4] == 1);
