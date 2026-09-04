@@ -522,17 +522,12 @@ TEST_CASE("distributed_inverse", "[math]")
     check(world.size()/nx, nx);
   };
 
-  run(40);
-  // Not divisible by the rank counts ctest uses: ragged last local block and a
-  // short trailing tile on both axes, which is the production geometry (THC
-  // nIpts 1687 split over 3 P ranks).
-  run(41);
-  // Production-sized ragged extents: 283 and 403 are augmented-basis Np values,
-  // 511 is prime-adjacent, 130 is even but not divisible by 4/8/12.
-  run(130);
-  run(283);
-  run(403);
-  run(511);
+  run(40);   // 2^3 * 5: exact on every grid np = 8 factors into, so no ragged tile
+  run(41);   // prime: ragged last local block on both axes at any np > 1
+  run(130);  // even, but not divisible by 4, 8 or 12
+  run(283);  // prime, and large enough for several tiles per rank
+  run(403);  // 13 * 31: no factor below 13
+  run(511);  // 7 * 73: exact at np = 7, ragged at 8, 11 and 13
 }
 
 // One gemm, one process grid, several blockings. Nothing else in the suite fixes

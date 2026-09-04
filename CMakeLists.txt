@@ -237,7 +237,7 @@ message(STATUS "MPI number of processors detected on the host system: " ${MPIEXE
 message(STATUS "MPI nproc flag: " ${MPIEXEC_NUMPROC_FLAG})
 message(STATUS "MPI exec flags: " ${MPIEXEC_PREFLAGS})
 if(DEFINED CTEST_NPROC) 
-  if( ${CTEST_NPROC}.gt.${MPIEXEC_MAX_NUMPROCS} )
+  if(CTEST_NPROC GREATER MPIEXEC_MAX_NUMPROCS)
     set(CTEST_NPROC ${MPIEXEC_MAX_NUMPROCS})
   endif()
 else()
