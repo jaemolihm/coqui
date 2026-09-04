@@ -8,6 +8,7 @@ set(TEST_ID utilities)
 set( TEST_SRCS
      test_harmonics.cpp
      test_utils.cpp
+     test_tile_partition.cpp
    )
 
 if(USE_DEVICE_COMPILER)

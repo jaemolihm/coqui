@@ -517,13 +517,248 @@ TEST_CASE("distributed_inverse", "[math]")
     check(1, world.size());
     long nx = utils::find_proc_grid_min_diff(world.size(), N, N);
     check(nx, world.size()/nx);
+    // the transposed grid: find_proc_grid_min_diff returns the larger factor
+    // first, so this is the only arm with np_i < np_j.
+    check(world.size()/nx, nx);
+  };
+
+  run(40);   // 2^3 * 5: exact on every grid np = 8 factors into, so no ragged tile
+  run(41);   // prime: ragged last local block on both axes at any np > 1
+  run(130);  // even, but not divisible by 4, 8 or 12
+  run(283);  // prime, and large enough for several tiles per rank
+  run(403);  // 13 * 31: no factor below 13
+  run(511);  // 7 * 73: exact at np = 7, ragged at 8, 11 and 13
+}
+
+// One gemm, one process grid, several blockings. Nothing else in the suite fixes
+// the grid and varies only the blocking, so nothing else can see a tiling bug
+// that a single blocking happens to hide (cf. docs/bug_lr_gw_fused_pq_tiling.md).
+// The reference is a replicated nda::matmul, independent of the distributed path.
+TEST_CASE("multiply_blocking_sweep", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+
+  auto run = [&](long N) {
+    const long np_i = utils::find_proc_grid_min_diff(world.size(), N, N);
+    const long np_j = world.size()/np_i;
+    if (N < np_i or N < np_j) return;
+    const long p_max = std::max(np_i, np_j);
+
+    nda::array<ComplexType, 2> A(N, N), B(N, N);
+    for (long i = 0; i < N; ++i)
+      for (long j = 0; j < N; ++j) {
+        A(i, j) = ComplexType(std::sin(0.31*i + 0.17*j), std::cos(0.11*i - 0.43*j));
+        B(i, j) = ComplexType(std::cos(0.23*i - 0.29*j), std::sin(0.37*i + 0.13*j));
+      }
+    nda::array<ComplexType, 2> Ref = nda::matmul(A, B);
+    double nrm = 0.0;
+    for (auto v : Ref) nrm = std::max(nrm, std::abs(v));
+
+    // one tile per rank, two tiles per rank, and tile size one
+    for (long b : {N/p_max, N/(2*p_max), 1l}) {
+      if (b < 1) continue;
+      auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world,
+                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{b, b});
+      auto dB = make_distributed_array<nda::array<ComplexType, 2>>(world,
+                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{b, b});
+      auto dC = make_distributed_array<nda::array<ComplexType, 2>>(world,
+                    shape_t<2>{np_i, np_j}, shape_t<2>{N, N}, shape_t<2>{b, b});
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
+      dB.local() = B(dB.local_range(0), dB.local_range(1));
+
+      math::nda::slate_ops::multiply(dA, dB, dC);
+
+      double err = 0.0;
+      auto Cloc = dC.local();
+      for (auto [i, in] : itertools::enumerate(dC.local_range(0)))
+        for (auto [j, jn] : itertools::enumerate(dC.local_range(1)))
+          err = std::max(err, std::abs(Cloc(i, j) - Ref(in, jn)));
+      err = world.all_reduce_value(err, boost::mpi3::max<>{});
+      app_log(2, "  multiply_blocking_sweep: N = {}, pgrid = ({},{}), b = {}, "
+                 "stored = {}, max rel error = {:.3e}",
+              N, np_i, np_j, b, dA.block_size()[0], err/nrm);
+      INFO("N = " << N << ", pgrid = (" << np_i << ", " << np_j << "), b = " << b);
+      CHECK(err < 1e-12*nrm);
+    }
   };
 
   run(40);
-  // Not divisible by the rank counts ctest uses: ragged last local block and a
-  // short trailing tile on both axes, which is the production geometry (THC
-  // nIpts 1687 split over 3 P ranks).
   run(41);
+  run(130);
+  run(283);
+}
+
+// multiply_blocking_sweep gives A, B and C the same square shape, grid and block
+// size, so its three operands cannot disagree and the conformability check inside
+// multiply_impl provably never fires there. gemm_tile_conformability drives the
+// predicate directly, with hand-written structs. Neither reaches the plumbing between
+// them -- which branch multiply_impl selects, in which order it passes the operands,
+// and whether it reads the POST-op extents -- and a bug there fails silently, by never
+// firing.
+//
+// So: one M x K times K x N with an independent block size per axis, fed from real
+// distributed arrays, asserted numerically.
+//
+// Choosing those block sizes is the whole subtlety, and it is the reason this test
+// exists. The factory clamps each axis independently, bsize[n] -> min(bsize[n],
+// shape[n]/grid[n]), so the tile count an axis ends up with depends on ITS OWN grid
+// extent. The contracted axis K sits on grid axis 1 of A and on grid axis 0 of B, so
+// the two clamps differ and the SAME requested block size can give A and B different
+// tile counts on the axis they share -- a wrong number out of slate::gemm, or the
+// abort. Requesting K's block size against the LARGER of the two grid extents makes
+// the clamp inactive on both. M is shared by A and C and N by B and C, both on the
+// same grid axis in each pair, so those two need no such care.
+TEST_CASE("multiply_nonsquare_blocking", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+
+  const long M = 96, K = 60, N = 40;
+  const long np_i = utils::find_proc_grid_min_diff(world.size(), M, N);
+  const long np_j = world.size()/np_i;
+  if (std::min({M,K,N}) < std::max(np_i,np_j)) return;
+
+  nda::array<ComplexType, 2> A(M,K), B(K,N);
+  for (long i = 0; i < M; ++i)
+    for (long j = 0; j < K; ++j)
+      A(i,j) = ComplexType(std::sin(0.31*i + 0.17*j), std::cos(0.11*i - 0.43*j));
+  for (long i = 0; i < K; ++i)
+    for (long j = 0; j < N; ++j)
+      B(i,j) = ComplexType(std::cos(0.23*i - 0.29*j), std::sin(0.37*i + 0.13*j));
+  nda::array<ComplexType, 2> Ref = nda::matmul(A, B);
+  double nrm = 0.0;
+  for (auto v : Ref) nrm = std::max(nrm, std::abs(v));
+
+  // one tile per rank on each axis, then two, then the smallest the clamp allows
+  for (long k : {1l, 2l, 4l}) {
+    const long bM = std::max(1l, M/(k*np_i));
+    const long bN = std::max(1l, N/(k*np_j));
+    const long bK = std::max(1l, K/(k*std::max(np_i,np_j)));   // the shared axis
+
+    auto dA = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{M,K}, shape_t<2>{bM,bK});
+    auto dB = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{K,N}, shape_t<2>{bK,bN});
+    auto dC = make_distributed_array<nda::array<ComplexType,2>>(world,
+                  shape_t<2>{np_i,np_j}, shape_t<2>{M,N}, shape_t<2>{bM,bN});
+
+    // the clamp must not have bitten, or the operands no longer share a partition on
+    // the axes they contract over. Asserted rather than skipped: a rank count that
+    // cannot express the shape should fail loudly, not vanish from the run.
+    REQUIRE(dA.block_size()[1] == dB.block_size()[0]);
+    REQUIRE(dA.block_size()[0] == dC.block_size()[0]);
+    REQUIRE(dB.block_size()[1] == dC.block_size()[1]);
+
+    dA.local() = A(dA.local_range(0), dA.local_range(1));
+    dB.local() = B(dB.local_range(0), dB.local_range(1));
+
+    math::nda::slate_ops::multiply(dA, dB, dC);
+
+    double err = 0.0;
+    auto Cloc = dC.local();
+    for (auto [i, in] : itertools::enumerate(dC.local_range(0)))
+      for (auto [j, jn] : itertools::enumerate(dC.local_range(1)))
+        err = std::max(err, std::abs(Cloc(i,j) - Ref(in,jn)));
+    err = world.all_reduce_value(err, boost::mpi3::max<>{});
+    app_log(2, "  multiply_nonsquare_blocking: {}x{} * {}x{}, pgrid = ({},{}), "
+               "b = ({},{},{}), max rel error = {:.3e}",
+            M, K, K, N, np_i, np_j, bM, bK, bN, err/nrm);
+    INFO("b = (" << bM << "," << bK << "," << bN << ")");
+    CHECK(err < 1e-12*nrm);
+  }
+}
+
+// The conformability predicate behind the utils::check in multiply_impl. It is a
+// predicate precisely so that it can be tested: utils::check calls MPI_Abort, so a
+// mismatched gemm cannot be run inside a Catch2 test. Extents and tile counts here are
+// what slate::gemm receives, i.e. already through the transpose op and the C-order
+// row/column swap.
+TEST_CASE("gemm_tile_conformability", "[math]")
+{
+  using math::nda::slate_ops::detail::gemm_operand;
+  using math::nda::slate_ops::detail::gemm_tile_mismatch;
+
+  // (100x60) * (60x40) = (100x40), tile counts agreeing on each shared axis
+  const gemm_operand A{100,60,4,3}, B{60,40,3,2}, C{100,40,4,2};
+  CHECK(gemm_tile_mismatch(A,B,C) == "");
+  // one element per tile is conformable too
+  CHECK(gemm_tile_mismatch({100,60,100,60},{60,40,60,40},{100,40,100,40}) == "");
+
+  // The silent one: extents agree everywhere, only the contracted axis is tiled
+  // differently. slate::gemm runs it and returns a wrong number.
+  CHECK(gemm_tile_mismatch(A,{60,40,4,2},C).find("contracted") != std::string::npos);
+  CHECK(gemm_tile_mismatch({100,60,4,2},B,C).find("contracted") != std::string::npos);
+  // extent mismatch on the contracted axis
+  CHECK(gemm_tile_mismatch(A,{59,40,3,2},C).find("contracted") != std::string::npos);
+  // the outer axes: A/C rows and B/C columns, tile count and extent
+  CHECK(gemm_tile_mismatch(A,B,{100,40,5,2}).find("row") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{101,40,4,2}).find("row") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{100,40,4,3}).find("column") != std::string::npos);
+  CHECK(gemm_tile_mismatch(A,B,{100,41,4,2}).find("column") != std::string::npos);
+
+  // the message names the operands it was GIVEN, in the order it was given them.
+  // multiply_impl relies on that: it always passes (A,B,C) in CoQui's own orientation,
+  // undoing the row/column swap to_slate_view applies to a C-order array, so the axis
+  // word and the shape in the message are the ones the caller wrote.
+  CHECK(gemm_tile_mismatch(B,A,C,"B","A","C").find("B is 60x40") != std::string::npos);
+}
+
+// The factory's distribution, checked as a partition rather than through an
+// operation: gather every rank's (origin, local_shape) and verify per axis that
+// the local ranges tile [0,N) exactly, that no rank is empty, and how far the
+// per-rank loads spread. The spread is only reported here; it is what the
+// balanced partition tightens.
+TEST_CASE("factory_partition", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+
+  auto run = [&](shape_t<2> grid, shape_t<2> shape, shape_t<2> bsize) {
+    if (grid[0]*grid[1] != world.size()) return;
+    if (shape[0] < grid[0] or shape[1] < grid[1]) return;
+    auto dA = make_distributed_array<nda::array<ComplexType, 2>>(world, grid, shape, bsize);
+
+    std::array<long, 4> mine{dA.origin()[0], dA.local_shape()[0],
+                             dA.origin()[1], dA.local_shape()[1]};
+    nda::array<long, 2> all_(world.size(), 4);
+    world.all_gather_n(mine.data(), 4, all_.data(), 4);
+
+    INFO("grid = (" << grid[0] << "," << grid[1] << "), shape = (" << shape[0]
+         << "," << shape[1] << "), bsize = (" << bsize[0] << "," << bsize[1] << ")");
+    for (int d = 0; d < 2; ++d) {
+      // the distinct local ranges along axis d, sorted by origin
+      std::vector<std::pair<long,long>> rng;
+      for (int r = 0; r < world.size(); ++r) {
+        std::pair<long,long> e{all_(r, 2*d), all_(r, 2*d+1)};
+        if (std::find(rng.begin(), rng.end(), e) == rng.end()) rng.push_back(e);
+      }
+      std::sort(rng.begin(), rng.end());
+      REQUIRE(long(rng.size()) == grid[d]);
+      long prev = 0, lmin = shape[d]+1, lmax = -1;
+      for (auto [o, l] : rng) {
+        REQUIRE(o == prev);            // no gap, no overlap
+        REQUIRE(l > 0);                // no empty rank
+        prev = o + l;
+        lmin = std::min(lmin, l);
+        lmax = std::max(lmax, l);
+      }
+      REQUIRE(prev == shape[d]);       // exactly the index space
+      app_log(2, "  factory_partition: axis {}, N = {}, grid = {}, bsize = {}, "
+                 "stored = {}, local extents [{},{}], ideal {}",
+              d, shape[d], grid[d], bsize[d], dA.block_size()[d], lmin, lmax,
+              (shape[d] + grid[d] - 1)/grid[d]);
+    }
+  };
+
+  const long np = world.size();
+  const long nx = utils::find_proc_grid_min_diff(np, 1687, 1687);
+  for (long N : {40l, 41l, 130l, 283l, 403l, 511l, 1687l}) {
+    if (N < np) continue;
+    for (auto g : std::array<shape_t<2>,3>{{ {np,1}, {1,np}, {nx,np/nx} }}) {
+      if (N < g[0] or N < g[1]) continue;
+      const long p_max = std::max(g[0], g[1]);
+      for (long b : {std::min({1024l, N/g[0], N/g[1]}), N/p_max, N/(2*p_max), 1l})
+        if (b >= 1) run(g, {N,N}, {b,b});
+    }
+  }
 }
 
 // scr_coulomb_fourier_t::ft_buffer_dist — the q-dist distribution, which on the
