@@ -581,7 +581,8 @@ public:
                              lr_diis_hist_t outer_hist = {},
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
-                             long hessian_nmodes = 0);
+                             long hessian_nmodes = 0,
+                             int n_dm_only = 0);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -737,6 +738,14 @@ private:
    */
   std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel(bool counter_term);
 
+  /// Whether this run's SCF iterations take the ΔDm-only Dyson pass
+  /// (lr_dyson::solve_lr_dm) instead of the full ΔG(iω) → ΔG(τ) pass: no reader
+  /// of ΔG(τ) inside the loop's sc channel (no Σ in K_sc, no qp map) and a size
+  /// lr_dyson supports. ΔG(τ) is then formed only where it is read, and a frozen
+  /// perturbative ΔΣ is summed once per stage. Agrees with the full pass to
+  /// round-off.
+  bool use_dm_only(lr_kernel_split const& k) const;
+
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
@@ -828,6 +837,13 @@ private:
   /// The kernel split, built once by lr_setup; its channels hold the evaluator
   /// instances above.
   lr_kernel_split _split;
+
+  // --- ΔDm-only Dyson pass (use_dm_only).
+  /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_src;
+  /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
+  /// it, since the caller's ΔF has been mixed by then.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
 
   bool _setup_done = false;
 
