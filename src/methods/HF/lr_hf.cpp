@@ -55,6 +55,9 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   utils::check(_hf_div_treatment == "ignore_g0" or _hf_div_treatment == "gygi",
                "lr_hf: hf_div_treatment must be \"ignore_g0\" or \"gygi\", got \"{}\".",
                _hf_div_treatment);
+  utils::check(_nkpts == _nkpts_ibz,
+               "lr_hf: symmetry-reduced k-points are not supported (nkpts = {}, "
+               "nkpts_ibz = {}).", _nkpts, _nkpts_ibz);
 
   // Compute k+q mapping
   auto kpts_crys = MF->kpts_crystal();
@@ -85,8 +88,17 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   app_log(2, "  - q is Gamma point: {}", _is_q_gamma ? "yes" : "no");
   app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
+  // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1 selects
+  // the gemm path with explicit FT coefficients (kept for testing).
+  if (_nkpts != 1 and not utils::lr_debug_gemm_ft()) {
+    _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
+    _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
+  }
+  if (_nkpts != 1)
+    app_log(2, "  - k<->R transform: {}", _fft_k ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
+
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
-                  "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC"}) {
+                  "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -263,10 +275,37 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   long np_Q = kernel_pgrid[2];
   nda::array<long, 1> R_grid = _MF->kp_grid();
 
+  // Dense k<->R coefficients, gemm path only.
   _Timer.start("ALLOC");
-  math::shm::shared_array<nda::array_view<ComplexType, 2>> sf_Rk(*_mpi, {nkpts, nkpts});
+  std::optional<math::shm::shared_array<nda::array_view<ComplexType, 2>>> sf_Rk;
+  if (nkpts != 1 and not _fft_k) sf_Rk.emplace(*_mpi, std::array<long, 2>{nkpts, nkpts});
   nda::matrix<ComplexType> buffer;
   _Timer.stop("ALLOC");
+
+  // k -> R in place on each (nk, ncols) slice of A_3D, over kpts or (on_Q) Qpts.
+  auto k_to_R = [&](auto&& A_3D, bool on_Q) {
+    _Timer.start("FT_R");
+    if (_fft_k) {
+      auto& fft = on_Q ? *_fft_q : *_fft_k;
+      for (long s = 0; s < A_3D.extent(0); ++s)
+        fft.k_to_R(A_3D(s, nda::ellipsis{}), A_3D(s, nda::ellipsis{}));
+    } else {
+      if (on_Q)
+        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
+                                   _MF->lattv(), R_grid, *sf_Rk);
+      else
+        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
+                                   _MF->lattv(), R_grid, *sf_Rk);
+      auto f_Rk = sf_Rk->local();
+      if (buffer.shape() != shape_t<2>{nkpts, A_3D.extent(2)})
+        buffer.resize(shape_t<2>{nkpts, A_3D.extent(2)});
+      for (long s = 0; s < A_3D.extent(0); ++s) {
+        nda::blas::gemm(f_Rk, A_3D(s, nda::ellipsis{}), buffer);
+        A_3D(s, nda::ellipsis{}) = buffer;
+      }
+    }
+    _Timer.stop("FT_R");
+  };
 
   app_log(3, "  LR-HF J/K evaluation:");
   app_log(3, "    - processor grid for ΔDm:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
@@ -351,16 +390,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
     // (2) FT DeltaV q→R using the same convention as dU_qPQ in the exchange
     //     path (MF->Qpts() grid).  DeltaV_qPQ is full-BZ q-indexed.
-    if (nkpts != 1) {
-      auto f_Rk = sf_Rk.local();
-      utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
-                                 _MF->lattv(), R_grid, sf_Rk);
-      if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
-        buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
-      auto V_2D = nda::reshape(DeltaV_RPQ_loc, shape_t<2>{nkpts, NP_loc * NQ_loc});
-      nda::blas::gemm(f_Rk, V_2D, buffer);
-      V_2D = buffer;
-    }
+    if (nkpts != 1)
+      k_to_R(nda::reshape(DeltaV_RPQ_loc, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
     // DeltaV_RPQ_loc now holds δV^R_PQ (used by the Exchange path).
 
     // (3) Forward-transform unperturbed Dm to aux (q=0), then FT k→R.
@@ -372,18 +403,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
     solvers::thc_solver_comm::primary_to_aux(0, 0, *Dm_skij_unpert, dDm_sRPQ_unpert,
                                              thc, _MF->kp_to_ibz(), _MF->kp_trev());
-    if (nkpts != 1) {
-      auto f_Rk = sf_Rk.local();
-      utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
-                                 _MF->lattv(), R_grid, sf_Rk);
-      if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
-        buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
-      auto Dm_3D = nda::reshape(dDm_sRPQ_unpert.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-      for (int s = 0; s < ns; ++s) {
-        nda::blas::gemm(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
-        Dm_3D(s, nda::ellipsis{}) = buffer;
-      }
-    }
+    if (nkpts != 1)
+      k_to_R(nda::reshape(dDm_sRPQ_unpert.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc}),
+             false);
 
     // (4) Diagonal of Dm_unpert at R=0, with the same spin factor as DeltaDm_QQ
     double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
@@ -410,20 +432,17 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
-      // FT ΔDm k→R
+      // Only ΔDm(R = 0) is read below: the k average 1/nk Σ_k ΔDm(k), written
+      // into row 0. The other rows keep ΔDm(k) and are not read.
       if (nkpts != 1) {
-        auto f_Rk = sf_Rk.local();
-        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
-                                   _MF->lattv(), R_grid, sf_Rk);
-        auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-        if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
-          buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
+        auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(),
+                                       shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
         for (int s = 0; s < ns; ++s) {
-          nda::blas::gemm(f_Rk, DeltaDm_3D(s, nda::ellipsis{}), buffer);
-          DeltaDm_3D(s, nda::ellipsis{}) = buffer;
+          auto R0 = DeltaDm_3D(s, 0, nda::range::all);
+          for (long ik = 1; ik < nkpts; ++ik) R0 += DeltaDm_3D(s, ik, nda::range::all);
+          R0 *= 1.0 / double(nkpts);
         }
       }
-      // After FT: dDeltaDm_skPQ is now dDeltaDm_sRPQ
       auto& dDeltaDm_sRPQ = dDeltaDm_skPQ;
 
       // Accumulate DeltaDm_QQ diagonal
@@ -514,15 +533,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       }
 
       _Timer.start("UQ_TO_UR");
-      if (nkpts != 1) {
-        buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
-        auto f_Rk = sf_Rk.local();
-        utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
-                                   _MF->lattv(), R_grid, sf_Rk);
-        auto U_2D = nda::reshape(dU_qPQ_loc, shape_t<2>{nkpts, NP_loc * NQ_loc});
-        nda::blas::gemm(f_Rk, U_2D, buffer);
-        U_2D = buffer;
-      }
+      if (nkpts != 1)
+        k_to_R(nda::reshape(dU_qPQ_loc, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
       _U_RPQ = dU_qPQ_loc;
       _U_RPQ_hsex = hsex ? std::optional{hsex->kernel} : std::nullopt;
       _U_RPQ_cached = true;
@@ -553,18 +565,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
         // FT ΔDm from k-space to R-space
         _Timer.start("EXCHANGE");
-        if (nkpts != 1) {
-          auto f_Rk = sf_Rk.local();
-          utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
-                                     _MF->lattv(), R_grid, sf_Rk);
-          auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-          if (buffer.shape() != shape_t<2>{nkpts, NP_loc * NQ_loc})
-            buffer.resize(shape_t<2>{nkpts, NP_loc * NQ_loc});
-          for (int s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_Rk, DeltaDm_3D(s, nda::ellipsis{}), buffer);
-            DeltaDm_3D(s, nda::ellipsis{}) = buffer;
-          }
-        }
+        if (nkpts != 1)
+          k_to_R(nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc}),
+                 false);
         _Timer.stop("EXCHANGE");
         // After FT: dDeltaDm_skPQ is now dDeltaDm_sRPQ
         auto& dDeltaDm_sRPQ = dDeltaDm_skPQ;
@@ -626,15 +629,25 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
         if (nkpts != 1) {
           // FT ΔK from R-space back to k-space; accumulates onto dDeltaF_skPQ (may contain ΔJ)
-          auto f_kR = sf_Rk.local();
-          utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
-                                     _MF->lattv(), R_grid, sf_Rk);
+          _Timer.start("FT_R");
           auto DeltaK_R_3D = nda::reshape(dDeltaK_sRPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
           auto DeltaF_k_3D = nda::reshape(dDeltaF_skPQ.local(), shape_t<3>{ns, nkpts_ibz, NP_loc * NQ_loc});
-          for (int s = 0; s < ns; ++s) {
-            nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
-                            DeltaK_R_3D(s, nda::ellipsis{}), ComplexType(1.0), DeltaF_k_3D(s, nda::ellipsis{}));
+          if (_fft_k) {
+            // In place: ΔK(R) is dead after this.
+            for (int s = 0; s < ns; ++s) {
+              _fft_k->R_to_k(DeltaK_R_3D(s, nda::ellipsis{}), DeltaK_R_3D(s, nda::ellipsis{}));
+              DeltaF_k_3D(s, nda::ellipsis{}) += DeltaK_R_3D(s, nda::ellipsis{});
+            }
+          } else {
+            auto f_kR = sf_Rk->local();
+            utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
+                                       _MF->lattv(), R_grid, *sf_Rk);
+            for (int s = 0; s < ns; ++s) {
+              nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
+                              DeltaK_R_3D(s, nda::ellipsis{}), ComplexType(1.0), DeltaF_k_3D(s, nda::ellipsis{}));
+            }
           }
+          _Timer.stop("FT_R");
         } else {
           // Gamma-point only: R=0 only, so ΔK(R=0) = ΔK(k)
           auto DeltaF_loc = dDeltaF_skPQ.local();

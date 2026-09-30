@@ -32,6 +32,7 @@
 #include "mean_field/MF.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/fft/fft_kR.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/SCF/lr_ibc.hpp"
 #include "utilities/lr_utils.hpp"
@@ -209,6 +210,7 @@ public:
     app_log(level, "{0}  - U(q)->U(R) FT:              {1:8.3f} sec  {2:4d} calls", indent, sec("UQ_TO_UR"), cnt("UQ_TO_UR"));
     app_log(level, "{0}  - Coulomb (J):                {1:8.3f} sec  {2:4d} calls", indent, sec("COULOMB"), cnt("COULOMB"));
     app_log(level, "{0}  - Exchange (K):               {1:8.3f} sec  {2:4d} calls", indent, sec("EXCHANGE"), cnt("EXCHANGE"));
+    app_log(level, "{0}  - k<->R FT (within the above):{1:8.3f} sec  {2:4d} calls", indent, sec("FT_R"), cnt("FT_R"));
     app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("AUX_TO_PRIM"), cnt("AUX_TO_PRIM"));
     app_log(level, "{0}  - Final reduce (ΔF):          {1:8.3f} sec  {2:4d} calls", indent, sec("FINAL_REDUCE"), cnt("FINAL_REDUCE"));
     app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, sec("MADELUNG"), cnt("MADELUNG"));
@@ -238,6 +240,11 @@ private:
   nda::array<bool, 1> _kpq_ibz_trev; // Whether k+q reaches its IBZ rep via time-reversal
 
   std::string _hf_div_treatment;    // "gygi" or "ignore_g0"; gates the Madelung K correction
+
+  // Blocked-FFT k<->R transforms over kpts / Qpts; empty on the gemm path
+  // (COQUI_LR_DEBUG_GEMM_FT) and at a single k-point. Members because each
+  // caches its FFTW_MEASURE plans across calls.
+  std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
 
   utils::TimerManager _Timer;
 
