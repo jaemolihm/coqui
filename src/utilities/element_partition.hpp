@@ -198,6 +198,27 @@ std::pair<double, double> striped_norm(Comm& comm, ArrA const& a, ArrB const& b,
   return {std::sqrt(acc[0]), std::sqrt(acc[1])};
 }
 
+/**
+ * @brief Re⟨W_i, v⟩ for every slice in `W`, from pre-sliced 1D views, reduced
+ *        over `comm` in a single all_reduce.
+ *
+ * The striped counterpart of a batch of inner products: each rank holds its
+ * part_map slice of every vector, so the local partial dots summed over `comm`
+ * are the full ones. The real part is the inner product of a real-linear map.
+ */
+template<typename Comm, typename Vec, typename ArrV>
+std::vector<double> striped_dotc_batch(Comm& comm, std::vector<Vec const*> const& W,
+                                       ArrV const& v) {
+  std::vector<double> h(W.size(), 0.0);
+  for (size_t i = 0; i < W.size(); ++i) {
+    check(W[i]->size() == v.size(),
+          "striped_dotc_batch: slice sizes differ ({} vs {})", W[i]->size(), v.size());
+    if (v.size() > 0) h[i] = std::real(nda::blas::dotc(*W[i], v));
+  }
+  if (!h.empty()) comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
+  return h;
+}
+
 } // namespace utils
 
 #endif // UTILITIES_ELEMENT_PARTITION_HPP
