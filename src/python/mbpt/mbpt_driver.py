@@ -19,6 +19,7 @@ limitations under the License.
 """
 
 import json
+import warnings
 
 from coqui._lib.mbpt_module import mbpt as mbpt_cxx
 
@@ -671,7 +672,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     # Handle deprecated include_gw_sigma parameter
     if include_gw_sigma is not None:
-        import warnings
         warnings.warn(
             "include_gw_sigma is deprecated, use gw_mode='fixed_W' or gw_mode='full' instead",
             DeprecationWarning, stacklevel=2)
@@ -695,7 +695,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
             f"Unknown iter_alg '{alg}'. Must be 'damping', 'DIIS' or 'GCR'.")
     mixing = float(iter_alg.get("mixing", 1.0))
     if alg == "GCR" and mixing != 1.0:
-        import warnings
         warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
     max_subsp_size = int(iter_alg.get("max_subsp_size", 100 if alg == "GCR" else 10))
     diis_warmup = int(iter_alg.get("diis_warmup", 0))
