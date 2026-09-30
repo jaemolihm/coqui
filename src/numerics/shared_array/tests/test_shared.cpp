@@ -149,4 +149,109 @@ TEST_CASE("gather_to_shm_synthetic_nodes", "[math]") {
   run(2, world.size() - 1, "ragged, 1-rank node");
 }
 
+/**
+ * reduce_scatter_add writes each rank's stripe of a comm-wide sum into its own node's
+ * window; all_reduce_parallel then sums the nodes. Same synthetic-node carving as
+ * above, with comm = node_comm (the lr_hf use) and comm = world (stripes spread over
+ * nodes). Integer-valued data, so every comparison is exact.
+ */
+TEST_CASE("reduce_scatter_add_synthetic_nodes", "[math]") {
+  auto world = mpi3::environment::get_world_instance();
+  auto phys_node = world.split_shared();
+  if (phys_node.size() != world.size() or world.size() < 4) {
+    WARN("reduce_scatter_add_synthetic_nodes not run: needs >= 4 ranks, all on one "
+         "machine (got " << world.size() << " ranks, " << phys_node.size() << " on this one)");
+    return;
+  }
+
+  auto run = [&](int nfake, int split_at, const std::string& tag) {
+    int color = (split_at < 0) ? (world.rank() * nfake) / world.size()
+                               : ((world.rank() < split_at) ? 0 : 1);
+    auto fake_node = phys_node.split(color, world.rank());
+    auto fake_internode = world.split(fake_node.rank(), world.rank());
+
+    // Per-rank partial of call `c`: distinct in (call, rank, index), exact in double.
+    auto part = [](int c, int r, long i) {
+      return ComplexType(double(r + 1 + 3 * i + 1000 * c), double((i % 7) - r - 5 * c));
+    };
+
+    struct case_t { long W, offset, n, chunk; };
+    std::vector<case_t> cases = {
+        {1300, 0, 1234, 1L << 22},   // n not divisible by any comm size here
+        {12, 5, 3, 1L << 22},        // n < comm size: some stripes are empty
+        {1100, 7, 1000, 64},         // several chunks, n % chunk != 0
+        {10, 4, 0, 1L << 22},        // empty range
+    };
+    const ComplexType scl0(2.0, -1.0), scl1(-3.0, 0.0);
+
+    for (int which = 0; which < 2; ++which) {
+      mpi3::communicator& comm = (which == 0) ? static_cast<mpi3::communicator&>(fake_node)
+                                              : world;
+      for (auto const& cs : cases) {
+        auto sA = shared_array<nda::array_view<ComplexType, 1>>(
+            std::addressof(world), std::addressof(fake_internode), std::addressof(fake_node),
+            {cs.W});
+        // Two accumulating calls, then one internode reduction.
+        for (int c = 0; c < 2; ++c) {
+          std::vector<ComplexType> buf(cs.n);
+          for (long i = 0; i < cs.n; ++i) buf[i] = part(c, world.rank(), i);
+          reduce_scatter_add(comm, sA, buf.data(), cs.offset, cs.n, (c == 0 ? scl0 : scl1),
+                             cs.chunk);
+        }
+        sA.all_reduce_parallel();
+
+        // Closed form, whichever comm: element offset+i = Σ_c scl_c Σ_r part(c, r, i)
+        // over every world rank r (the nodes' sums add up in all_reduce_parallel);
+        // zero elsewhere.
+        long nbad = 0;
+        auto A = sA.local();
+        for (long j = 0; j < cs.W; ++j) {
+          ComplexType ref(0.0);
+          long i = j - cs.offset;
+          if (i >= 0 and i < cs.n) {
+            for (int c = 0; c < 2; ++c) {
+              ComplexType s(0.0);
+              for (int r = 0; r < world.size(); ++r) s += part(c, r, i);
+              ref += (c == 0 ? scl0 : scl1) * s;
+            }
+          }
+          if (A(j) != ref) ++nbad;
+        }
+        nbad = world.all_reduce_value(nbad, std::plus<>{});
+        app_log(2, "reduce_scatter_add [{}, comm = {}]: nodes = {}, W = {}, offset = {}, "
+                "n = {}, chunk = {}, mismatches = {}", tag, which == 0 ? "node" : "world",
+                fake_internode.size(), cs.W, cs.offset, cs.n, cs.chunk, nbad);
+        REQUIRE(nbad == 0);
+      }
+    }
+
+    // double-valued window, comm = world
+    {
+      long W = 1301, n = 1297;
+      auto sD = shared_array<nda::array_view<double, 1>>(
+          std::addressof(world), std::addressof(fake_internode), std::addressof(fake_node), {W});
+      std::vector<double> buf(n);
+      for (long i = 0; i < n; ++i) buf[i] = double(world.rank() + 2 * i);
+      reduce_scatter_add(world, sD, buf.data(), 4, n, 3.0, 100);
+      sD.all_reduce_parallel();
+      long nbad = 0;
+      auto D = sD.local();
+      long np = world.size();
+      for (long j = 0; j < W; ++j) {
+        long i = j - 4;
+        double ref = (i >= 0 and i < n) ? 3.0 * double(np * (np - 1) / 2 + np * 2 * i) : 0.0;
+        if (D(j) != ref) ++nbad;
+      }
+      nbad = world.all_reduce_value(nbad, std::plus<>{});
+      REQUIRE(nbad == 0);
+    }
+  };
+
+  run(2, -1, "even, 2 nodes");
+  if (world.size() >= 8) run(4, -1, "even, 4 nodes");
+  run(2, world.size() / 2 + 1, "ragged");
+  run(2, world.size() - 1, "ragged, 1-rank node");
+  run(world.size(), -1, "1 rank per node");
+}
+
 } // bdft_tests
