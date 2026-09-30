@@ -939,18 +939,20 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
   long nkpts_ibz = DeltaDm_skij.extent(1);
   long nbnd = DeltaDm_skij.extent(2);
 
-  auto sDelta_skij = math::shm::make_shared_array<AF_t>(
-      *sDeltaF_skij.communicator(), *sDeltaF_skij.internode_comm(), *sDeltaF_skij.node_comm(),
-      {ns, nkpts_ibz, nbnd, nbnd});
-
-  int rank = sDelta_skij.communicator()->rank();
-  int size = sDelta_skij.communicator()->size();
+  // Node-redundant on purpose, as lr_gw::_sigma_div_correction: every node computes
+  // all (s,k) blocks over its own ranks and adds them in place, which costs a few
+  // gemms per rank instead of an internode reduction of the whole array.
+  auto node_comm = sDeltaF_skij.node_comm();
+  int node_rank = node_comm->rank();
+  int node_size = node_comm->size();
   nda::matrix<ComplexType> buffer(nbnd, nbnd);
-  for (int i = rank; i < ns * nkpts_ibz; i += size) {
+  nda::matrix<ComplexType> Delta_sk(nbnd, nbnd);
+  auto DeltaF_loc = sDeltaF_skij.local();
+  sDeltaF_skij.win().fence();
+  for (int i = node_rank; i < ns * nkpts_ibz; i += node_size) {
     int is = i / nkpts_ibz;
     int ik = i % nkpts_ibz;
     // ΔDelta_ij(k) = -madelung * S(k+q)_ia * ΔDm_ab(k) * S(k)_bj
-    auto Delta_sk = sDelta_skij.local()(is, ik, all, all);
     auto DeltaDm_sk = DeltaDm_skij(is, ik, all, all);
     auto S_k = S_skij(is, ik, all, all);               // S at k (right)
 
@@ -964,12 +966,12 @@ void lr_hf::LR_HF_K_correction(sArray_t<AF_t>& sDeltaF_skij,
     } else {
       nda::blas::gemm(ComplexType(-1.0 * madelung), S_kq_raw, DeltaDm_sk, ComplexType(0.0), buffer);
     }
+    // Into a private block rather than straight onto ΔF with β = 1, which would
+    // change the rounding of the sum.
     nda::blas::gemm(ComplexType(1.0), buffer, S_k, ComplexType(0.0), Delta_sk);
+    DeltaF_loc(is, ik, all, all) += Delta_sk;
   }
-  sDelta_skij.all_reduce_parallel();
-
-  if (sDeltaF_skij.node_comm()->root())
-    sDeltaF_skij.local() += sDelta_skij.local();
+  sDeltaF_skij.win().fence();
   sDeltaF_skij.communicator()->barrier();
 }
 
