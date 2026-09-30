@@ -59,6 +59,10 @@ namespace methods {
  *
  * SPMD: every rank of `comm` holds its `pmap` slice of every vector, and the
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
+ * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
+ *
+ * Named for the flexible variant of docs/plan_lr_krylov_solver.md (Phase 1): the
+ * preconditioner hook z = P⁻¹ r is reserved for it; here z = r.
  *
  * Why not src/numerics/iter_scf/: its solvers keep their vectors in HDF5-backed
  * VSpace storage behind a file-I/O Vector interface, and have no notion of a
@@ -78,6 +82,7 @@ public:
     _n = 0;
     _head = 0;
     _have_rhs = false;
+    _warned_full = false;
   }
   /// Keep the basis; the next step starts a new right-hand side.
   void reset_rhs() { _have_rhs = false; }
@@ -129,23 +134,50 @@ public:
     } else {
       Vec1D z = F_probe - _x;
       Vec1D w = _r - r_y;                 // = A z
+      // CGS2. The first pass also carries ‖w‖² before orthogonalization, the
+      // scale the breakdown test below is relative to.
+      double w0n = 0.0;
       for (int pass = 0; pass < 2; ++pass) {
-        if (_n == 0) break;
-        auto h = dots(comm, w);
+        std::vector<double> h(_n + (pass == 0 ? 1 : 0), 0.0);
+        if (w.size() > 0) {
+          for (size_t i = 0; i < _n; ++i) h[i] = std::real(nda::blas::dotc(_W[slot(i)], w));
+          if (pass == 0) h[_n] = std::real(nda::blas::dotc(w, w));
+        }
+        if (h.empty()) break;
+        comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
+        if (pass == 0) w0n = std::sqrt(h[_n]);
         for (size_t i = 0; i < _n; ++i) {
           w -= h[i] * _W[slot(i)];
           z -= h[i] * _Z[slot(i)];
         }
+        if (_n == 0) break;
       }
-      const double wn = norm(comm, w);
-      if (wn > 0.0) {
+      // ‖w‖² and ⟨w, r⟩ in one reduction.
+      double acc[2] = {0.0, 0.0};
+      if (w.size() > 0) {
+        acc[0] = std::real(nda::blas::dotc(w, w));
+        acc[1] = std::real(nda::blas::dotc(w, _r));
+      }
+      comm.all_reduce_in_place_n(acc, 2, std::plus<>{});
+      const double wn = std::sqrt(acc[0]);
+      if (wn <= 1e-14 * w0n || wn == 0.0) {
+        // A z lies in the span of the stored W to working precision: this probe
+        // adds no direction, and repeating it would add none either. Restart
+        // from the next probe x + r with an empty basis; its first step then
+        // re-forms r from the true residual.
+        app_log(1, "    [WARNING] lr_fgcr: breakdown (||w|| = {:.3e} after "
+                   "orthogonalization, {:.3e} before); restarting with an empty "
+                   "basis.", wn, w0n);
+        _n = 0;
+        _head = 0;
+        _have_rhs = false;
+      } else {
         w *= 1.0 / wn;
         z *= 1.0 / wn;
         const size_t s = push_slot();
         _Z[s] = z;
         _W[s] = w;
-        double alpha = (w.size() > 0) ? std::real(nda::blas::dotc(w, _r)) : 0.0;
-        comm.all_reduce_in_place_n(&alpha, 1, std::plus<>{});
+        const double alpha = acc[1] / wn;
         _x += alpha * z;
         _r -= alpha * w;
       }

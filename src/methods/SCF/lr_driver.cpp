@@ -544,6 +544,8 @@ void lr_driver::lr_setup(
   // the stages of one solve.
   if (p.iter_params.alg == "GCR")
     _lr_fgcr = std::make_unique<lr_fgcr>(p.iter_params.max_subsp_size);
+  else
+    _lr_fgcr.reset();
   // The outer accelerator is a separate object with its own subspace, history
   // and warmup: it is keyed on the outer step index while the inner one restarts
   // at every stage boundary, and the two must share nothing.
@@ -1115,8 +1117,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // residual S_1 - 0 needs no special casing — the histories start zeroed.
   if (_sDeltaDm_stage_prev) _sDeltaDm_stage_prev->set_zero();
   sDeltaDm_prev_skij.set_zero();
-  // Not strictly required — every read of these is guarded by stage_iter > 1 —
-  // but it makes a solve depend on nothing but its own ΔH0.
+  // Not strictly required — every read of these follows a save in the same solve
+  // (stage_iter > 1, or any iteration under GCR) — but it makes a solve depend on
+  // nothing but its own ΔH0.
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   _lr_diis->reset();
@@ -1177,7 +1180,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // Split-kernel stage state. `stage_iter` is the iteration index within the
   // current stage: DIIS keys its warmup off it and it gates the prev-array save,
   // so a stage boundary looks like a fresh start even though ΔF_sc/ΔΣ_sc are
-  // deliberately carried over (warm start) into the next stage.
+  // deliberately carried over (warm start) into the next stage. GCR instead steps
+  // on every iteration, the first of a stage opening the new right-hand side.
   int n_applied = 0;
   int stage = 1;
   int stage_iter = 0;
@@ -1185,14 +1189,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
   bool outer_converged = false;
 
-  // Where the ΔG(τ) of the current ΔDm lives: still distributed inside lr_dyson
-  // (pending), replicated into sDeltaG_tskij, or nowhere.
-  bool deltaG_pending = false;
-  bool deltaG_in_shm = false;
+  // Where the ΔG(τ) of the current ΔDm lives: nowhere (a ΔDm-only pass made
+  // it), still distributed inside lr_dyson, or replicated into sDeltaG_tskij.
+  enum class dG_state { none, pending, in_shm };
+  dG_state dG = dG_state::none;
   auto materialize = [&]() {
     _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
-    deltaG_pending = false;
-    deltaG_in_shm = true;
+    dG = dG_state::in_shm;
   };
   // The ΔΣ the Dyson RHS reads. When Σ lives in the perturbative channel alone,
   // it is the zero set of the reset above until the first K_pert evaluation, and
@@ -1213,10 +1216,29 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaDm_skij, sDeltaH0_skij, sDeltaF_in, dyson_sigma(), p.fix_density,
         static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
-    deltaG_pending = true;
-    deltaG_in_shm = false;
+    dG = dG_state::pending;
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
+  };
+  // The ΔDm-only pass on the current ΔF. The frozen perturbative ΔΣ enters
+  // through its own ΔDm, summed at the first pass of each stage; the static RHS
+  // is summed every pass. The ΔF it was fed is kept for the harvest.
+  auto dm_pass = [&](bool first_of_stage) {
+    const bool has_src = k.pert_sigma && n_applied >= 1;
+    if (has_src && first_of_stage)
+      _lr_dyson.build_dynamic_source(*_sDeltaDm_src, *sDeltaSigma_tskij);
+    _sDeltaF_dyson_in->win().fence();
+    if (_mpi->node_comm.root()) _sDeltaF_dyson_in->local() = sDeltaF_skij.local();
+    _sDeltaF_dyson_in->win().fence();
+    Delta_mu = _lr_dyson.solve_lr_dm(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                                     has_src ? &(*_sDeltaDm_src) : nullptr,
+                                     p.fix_density);
+    dG = dG_state::none;
+  };
+  // Form ΔG(τ) of the current ΔDm for a reader, whichever path made the ΔDm.
+  auto need_dG = [&]() {
+    if (dm_only && dG == dG_state::none) harvest(*_sDeltaF_dyson_in);
+    if (dG == dG_state::pending) materialize();
   };
 
   const bool log_sigma_col = has_Sigma_sc || has_Vcorr;
@@ -1249,8 +1271,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     const bool first_of_stage = (stage_iter == 1);
     bool pert_refreshed_this_iter = false;
     // Did the mixing block run this iteration? It is skipped on the first
-    // iteration of a stage (there is no previous iterate yet) and by a kernel with
-    // nothing self-consistent to mix, and the hessian estimator needs to know
+    // iteration of a stage under DIIS/damping (there is no previous iterate yet;
+    // GCR runs there) and by a kernel with nothing self-consistent to mix, and
+    // the hessian estimator needs to know
     // whether the arrays it is handed at exit are the raw kernel output or the
     // mixed iterate.
     bool mixed_this_iter = false;
@@ -1280,27 +1303,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
     if (dm_only) {
-      // The frozen perturbative ΔΣ enters through its own ΔDm, summed once per
-      // stage; the static RHS is summed every iteration.
-      const bool has_src = k.pert_sigma && n_applied >= 1;
-      if (has_src && first_of_stage)
-        _lr_dyson.build_dynamic_source(*_sDeltaDm_src, *sDeltaSigma_tskij);
-      _sDeltaF_dyson_in->win().fence();
-      if (_mpi->node_comm.root()) _sDeltaF_dyson_in->local() = sDeltaF_skij.local();
-      _sDeltaF_dyson_in->win().fence();
-      Delta_mu = _lr_dyson.solve_lr_dm(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                                       has_src ? &(*_sDeltaDm_src) : nullptr,
-                                       p.fix_density);
-      deltaG_pending = false;
-      deltaG_in_shm = false;
+      dm_pass(first_of_stage);
     } else {
       const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij,
           sDeltaF_skij, dyson_sigma(),
           p.fix_density, dyson_vcorr);
-      deltaG_pending = true;
-      deltaG_in_shm = false;
+      dG = dG_state::pending;
     }
 
     // The solve leaves ΔG(τ) distributed; replicating it is the single most
@@ -1505,11 +1515,28 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_CONVERGENCE");
 
     // GCR converged: the slot holds x, not the probe the ΔDm above came from.
-    // Form ΔDm and ΔG at x before anything reads them (the outer test, K_pert,
-    // the exit).
+    // Form ΔDm at x before anything reads it (the outer test, K_pert, the exit);
+    // ΔG(τ) at x only if a reader asks for it (need_dG).
     if (gcr && inner_converged) {
       rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
-      harvest(sDeltaF_skij);
+      _Timer.start("LR_DYSON");
+      dm_pass(false);
+      _Timer.stop("LR_DYSON");
+      _mpi->comm.barrier();
+      // Diagnostic (verbosity >= 3): the true residual ‖K_sc(ΔDm(x)) − x‖ next to
+      // the recursive one, which would expose drift carried into the recycled
+      // basis. Costs one more K_sc evaluation per converged stage.
+      if (__app_verbosity__ >= 3) {
+        auto sF_check = math::shm::make_shared_array<Array_view_4D_t>(
+            *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+        apply_kernel(K_sc, sF_check, nullptr, sDeltaDm_skij, sDeltaG_tskij,
+                     sG_tskij, thc, p);
+        double true_res = utils::lr_distributed_norm(
+            _mpi->node_comm, sF_check.local(), sDeltaF_sc_skij.local(), true).second;
+        _mpi->comm.broadcast_n(&true_res, 1, 0);
+        app_log(3, "          [GCR] converged: true ||g(x) - x|| = {:.6e}, "
+                   "recursive ||r|| = {:.6e}", true_res, gcr_rnorm);
+      }
     }
 
     // Stage boundary: one K_pert evaluation on the converged ΔG of this stage,
@@ -1532,10 +1559,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        if (k.pert_sigma) {
-          if (dm_only && !deltaG_pending && !deltaG_in_shm) harvest(*_sDeltaF_dyson_in);
-          if (deltaG_pending) materialize();
-        }
+        if (k.pert_sigma) need_dG();
         apply_kernel(K_pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
 
@@ -1665,10 +1689,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // outlives the solve and is reused by the next perturbation, so skipping this
   // would hand those readers the previous perturbation's ΔG next to this one's
   // ΔDm/ΔF. With no reader the gather is skipped outright.
-  if (p.save_DeltaG || (p.hessian() && k.pert_sigma)) {
-    if (dm_only && !deltaG_pending && !deltaG_in_shm) harvest(*_sDeltaF_dyson_in);
-    if (deltaG_pending) materialize();
-  }
+  if (p.save_DeltaG || (p.hessian() && k.pert_sigma)) need_dG();
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
