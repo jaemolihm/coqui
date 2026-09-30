@@ -90,13 +90,12 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
 
   // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1 selects
   // the gemm path with explicit FT coefficients (kept for testing).
-  _use_fft = _nkpts != 1 and not utils::lr_debug_gemm_ft();
-  if (_use_fft) {
+  if (_nkpts != 1 and not utils::lr_debug_gemm_ft()) {
     _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
     _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
   }
   if (_nkpts != 1)
-    app_log(2, "  - k<->R transform: {}", _use_fft ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
+    app_log(2, "  - k<->R transform: {}", _fft_k ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
 
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
                   "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R"}) {
@@ -279,14 +278,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // Dense k<->R coefficients, gemm path only.
   _Timer.start("ALLOC");
   std::optional<math::shm::shared_array<nda::array_view<ComplexType, 2>>> sf_Rk;
-  if (nkpts != 1 and not _use_fft) sf_Rk.emplace(*_mpi, std::array<long, 2>{nkpts, nkpts});
+  if (nkpts != 1 and not _fft_k) sf_Rk.emplace(*_mpi, std::array<long, 2>{nkpts, nkpts});
   nda::matrix<ComplexType> buffer;
   _Timer.stop("ALLOC");
 
   // k -> R in place on each (nk, ncols) slice of A_3D, over kpts or (on_Q) Qpts.
   auto k_to_R = [&](auto&& A_3D, bool on_Q) {
     _Timer.start("FT_R");
-    if (_use_fft) {
+    if (_fft_k) {
       auto& fft = on_Q ? *_fft_q : *_fft_k;
       for (long s = 0; s < A_3D.extent(0); ++s)
         fft.k_to_R(A_3D(s, nda::ellipsis{}), A_3D(s, nda::ellipsis{}));
@@ -433,25 +432,17 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
-      // FT ΔDm k→R. Only the R = 0 row is read below, which off the gemm path is
-      // the plain k average (the transform's 1/nk Σ_k e^{-ik·0}).
+      // Only ΔDm(R = 0) is read below: the k average 1/nk Σ_k ΔDm(k), written
+      // into row 0. The other rows keep ΔDm(k) and are not read.
       if (nkpts != 1) {
-        if (_use_fft) {
-          _Timer.start("FT_R");
-          auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(),
-                                         shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
-          for (int s = 0; s < ns; ++s) {
-            auto R0 = DeltaDm_3D(s, 0, nda::range::all);
-            for (long ik = 1; ik < nkpts; ++ik) R0 += DeltaDm_3D(s, ik, nda::range::all);
-            R0 *= 1.0 / double(nkpts);
-          }
-          _Timer.stop("FT_R");
-        } else {
-          k_to_R(nda::reshape(dDeltaDm_skPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc}),
-                 false);
+        auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(),
+                                       shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
+        for (int s = 0; s < ns; ++s) {
+          auto R0 = DeltaDm_3D(s, 0, nda::range::all);
+          for (long ik = 1; ik < nkpts; ++ik) R0 += DeltaDm_3D(s, ik, nda::range::all);
+          R0 *= 1.0 / double(nkpts);
         }
       }
-      // After FT: dDeltaDm_skPQ is now dDeltaDm_sRPQ (row R = 0 only on the FFT path)
       auto& dDeltaDm_sRPQ = dDeltaDm_skPQ;
 
       // Accumulate DeltaDm_QQ diagonal
@@ -641,7 +632,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
           _Timer.start("FT_R");
           auto DeltaK_R_3D = nda::reshape(dDeltaK_sRPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
           auto DeltaF_k_3D = nda::reshape(dDeltaF_skPQ.local(), shape_t<3>{ns, nkpts_ibz, NP_loc * NQ_loc});
-          if (_use_fft) {
+          if (_fft_k) {
             // In place: ΔK(R) is dead after this.
             for (int s = 0; s < ns; ++s) {
               _fft_k->R_to_k(DeltaK_R_3D(s, nda::ellipsis{}), DeltaK_R_3D(s, nda::ellipsis{}));

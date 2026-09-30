@@ -41,7 +41,7 @@ namespace fft {
 
 /**
  * Blocked-FFT replacement for the dense k<->R Fourier-transform gemms used by
- * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw / lr_hf).
+ * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·)).
  *
  * Design note (why the existing gemm / plain batched-FFT paths are not reused):
  * the LR arrays are (nk, ncols) row-major with k as the SLOW axis. A batched
