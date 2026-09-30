@@ -2079,8 +2079,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.max_iter         = max_iter;
   p.tol              = tol;
   p.fix_density      = fix_density;
-  // dump_lr below is the only reader of lr_state.sDeltaG_tskij, and it writes it
-  // only under this flag, so it also decides whether ΔG(τ) is replicated at all.
+  // dump_lr below writes lr_state.sDeltaG_tskij only under this flag; with it off,
+  // ΔG(τ) is still replicated where the solve's own consumers (Σ, and the
+  // hessian's refresh and store) read it.
   p.save_DeltaG      = save_DeltaG;
   p.iter_params      = iter_params;
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;

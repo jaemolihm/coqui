@@ -1065,6 +1065,26 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
   bool outer_converged = false;
 
+  // Where the ΔG(τ) of the current ΔDm lives: still distributed inside lr_dyson
+  // (pending), replicated into sDeltaG_tskij, or nowhere.
+  bool deltaG_pending = false;
+  bool deltaG_in_shm = false;
+  auto materialize = [&]() {
+    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+    deltaG_pending = false;
+    deltaG_in_shm = true;
+  };
+  // The ΔΣ the Dyson RHS reads. When Σ lives in the perturbative channel alone,
+  // it is the zero set of the reset above until the first K_pert evaluation, and
+  // transforming zeros is skipped. A split ΔΣ has no such guarantee: its total
+  // carries the sc channel as well.
+  auto dyson_sigma = [&]() -> sArray_t<Array_view_5D_t>* {
+    if (!k.any_Sigma() || k.sc.is_qp()) return nullptr;
+    if (k.do_pert() && !k.sc.has_Sigma() && !k.both_have_Sigma() && n_applied == 0)
+      return nullptr;
+    return sDeltaSigma_tskij;
+  };
+
   const bool log_sigma_col = k.sc.has_Sigma();
 
   // SCF iteration header
@@ -1123,22 +1143,21 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
     // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
-    sArray_t<Array_view_5D_t>* dyson_sigma =
-        (k.any_Sigma() && !k.sc.is_qp()) ? sDeltaSigma_tskij : nullptr;
     const sArray_t<Array_view_4D_t>* dyson_vcorr =
         k.sc.is_qp() ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaDm_skij, sDeltaH0_skij,
-        sDeltaF_skij, dyson_sigma,
+        sDeltaF_skij, dyson_sigma(),
         p.fix_density, dyson_vcorr);
+    deltaG_pending = true;
+    deltaG_in_shm = false;
 
     // The solve leaves ΔG(τ) distributed; replicating it is the single most
     // expensive step of the Dyson phase, so it happens only where something
-    // reads it. k.any_Sigma() is loop-invariant, so which iterations
-    // replicate is fixed before the loop starts, not discovered inside it —
-    // the Σ evaluators can assume sDeltaG_tskij is current, and the tail below
-    // knows from the same flag whether the converged ΔG(τ) still needs one.
-    if (k.any_Sigma()) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+    // reads it. Inside the loop that is the sc channel's Σ, every iteration; the
+    // perturbative channel reads it only at a stage boundary, and the
+    // checkpoint/hessian after the loop.
+    if (k.sc.has_Sigma()) materialize();
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -1335,6 +1354,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
+        if (k.pert.has_Sigma() && deltaG_pending) materialize();
         apply_kernel(k.pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
 
@@ -1457,15 +1477,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
-  // A Σ-free run never replicated ΔG(τ) inside the loop, so if the caller is
-  // going to read the converged one it has to be replicated now: sDeltaG_tskij
-  // outlives the solve and is reused by the next perturbation, so leaving it
-  // would hand the caller the previous perturbation's ΔG next to this one's
-  // ΔDm/ΔF. With Σ the last iteration already replicated it and nothing is
-  // pending; with save_DeltaG off nobody reads it and the gather is skipped
-  // outright — the only case where ΔG(τ) is never replicated at all.
-  if (!k.any_Sigma() and p.save_DeltaG)
-    _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+  // Replicate the converged ΔG(τ) if anyone reads it after the solve and the
+  // loop left it pending: the checkpoint (save_DeltaG), and the hessian's K_pert
+  // refresh (get_full_kernel_result), which contracts it with Σ. sDeltaG_tskij
+  // outlives the solve and is reused by the next perturbation, so skipping this
+  // would hand those readers the previous perturbation's ΔG next to this one's
+  // ΔDm/ΔF. With no reader the gather is skipped outright.
+  if (deltaG_pending && (p.save_DeltaG || (p.hessian() && k.pert.has_Sigma())))
+    materialize();
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.sc.is_qp() && sDeltaVcorr_out_skij != nullptr) {
