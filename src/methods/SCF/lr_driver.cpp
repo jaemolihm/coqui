@@ -1065,10 +1065,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
   bool outer_converged = false;
 
-  // ΔG(τ) of the latest Dyson solve is replicated into sDeltaG_tskij at every
-  // stage boundary, every iteration when K_sc carries a Σ, and at the end of the
-  // solve if something reads it afterwards (materialize_DeltaG_tau is a no-op
-  // when repeated for the same solve).
+  // ΔG(τ) of a Dyson solve is replicated into sDeltaG_tskij at most once (a
+  // second materialize_DeltaG_tau throws): right after the solve when K_sc
+  // evaluates a ΔΣ, otherwise at a stage boundary, or after the loop when
+  // something reads it and the last iteration did not already.
+  //
+  // Whether the last iteration ran a stage boundary; read after the loop.
+  bool pert_refreshed_this_iter = false;
   //
   // The ΔΣ the Dyson RHS reads. When only K_pert carries a Σ, there is none until
   // the first K_pert evaluation writes it.
@@ -1103,7 +1106,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     ++stage_iter;
     const bool first_of_stage = (stage_iter == 1);
-    bool pert_refreshed_this_iter = false;
+    pert_refreshed_this_iter = false;
     // Did the mixing block run this iteration? It is skipped on the first
     // iteration of a stage (there is no previous iterate yet) and by a kernel with
     // nothing self-consistent to mix, and the hessian estimator needs to know
@@ -1340,7 +1343,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+        if (!k.sc.has_Sigma()) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
         apply_kernel(k.pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
         if (k.pert.has_Sigma()) dyson_DeltaSigma_tskij = sDeltaSigma_tskij;
@@ -1465,7 +1468,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _Timer.stop("LR_SCF");
 
   // After the solve ΔG(τ) is read by the checkpoint and the hessian's Σ refresh.
-  if (p.save_DeltaG || (p.hessian() && k.any_Sigma()))
+  // A Σ in K_sc, or a stage boundary on the last iteration, already replicated it.
+  const bool dG_read_after = p.save_DeltaG || (p.hessian() && k.any_Sigma());
+  if (dG_read_after && !k.sc.has_Sigma() && !pert_refreshed_this_iter)
     _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).

@@ -197,7 +197,8 @@ public:
    * For q≠0, fix_density is ignored (Δμ contribution vanishes).
    *
    * ΔG(τ) itself is left distributed: the solve retains it until the caller
-   * replicates it into shared memory with materialize_DeltaG_tau(). ΔDm, which most callers actually want, is produced here as usual.
+   * replicates it into shared memory with materialize_DeltaG_tau(), at most
+   * once. ΔDm, which most callers actually want, is produced here as usual.
    *
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
@@ -232,8 +233,9 @@ public:
    * the solve does not do it: a Σ-free run that never writes ΔG(τ) skips it
    * entirely, and its buffer is dropped by the next solve.
    *
-   * Repeating the call for the same solve and array returns at once. Any other
-   * call without a ΔG(τ) to replicate throws, so a caller never reads a stale one.
+   * At most once per solve: the gather consumes the buffer, and a second call
+   * throws rather than leave its array with a stale ΔG(τ). The call sites are
+   * therefore responsible for calling it once.
    *
    * Collective: every rank must call it, or none. In lr_driver every call site
    * depends only on kernel flags and loop state that agree on every rank.
@@ -405,9 +407,6 @@ private:
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
   // of every solve so a solve never inherits the previous one's array.
   std::optional<dArray_5D_t> _dDeltaG_tau_buffer;
-  // The shared array holding the current solve's replicated ΔG(τ); null until
-  // materialize_DeltaG_tau() has run for this solve.
-  const sArray_t<Array_view_5D_t>* _sDeltaG_holder = nullptr;
 
   // Δμ response of the LR solution. Δμ enters the RHS only through the −Δμ·S
   // term, so ΔG is affine in it:
