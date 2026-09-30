@@ -435,23 +435,23 @@ void lr_dyson::setup_dm_only_layout() {
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
   auto own = make_distributed_array<nda::array<ComplexType, 5>>(
       _context->comm, w_pgrid, {_nw, _ns, _nkpts_ibz, 1, 1});
-  _dmo_w_org = own.origin()[0];
-  _dmo_nw_loc = own.local_shape()[0];
-  _dmo_k_org = own.origin()[2];
-  _dmo_nk_loc = own.local_shape()[2];
+  _dm_w_origin = own.origin()[0];
+  _dm_nw_local = own.local_shape()[0];
+  _dm_k_origin = own.origin()[2];
+  _dm_nk_local = own.local_shape()[2];
 
   // The ranks sharing a k block form an ω pool. After the pool's reduction every
   // member holds the same partial ΔDm, so each hands a disjoint band-row slice to
   // gather_to_shm and the slices cover all ranks exactly once.
-  _wpool_comm.emplace(_context->comm.split(int(_dmo_k_org), _context->comm.rank()));
+  _wpool_comm.emplace(_context->comm.split(int(_dm_k_origin), _context->comm.rank()));
   utils::check(_wpool_comm->size() == w_pgrid[0],
                "lr_dyson: ω pool of size {} for {} ω pools.",
                _wpool_comm->size(), w_pgrid[0]);
   auto [i0, i1] = itertools::chunk_range(0, long(_nbnd), long(_wpool_comm->size()),
                                          long(_wpool_comm->rank()));
-  _dmo_i_org = i0;
-  _dmo_ni_loc = i1 - i0;
-  _dmo_grid = {1, w_pgrid[2], w_pgrid[0], 1};
+  _dm_row_origin = i0;
+  _dm_nrow_local = i1 - i0;
+  _dm_rows_grid = {1, w_pgrid[2], w_pgrid[0], 1};
   _dm_only_layout = true;
 }
 
@@ -464,40 +464,40 @@ void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
                "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
   setup_dm_only_layout();
   const bool has_static = sDeltaH0_skij and sDeltaF_skij;
+  utils::check(has_static != (dDeltaSigma_wskij != nullptr),
+               "lr_dyson::dm_only_pass: give either the static ΔH0 + ΔF or ΔΣ(iω).");
   if (dDeltaSigma_wskij) {
-    utils::check(dDeltaSigma_wskij->origin()[0] == _dmo_w_org and
-                 dDeltaSigma_wskij->origin()[2] == _dmo_k_org and
-                 dDeltaSigma_wskij->local_shape()[0] == _dmo_nw_loc and
-                 dDeltaSigma_wskij->local_shape()[2] == _dmo_nk_loc,
+    utils::check(dDeltaSigma_wskij->origin()[0] == _dm_w_origin and
+                 dDeltaSigma_wskij->origin()[2] == _dm_k_origin and
+                 dDeltaSigma_wskij->local_shape()[0] == _dm_nw_local and
+                 dDeltaSigma_wskij->local_shape()[2] == _dm_nk_local,
                  "lr_dyson: ΔΣ(iω) is not on the ω-side Dyson grid.");
   }
 
   auto G_w = _cached_G_wskij->local();
-  nda::array<ComplexType, 4> part(_ns, _dmo_nk_loc, _nbnd, _nbnd);
+  nda::array<ComplexType, 4> part(_ns, _dm_nk_local, _nbnd, _nbnd);
   part() = ComplexType(0.0);
   nda::matrix<ComplexType> X_static(_nbnd, _nbnd);
-  nda::matrix<ComplexType> X_ij(_nbnd, _nbnd);
   nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
 
   for (long s = 0; s < _ns; ++s) {
-    for (long k = 0; k < _dmo_nk_loc; ++k) {
-      const long ik = k + _dmo_k_org;
+    for (long k = 0; k < _dm_nk_local; ++k) {
+      const long ik = k + _dm_k_origin;
       const long ikq = _kpq_map(ik);
       auto Dm_k = part(s, k, nda::range::all, nda::range::all);
       if (has_static)
         X_static = sDeltaH0_skij->local()(s, ik, nda::range::all, nda::range::all) +
                    sDeltaF_skij->local()(s, ik, nda::range::all, nda::range::all);
-      for (long n = 0; n < _dmo_nw_loc; ++n) {
-        const long iw = n + _dmo_w_org;
+      for (long n = 0; n < _dm_nw_local; ++n) {
+        const long iw = n + _dm_w_origin;
         auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
         auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
-        if (dDeltaSigma_wskij) {
-          X_ij = dDeltaSigma_wskij->local()(n, s, k, nda::range::all, nda::range::all);
-          if (has_static) X_ij += X_static;
-          nda::blas::gemm(_c_beta_w(iw), X_ij, G_k, ComplexType(0.0), tmp);
-        } else {
+        if (has_static)
           nda::blas::gemm(_c_beta_w(iw), X_static, G_k, ComplexType(0.0), tmp);
-        }
+        else
+          nda::blas::gemm(_c_beta_w(iw),
+                          dDeltaSigma_wskij->local()(n, s, k, nda::range::all, nda::range::all),
+                          G_k, ComplexType(0.0), tmp);
         nda::blas::gemm(ComplexType(1.0), G_kq, tmp, ComplexType(1.0), Dm_k);
       }
     }
@@ -507,10 +507,10 @@ void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
 
   nda::array<ComplexType, 4> rows =
       part(nda::range::all, nda::range::all,
-           nda::range(_dmo_i_org, _dmo_i_org + _dmo_ni_loc), nda::range::all);
+           nda::range(_dm_row_origin, _dm_row_origin + _dm_nrow_local), nda::range::all);
   using dArray_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
-  dArray_4D_t dDm(std::addressof(_context->comm), _dmo_grid, {_ns, _nkpts_ibz, _nbnd, _nbnd},
-                  {0, _dmo_k_org, _dmo_i_org, 0}, {1, 1, 1, 1}, std::move(rows));
+  dArray_4D_t dDm(std::addressof(_context->comm), _dm_rows_grid, {_ns, _nkpts_ibz, _nbnd, _nbnd},
+                  {0, _dm_k_origin, _dm_row_origin, 0}, {1, 1, 1, 1}, std::move(rows));
   math::nda::gather_to_shm(dDm, sDeltaDm_out);
 }
 

@@ -448,7 +448,7 @@ private:
   // The ΔDm pass behind solve_lr_dm / build_dynamic_source: accumulates
   // c_ω·G_{k+q}·X·G_k over this rank's (ω, k) block of lr_dyson_omega_pgrid,
   // reduces over the ω-pool, and assembles ΔDm(Δμ=0) in `sDeltaDm_out` through
-  // gather_to_shm. X = ΔH0 + ΔF (when both are given) + ΔΣ(iω) (when given).
+  // gather_to_shm. X = ΔH0 + ΔF, or X = ΔΣ(iω); exactly one of the two is given.
   void dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
                     const sArray_t<Array_view_4D_t>* sDeltaH0_skij,
                     const sArray_t<Array_view_4D_t>* sDeltaF_skij,
@@ -500,9 +500,9 @@ private:
   // ω-pool and band-row slice. Built on first use.
   nda::array<ComplexType, 1> _c_beta_w;
   bool _dm_only_layout = false;
-  long _dmo_w_org = 0, _dmo_nw_loc = 0, _dmo_k_org = 0, _dmo_nk_loc = 0;
-  long _dmo_i_org = 0, _dmo_ni_loc = 0;
-  std::array<long, 4> _dmo_grid = {1, 1, 1, 1};
+  long _dm_w_origin = 0, _dm_nw_local = 0, _dm_k_origin = 0, _dm_nk_local = 0;
+  long _dm_row_origin = 0, _dm_nrow_local = 0;
+  std::array<long, 4> _dm_rows_grid = {1, 1, 1, 1};
   std::optional<mpi3::communicator> _wpool_comm;
   void setup_dm_only_layout();
 
