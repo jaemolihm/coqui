@@ -113,81 +113,31 @@ lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc
 }
 
 
-/**
- * The kernel split a run executes: the components the inner SCF loop resums
- * (K_sc), those applied perturbatively (K_pert), and the unions on which every
- * solver, buffer and W-operand decision is taken.
- *
- * Derived from `p` alone and recomputed identically by lr_setup, lr_solve_one and
- * get_full_kernel_result, so what one allocates is exactly what the others read.
- */
-struct lr_kernel_split {
-  lr_kernel_spec sc{};
-  lr_kernel_spec pert{};
-  /// A perturbative pass actually runs. At pert_order = 0 the only one is
-  /// get_full_kernel_result's refresh; the split, the buffers and the W
-  /// operands are the same either way.
-  bool do_pert = false;
-
-  bool sc_hf = false,    pert_hf = false;
-  bool sc_sigma = false, pert_sigma = false;
-  bool need_hf = false;            ///< ΔF is evaluated by some channel
-  bool include_gw_sigma = false;   ///< ΔΣ is evaluated by some channel
-  bool gw_full = false;            ///< Σ2 = -G⊙ΔW anywhere, hence the ΔW Dyson
-
-  /// A quantity BOTH channels contribute to. It is the only case needing
-  /// per-channel buffers and a total rebuilt every inner iteration; a quantity
-  /// carried by one channel is written straight into the caller's array.
-  bool split_F = false, split_Sigma = false;
-
-  bool qp_mode = false;
-  bool has_Vcorr = false;     ///< the static ΔV_QPGW is the mixed/tracked quantity
-  bool has_Sigma = false;     ///< the dynamic ΔΣ enters the Dyson RHS
-  bool has_Sigma_sc = false;  ///< ... and the sc channel's copy is the tracked one
-
-  /// The perturbative channel owes the static counter-term +ΔDm ⊙ W_c(0) on
-  /// top of its mask, because K_sc is HSEX. See lr_params::exchange_static_W.
-  bool pert_sex_counterterm = false;
-};
-
-
 lr_kernel_split make_kernel_split(lr_params const& p) {
   lr_kernel_split k;
   // The active-term flags always name the TOTAL kernel; on the single-kernel
   // path sc_kernel merely repeats it and may be left empty. A caller that asked
   // for a split is authoritative about K_sc, the empty mask included — there it
   // means "K_sc = none", not "fill it in from the flags".
-  const lr_kernel_spec total{p.include_hartree, p.include_exchange,
-                             p.include_gw_sigma(), p.gw_full()};
   const bool split_requested = !p.pert_kernel.empty();
-  k.do_pert = p.has_pert_kernel();
-  k.sc   = (split_requested || !p.sc_kernel.empty()) ? p.sc_kernel : total;
-  k.pert = k.do_pert ? p.pert_kernel : lr_kernel_spec{};
+  const bool do_pert = p.has_pert_kernel();
+  k.sc.terms   = (split_requested || !p.sc_kernel.empty()) ? p.sc_kernel : p.total_kernel();
+  k.pert.terms = do_pert ? p.pert_kernel : lr_kernel_spec{};
+
+  // The self-consistent channel is the one holding the HSEX kernel proper, the
+  // static inputs and the IBC correction, the only one that can split ΔΣ, and
+  // the only one whose Σ can be statified.
+  k.sc.static_inputs     = true;
+  k.sc.split_sigma_terms = p.split_sigma_terms;
+  k.sc.qp                = p.qp_static;
 
   // A split run whose K_sc is HSEX owes the remainder the static counter-term
-  // +ΔDm ⊙ W_c(0), which is an exchange-shaped evaluation the pert mask does
+  // +ΔDm ⊙ W_c(0), which is an exchange-shaped evaluation the pert terms do
   // not carry. It exists exactly when the screened kernel sits in K_sc and the
   // total kernel it is being subtracted from is the bare-exchange one.
-  k.pert_sex_counterterm = k.do_pert && p.exchange_static_W && k.sc.exchange;
-
-  k.sc_hf      = k.sc.hartree || k.sc.exchange || p.include_xc;
-  k.pert_hf    = k.pert.hartree || k.pert.exchange || k.pert_sex_counterterm;
-  k.sc_sigma   = k.sc.has_sigma();
-  k.pert_sigma = k.pert.has_sigma();
-
-  k.need_hf          = k.sc_hf || k.pert_hf;
-  k.include_gw_sigma = k.sc_sigma || k.pert_sigma;
-  k.gw_full          = k.sc.sigma_G_dW || k.pert.sigma_G_dW;
-
-  k.split_F     = k.sc_hf && k.pert_hf;
-  k.split_Sigma = k.sc_sigma && k.pert_sigma;
-
-  k.qp_mode   = p.qp_mode();
-  k.has_Vcorr = k.qp_mode;
-  // The ΔΣ fed to the Dyson equation is the total (sc + pert) one; the ΔΣ that
-  // is mixed and tracked for convergence is the sc-channel one only.
-  k.has_Sigma    = k.include_gw_sigma && !k.qp_mode;
-  k.has_Sigma_sc = k.sc_sigma && !k.qp_mode;
+  k.pert.sex_counterterm = do_pert && p.exchange_static_W && k.sc.terms.exchange;
+  utils::check(!k.pert.is_qp(),
+               "make_kernel_split: the perturbative channel cannot be in qp mode.");
   return k;
 }
 
@@ -271,7 +221,22 @@ void lr_driver::lr_setup(
     dW_t* dW_wqPQ_in,
     const lr_params& p) {
 
-  const lr_kernel_split k = make_kernel_split(p);
+  _split = make_kernel_split(p);
+  lr_kernel_split& k = _split;
+
+  // qp mode statifies the sc channel's Σ, so it needs one and admits no
+  // perturbative pass.
+  if (k.sc.is_qp()) {
+    utils::check(!k.do_pert(),
+                 "lr_driver::lr_setup: the split-kernel schedule is incompatible "
+                 "with qp_static mode.");
+    utils::check(k.sc.has_Sigma(),
+                 "lr_driver::lr_setup: qp_static mode requires a GW self-energy.");
+    utils::check(!p.split_sigma_terms,
+                 "lr_driver::lr_setup: qp_static mode is incompatible with split ΔΣ terms.");
+    utils::check(p.qp_static->sMO_skia != nullptr && p.qp_static->sE_ska != nullptr,
+                 "lr_driver::lr_setup: qp_static mode requires sMO_skia and sE_ska.");
+  }
 
   utils::check(p.iter_params.alg == "damping" || p.iter_params.alg == "DIIS",
                "lr_driver::lr_setup: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
@@ -286,14 +251,14 @@ void lr_driver::lr_setup(
   utils::check(p.pert_order == 0 || !p.pert_kernel.empty(),
                "lr_driver::lr_setup: pert_order = {} >= 1 requires a non-empty "
                "perturbative kernel.", p.pert_order);
-  if (k.do_pert) {
-    utils::check(!k.sc.overlaps(k.pert),
+  if (k.do_pert()) {
+    utils::check(!k.sc.terms.overlaps(k.pert.terms),
                  "lr_driver::lr_setup: the self-consistent ({}) and perturbative "
                  "({}) kernels share components. pert_kernel must be the "
                  "DIFFERENCE kernel(total) \\ kernel(sc), not the total kernel — "
                  "a shared component would be applied twice, once resummed and "
                  "once as a frozen source. Build it with kernel_diff().",
-                 k.sc.to_string(), k.pert.to_string());
+                 k.sc.terms.to_string(), k.pert.terms.to_string());
     utils::check(!p.has_deltax(),
                  "lr_driver::lr_setup: the split-kernel schedule does not support "
                  "the DeltaX IBC correction (each kernel evaluator adds its own "
@@ -307,9 +272,6 @@ void lr_driver::lr_setup(
     utils::check(!p.split_sigma_terms,
                  "lr_driver::lr_setup: the split-kernel schedule is incompatible "
                  "with split ΔΣ terms.");
-    utils::check(!k.qp_mode,
-                 "lr_driver::lr_setup: the split-kernel schedule is incompatible "
-                 "with qp_static mode.");
   }
 
   // Outer-loop acceleration. The defaults (alg "damping", tol = 0) switch every
@@ -327,7 +289,7 @@ void lr_driver::lr_setup(
   utils::check(outer_tol >= 0.0,
                "lr_driver::lr_setup: the outer tolerance must be >= 0, got {}.",
                outer_tol);
-  // two_step(), not k.do_pert: at order 0 K_pert is evaluated only after the
+  // two_step(), not k.do_pert(): at order 0 K_pert is evaluated only after the
   // solve, so there is no outer sequence.
   utils::check(!outer_track || p.two_step(),
                "lr_driver::lr_setup: outer-loop acceleration requires at least one "
@@ -336,7 +298,7 @@ void lr_driver::lr_setup(
                "hessian refresh, and there is no outer sequence to accelerate.",
                p.pert_order);
 
-  if (k.include_gw_sigma) {
+  if (k.any_Sigma()) {
     utils::check(dW_wqPQ_in != nullptr && p.eps_inv_head != nullptr,
                  "lr_driver::lr_setup: a GW self-energy is active but dW or "
                  "eps_inv_head is null.");
@@ -349,7 +311,7 @@ void lr_driver::lr_setup(
                  "include_exchange = true. The semilocal xc kernel contracts with the "
                  "diagonal density response only; LR-DFT is include_hartree = true, "
                  "include_exchange = false.");
-    utils::check(!p.include_gw_sigma(),
+    utils::check(!p.total_kernel().has_sigma(),
                  "lr_driver::lr_setup: include_xc = true is incompatible with a GW "
                  "self-energy (gw_mode != none): f_xc and ΔΣ_GW both carry the "
                  "correlation response, so the two together double-count it. "
@@ -360,7 +322,7 @@ void lr_driver::lr_setup(
   utils::check(p.max_iter >= 1,
                "lr_driver::lr_setup: max_iter must be >= 1, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
-    utils::check(k.gw_full,
+    utils::check(k.needs_dW(),
                  "lr_driver::lr_setup: split ΔΣ terms require the Σ2 (-G⊙ΔW) component.");
     utils::check(p.max_iter == 1,
                  "lr_driver::lr_setup: split ΔΣ terms are only meaningful for a "
@@ -379,23 +341,23 @@ void lr_driver::lr_setup(
                  "lr_driver::lr_setup: exchange_static_W = true needs W_c(iω); "
                  "dW is null.");
     // Per-channel, not global: a split run deliberately puts Σ in K_pert.
-    utils::check(!k.sc.has_sigma(),
+    utils::check(!k.sc.has_Sigma(),
                  "lr_driver::lr_setup: exchange_static_W puts W_c(iν=0) in the "
                  "exchange kernel, and the self-consistent channel also carries "
                  "Σ ({}), whose W_c(τ) contains the same ν=0 plane. That "
                  "double-counts the static screening. Use HSEX as a standalone "
                  "kernel, or as two_step_inner_method with Σ in K_pert.",
-                 k.sc.to_string());
-    if (k.do_pert) {
+                 k.sc.terms.to_string());
+    if (k.do_pert()) {
       // The counter-term is defined against the whole exchange operator, so it
       // only closes if the bare-exchange slot is wholly inside K_sc.
-      utils::check(k.sc.exchange && !k.pert.exchange,
+      utils::check(k.sc.terms.exchange && !k.pert.terms.exchange,
                    "lr_driver::lr_setup: with exchange_static_W the exchange "
                    "channel must be wholly self-consistent (K_sc = {}, K_pert = "
                    "{}). The static counter-term that makes K_sc + K_pert sum "
                    "back to bare exchange is defined against the whole exchange "
                    "operator, not a share of it.",
-                   k.sc.to_string(), k.pert.to_string());
+                   k.sc.terms.to_string(), k.pert.terms.to_string());
     }
     // The IBC ΔX correction is built against the bare V_HF in the aux basis
     // (build_lr_ibc's exchange branch); pairing it with a screened exchange
@@ -408,14 +370,6 @@ void lr_driver::lr_setup(
                  "lr_driver::lr_setup: exchange_static_W is incompatible with the "
                  "DeltaV_qPQ perturbation, whose exchange term contracts the bare "
                  "δV against the unperturbed Dm.");
-  }
-  if (k.qp_mode) {
-    utils::check(k.include_gw_sigma,
-                 "lr_driver::lr_setup: qp_static mode requires a GW self-energy.");
-    utils::check(!p.split_sigma_terms,
-                 "lr_driver::lr_setup: qp_static mode is incompatible with split ΔΣ terms.");
-    utils::check(p.qp_static->sMO_skia != nullptr && p.qp_static->sE_ska != nullptr,
-                 "lr_driver::lr_setup: qp_static mode requires sMO_skia and sE_ska.");
   }
   utils::check(!_setup_done,
                "lr_driver::lr_setup: called twice on the same driver. One driver "
@@ -436,9 +390,9 @@ void lr_driver::lr_setup(
   app_log(1, "  include_hartree = {}", p.include_hartree ? "true" : "false");
   app_log(1, "  include_exchange = {}", p.include_exchange ? "true" : "false");
   app_log(1, "  gw_mode = {}", gw_mode_str);
-  app_log(1, "  K_sc  (self-consistent) = {}", k.sc.to_string());
-  if (k.do_pert) {
-    app_log(1, "  K_pert (perturbative)   = {}", k.pert.to_string());
+  app_log(1, "  K_sc  (self-consistent) = {}", k.sc.terms.to_string());
+  if (k.do_pert()) {
+    app_log(1, "  K_pert (perturbative)   = {}", k.pert.terms.to_string());
     app_log(1, "  pert_order = {}  ({} stage(s); max_iter counts total inner iterations)",
             p.pert_order, p.pert_order + 1);
     if (p.pert_order == 0)
@@ -451,11 +405,11 @@ void lr_driver::lr_setup(
   app_log(1, "  include_xc = {}", p.include_xc ? "true" : "false");
   if (p.exchange_static_W) {
     app_log(1, "  exchange kernel = V + W_c(iν=0)  [static screened exchange]");
-    if (k.pert_sex_counterterm)
+    if (k.pert.sex_counterterm)
       app_log(1, "    K_pert additionally carries the static counter-term "
                  "+ΔDm ⊙ W_c(iν=0), so K_sc + K_pert restores bare exchange");
   }
-  app_log(1, "  qp_static_sigma = {}", k.qp_mode ? "true" : "false");
+  app_log(1, "  qp_static_sigma = {}", k.sc.is_qp() ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.mixing());
   if (p.use_diis()) {
@@ -489,15 +443,15 @@ void lr_driver::lr_setup(
   // ΔΣ-sized shared arrays on top of the total ΔΣ the base estimate already
   // lists.
   std::vector<std::string> extra_sigma;
-  if (k.split_Sigma) {
+  if (k.both_have_Sigma()) {
     extra_sigma.push_back("sDeltaSigma (sc channel)");
     extra_sigma.push_back("sDeltaSigma (pert channel)");
   }
 
   // ΔΣ-sized striped previous iterates: the inner loop's tracked ΔΣ, plus the
   // outer accelerator's previous source when it mixes one.
-  const long n_sigma_prev = (k.has_Sigma_sc ? 1 : 0)
-                          + ((outer_diis_on && k.pert_sigma) ? 1 : 0);
+  const long n_sigma_prev = (k.sc.mixes_Sigma() ? 1 : 0)
+                          + ((outer_diis_on && k.pert.has_Sigma()) ? 1 : 0);
 
   // The inner accelerator, built once: lr_solve_one reset()s the subspace rather
   // than rebuilding it, so the (job-wide, striped) history is allocated exactly
@@ -524,47 +478,47 @@ void lr_driver::lr_setup(
   // residual vector of every quantity the accelerator mixes; a ring that can never
   // extrapolate keeps trials only. Both facts come from the accelerator itself.
   lr_diis_hist_t inner_hist, outer_hist;
-  if (k.sc_hf || k.sc_sigma || k.has_Vcorr) {
+  if (!k.sc.is_empty()) {
     inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
-    inner_hist.n_F = k.has_Vcorr ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
-    inner_hist.n_Sigma = k.has_Sigma_sc ? 1 : 0;
+    inner_hist.n_F = k.sc.is_qp() ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
+    inner_hist.n_Sigma = k.sc.mixes_Sigma() ? 1 : 0;
     inner_hist.with_residuals = _lr_diis->stores_residuals();
   }
   if (outer_diis_on) {
     outer_hist.depth = static_cast<long>(_outer_diis->max_subsp_size());
-    outer_hist.n_F     = k.pert_hf ? 1 : 0;
-    outer_hist.n_Sigma = k.pert_sigma ? 1 : 0;
+    outer_hist.n_F     = k.pert.has_F() ? 1 : 0;
+    outer_hist.n_Sigma = k.pert.has_Sigma() ? 1 : 0;
     outer_hist.with_residuals = _outer_diis->stores_residuals();
   }
 
   // Estimate the persistent large-array memory footprint for this path, then
   // summarize the MPI distribution patterns the large arrays use.
-  print_memory_estimate(thc.Np(), k.include_gw_sigma, k.gw_full, extra_sigma,
+  print_memory_estimate(thc.Np(), k.any_Sigma(), k.needs_dW(), extra_sigma,
                         n_sigma_prev, inner_hist, outer_hist,
                         p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W,
                         p.hessian_nmodes);
-  print_distribution_summary(thc.Np(), k.include_gw_sigma, k.gw_full);
+  print_distribution_summary(thc.Np(), k.any_Sigma(), k.needs_dW());
 
   _Timer.start("LR_DRIVER_SETUP");
 
   // Solvers. Each latches the perturbation q at construction and caches a
   // workspace, so they are built once here and reused by every lr_solve_one.
-  if (k.need_hf && !_lr_hf) {
+  if (k.any_F() && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   // The perturbative channel gets its own lr_hf for the same reason lr_gw does:
   // lr_hf caches U(R) keyed on the exchange kernel it was first built with, and an
   // HSEX split run contracts V + W_c(0) in K_sc but -W_c(0) in K_pert.
-  if (k.pert_hf && !_lr_hf_pert) {
+  if (k.pert.has_F() && !_lr_hf_pert) {
     _lr_hf_pert = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
-  if (k.sc_sigma) {
+  if (k.sc.has_Sigma()) {
     _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
   }
   // The perturbative channel gets its own lr_gw: the cached workspace is keyed
   // on the (term1, term2) combination it was first used with, and the two
   // channels generally run different combinations (e.g. Σ1 in K_sc, Σ2 in K_pert).
-  if (k.pert_sigma) {
+  if (k.pert.has_Sigma()) {
     _lr_gw_pert = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
   }
   // Split-term mode (one-shot G0W0) needs a second lr_gw for term 2: each solver
@@ -572,10 +526,14 @@ void lr_driver::lr_setup(
   if (p.split_sigma_terms) {
     _lr_gw2 = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
   }
-  if (k.gw_full) {
+  if (k.needs_dW()) {
     _lr_pi = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
     _lr_scr = std::make_unique<solvers::lr_scr_coulomb_t>(_dyson.FT(), _lr_dyson.q_vec());
   }
+  k.sc.hf   = _lr_hf.get();
+  k.sc.gw   = _lr_gw.get();
+  k.pert.hf = _lr_hf_pert.get();
+  k.pert.gw = _lr_gw_pert.get();
 
   // HSEX kernel, taken BEFORE lr_setup_W: that call consumes dW_wqPQ_in (it is
   // either moved into W_full or released by the ω→τ transform), and it also adds
@@ -593,8 +551,8 @@ void lr_driver::lr_setup(
     _Timer.stop("LR_DRIVER_SETUP_WC0");
   }
 
-  if (k.include_gw_sigma) {
-    lr_setup_W(dW_wqPQ_in, thc, k.gw_full, _lr_scr.get(),
+  if (k.any_Sigma()) {
+    lr_setup_W(dW_wqPQ_in, thc, k.needs_dW(), _lr_scr.get(),
                _opt_dW_full_wqPQ, _opt_dW_tRPQ);
   } else if (dW_wqPQ_in != nullptr) {
     // Nothing below reads the ω-axis W; whatever wanted it above has taken its
@@ -608,7 +566,7 @@ void lr_driver::lr_setup(
   // Precompute the unperturbed G^R(τ)/G^R(β−τ) pair in aux basis (constant
   // across SCF iterations and across perturbations; consumed by evaluate_lr_Pi
   // and Σ term 2).
-  if (k.gw_full) {
+  if (k.needs_dW()) {
     _Timer.start("LR_DRIVER_SETUP_G_R");
     utils::memlog("lr_driver::lr_setup: before G^R pair precompute");
     auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
@@ -656,8 +614,8 @@ void lr_driver::lr_setup(
   // n_flat = 0.
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
   _DeltaF.alloc(_pmap, nF);
-  _DeltaSigma.alloc(_pmap, k.has_Sigma_sc ? _nts * nF : 0);
-  _DeltaVcorr.alloc(_pmap, k.has_Vcorr ? nF : 0);
+  _DeltaSigma.alloc(_pmap, k.sc.mixes_Sigma() ? _nts * nF : 0);
+  _DeltaVcorr.alloc(_pmap, k.sc.is_qp() ? nF : 0);
 
   // Raw (pre-mixing) capture buffers for the hessian estimator: one
   // more striped ΔF slice, and one more striped ΔΣ slice when the sc channel
@@ -665,27 +623,25 @@ void lr_driver::lr_setup(
   // unchanged in both memory and work.
   if (p.hessian()) {
     _DeltaF.alloc_kernel_out();
-    if (k.has_Sigma_sc) _DeltaSigma.alloc_kernel_out();
+    if (k.sc.mixes_Sigma()) _DeltaSigma.alloc_kernel_out();
   }
 
   // Static ΔV_QPGW tracked in qp mode.
-  _sDeltaVcorr_skij.emplace(k.has_Vcorr
+  _sDeltaVcorr_skij.emplace(k.sc.is_qp()
       ? math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd})
       : math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {1, 1, 1, 1}));
 
-  // Per-kernel buffers of a split run. sDeltaF_skij / sDeltaSigma_tskij always hold
-  // the TOTAL (sc + pert) quantities that the Dyson RHS and the checkpoint dump
-  // consume. A per-channel buffer exists only for a *split* quantity; otherwise
-  // the sole contributing channel writes the caller's array directly, so the
-  // single-kernel path — and every composition that splits only one of the two —
-  // forms no sum at all.
-  if (k.split_F) {
-    _sDeltaF_sc.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-        *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-    _sDeltaF_pert.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-        *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-  }
-  if (k.split_Sigma) {
+  // Per-channel buffers. sDeltaF_skij / sDeltaSigma_tskij always hold the TOTAL
+  // (sc + pert) quantities that the Dyson RHS and the checkpoint dump consume.
+  // ΔF (nb²·nk, small) always has one buffer per channel, and its total is
+  // rebuilt every inner iteration. ΔΣ (nt times larger) has per-channel buffers
+  // only when both channels carry a Σ; otherwise the sole Σ channel writes the
+  // caller's array directly.
+  _sDeltaF_sc.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+      *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+  _sDeltaF_pert.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+      *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+  if (k.both_have_Sigma()) {
     _sDeltaSigma_sc.emplace(math::shm::make_shared_array<Array_view_5D_t>(
         *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
     _sDeltaSigma_pert.emplace(math::shm::make_shared_array<Array_view_5D_t>(
@@ -699,8 +655,8 @@ void lr_driver::lr_setup(
   // termination criterion and is taken on the node_comm path. A tolerance-only
   // run therefore never allocates a ΔΣ-sized buffer.
   if (outer_diis_on) {
-    if (k.pert_hf)    _DeltaF_pert.alloc(_pmap, nF);
-    if (k.pert_sigma) _DeltaSigma_pert.alloc(_pmap, _nts * nF);
+    if (k.pert.has_F())     _DeltaF_pert.alloc(_pmap, nF);
+    if (k.pert.has_Sigma()) _DeltaSigma_pert.alloc(_pmap, _nts * nF);
   }
   if (outer_tol > 0.0)
     _sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
@@ -719,7 +675,7 @@ void lr_driver::lr_setup(
         _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
         p.Dm_ab, &sG_tskij,
         _opt_dW_tRPQ ? &(*_opt_dW_tRPQ) : nullptr,
-        k.sc.hartree, k.sc.exchange, k.sc_sigma,
+        k.sc.terms.hartree, k.sc.terms.exchange, k.sc.has_Sigma(),
         p.keep_F_PQ));
 
     app_log(2, "  DeltaX IBC correction: setup complete.");
@@ -744,7 +700,7 @@ void lr_driver::apply_kernel_gw(
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
-  lr_kernel_spec const& spec = kernel.mask;
+  lr_kernel_spec const& spec = kernel.terms;
   solvers::lr_gw& gw_solver = *kernel.gw;
   // Only the self-consistent channel carries the IBC correction.
   const lr_ibc_DeltaX* ibc_ptr =
@@ -856,46 +812,6 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel(bool counter
 }
 
 
-// `k` is the SPLIT — which components of K the inner loop resums and which are
-// applied perturbatively. The two functions below turn one side of it into an
-// evaluable lr_kernel, and are the only place that mapping is made.
-lr_kernel lr_driver::make_sc_kernel(lr_kernel_split const& k, lr_params const& p) {
-  lr_kernel kernel;
-  kernel.mask         = k.sc;
-  kernel.hf_active    = k.sc_hf;
-  kernel.exchange     = k.sc.exchange;
-  kernel.sigma_active = k.sc_sigma;
-  kernel.hf = _lr_hf.get();
-  kernel.gw = _lr_gw.get();
-  // The self-consistent channel is the one holding the HSEX kernel proper, the
-  // static inputs and the IBC correction, and the only one that can split ΔΣ.
-  kernel.sex_counterterm   = false;
-  kernel.static_inputs     = true;
-  kernel.split_sigma_terms = p.split_sigma_terms;
-  return kernel;
-}
-
-
-lr_kernel lr_driver::make_pert_kernel(lr_kernel_split const& k, lr_params const& p) {
-  lr_kernel kernel;
-  kernel.mask         = k.pert;
-  kernel.hf_active    = k.pert_hf;
-  // The counter-term IS an exchange contraction, just with the kernel -W_c(0), so
-  // it turns the exchange branch on even when the component mask leaves exchange
-  // wholly in K_sc.
-  kernel.exchange     = k.pert.exchange || k.pert_sex_counterterm;
-  kernel.sigma_active = k.pert_sigma;
-  kernel.hf = _lr_hf_pert.get();
-  kernel.gw = _lr_gw_pert.get();
-  kernel.sex_counterterm = k.pert_sex_counterterm;
-  kernel.static_inputs   = false;
-  // The split-term ΔΣ output is a one-shot G0W0 feature, rejected together with a
-  // split kernel, so the perturbative channel never has a term-2 destination.
-  kernel.split_sigma_terms = false;
-  return kernel;
-}
-
-
 template<THC_ERI THC_t>
 void lr_driver::apply_kernel(
     lr_kernel const& kernel,
@@ -908,7 +824,7 @@ void lr_driver::apply_kernel(
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
-  if (kernel.hf_active) {
+  if (kernel.has_F()) {
     utils::check(kernel.hf != nullptr,
                  "lr_driver::apply_kernel: the channel evaluates ΔF but carries no "
                  "lr_hf instance.");
@@ -916,8 +832,8 @@ void lr_driver::apply_kernel(
     // counter-term a split run's remainder owes; empty unless the run is HSEX.
     auto hsex = hsex_kernel(kernel.sex_counterterm);
     // A channel that owes the counter-term must have a kernel to build it from.
-    // It always does — pert_sex_counterterm implies exchange_static_W, which is
-    // exactly when lr_setup engages _opt_dWc0_qPQ — and kernel.exchange is set from
+    // It always does — sex_counterterm implies exchange_static_W, which is
+    // exactly when lr_setup engages _opt_dWc0_qPQ — and kernel.has_exchange() includes
     // kernel.sex_counterterm on that assumption, so the exchange branch would
     // otherwise silently contract bare V instead of -W_c(0).
     utils::check(!kernel.sex_counterterm || hsex.has_value(),
@@ -925,7 +841,7 @@ void lr_driver::apply_kernel(
                  "but W_c(iν=0) was never precomputed.");
     _Timer.start("LR_HF");
     kernel.hf->evaluate(sDeltaF_out, sDeltaDm_skij, thc, _dyson.sS_skij().local(),
-                    kernel.mask.hartree, kernel.exchange,
+                    kernel.terms.hartree, kernel.has_exchange(),
                     kernel.static_inputs && _opt_ibc ? &(*_opt_ibc) : nullptr,
                     kernel.static_inputs ? p.DeltaV_qPQ : nullptr,
                     kernel.static_inputs ? p.Dm_ab : nullptr,
@@ -936,7 +852,7 @@ void lr_driver::apply_kernel(
     _mpi->comm.barrier();
   }
 
-  if (kernel.sigma_active) {
+  if (kernel.has_Sigma()) {
     utils::check(pDeltaSigma_out != nullptr,
                  "lr_driver::apply_kernel: the channel evaluates ΔΣ but no "
                  "destination was given.");
@@ -947,16 +863,15 @@ void lr_driver::apply_kernel(
 
 
 template<typename Arr_t>
-void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t& pert_part) {
-  // Both operands are node-replicated shared memory whose slices were written by
+void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t* pert_part) {
+  // The operands are node-replicated shared memory whose slices were written by
   // other ranks, so a barrier is not enough under the MPI-3 separate
   // shared-memory model: each window has to be fenced before it is read.
   total.win().fence();
   sc_part.win().fence();
-  pert_part.win().fence();
+  if (pert_part) pert_part->win().fence();
   auto tot_v  = total.local();
   auto sc_v   = sc_part.local();
-  auto pert_v = pert_part.local();
   const long n = tot_v.size();
   const long nr = _mpi->node_comm.size();
   const long r = _mpi->node_comm.rank();
@@ -967,8 +882,12 @@ void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t& pert_part) {
     auto rng = nda::range(i0, i1);
     auto t_s = nda::reshape(tot_v,  std::array<long, 1>{n})(rng);
     auto a_s = nda::reshape(sc_v,   std::array<long, 1>{n})(rng);
-    auto b_s = nda::reshape(pert_v, std::array<long, 1>{n})(rng);
-    t_s = a_s + b_s;
+    if (pert_part) {
+      auto b_s = nda::reshape(pert_part->local(), std::array<long, 1>{n})(rng);
+      t_s = a_s + b_s;
+    } else {
+      t_s = a_s;
+    }
   }
   total.win().fence();
   _mpi->node_comm.barrier();
@@ -978,16 +897,36 @@ void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t& pert_part) {
 void lr_driver::rebuild_split_totals(lr_kernel_split const& k,
                                      sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                      sArray_t<Array_view_5D_t>* sDeltaSigma_tskij) {
-  if (!k.split_F && !k.split_Sigma) return;
   _Timer.start("LR_TOTALS");
-  // split_F / split_Sigma guarantee the corresponding optionals are engaged and
-  // are exactly the per-channel buffers.
-  if (k.split_F)
-    rebuild_total(sDeltaF_skij, *_sDeltaF_sc, *_sDeltaF_pert);
-  if (k.split_Sigma)
-    rebuild_total(*sDeltaSigma_tskij, *_sDeltaSigma_sc, *_sDeltaSigma_pert);
+  // A channel carrying no ΔF leaves its buffer identically zero, and it is
+  // copied past rather than added: +0.0 would flip the sign of the other
+  // channel's -0.0 entries. With no ΔF anywhere the (zero) sc buffer is copied.
+  sArray_t<Array_view_4D_t>* no_F = nullptr;
+  if (k.sc.has_F() && k.pert.has_F())
+    rebuild_total(sDeltaF_skij, *_sDeltaF_sc, &(*_sDeltaF_pert));
+  else if (k.pert.has_F())
+    rebuild_total(sDeltaF_skij, *_sDeltaF_pert, no_F);
+  else
+    rebuild_total(sDeltaF_skij, *_sDeltaF_sc, no_F);
+  // both_have_Sigma() guarantees the ΔΣ optionals are engaged.
+  if (k.both_have_Sigma())
+    rebuild_total(*sDeltaSigma_tskij, *_sDeltaSigma_sc, &(*_sDeltaSigma_pert));
   _mpi->comm.barrier();
   _Timer.stop("LR_TOTALS");
+}
+
+
+lr_driver::lr_channel_targets lr_driver::channel_targets(
+    lr_kernel_split const& k,
+    sArray_t<Array_view_5D_t>* sDeltaSigma_tskij) {
+  lr_channel_targets t;
+  t.F_sc   = &(*_sDeltaF_sc);
+  t.F_pert = &(*_sDeltaF_pert);
+  t.S_sc   = !k.sc.has_Sigma()   ? nullptr
+           : (k.both_have_Sigma() ? &(*_sDeltaSigma_sc) : sDeltaSigma_tskij);
+  t.S_pert = !k.pert.has_Sigma() ? nullptr
+           : (k.both_have_Sigma() ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
+  return t;
 }
 
 
@@ -1009,14 +948,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     int* n_pert_applied_out) {
 
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
-  // Read once: the loop below refers to these on nearly every line, and the
-  // predicates are cheap but not free.
-  const lr_kernel_split k = make_kernel_split(p);
-  const bool include_gw_sigma = k.include_gw_sigma;
-  const bool has_Vcorr   = k.has_Vcorr;
-  const bool has_Sigma   = k.has_Sigma;
-  const bool has_Sigma_sc = k.has_Sigma_sc;
-  const bool do_pert     = k.do_pert;
+  const lr_kernel_split& k = _split;
   const std::string& outer_alg = p.outer_accel.iter.alg;
   const double outer_tol   = p.outer_accel.tol;
   const bool outer_diis_on = (outer_alg == "DIIS");
@@ -1025,12 +957,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
   auto& sS_skij            = _dyson.sS_skij();
-  // The two kernels, resolved once: which evaluators, which component
-  // switches, which clocks. apply_kernel is agnostic to which one it is handed.
-  const lr_kernel K_sc   = make_sc_kernel(k, p);
-  const lr_kernel K_pert = make_pert_kernel(k, p);
 
-  if (include_gw_sigma) {
+  if (k.any_Sigma()) {
     utils::check(sDeltaSigma_tskij != nullptr,
                  "lr_driver::lr_solve_one: a GW self-energy is active but "
                  "sDeltaSigma_tskij is null.");
@@ -1039,14 +967,16 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                "lr_driver::lr_solve_one: sDeltaSigma_term2_tskij presence must match "
                "the p.split_sigma_terms lr_setup was given.");
 
-  // Per-channel write targets. When a quantity is not split, both channels
-  // resolve to the caller's array (at most one of them is ever active).
-  auto& sDeltaF_sc_skij   = k.split_F ? *_sDeltaF_sc   : sDeltaF_skij;
-  auto& sDeltaF_pert_skij = k.split_F ? *_sDeltaF_pert : sDeltaF_skij;
-  sArray_t<Array_view_5D_t>* pDeltaSigma_sc =
-      !k.sc_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_sc) : sDeltaSigma_tskij);
-  sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
-      !k.pert_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
+  const lr_channel_targets tgt = channel_targets(k, sDeltaSigma_tskij);
+  auto& sDeltaF_sc_skij   = *tgt.F_sc;
+  auto& sDeltaF_pert_skij = *tgt.F_pert;
+  // The ΔF the iteration log and the prev-iterate save follow: the sc channel's,
+  // or the total when K_sc is empty and K_pert carries a ΔF (it is then the
+  // frozen source, and nothing is mixed).
+  auto& sDeltaF_track_skij =
+      (k.sc.is_empty() && k.pert.has_F()) ? sDeltaF_skij : sDeltaF_sc_skij;
+  sArray_t<Array_view_5D_t>* pDeltaSigma_sc   = tgt.S_sc;
+  sArray_t<Array_view_5D_t>* pDeltaSigma_pert = tgt.S_pert;
 
   // Reset every quantity carried across SCF iterations, so this solve cannot see
   // the previous perturbation's state. set_zero ends with fence + node_sync.
@@ -1056,7 +986,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔΣ term 2 is zeroed by lr_gw::evaluate_sigma_DeltaW before it accumulates,
   // but do not rely on that from here.
   if (sDeltaSigma_term2_tskij) sDeltaSigma_term2_tskij->set_zero();
-  if (has_Vcorr) sDeltaVcorr_skij.set_zero();
+  if (k.sc.is_qp()) sDeltaVcorr_skij.set_zero();
   if (_sDeltaF_sc)       _sDeltaF_sc->set_zero();
   if (_sDeltaF_pert)     _sDeltaF_pert->set_zero();
   if (_sDeltaSigma_sc)   _sDeltaSigma_sc->set_zero();
@@ -1135,10 +1065,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
   bool outer_converged = false;
 
-  const bool log_sigma_col = has_Sigma_sc || has_Vcorr;
+  const bool log_sigma_col = k.sc.has_Sigma();
 
   // SCF iteration header
-  if (do_pert) {
+  if (k.do_pert()) {
     if (p.pert_order == 0)
       app_log(1, "\n  (split kernel at order 0: no stage boundaries, so the loop "
                  "below is the single-kernel K_sc solve; K_pert is evaluated once "
@@ -1178,10 +1108,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     if (stage_iter > 1) {
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
-      _DeltaF.prev = _DeltaF.slice(sDeltaF_sc_skij.local());
-      if (has_Vcorr) {
+      _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
+      if (k.sc.is_qp()) {
         _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
-      } else if (has_Sigma_sc) {
+      } else if (k.sc.mixes_Sigma()) {
         _DeltaSigma.prev = _DeltaSigma.slice(pDeltaSigma_sc->local());
       }
     }
@@ -1193,8 +1123,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
     // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
-    sArray_t<Array_view_5D_t>* dyson_sigma = has_Sigma ? sDeltaSigma_tskij : nullptr;
-    const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
+    sArray_t<Array_view_5D_t>* dyson_sigma =
+        (k.any_Sigma() && !k.sc.is_qp()) ? sDeltaSigma_tskij : nullptr;
+    const sArray_t<Array_view_4D_t>* dyson_vcorr =
+        k.sc.is_qp() ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaDm_skij, sDeltaH0_skij,
         sDeltaF_skij, dyson_sigma,
@@ -1202,11 +1134,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     // The solve leaves ΔG(τ) distributed; replicating it is the single most
     // expensive step of the Dyson phase, so it happens only where something
-    // reads it. k.include_gw_sigma is loop-invariant, so which iterations
+    // reads it. k.any_Sigma() is loop-invariant, so which iterations
     // replicate is fixed before the loop starts, not discovered inside it —
     // the Σ evaluators can assume sDeltaG_tskij is current, and the tail below
     // knows from the same flag whether the converged ΔG(τ) still needs one.
-    if (k.include_gw_sigma) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+    if (k.any_Sigma()) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -1224,19 +1156,19 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_CONVERGENCE");
 
     // Steps 2-3: apply K_sc — the ΔF branch, then the ΔΠ -> ΔW -> ΔΣ pipeline.
-    apply_kernel(K_sc, sDeltaF_sc_skij, pDeltaSigma_sc,
+    apply_kernel(k.sc, sDeltaF_sc_skij, pDeltaSigma_sc,
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
 
     // Step 3g (qp mode): statify the dynamic ΔΣ(iω) into the static ΔV_QPGW(k)
     // using the frozen QP orbitals/energies. ΔV_QPGW is the tracked/mixed static
     // quantity and enters the Dyson RHS at the next iteration.
-    if (k.qp_mode) {
+    if (k.sc.is_qp()) {
       _Timer.start("LR_QPGW_STATIC");
       auto sVcorr = lr_qp_approx(
-          *sDeltaSigma_tskij, *p.qp_static->sMO_skia, *p.qp_static->sE_ska,
-          p.qp_static->mu, _lr_dyson.kpq_map(), is_q_gamma(),
-          *_dyson.FT(), p.qp_static->qp_params);
+          *sDeltaSigma_tskij, *k.sc.qp->sMO_skia, *k.sc.qp->sE_ska,
+          k.sc.qp->mu, _lr_dyson.kpq_map(), is_q_gamma(),
+          *_dyson.FT(), k.sc.qp->qp_params);
       sDeltaVcorr_skij.win().fence();
       if (_mpi->node_comm.root())
         sDeltaVcorr_skij.local() = sVcorr.local();
@@ -1249,7 +1181,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // sc-channel (ΔF, ΔΣ). The perturbative source is frozen input, not an SCF
     // variable, so it never takes part in the mixing.
     _Timer.start("LR_ITER_ALG");
-    if (stage_iter > 1 && (k.sc_hf || k.sc_sigma || has_Vcorr)) {
+    if (stage_iter > 1 && !k.sc.is_empty()) {
       // Striped: every rank of the global comm participates, each operating on its
       // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
       // back in place. Pass .local() views directly (in/out); the "prev" arguments
@@ -1257,12 +1189,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       //
       // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
       // standard path, or the static ΔV_QPGW in qp mode.
-      if (has_Vcorr) {
+      if (k.sc.is_qp()) {
         _lr_diis->next_step_combined(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
             sDeltaVcorr_skij.local(), _DeltaVcorr.prev, stage_iter);
-      } else if (has_Sigma_sc) {
+      } else if (k.sc.mixes_Sigma()) {
         _lr_diis->next_step_combined(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
@@ -1286,15 +1218,15 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // every iteration and discard what lr_setup allocated.
       if (p.hessian()) {
         _DeltaF.kernel_out() = _lr_diis->newest_raw_F();
-        if (has_Sigma_sc) _DeltaSigma.kernel_out() = _lr_diis->newest_raw_Sigma();
+        if (k.sc.mixes_Sigma()) _DeltaSigma.kernel_out() = _lr_diis->newest_raw_Sigma();
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
       // place with no trailing collective. Fence + barrier make every slice
       // visible to node root before it gathers below (barrier alone is
       // insufficient under the MPI-3 separate shared-memory model).
       sDeltaF_sc_skij.win().fence();
-      if (has_Vcorr) sDeltaVcorr_skij.win().fence();
-      else if (has_Sigma_sc) pDeltaSigma_sc->win().fence();
+      if (k.sc.is_qp()) sDeltaVcorr_skij.win().fence();
+      else if (k.sc.mixes_Sigma()) pDeltaSigma_sc->win().fence();
       _mpi->node_comm.barrier();
       // Each node now holds a valid copy of its own contiguous element run
       // only; one allgatherv among the node roots completes every replica. With
@@ -1302,18 +1234,18 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (_mpi->node_comm.root()) {
         utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                        sDeltaF_sc_skij.local().data(), _DeltaF.n_flat);
-        if (has_Vcorr) {
+        if (k.sc.is_qp()) {
           utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                          sDeltaVcorr_skij.local().data(), _DeltaVcorr.n_flat);
-        } else if (has_Sigma_sc) {
+        } else if (k.sc.mixes_Sigma()) {
           utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                          pDeltaSigma_sc->local().data(), _DeltaSigma.n_flat);
         }
       }
       // Make node root's overwrite visible to its node peers
       sDeltaF_sc_skij.win().fence();
-      if (has_Vcorr) sDeltaVcorr_skij.win().fence();
-      else if (has_Sigma_sc) pDeltaSigma_sc->win().fence();
+      if (k.sc.is_qp()) sDeltaVcorr_skij.win().fence();
+      else if (k.sc.mixes_Sigma()) pDeltaSigma_sc->win().fence();
       _mpi->comm.barrier();
     }
     _Timer.stop("LR_ITER_ALG");
@@ -1323,7 +1255,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // same slices.
     _Timer.start("LR_CONVERGENCE");
     auto norms_F = utils::striped_norm(
-        _mpi->comm, _DeltaF.slice(sDeltaF_sc_skij.local()), _DeltaF.prev, stage_iter > 1);
+        _mpi->comm, _DeltaF.slice(sDeltaF_track_skij.local()), _DeltaF.prev, stage_iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
 
@@ -1331,13 +1263,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // standard path; static ΔV_QPGW in qp mode) for logging/convergence.
     double norm_DeltaSigma = 0.0;
     double norm_DeltaSigma_diff = 0.0;
-    if (has_Vcorr) {
+    if (k.sc.is_qp()) {
       auto norms_V = utils::striped_norm(
           _mpi->comm, _DeltaVcorr.slice(sDeltaVcorr_skij.local()), _DeltaVcorr.prev,
           stage_iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
-    } else if (has_Sigma_sc) {
+    } else if (k.sc.mixes_Sigma()) {
       auto norms_Sigma = utils::striped_norm(
           _mpi->comm, _DeltaSigma.slice(pDeltaSigma_sc->local()), _DeltaSigma.prev,
           stage_iter > 1);
@@ -1350,17 +1282,17 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // An empty K_sc makes it exact in a single Dyson application, so every
     // stage is then one iteration long.
     bool dm_converged = norm_DeltaDm_diff < p.tol;
-    bool f_converged = !k.sc_hf || norm_DeltaF_diff < p.tol;
-    bool sigma_converged = !(has_Sigma_sc || has_Vcorr) || norm_DeltaSigma_diff < p.tol;
+    bool f_converged = !k.sc.has_F() || norm_DeltaF_diff < p.tol;
+    bool sigma_converged = !k.sc.has_Sigma() || norm_DeltaSigma_diff < p.tol;
     bool inner_conv_std = (stage_iter > 1) && dm_converged && f_converged && sigma_converged;
-    bool inner_converged = (do_pert && k.sc.empty()) ? true : inner_conv_std;
+    bool inner_converged = (k.do_pert() && k.sc.is_empty()) ? true : inner_conv_std;
 
     // Log iteration. This closes the iteration that produced the norms above,
     // so it comes before the stage-boundary block: K_pert logs of its own
     // (head extrapolation, outer residual) then follow their iteration's row
     // instead of splitting it from the previous one.
     _Timer.start("LR_CONVERGENCE");
-    std::string iter_lbl = (do_pert && p.pert_order > 0)
+    std::string iter_lbl = (k.do_pert() && p.pert_order > 0)
                                ? fmt::format("{}[s{}]", iter, stage)
                                : fmt::format("{}", iter);
     if (first_of_stage) {
@@ -1386,7 +1318,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Stage boundary: one K_pert evaluation on the converged ΔG of this stage,
     // overwriting (not accumulating) the perturbative source — ΔG already
     // carries every lower order.
-    if (do_pert && inner_converged && n_applied < p.pert_order && !outer_converged) {
+    if (k.do_pert() && inner_converged && n_applied < p.pert_order && !outer_converged) {
       const int outer_step = n_applied + 1;  // 1-based outer iteration index
       double outer_dm_diff = -1.0;
       double outer_res = -1.0;
@@ -1403,13 +1335,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        apply_kernel(K_pert, sDeltaF_pert_skij, pDeltaSigma_pert,
+        apply_kernel(k.pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
 
-        // Extrapolate the perturbative source. Only a channel that actually
-        // carries the quantity may be mixed — otherwise the handle aliases the
-        // SELF-CONSISTENT array (see the per-channel write targets above) and
-        // mixing it would extrapolate the sc channel with the outer sequence.
+        // Extrapolate the perturbative source. Only a quantity the channel
+        // actually carries may be mixed — a pert ΔΣ handle of a channel without Σ
+        // is null, and a pert-only ΔΣ is the caller's array (see the per-channel
+        // write targets above).
         //
         // Extrapolating the source rather than the solution loses nothing:
         // compute_coefs normalizes Σ c_i = 1 and the inner solve A is affine,
@@ -1418,13 +1350,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // The two choices are the same iteration in different inner products.
         if (outer_diis_on) {
           double r2 = 0.0;
-          if (k.pert_hf) {
+          if (k.pert.has_F()) {
             double d = utils::striped_norm(
                 _mpi->comm, _DeltaF_pert.slice(sDeltaF_pert_skij.local()),
                 _DeltaF_pert.prev, true).second;
             r2 += d * d;
           }
-          if (k.pert_sigma) {
+          if (k.pert.has_Sigma()) {
             double d = utils::striped_norm(
                 _mpi->comm, _DeltaSigma_pert.slice(pDeltaSigma_pert->local()),
                 _DeltaSigma_pert.prev, true).second;
@@ -1437,13 +1369,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           // inner one: each rank mixes its own element slice of the source and
           // outer_sync completes the node replicas afterwards.
           nda::array<ComplexType, 1> empty_prev;
-          if (k.pert_hf && k.pert_sigma) {
+          if (k.pert.has_F() && k.pert.has_Sigma()) {
             _outer_diis->next_step_combined(
                 _mpi->comm, _pmap,
                 sDeltaF_pert_skij.local(), _DeltaF_pert.prev,
                 pDeltaSigma_pert->local(), _DeltaSigma_pert.prev,
                 outer_step);
-          } else if (k.pert_sigma) {
+          } else if (k.pert.has_Sigma()) {
             // Σ-only source: next_step_combined is generic in both slots, so
             // the 5D ΔΣ rides the first one with an empty second slot.
             nda::array<ComplexType, 5> empty_slot;
@@ -1458,13 +1390,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                 sDeltaF_pert_skij.local(), _DeltaF_pert.prev,
                 empty_slot, empty_prev, outer_step);
           }
-          outer_sync(k.pert_hf ? &sDeltaF_pert_skij : nullptr,
-                     k.pert_sigma ? pDeltaSigma_pert : nullptr);
+          outer_sync(k.pert.has_F() ? &sDeltaF_pert_skij : nullptr,
+                     k.pert.has_Sigma() ? pDeltaSigma_pert : nullptr);
           // The mixed source is what the next stage uses, hence what the next
           // outer residual is measured against.
-          if (k.pert_hf)
+          if (k.pert.has_F())
             _DeltaF_pert.prev = _DeltaF_pert.slice(sDeltaF_pert_skij.local());
-          if (k.pert_sigma)
+          if (k.pert.has_Sigma())
             _DeltaSigma_pert.prev = _DeltaSigma_pert.slice(pDeltaSigma_pert->local());
           _Timer.stop("LR_OUTER_ITER_ALG");
         }
@@ -1494,9 +1426,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       }
     }
 
-    // Refresh whichever totals are actually split, for the next Dyson solve and
-    // the checkpoint. A quantity carried by one channel needs nothing: that
-    // channel already wrote the caller's array.
+    // Refresh the totals for the next Dyson solve and the checkpoint: ΔF always,
+    // ΔΣ when both channels carry one (a one-channel ΔΣ is already the caller's
+    // array).
     rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
 
     // Whether the caller's ΔF/ΔΣ are the mixed iterate on exit. The raw slice
@@ -1532,11 +1464,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm/ΔF. With Σ the last iteration already replicated it and nothing is
   // pending; with save_DeltaG off nobody reads it and the gather is skipped
   // outright — the only case where ΔG(τ) is never replicated at all.
-  if (!k.include_gw_sigma and p.save_DeltaG)
+  if (!k.any_Sigma() and p.save_DeltaG)
     _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
-  if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
+  if (k.sc.is_qp() && sDeltaVcorr_out_skij != nullptr) {
     sDeltaVcorr_out_skij->win().fence();
     if (_mpi->node_comm.root())
       sDeltaVcorr_out_skij->local() = sDeltaVcorr_skij.local();
@@ -1551,13 +1483,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
   } else if (p.max_iter > 1) {
     // "applied 0 of 0" would read as a mid-schedule stop, which order 0 is not.
-    if (do_pert && p.pert_order > 0)
+    if (k.do_pert() && p.pert_order > 0)
       app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations "
                  "(K_pert applied {} of {} times).", p.max_iter, n_applied, p.pert_order);
     else
       app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations.", p.max_iter);
   }
-  if (do_pert && outer_track) {
+  if (k.do_pert() && outer_track) {
     if (outer_converged)
       app_log(1, "  Outer loop converged: K_pert applied {} of at most {} times.",
               n_applied, p.pert_order);
@@ -1591,11 +1523,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (F_PQ_out && opt_ibc && opt_ibc->F_PQ_skij.size() > 0) {
     *F_PQ_out = std::move(opt_ibc->F_PQ_skij);
   }
-  if (DeltaF_PQ_out && k.need_hf) {
+  if (DeltaF_PQ_out && k.any_F()) {
     // The harvest is ONE lr_hf call on the union mask, so it cannot represent a
     // kernel the two channels only add up to. HSEX + split is exactly that: the
     // sc channel contracted V + W_c(0) and the pert channel -W_c(0).
-    utils::check(!k.pert_sex_counterterm,
+    utils::check(!k.pert.sex_counterterm,
                  "lr_driver::lr_solve_one: the aux-basis ΔF_PQ output cannot be "
                  "produced for a split run whose K_sc is HSEX — the total "
                  "exchange kernel is the sum of two channels, and this is a "
@@ -1613,8 +1545,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // array, and is the only caller that wants DeltaF_PQ_out.
     auto hsex = hsex_kernel(false);
     _lr_hf->evaluate(sDeltaF_scratch, sDeltaDm_skij, thc, sS_skij.local(),
-                     k.sc.hartree || k.pert.hartree,
-                     k.sc.exchange || k.pert.exchange, ibc_ptr,
+                     k.sc.terms.hartree || k.pert.terms.hartree,
+                     k.sc.terms.exchange || k.pert.terms.exchange, ibc_ptr,
                      p.DeltaV_qPQ, p.Dm_ab,
                      DeltaF_PQ_out, p.include_xc, hsex ? &(*hsex) : nullptr);
   }
@@ -1642,8 +1574,8 @@ void lr_driver::get_full_kernel_result(
   utils::check(p.hessian(),
                "lr_driver::get_full_kernel_result: lr_setup must have been given "
                "a nonzero hessian_nmodes, or there is no raw slice to read.");
-  const lr_kernel_split k = make_kernel_split(p);
-  utils::check(!k.qp_mode,
+  const lr_kernel_split& k = _split;
+  utils::check(!k.sc.is_qp(),
                "lr_driver::get_full_kernel_result: qp mode is out of scope — the "
                "accelerator's second slot holds the static ΔV_QPGW rather than ΔΣ, "
                "so the raw-ΔΣ algebra does not carry over.");
@@ -1654,15 +1586,12 @@ void lr_driver::get_full_kernel_result(
   // stationary functional loses its second-order property — the same violation as
   // handing it the mixed iterate. One extra K_pert evaluation restores
   // ΔV' = ΔH0 + K_sc(ΔG') + K_pert(ΔG') exactly.
-  if (k.do_pert) {
+  if (k.do_pert()) {
     _Timer.start("LR_HESS_PERT_REFRESH");
-    // Same write targets the stage boundary uses: a channel that is the sole
-    // contributor to a quantity writes the caller's array directly.
-    auto& sDeltaF_pert_skij = k.split_F ? *_sDeltaF_pert : sDeltaF_skij;
-    sArray_t<Array_view_5D_t>* pDeltaSigma_pert =
-        !k.pert_sigma ? nullptr : (k.split_Sigma ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
+    // Same write targets the stage boundary uses.
+    const lr_channel_targets tgt = channel_targets(k, sDeltaSigma_tskij);
 
-    apply_kernel(make_pert_kernel(k, p), sDeltaF_pert_skij, pDeltaSigma_pert,
+    apply_kernel(k.pert, *tgt.F_pert, tgt.S_pert,
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
     // The totals the caller reads must see the new source; the sc channel is
     // untouched, so this is the same rebuild the SCF loop does every iteration.
@@ -1675,19 +1604,18 @@ void lr_driver::get_full_kernel_result(
   // solve returned already ARE the raw kernel output.
   if (!_mixed_last_iter) return;
 
-  // The ring's ΔF slot holds whatever the mixing block mixed alongside ΔΣ, which
-  // is the sc-channel ΔF. A Σ-carrying K_sc with no Hartree/exchange component
-  // is off the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder and unreachable today, but were it
-  // ever added the slot would hold the PERT-written array and adding pert below
-  // would double-count it.
-  utils::check(k.sc_hf or !k.sc_sigma,
+  // The ring's ΔF slot holds the sc-channel ΔF the mixing block mixed alongside
+  // ΔΣ. A Σ-carrying K_sc with no Hartree/exchange component is off the
+  // none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder, unreachable from run_lr_calc and untested
+  // here, so it is rejected.
+  utils::check(k.sc.has_F() or !k.sc.has_Sigma(),
                "lr_driver::get_full_kernel_result: a Σ-carrying K_sc with no "
                "Hartree/exchange component is not supported.");
-  if (k.split_F) {
+  if (k.sc.has_F() && k.pert.has_F()) {
     _sDeltaF_pert->win().fence();
     _mpi->comm.barrier();
   }
-  if (k.split_Sigma) {
+  if (k.both_have_Sigma()) {
     _sDeltaSigma_pert->win().fence();
     _mpi->comm.barrier();
   }
@@ -1695,43 +1623,43 @@ void lr_driver::get_full_kernel_result(
   // Each rank writes its own `_pmap` element slice; the raw total of a split
   // quantity is raw-sc (from the ring) plus the perturbative source step 1 has
   // just re-evaluated on the returned ΔG.
-  if (k.sc_hf) {
+  if (k.sc.has_F()) {
     utils::check(_DeltaF.has_kernel_out(),
                  "lr_driver::get_full_kernel_result: lr_setup allocated no kernel_out "
                  "ΔF slice, so lr_params::hessian_nmodes cannot have been set.");
     auto F_loc = _DeltaF.slice(sDeltaF_skij.local());
     F_loc = _DeltaF.kernel_out;
-    if (k.split_F) F_loc += _DeltaF.slice(_sDeltaF_pert->local());
+    if (k.pert.has_F()) F_loc += _DeltaF.slice(_sDeltaF_pert->local());
   }
-  if (k.has_Sigma_sc) {
+  if (k.sc.mixes_Sigma()) {
     utils::check(_DeltaSigma.has_kernel_out(),
                  "lr_driver::get_full_kernel_result: lr_setup allocated no kernel_out "
                  "ΔΣ slice.");
     auto S_loc = _DeltaSigma.slice(sDeltaSigma_tskij->local());
     S_loc = _DeltaSigma.kernel_out;
-    if (k.split_Sigma) S_loc += _DeltaSigma.slice(_sDeltaSigma_pert->local());
+    if (k.both_have_Sigma()) S_loc += _DeltaSigma.slice(_sDeltaSigma_pert->local());
   }
 
   // Republication: the same fence / node barrier / allgatherv-among-node-roots
   // sequence the SCF loop's mixing epilogue uses.
-  if (k.sc_hf) sDeltaF_skij.win().fence();
-  if (k.has_Sigma_sc) sDeltaSigma_tskij->win().fence();
+  if (k.sc.has_F()) sDeltaF_skij.win().fence();
+  if (k.sc.mixes_Sigma()) sDeltaSigma_tskij->win().fence();
   _mpi->node_comm.barrier();
   if (_mpi->node_comm.root()) {
-    if (k.sc_hf)
+    if (k.sc.has_F())
       utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                   sDeltaF_skij.local().data(), _DeltaF.n_flat);
-    if (k.has_Sigma_sc)
+    if (k.sc.mixes_Sigma())
       utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                   sDeltaSigma_tskij->local().data(), _DeltaSigma.n_flat);
   }
-  if (k.sc_hf) sDeltaF_skij.win().fence();
-  if (k.has_Sigma_sc) sDeltaSigma_tskij->win().fence();
+  if (k.sc.has_F()) sDeltaF_skij.win().fence();
+  if (k.sc.mixes_Sigma()) sDeltaSigma_tskij->win().fence();
   _mpi->comm.barrier();
 }
 
 
-void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_full,
+void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                                       std::vector<std::string> const& extra_sigma,
                                       long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
@@ -1789,7 +1717,11 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
-  if (include_gw_sigma) {
+  // Per-channel ΔF buffers (sc, pert), on top of the caller's total ΔF.
+  arrays.push_back({"sDeltaF (sc + pert channels)",
+                    fmt::format("2x({},{},{},{})", ns, nki, nb, nb),
+                    2.0 * band5(1), false, PERSIST});
+  if (any_Sigma) {
     arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false, PERSIST});
     // Split-kernel per-channel ΔΣ buffers and the outer accelerator's previous
     // source, on top of the total ΔΣ.
@@ -1832,14 +1764,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   // ΔF and, with a dynamic Σ, one more ΔΣ. Its extra Dyson solve reuses the mode
   // loop's arrays, so it adds nothing else here.
   if (hessian_nmodes > 0) {
-    if (include_gw_sigma) {
+    if (any_Sigma) {
       arrays.push_back({"hessian ω stores (ΔΣ+ΔG)",
                         fmt::format("2x{}x{}", hessian_nmodes, shp5b(nw)),
                         2.0 * double(hessian_nmodes) * band5(nw), true, PERSIST});
     }
     arrays.push_back({"hessian raw ΔF/ΔΣ (striped)",
-                      include_gw_sigma ? fmt::format("ΔF + {}", shp5b(nt)) : "ΔF",
-                      band5(1) + (include_gw_sigma ? band5(nt) : 0.0), true, PERSIST});
+                      any_Sigma ? fmt::format("ΔF + {}", shp5b(nt)) : "ΔF",
+                      band5(1) + (any_Sigma ? band5(nt) : 0.0), true, PERSIST});
   }
 
   // --- Persistent, distributed, band basis ---
@@ -1863,14 +1795,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   }
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
-  if (include_gw_sigma) {
+  if (any_Sigma) {
     arrays.push_back({"dW_tRPQ",       shp4a(nth), aux4(nth), true, PERSIST});
   }
   if (exchange_static_W) {
     arrays.push_back({"dWc0_qPQ (HSEX)", fmt::format("({},{},{})", nq, NP, NP),
                       aux4(1), true, PERSIST});
   }
-  if (gw_full) {
+  if (needs_dW) {
     arrays.push_back({"dW_full_wqPQ",  shp4a(nwbh), aux4(nwbh), true, PERSIST});
     arrays.push_back({"dG_tsRPQ",      shp5a(nth),  aux5(nth),  true, PERSIST});
     arrays.push_back({"dG_mtau_tsRPQ", shp5a(nth),  aux5(nth),  true, PERSIST});
@@ -1882,13 +1814,13 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
   //     freed within one SCF iteration, on top of the persistent set.
   //     Two mutually-exclusive phases:
   //       Dyson : ΔG(iω)/ΔΣ(iω) inside lr_dyson (distributed band basis)
-  //       ΔW/Σ  : ΔΠ/ΔW(τ) + the FT staging buffers (gw_full only)
+  //       ΔW/Σ  : ΔΠ/ΔW(τ) + the FT staging buffers (needs_dW only)
   //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
   //     two never coexist — the peak adds only the larger of the two phases.
   arrays.push_back({"ΔG(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
-  if (include_gw_sigma)
+  if (any_Sigma)
     arrays.push_back({"ΔΣ(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
-  if (gw_full) {
+  if (needs_dW) {
     arrays.push_back({"ΔΠ/ΔW(τ)",       shp4a(nth), aux4(nth), true, T_GWSIG});
     // FT staging buffers, allocated and released inside each tau_to_w/w_to_tau.
     arrays.push_back({"FT buffer (τ)",   shp4a(nth),  aux4(nth),  true, T_GWSIG});
@@ -1944,7 +1876,7 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
 
 
 
-void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool gw_full) {
+void lr_driver::print_distribution_summary(long NP, bool any_Sigma, bool needs_dW) {
   const long nproc = _mpi->comm.size();
   const long nw   = _dyson.FT()->nw_f();
   const long nwb  = _dyson.FT()->nw_b();
@@ -1967,8 +1899,8 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   app_log(2, "    {:<22s}{:<30s}{}", "pattern", "pgrid", "arrays");
 
   // Aux τ-dist (q-local) — present whenever a W self-energy is active.
-  if (include_gw_sigma) {
-    const char* arrs = gw_full ? "dW_tRPQ, dG_tsRPQ, dG_mtau, ΔΠ/ΔW" : "dW_tRPQ";
+  if (any_Sigma) {
+    const char* arrs = needs_dW ? "dW_tRPQ, dG_tsRPQ, dG_mtau, ΔΠ/ΔW" : "dW_tRPQ";
     app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
             pg4(tau_pg, "(t,q,P,Q)"), arrs);
   }
@@ -1976,7 +1908,7 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   // staging buffers and W(iω) share a distribution, which is what lets both
   // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
   // ω-side Dyson runs on.
-  if (gw_full) {
+  if (needs_dW) {
     auto [w_pg, w_bs] = utils::lr_W_tau_local_dist(nproc, nwbh, nq, NP);
     const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
                                     : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
@@ -2001,7 +1933,7 @@ void lr_driver::print_distribution_summary(long NP, bool include_gw_sigma, bool 
   }
   app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(ω)",
           pg5(dyw_pg, "(w,s,k,i,j)"),
-          include_gw_sigma ? "ΔG(iω), ΔΣ(iω)" : "ΔG(iω)");
+          any_Sigma ? "ΔG(iω), ΔΣ(iω)" : "ΔG(iω)");
   app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(τ)",
           pg5(dyt_pg, "(·,·,k,i,j)"), "ΔG(τ) (+ redistribute tmp)");
   app_log(2, "  {}", std::string(72, '-'));

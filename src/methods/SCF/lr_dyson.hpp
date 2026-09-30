@@ -238,7 +238,7 @@ public:
    * the call sites and never by state inside lr_dyson.
    *
    * Collective: every rank must call it, or none. In lr_driver that follows from
-   * k.include_gw_sigma and p.save_DeltaG, both loop-invariant and identical on
+   * k.any_Sigma() and p.save_DeltaG, both loop-invariant and identical on
    * every rank.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
