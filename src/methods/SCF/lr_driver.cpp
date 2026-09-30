@@ -534,7 +534,9 @@ void lr_driver::lr_setup(
   // Solvers. Each latches the perturbation q at construction and caches a
   // workspace, so they are built once here and reused by every lr_solve_one.
   if (k.any_F() && !_lr_hf) {
-    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
+    // K_sc runs every inner iteration, so it keeps its dense work arrays.
+    _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment,
+                                              /*cache_dense_arrays=*/true);
   }
   // The perturbative channel gets its own lr_hf for the same reason lr_gw does:
   // lr_hf caches U(R) keyed on the exchange kernel it was first built with, and an
