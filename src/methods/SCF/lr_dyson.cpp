@@ -403,18 +403,8 @@ void lr_dyson::apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
 }
 
 
-bool lr_dyson::dm_only_supported() const {
-  auto [w_pgrid, w_bsize] =
-      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
-  return w_pgrid[3] * w_pgrid[4] == 1 and _nbnd >= w_pgrid[0];
-}
-
-
 void lr_dyson::setup_dm_only_layout() {
   if (_dm_only_layout) return;
-  utils::check(dm_only_supported(),
-               "lr_dyson: the ΔDm-only pass needs undivided band axes and nbnd >= "
-               "the number of ω pools; take solve_lr_dyson instead.");
   using math::nda::make_distributed_array;
 
   // c_ω: the ω→τ matrix followed by the τ→β⁻ vector, as one length-nw vector.
@@ -433,6 +423,11 @@ void lr_dyson::setup_dm_only_layout() {
   // same (ω, s, k) extents, with the band axes collapsed to a single element.
   auto [w_pgrid, w_bsize] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  utils::check(w_pgrid[3] * w_pgrid[4] == 1,
+               "lr_dyson: the ΔDm-only pass needs undivided band axes, but {} ranks "
+               "have no (ω pools x k pools) factorisation with nw = {}, nk = {}. Use a "
+               "rank count without a prime factor larger than both.",
+               _context->comm.size(), _nw, _nkpts_ibz);
   auto own = make_distributed_array<nda::array<ComplexType, 5>>(
       _context->comm, w_pgrid, {_nw, _ns, _nkpts_ibz, 1, 1});
   _dm_w_origin = own.origin()[0];
@@ -442,7 +437,8 @@ void lr_dyson::setup_dm_only_layout() {
 
   // The ranks sharing a k block form an ω pool. After the pool's reduction every
   // member holds the same partial ΔDm, so each hands a disjoint band-row slice to
-  // gather_to_shm and the slices cover all ranks exactly once.
+  // gather_to_shm and the slices cover all rows exactly once. With more members
+  // than bands some slices are empty.
   _wpool_comm.emplace(_context->comm.split(int(_dm_k_origin), _context->comm.rank()));
   utils::check(_wpool_comm->size() == w_pgrid[0],
                "lr_dyson: ω pool of size {} for {} ω pools.",

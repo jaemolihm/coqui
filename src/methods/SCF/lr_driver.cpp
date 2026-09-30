@@ -410,11 +410,6 @@ void lr_driver::lr_setup(
                  "+ΔDm ⊙ W_c(iν=0), so K_sc + K_pert restores bare exchange");
   }
   app_log(1, "  qp_static_sigma = {}", k.sc.is_qp() ? "true" : "false");
-  const bool dm_only = use_dm_only(k);
-  app_log(1, "  Dyson pass = {}", dm_only
-          ? "ΔDm-only (ΔG(τ) formed only where read)"
-          : "full (Σ in K_sc, qp mode, or a Dyson grid the ΔDm-only pass does not "
-            "support)");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.mixing());
   if (p.use_diis()) {
@@ -502,7 +497,7 @@ void lr_driver::lr_setup(
                         n_sigma_prev, inner_hist, outer_hist,
                         p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W,
                         p.hessian_nmodes,
-                        dm_only ? (k.pert.has_Sigma() ? 2 : 1) : 0);
+                        k.sc.has_Sigma() ? 0 : (k.pert.has_Sigma() ? 2 : 1));
   print_distribution_summary(thc.Np(), k.any_Sigma(), k.needs_dW());
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -667,7 +662,8 @@ void lr_driver::lr_setup(
   if (outer_tol > 0.0)
     _sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-  if (dm_only) {
+  // A K_sc without a Σ takes the ΔDm-only Dyson pass.
+  if (!k.sc.has_Sigma()) {
     _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
     if (k.pert.has_Sigma())
@@ -822,11 +818,6 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel(bool counter
                          hsex_kernel_t::kernel_e::minus_Wc0};
   return hsex_kernel_t{&(*_opt_dWc0_qPQ), _hsex_head_factor,
                        hsex_kernel_t::kernel_e::V_plus_Wc0};
-}
-
-
-bool lr_driver::use_dm_only(lr_kernel_split const& k) const {
-  return !k.sc.has_Sigma() && !k.sc.is_qp() && _lr_dyson.dm_only_supported();
 }
 
 
@@ -1101,10 +1092,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // the first K_pert evaluation writes it.
   sArray_t<Array_view_5D_t>* dyson_DeltaSigma_tskij =
       k.sc.mixes_Sigma() ? sDeltaSigma_tskij : nullptr;
-  // ΔDm-only Dyson pass. Its ΔG(τ) is formed on demand by the full pass on the
-  // same input (the harvest), which replaces ΔDm and Δμ by that pass's — equal
-  // to round-off — so the triple the readers see is consistent.
-  const bool dm_only = use_dm_only(k);
+  // ΔDm-only Dyson pass, taken whenever K_sc has no Σ. Its ΔG(τ) is formed on
+  // demand by the full pass on the same input (the harvest), which replaces ΔDm
+  // and Δμ by that pass's — equal to round-off — so the triple the readers see
+  // is consistent.
   auto harvest = [&](const sArray_t<Array_view_4D_t>& sDeltaF_in) {
     _Timer.start("LR_DYSON");
     Delta_mu = _lr_dyson.solve_lr_dyson(
@@ -1131,7 +1122,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   };
   // Form ΔG(τ) of the current ΔDm for a reader, whichever path made the ΔDm.
   auto need_dG = [&]() {
-    if (dm_only && dG == dG_state::none) harvest(*_sDeltaF_dyson_in);
+    if (!k.sc.has_Sigma() && dG == dG_state::none) harvest(*_sDeltaF_dyson_in);
     if (dG == dG_state::pending) materialize_DeltaG();
   };
 
@@ -1194,7 +1185,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
     // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
-    if (dm_only) {
+    if (!k.sc.has_Sigma()) {
       dm_pass(first_of_stage);
     } else {
       const sArray_t<Array_view_4D_t>* dyson_vcorr =
