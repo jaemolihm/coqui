@@ -24,6 +24,8 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "configuration.hpp"
@@ -41,7 +43,7 @@ namespace fft {
 
 /**
  * Blocked-FFT replacement for the dense k<->R Fourier-transform gemms used by
- * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw).
+ * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw / lr_hf).
  *
  * Design note (why the existing gemm / plain batched-FFT paths are not reused):
  * the LR arrays are (nk, ncols) row-major with k as the SLOW axis. A batched
@@ -78,49 +80,35 @@ public:
 #if defined(ENABLE_FFTW)
     _n[0] = kp_grid(0); _n[1] = kp_grid(1); _n[2] = kp_grid(2);
     _nk = _n[0] * _n[1] * _n[2];
-    long nk_in = kpts_cart.shape(0);
-    // Preconditions are the caller's responsibility (the LR path forbids
-    // symmetry and guards the Γ-only case): assert loudly rather than silently
-    // reverting to the gemm path on a grid the FFT cannot represent.
-    utils::check(nk_in == _nk,
-                 "fft_kR_t: k-point count {} does not match the MP-mesh product {}", nk_in, _nk);
-    utils::check(_nk > 1,
-                 "fft_kR_t: single-k (Γ-only) grid; the caller must handle this as a do-nothing copy");
-
-    constexpr double tpi = 2.0 * M_PI;
-    constexpr double tol = 1e-8;
-    _mesh_of_k.resize(_nk);
-    std::vector<bool> seen(_nk, false);
-    // Build _mesh_of_k and validate the grid: map each input k-point's crystal
-    // coords to its lexicographic MP-mesh slot; bail (unusable) on any off-mesh
-    // point or duplicate slot (i.e. shifted / IBZ-reduced / non-mesh grids).
-    for (long q = 0; q < _nk; ++q) {
-      std::array<long, 3> m;
-      for (int i = 0; i < 3; ++i) {
-        // crystal coordinate: k·a_i / 2π
-        double kcry = (kpts_cart(q, 0) * lattv(i, 0) +
-                       kpts_cart(q, 1) * lattv(i, 1) +
-                       kpts_cart(q, 2) * lattv(i, 2)) / tpi;
-        double md = kcry * _n[i];
-        long mi = std::llround(md);
-        utils::check(std::abs(md - double(mi)) <= tol,
-                     "fft_kR_t: shifted / non-Monkhorst-Pack k-grid not supported "
-                     "(LR assumes an unshifted MP mesh; off-mesh crystal coord {})", md);
-        mi %= _n[i];
-        if (mi < 0) mi += _n[i];
-        m[i] = mi;
-      }
-      long p = (m[0] * _n[1] + m[1]) * _n[2] + m[2];
-      utils::check(!seen[p],
-                   "fft_kR_t: non-bijective k-grid (symmetry-reduced / IBZ?) not supported; "
-                   "the LR path forbids symmetry");
-      seen[p] = true;
-      _mesh_of_k[q] = p;
-    }
+    // Preconditions are the caller's responsibility: assert loudly rather than
+    // silently reverting to the gemm path on a grid the FFT cannot represent.
+    // lr_gw / lr_rpa_pi forbid symmetry and guard the Γ-only case; lr_hf, which
+    // supports symmetry-reduced inputs, asks mesh_ok() first and falls back to
+    // gemm.
+    std::string why;
+    auto slots = mesh_slots(kpts_cart, lattv, kp_grid, &why);
+    utils::check(slots.has_value(), "fft_kR_t: {}", why);
+    _mesh_of_k = std::move(*slots);
     _scratch.resize(_block, _nk);
 #else
     (void)kpts_cart; (void)lattv; (void)kp_grid;
     utils::check(false, "fft_kR_t: requires an FFTW build");
+#endif
+  }
+
+  /**
+   * Whether the constructor accepts this grid: a Γ-centered, uniform, full
+   * Monkhorst-Pack mesh with more than one point, in an FFTW build. Never
+   * aborts, so a caller can fall back to the gemm path instead.
+   */
+  static bool mesh_ok(::nda::ArrayOfRank<2> auto const& kpts_cart,
+                      ::nda::ArrayOfRank<2> auto const& lattv,
+                      ::nda::ArrayOfRank<1> auto const& kp_grid) {
+#if defined(ENABLE_FFTW)
+    return mesh_slots(kpts_cart, lattv, kp_grid, nullptr).has_value();
+#else
+    (void)kpts_cart; (void)lattv; (void)kp_grid;
+    return false;
 #endif
   }
 
@@ -155,6 +143,60 @@ public:
   }
 
 private:
+  /**
+   * Lexicographic MP-mesh slot of every input k-point, or nullopt (with the
+   * reason in *why) when the grid is not a bijection onto a Γ-centered mesh:
+   * wrong count, a single point, off-mesh (shifted) or duplicate
+   * (symmetry-reduced) points.
+   */
+  static std::optional<std::vector<long>> mesh_slots(
+      ::nda::ArrayOfRank<2> auto const& kpts_cart,
+      ::nda::ArrayOfRank<2> auto const& lattv,
+      ::nda::ArrayOfRank<1> auto const& kp_grid, std::string* why) {
+    auto fail = [&](std::string msg) -> std::optional<std::vector<long>> {
+      if (why) *why = std::move(msg);
+      return std::nullopt;
+    };
+    const std::array<long, 3> n = {long(kp_grid(0)), long(kp_grid(1)), long(kp_grid(2))};
+    const long nk = n[0] * n[1] * n[2];
+    const long nk_in = kpts_cart.shape(0);
+    if (nk_in != nk)
+      return fail(fmt::format("k-point count {} does not match the MP-mesh product {}",
+                              nk_in, nk));
+    if (nk <= 1)
+      return fail("single-k (Γ-only) grid; the caller must handle this as a "
+                  "do-nothing copy");
+
+    constexpr double tpi = 2.0 * M_PI;
+    constexpr double tol = 1e-8;
+    std::vector<long> slot(nk);
+    std::vector<bool> seen(nk, false);
+    // Map each input k-point's crystal coords to its lexicographic MP-mesh slot.
+    for (long q = 0; q < nk; ++q) {
+      std::array<long, 3> m;
+      for (int i = 0; i < 3; ++i) {
+        // crystal coordinate: k·a_i / 2π
+        double kcry = (kpts_cart(q, 0) * lattv(i, 0) +
+                       kpts_cart(q, 1) * lattv(i, 1) +
+                       kpts_cart(q, 2) * lattv(i, 2)) / tpi;
+        double md = kcry * n[i];
+        long mi = std::llround(md);
+        if (std::abs(md - double(mi)) > tol)
+          return fail(fmt::format("shifted / non-Monkhorst-Pack k-grid not supported "
+                                  "(off-mesh crystal coord {})", md));
+        mi %= n[i];
+        if (mi < 0) mi += n[i];
+        m[i] = mi;
+      }
+      long p = (m[0] * n[1] + m[1]) * n[2] + m[2];
+      if (seen[p])
+        return fail("non-bijective k-grid (symmetry-reduced / IBZ?) not supported");
+      seen[p] = true;
+      slot[q] = p;
+    }
+    return slot;
+  }
+
   void apply(::nda::MemoryArrayOfRank<2> auto const& in,
              ::nda::MemoryArrayOfRank<2> auto&& out,
              bool forward, double scale, bool perm_in, bool perm_out) {
