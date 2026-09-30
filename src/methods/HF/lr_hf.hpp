@@ -83,11 +83,17 @@ public:
    *                   correction exactly as hf_t does, so ΔF matches how the
    *                   unperturbed Fock was built; the caller reads it from the
    *                   checkpoint.
+   * @param cache_dense_arrays - [INPUT] keep the two (s, k, P, Q) work arrays of the
+   *                   exchange path alive across evaluate() calls instead of
+   *                   allocating them per call. Costs 2·ns·nk·NP²·16 B spread over
+   *                   the job for the solver's lifetime, so it is meant for the one
+   *                   instance that runs every inner iteration.
    */
   lr_hf(std::shared_ptr<mpi_context_t> mpi,
         const mf::MF* MF,
         nda::array<double, 1> const& q_vec,
-        std::string hf_div_treatment = "gygi");
+        std::string hf_div_treatment = "gygi",
+        bool cache_dense_arrays = false);
 
   lr_hf(lr_hf const&) = delete;
   lr_hf(lr_hf &&) = default;
@@ -271,6 +277,14 @@ private:
   nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
   /// The HSEX kernel _U_RPQ was built for (nullopt = bare V), checked on reuse.
   std::optional<hsex_kernel_t::kernel_e> _U_RPQ_hsex;
+
+  /// ΔDm_skPQ / ΔF_skPQ work arrays of the dense path, kept across calls when
+  /// _cache_dense. Both are fully overwritten before every read: primary_to_aux
+  /// assigns every block, and ΔF_PQ is zeroed before each use.
+  using dArray_4D_host_t = dArray_t<memory::array<HOST_MEMORY, ComplexType, 4>>;
+  bool _cache_dense = false;
+  std::optional<dArray_4D_host_t> _dDeltaDm_skPQ;
+  std::optional<dArray_4D_host_t> _dDeltaF_skPQ;
 
   /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
   /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.

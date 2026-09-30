@@ -35,7 +35,8 @@ namespace solvers {
 lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
              const mf::MF* MF,
              nda::array<double, 1> const& q_vec,
-             std::string hf_div_treatment)
+             std::string hf_div_treatment,
+             bool cache_dense_arrays)
     : _mpi(mpi),
       _MF(MF),
       _ns(MF->nspin()),
@@ -46,6 +47,7 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
       _q_vec(q_vec),
       _kpq_map(_nkpts),
       _hf_div_treatment(std::move(hf_div_treatment)),
+      _cache_dense(cache_dense_arrays),
       _Timer() {
 
   // hf_t coerces because it takes user input; here the value is read back from the
@@ -322,11 +324,19 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   app_log(3, "    - processor grid for ΔDm:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
 
   _Timer.start("ALLOC");
+  // Cached in the solver when _cache_dense, otherwise in these per-call slots.
+  std::optional<dArray_4D_host_t> dDeltaDm_tmp, dDeltaF_tmp;
+  auto work_array = [&](std::optional<dArray_4D_host_t>& cached,
+                        std::optional<dArray_4D_host_t>& tmp, long nk) -> dArray_4D_host_t& {
+    auto& slot = _cache_dense ? cached : tmp;
+    if (not slot or slot->global_shape() != std::array<long, 4>{ns, nk, NP, NP})
+      slot.emplace(make_distributed_array<local_Array_4D_t>(_mpi->comm, {1, 1, np_P, np_Q},
+                                                             {ns, nk, NP, NP}));
+    return *slot;
+  };
   // ΔDm_skPQ is needed at all k-points in 1st-BZ
-  auto dDeltaDm_skPQ = make_distributed_array<local_Array_4D_t>(_mpi->comm, {1, 1, np_P, np_Q},
-                                                                 {ns, nkpts, NP, NP});
-  auto dDeltaF_skPQ = make_distributed_array<local_Array_4D_t>(_mpi->comm, {1, 1, np_P, np_Q},
-                                                                {ns, nkpts_ibz, NP, NP});
+  auto& dDeltaDm_skPQ = work_array(_dDeltaDm_skPQ, dDeltaDm_tmp, nkpts);
+  auto& dDeltaF_skPQ = work_array(_dDeltaF_skPQ, dDeltaF_tmp, nkpts_ibz);
   auto NP_loc = dDeltaDm_skPQ.local_shape()[2];
   auto NQ_loc = dDeltaDm_skPQ.local_shape()[3];
   auto P_origin = dDeltaDm_skPQ.origin()[2];
@@ -834,7 +844,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     sDeltaF_skij.win().fence();
   }
 
-  dDeltaDm_skPQ.reset();
+  dDeltaDm_tmp.reset();
+  dDeltaF_tmp.reset();
   _mpi->comm.barrier();
   _Timer.stop("MISC");
 }
