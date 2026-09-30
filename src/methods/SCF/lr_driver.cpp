@@ -238,9 +238,27 @@ void lr_driver::lr_setup(
                  "lr_driver::lr_setup: qp_static mode requires sMO_skia and sE_ska.");
   }
 
-  utils::check(p.iter_params.alg == "damping" || p.iter_params.alg == "DIIS",
-               "lr_driver::lr_setup: unknown iter_alg '{}'. Must be 'damping' or 'DIIS'.",
-               p.iter_params.alg);
+  utils::check(p.iter_params.alg == "damping" || p.iter_params.alg == "DIIS" ||
+               p.iter_params.alg == "GCR",
+               "lr_driver::lr_setup: unknown iter_alg '{}'. Must be 'damping', 'DIIS' "
+               "or 'GCR'.", p.iter_params.alg);
+  if (p.iter_params.alg == "GCR") {
+    // GCR's vectors are ΔF-sized and its basis stays valid only while the map is
+    // one fixed affine operator; the converged iterate x is then turned into ΔDm
+    // and ΔG by the ΔDm-only path's harvest, so that path must apply: a static
+    // K_sc.
+    utils::check(!k.sc.has_Sigma() && !k.sc.is_qp(),
+                 "lr_driver::lr_setup: iter_alg 'GCR' requires the ΔDm-only Dyson "
+                 "pass, which needs a static self-consistent kernel; K_sc carries a Σ "
+                 "or the qpGW map ({}).", k.sc.terms.to_string());
+    utils::check(k.sc.has_F(),
+                 "lr_driver::lr_setup: iter_alg 'GCR' needs a self-consistent kernel "
+                 "that evaluates ΔF.");
+    utils::check(!p.hessian(),
+                 "lr_driver::lr_setup: iter_alg 'GCR' is incompatible with the hessian "
+                 "estimator, which reads the raw pre-mixing kernel output of the "
+                 "accelerator's ring.");
+  }
 
   // Split-kernel (two-step) schedule: K = K_sc + K_pert, with K_sc resummed to
   // all orders by the inner SCF and K_pert applied `pert_order` times, each on a
@@ -468,6 +486,12 @@ void lr_driver::lr_setup(
   // Routing damping through the accelerator is also what makes the RAW pre-mixing
   // slice available, which the hessian estimator needs.
   _lr_diis = std::make_unique<lr_diis>(p.iter_params);
+  // GCR replaces the inner accelerator at the same slot, keeping its basis across
+  // the stages of one solve.
+  if (p.iter_params.alg == "GCR")
+    _lr_fgcr = std::make_unique<lr_fgcr>(p.iter_params.max_subsp_size);
+  else
+    _lr_fgcr.reset();
   // The outer accelerator is a separate object with its own subspace, history
   // and warmup: it is keyed on the outer step index while the inner one restarts
   // at every stage boundary, and the two must share nothing.
@@ -478,7 +502,12 @@ void lr_driver::lr_setup(
   // residual vector of every quantity the accelerator mixes; a ring that can never
   // extrapolate keeps trials only. Both facts come from the accelerator itself.
   lr_diis_hist_t inner_hist, outer_hist;
-  if (!k.sc.is_empty()) {
+  if (_lr_fgcr) {
+    // 2M basis vectors plus x and r: the depth-M, residual-carrying layout.
+    inner_hist.depth = static_cast<long>(_lr_fgcr->capacity());
+    inner_hist.n_F = 1;
+    inner_hist.with_residuals = true;
+  } else if (!k.sc.is_empty()) {
     inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
     inner_hist.n_F = k.sc.is_qp() ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = k.sc.mixes_Sigma() ? 1 : 0;
@@ -1005,11 +1034,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // residual S_1 - 0 needs no special casing — the histories start zeroed.
   if (_sDeltaDm_stage_prev) _sDeltaDm_stage_prev->set_zero();
   sDeltaDm_prev_skij.set_zero();
-  // Not strictly required — every read of these is guarded by stage_iter > 1 —
-  // but it makes a solve depend on nothing but its own ΔH0.
+  // Not strictly required — every read of these follows a save in the same solve
+  // (stage_iter > 1, or any iteration under GCR) — but it makes a solve depend on
+  // nothing but its own ΔH0.
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   _lr_diis->reset();
+  if (_lr_fgcr) _lr_fgcr->clear();
   if (outer_diis_on) _outer_diis->reset();
   _mixed_last_iter = false;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
@@ -1066,7 +1097,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // Split-kernel stage state. `stage_iter` is the iteration index within the
   // current stage: DIIS keys its warmup off it and it gates the prev-array save,
   // so a stage boundary looks like a fresh start even though ΔF_sc/ΔΣ_sc are
-  // deliberately carried over (warm start) into the next stage.
+  // deliberately carried over (warm start) into the next stage. GCR instead steps
+  // on every iteration, the first of a stage opening the new right-hand side.
   int n_applied = 0;
   int stage = 1;
   int stage_iter = 0;
@@ -1096,6 +1128,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // demand by the full pass on the same input (the harvest), which replaces ΔDm
   // and Δμ by that pass's — equal to round-off — so the triple the readers see
   // is consistent.
+  const bool gcr = (_lr_fgcr != nullptr);
   auto harvest = [&](const sArray_t<Array_view_4D_t>& sDeltaF_in) {
     _Timer.start("LR_DYSON");
     Delta_mu = _lr_dyson.solve_lr_dyson(
@@ -1157,8 +1190,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // K_pert was evaluated in this iteration (a stage boundary).
     bool K_pert_applied_this_iter = false;
     // Did the mixing block run this iteration? It is skipped on the first
-    // iteration of a stage (there is no previous iterate yet) and by a kernel with
-    // nothing self-consistent to mix, and the hessian estimator needs to know
+    // iteration of a stage under DIIS/damping (there is no previous iterate yet;
+    // GCR runs there) and by a kernel with nothing self-consistent to mix, and
+    // the hessian estimator needs to know
     // whether the arrays it is handed at exit are the raw kernel output or the
     // mixed iterate.
     bool mixed_this_iter = false;
@@ -1167,10 +1201,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // node root copies it whole; the mixed quantities are saved as this rank's
     // partition slice only, in parallel across the node.
     _Timer.start("LR_SAVE");
+    // GCR also needs the probe of a stage's first iteration: that step opens the
+    // new right-hand side.
+    if (stage_iter > 1 || gcr) _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
     if (stage_iter > 1) {
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
-      _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
       if (k.sc.is_qp()) {
         _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
       } else if (k.sc.mixes_Sigma()) {
@@ -1243,7 +1279,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // sc-channel (ΔF, ΔΣ). The perturbative source is frozen input, not an SCF
     // variable, so it never takes part in the mixing.
     _Timer.start("LR_ITER_ALG");
-    if (stage_iter > 1 && !k.sc.is_empty()) {
+    double gcr_rnorm = -1.0;
+    bool gcr_converged = false;
+    if ((stage_iter > 1 || gcr) && !k.sc.is_empty()) {
       // Striped: every rank of the global comm participates, each operating on its
       // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
       // back in place. Pass .local() views directly (in/out); the "prev" arguments
@@ -1261,6 +1299,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
             pDeltaSigma_sc->local(), _DeltaSigma.prev, stage_iter);
+      } else if (gcr) {
+        gcr_rnorm = _lr_fgcr->step(_mpi->comm, _pmap, sDeltaF_sc_skij.local(),
+                                   _DeltaF.prev, p.tol, gcr_converged);
       } else {
         nda::array<ComplexType, 5> empty_sigma;
         nda::array<ComplexType, 1> empty_prev;
@@ -1347,7 +1388,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     bool f_converged = !k.sc.has_F() || norm_DeltaF_diff < p.tol;
     bool sigma_converged = !k.sc.has_Sigma() || norm_DeltaSigma_diff < p.tol;
     bool inner_conv_std = (stage_iter > 1) && dm_converged && f_converged && sigma_converged;
-    bool inner_converged = (k.do_pert() && k.sc.is_empty()) ? true : inner_conv_std;
+    // GCR: the honest residual ‖r‖ of the affine inner problem, which a stage's
+    // first iteration can already meet when the recycled basis covers its
+    // right-hand side. The difference norms above remain diagnostics.
+    bool inner_converged = (k.do_pert() && k.sc.is_empty()) ? true
+                         : gcr ? gcr_converged : inner_conv_std;
 
     // Log iteration. This closes the iteration that produced the norms above,
     // so it comes before the stage-boundary block: K_pert logs of its own
@@ -1375,7 +1420,42 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                 iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
       }
     }
+    if (gcr) {
+      if (first_of_stage)
+        app_log(1, "          [GCR] ||r|| = {:.6e}  (new RHS: ||r0|| {:.6e} -> {:.6e} "
+                   "after projection on {} recycled pair(s))",
+                gcr_rnorm, _lr_fgcr->rhs_residual_raw(),
+                _lr_fgcr->rhs_residual_projected(), _lr_fgcr->basis_size());
+      else
+        app_log(1, "          [GCR] ||r|| = {:.6e}  (basis {})", gcr_rnorm,
+                _lr_fgcr->basis_size());
+    }
     _Timer.stop("LR_CONVERGENCE");
+
+    // GCR converged: the slot holds x, not the probe the ΔDm above came from.
+    // Form ΔDm at x before anything reads it (the outer test, K_pert, the exit);
+    // ΔG(τ) at x only if a reader asks for it (need_dG).
+    if (gcr && inner_converged) {
+      rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+      _Timer.start("LR_DYSON");
+      dm_pass(false);
+      _Timer.stop("LR_DYSON");
+      _mpi->comm.barrier();
+      // Diagnostic (verbosity >= 3): the true residual ‖K_sc(ΔDm(x)) − x‖ next to
+      // the recursive one, which would expose drift carried into the recycled
+      // basis. Costs one more K_sc evaluation per converged stage.
+      if (__app_verbosity__ >= 3) {
+        auto sF_check = math::shm::make_shared_array<Array_view_4D_t>(
+            *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+        apply_kernel(k.sc, sF_check, nullptr, sDeltaDm_skij, sDeltaG_tskij,
+                     sG_tskij, thc, p);
+        double true_res = utils::lr_distributed_norm(
+            _mpi->node_comm, sF_check.local(), sDeltaF_sc_skij.local(), true).second;
+        _mpi->comm.broadcast_n(&true_res, 1, 0);
+        app_log(3, "          [GCR] converged: true ||g(x) - x|| = {:.6e}, "
+                   "recursive ||r|| = {:.6e}", true_res, gcr_rnorm);
+      }
+    }
 
     // Stage boundary: one K_pert evaluation on the converged ΔG of this stage,
     // overwriting (not accumulating) the perturbative source — ΔG already
@@ -1481,8 +1561,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // The next stage solves a different fixed point: the DIIS history from
         // this one is invalid and its warmup keys off the stage-local iteration
         // index. ΔF_sc/ΔΣ_sc are deliberately kept as the warm start for the
-        // next stage.
-        _lr_diis->reset();
+        // next stage. GCR keeps its basis: only the right-hand side changed.
+        if (gcr) _lr_fgcr->reset_rhs();
+        else     _lr_diis->reset();
       } else {
         app_log(1, "    [outer] converged after {} K_pert evaluation(s): "
                    "||ΔDm - ΔDm_stage_prev|| = {:.6e} < {:.2e}",
@@ -1819,13 +1900,13 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
     const long per_entry = h.with_residuals ? 2 : 1;
     const double nelem =
         per_entry * slots * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
-    arrays.push_back({fmt::format("{} DIIS history", who),
+    arrays.push_back({std::string(who),
                       fmt::format("{}x{}x[{}xΔF + {}xΔΣ]", per_entry, slots,
                                   h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
-  push_hist(inner_hist, "inner");
-  push_hist(outer_hist, "outer");
+  push_hist(inner_hist, _lr_fgcr ? "inner GCR basis" : "inner DIIS history");
+  push_hist(outer_hist, "outer DIIS history");
 
   // Stationary hessian estimator. The ω stores — ΔΣ_λ(iω) and ΔG_p(iω) for every
   // perturbation of the batch — are the largest thing the feature allocates and the

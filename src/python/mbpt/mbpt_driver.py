@@ -19,6 +19,7 @@ limitations under the License.
 """
 
 import json
+import warnings
 
 from coqui._lib.mbpt_module import mbpt as mbpt_cxx
 
@@ -460,9 +461,16 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     iter_alg : dict or None, optional
         Iteration algorithm configuration. If None, uses DIIS with mixing=1.0
         and a subspace of 10. Keys:
-        - alg : str - "DIIS" (default) or "damping"
-        - mixing : float - Damping/mixing parameter (default 1.0)
-        - max_subsp_size : int - DIIS subspace size (default 10)
+        - alg : str - "DIIS" (default), "damping" or "GCR"
+        - mixing : float - Damping/mixing parameter (default 1.0; ignored by GCR)
+        - max_subsp_size : int - DIIS subspace size (default 10), or the GCR
+          basis capacity (default 100)
+        "GCR" solves the affine inner problem by GCR in probe form, converging
+        on the residual ||r|| <= tol and keeping its Krylov basis across the
+        stages of a split-kernel solve. It requires the ΔDm-only Dyson pass to
+        apply -- a static self-consistent kernel (no Sigma, no qpGW map in it)
+        and nbnd >= the number of frequency pools -- and is rejected with
+        hessian.
         - diis_warmup : int - Warmup iterations before DIIS (default 0)
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
@@ -657,7 +665,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     # Handle deprecated include_gw_sigma parameter
     if include_gw_sigma is not None:
-        import warnings
         warnings.warn(
             "include_gw_sigma is deprecated, use gw_mode='fixed_W' or gw_mode='full' instead",
             DeprecationWarning, stacklevel=2)
@@ -676,10 +683,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if iter_alg is None:
         iter_alg = {}
     alg = str(iter_alg.get("alg", "DIIS"))
-    if alg not in ("damping", "DIIS"):
-        raise ValueError(f"Unknown iter_alg '{alg}'. Must be 'damping' or 'DIIS'.")
+    if alg not in ("damping", "DIIS", "GCR"):
+        raise ValueError(
+            f"Unknown iter_alg '{alg}'. Must be 'damping', 'DIIS' or 'GCR'.")
     mixing = float(iter_alg.get("mixing", 1.0))
-    max_subsp_size = int(iter_alg.get("max_subsp_size", 10))
+    if alg == "GCR" and mixing != 1.0:
+        warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 100 if alg == "GCR" else 10))
     diis_warmup = int(iter_alg.get("diis_warmup", 0))
 
     if MPI.COMM_WORLD.Get_rank() == 0:
