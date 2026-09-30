@@ -237,9 +237,8 @@ public:
    * rather than skipping quietly, so "has ΔG(τ) been replicated?" is answered by
    * the call sites and never by state inside lr_dyson.
    *
-   * Collective: every rank must call it, or none. In lr_driver that follows from
-   * k.any_Sigma() and p.save_DeltaG, both loop-invariant and identical on
-   * every rank.
+   * Collective: every rank must call it, or none. In lr_driver every call site
+   * depends only on kernel flags and loop state that agree on every rank.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
