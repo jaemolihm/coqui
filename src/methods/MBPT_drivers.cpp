@@ -1539,6 +1539,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   //     full-basis object; each trimmed dataset says so via an "nbnd_save"
   //     attribute. Absent = no trim.
   auto save_DeltaG = io::get_value_with_default<bool>(pt, "save_DeltaG", true);
+  // ΔDm-only Dyson pass on iterations that do not read ΔG(τ); see
+  // lr_params::dm_only_dyson. Opt-in, off by default.
+  auto dm_only_dyson = io::get_value_with_default<bool>(pt, "dm_only_dyson", false);
   std::optional<long> nbnd_save;
   if (io::check_exists<long>(pt, "nbnd_save")) {
     nbnd_save = io::get_value<long>(pt, "nbnd_save");
@@ -2082,6 +2085,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // dump_lr below is the only reader of lr_state.sDeltaG_tskij, and it writes it
   // only under this flag, so it also decides whether ΔG(τ) is replicated at all.
   p.save_DeltaG      = save_DeltaG;
+  p.dm_only_dyson    = dm_only_dyson;
   p.iter_params      = iter_params;
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
   p.eps_inv_head_w   = opt_eps_inv_w ? &(*opt_eps_inv_w) : nullptr;

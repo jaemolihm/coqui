@@ -219,6 +219,11 @@ struct lr_params {
   /// the Dyson phase, so a Σ-free run that is not going to write it never pays:
   /// see the sDeltaG_tskij note on lr_solve_one for what that means for callers.
   bool save_DeltaG = true;
+  /// Iterations whose kernel reads ΔDm alone (no Σ in K_sc, no qp map) solve for
+  /// ΔDm only (lr_dyson::solve_lr_dm) instead of the full ΔG(iω) → ΔG(τ) pass;
+  /// ΔG(τ) is formed only where it is read. A frozen perturbative ΔΣ is summed
+  /// once per stage. Agrees with the full pass to round-off. Opt-in.
+  bool dm_only_dyson = false;
   lr_iter_params iter_params{};   ///< damping / DIIS
 
   // --- Split-kernel (two-step) schedule ---
@@ -560,7 +565,8 @@ public:
                              lr_diis_hist_t outer_hist = {},
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
-                             long hessian_nmodes = 0);
+                             long hessian_nmodes = 0,
+                             int n_dm_only = 0);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -708,6 +714,10 @@ private:
    */
   std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel(bool counter_term);
 
+  /// Whether this run's SCF iterations take the ΔDm-only Dyson pass: requested,
+  /// no reader of ΔG(τ) inside the loop's sc channel, and a size lr_dyson supports.
+  bool use_dm_only(lr_kernel_split const& k, lr_params const& p) const;
+
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
@@ -795,6 +805,13 @@ private:
   /// ΔDm at the previous stage boundary, whose change is the outer termination
   /// criterion. Kept whole: its norm is taken on the node_comm path.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_stage_prev;
+
+  // --- ΔDm-only Dyson pass (lr_params::dm_only_dyson).
+  /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_src;
+  /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
+  /// it, since the caller's ΔF has been mixed by then.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
 
   bool _setup_done = false;
 

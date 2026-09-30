@@ -388,6 +388,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            save_DeltaG=True,
            nbnd_save=None,
            method=None,
+           dm_only_dyson=False,
            lr_two_step=False,
            two_step_inner_method=None,
            two_step_order=1,
@@ -510,6 +511,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can
         turn it off.
+    dm_only_dyson : bool, optional
+        Solve for ΔDm alone on SCF iterations whose kernel reads nothing else
+        (no Σ in the self-consistent channel, no qpGW map): the ΔG(iω) → ΔG(τ)
+        pass is skipped and ΔG(τ) is formed only where it is read (the K_pert
+        evaluation of a split kernel, the checkpoint, the hessian). A frozen
+        perturbative ΔΣ is summed once per stage. Agrees with the full pass to
+        round-off (default False).
     hessian : bool, optional
         Also evaluate the free-energy hessian through the variationally-stationary
         (quadratic-error) functional (default False). The error in hessian then
@@ -708,6 +716,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         lr_params["div_treatment"] = str(div_treatment)
     # LR output volume (read by C++ dump_lr). Defaults keep the checkpoint as-is.
     lr_params["save_DeltaG"] = bool(save_DeltaG)
+    lr_params["dm_only_dyson"] = bool(dm_only_dyson)
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
     lr_params["lr_hessian"] = bool(hessian)

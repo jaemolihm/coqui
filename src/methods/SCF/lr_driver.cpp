@@ -456,6 +456,12 @@ void lr_driver::lr_setup(
                  "+ΔDm ⊙ W_c(iν=0), so K_sc + K_pert restores bare exchange");
   }
   app_log(1, "  qp_static_sigma = {}", k.qp_mode ? "true" : "false");
+  const bool dm_only = use_dm_only(k, p);
+  if (p.dm_only_dyson)
+    app_log(1, "  dm_only_dyson = {}", dm_only
+            ? "true (ΔDm-only Dyson pass; ΔG(τ) formed only where read)"
+            : "requested but not applicable (Σ in K_sc, qp mode, or a band-split "
+              "Dyson grid); full Dyson pass");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.mixing());
   if (p.use_diis()) {
@@ -542,7 +548,8 @@ void lr_driver::lr_setup(
   print_memory_estimate(thc.Np(), k.include_gw_sigma, k.gw_full, extra_sigma,
                         n_sigma_prev, inner_hist, outer_hist,
                         p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W,
-                        p.hessian_nmodes);
+                        p.hessian_nmodes,
+                        dm_only ? (k.pert_sigma ? 2 : 1) : 0);
   print_distribution_summary(thc.Np(), k.include_gw_sigma, k.gw_full);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -705,6 +712,13 @@ void lr_driver::lr_setup(
   if (outer_tol > 0.0)
     _sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+  if (dm_only) {
+    _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+        *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+    if (k.pert_sigma)
+      _sDeltaDm_src.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+  }
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
 
   // DeltaX IBC correction setup
@@ -853,6 +867,12 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel(bool counter
                          hsex_kernel_t::kernel_e::minus_Wc0};
   return hsex_kernel_t{&(*_opt_dWc0_qPQ), _hsex_head_factor,
                        hsex_kernel_t::kernel_e::V_plus_Wc0};
+}
+
+
+bool lr_driver::use_dm_only(lr_kernel_split const& k, lr_params const& p) const {
+  return p.dm_only_dyson && !k.sc_sigma && !k.qp_mode && !k.has_Vcorr &&
+         _lr_dyson.dm_only_supported();
 }
 
 
@@ -1153,6 +1173,20 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     if (k.do_pert && !k.sc_sigma && !k.split_Sigma && n_applied == 0) return nullptr;
     return sDeltaSigma_tskij;
   };
+  // ΔDm-only Dyson pass. Its ΔG(τ) is formed on demand by the full pass on the
+  // same input (the harvest), which replaces ΔDm and Δμ by that pass's — equal
+  // to round-off — so the triple the readers see is consistent.
+  const bool dm_only = use_dm_only(k, p);
+  auto harvest = [&](const sArray_t<Array_view_4D_t>& sDeltaF_in) {
+    _Timer.start("LR_DYSON");
+    Delta_mu = _lr_dyson.solve_lr_dyson(
+        sDeltaDm_skij, sDeltaH0_skij, sDeltaF_in, dyson_sigma(), p.fix_density,
+        static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+    deltaG_pending = true;
+    deltaG_in_shm = false;
+    _Timer.stop("LR_DYSON");
+    _mpi->comm.barrier();
+  };
 
   const bool log_sigma_col = has_Sigma_sc || has_Vcorr;
 
@@ -1212,13 +1246,29 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
     // the static ΔV_QPGW enters as a frequency-independent one-body term.
     _Timer.start("LR_DYSON");
-    const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
-    Delta_mu = _lr_dyson.solve_lr_dyson(
-        sDeltaDm_skij, sDeltaH0_skij,
-        sDeltaF_skij, dyson_sigma(),
-        p.fix_density, dyson_vcorr);
-    deltaG_pending = true;
-    deltaG_in_shm = false;
+    if (dm_only) {
+      // The frozen perturbative ΔΣ enters through its own ΔDm, summed once per
+      // stage; the static RHS is summed every iteration.
+      const bool has_src = k.pert_sigma && n_applied >= 1;
+      if (has_src && first_of_stage)
+        _lr_dyson.build_dynamic_source(*_sDeltaDm_src, *sDeltaSigma_tskij);
+      _sDeltaF_dyson_in->win().fence();
+      if (_mpi->node_comm.root()) _sDeltaF_dyson_in->local() = sDeltaF_skij.local();
+      _sDeltaF_dyson_in->win().fence();
+      Delta_mu = _lr_dyson.solve_lr_dm(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                                       has_src ? &(*_sDeltaDm_src) : nullptr,
+                                       p.fix_density);
+      deltaG_pending = false;
+      deltaG_in_shm = false;
+    } else {
+      const sArray_t<Array_view_4D_t>* dyson_vcorr = has_Vcorr ? &sDeltaVcorr_skij : nullptr;
+      Delta_mu = _lr_dyson.solve_lr_dyson(
+          sDeltaDm_skij, sDeltaH0_skij,
+          sDeltaF_skij, dyson_sigma(),
+          p.fix_density, dyson_vcorr);
+      deltaG_pending = true;
+      deltaG_in_shm = false;
+    }
 
     // The solve leaves ΔG(τ) distributed; replicating it is the single most
     // expensive step of the Dyson phase, so it happens only where something
@@ -1422,7 +1472,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        if (k.pert_sigma && deltaG_pending) materialize();
+        if (k.pert_sigma) {
+          if (dm_only && !deltaG_pending && !deltaG_in_shm) harvest(*_sDeltaF_dyson_in);
+          if (deltaG_pending) materialize();
+        }
         apply_kernel(K_pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
 
@@ -1551,8 +1604,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // outlives the solve and is reused by the next perturbation, so skipping this
   // would hand those readers the previous perturbation's ΔG next to this one's
   // ΔDm/ΔF. With no reader the gather is skipped outright.
-  if (deltaG_pending && (p.save_DeltaG || (p.hessian() && k.pert_sigma)))
-    materialize();
+  if (p.save_DeltaG || (p.hessian() && k.pert_sigma)) {
+    if (dm_only && !deltaG_pending && !deltaG_in_shm) harvest(*_sDeltaF_dyson_in);
+    if (deltaG_pending) materialize();
+  }
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.qp_mode && sDeltaVcorr_out_skij != nullptr) {
@@ -1757,7 +1812,8 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
                                       lr_diis_hist_t outer_hist,
                                       bool need_Delta_mu,
                                       bool exchange_static_W,
-                                      long hessian_nmodes) {
+                                      long hessian_nmodes,
+                                      int n_dm_only) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1815,6 +1871,14 @@ void lr_driver::print_memory_estimate(long NP, bool include_gw_sigma, bool gw_fu
     for (auto const& name : extra_sigma)
       arrays.push_back({name, shp5b(nt), band5(nt), false, PERSIST});
   }
+
+  // ΔDm-only Dyson pass: the ΔF it was fed, and the ΔDm of the frozen ΔΣ.
+  if (n_dm_only >= 1)
+    arrays.push_back({"ΔF Dyson input (dm-only)",
+                      fmt::format("({},{},{},{})", ns, nki, nb, nb), band5(1), false, PERSIST});
+  if (n_dm_only >= 2)
+    arrays.push_back({"ΔDm of frozen ΔΣ (dm-only)",
+                      fmt::format("({},{},{},{})", ns, nki, nb, nb), band5(1), false, PERSIST});
 
   // --- Persistent, striped over the global comm (each rank keeps one element
   //     slice of a node-replicated band array) ---

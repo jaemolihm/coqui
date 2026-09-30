@@ -244,6 +244,56 @@ public:
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
   /**
+   * @brief Whether solve_lr_dm / build_dynamic_source can run at this size.
+   *
+   * They reuse lr_dyson_omega_pgrid's (ω, k) ownership and slice the band rows
+   * of the reduced ΔDm over each ω-pool, so they need the band axes undivided
+   * and at least one band row per ω-pool member. Otherwise the caller takes
+   * solve_lr_dyson.
+   */
+  bool dm_only_supported() const;
+
+  /**
+   * @brief ΔDm only, for a static one-body RHS: the part of solve_lr_dyson an
+   *        SCF iteration that does not read ΔG(τ) needs.
+   *
+   * ΔDm = −ΔG(τ=β⁻), and ΔG(τ) = Ttw·ΔG(iω), so
+   *
+   *   ΔDm(k) = Σ_ω c_ω · G_{k+q}(iω) · X(k) · G_k(iω),   c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω),
+   *
+   * with X = ΔH0 + ΔF. c_ω folds into the alpha of the per-(ω,k) gemm pair and
+   * the pair accumulates, so the pass does the same flops as the Dyson loop and
+   * skips ΔG(iω), its redistribute, the ω→τ transform and ΔG(τ). The result
+   * agrees with solve_lr_dyson to round-off, not bitwise.
+   *
+   * `sDeltaDm_src`, when given, is a ΔDm(Δμ=0) contribution computed elsewhere
+   * (build_dynamic_source) and added before the Δμ step. With fix_density at
+   * q=Γ the Δμ closed form of solve_lr_dyson follows, shifting ΔDm alone.
+   *
+   * Leaves no ΔG(τ) behind: materialize_DeltaG_tau() after this throws.
+   * Requires dm_only_supported(). Collective on comm.
+   *
+   * @return the Δμ used, as solve_lr_dyson
+   */
+  double solve_lr_dm(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                     const sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                     const sArray_t<Array_view_4D_t>* sDeltaDm_src,
+                     bool fix_density);
+
+  /**
+   * @brief The ΔDm(Δμ=0) of a dynamic RHS ΔΣ(τ) alone, into `sDeltaDm_src`.
+   *
+   * The Dyson map is linear in its RHS, so a ΔΣ that is frozen over many
+   * solve_lr_dm calls is summed once here and handed to each of them as
+   * `sDeltaDm_src`. Transforms ΔΣ to iω on the ω-side grid, runs the same pass
+   * as solve_lr_dm with X(iω) = ΔΣ(iω), and frees the ω array.
+   * Requires dm_only_supported(). Collective on comm.
+   */
+  void build_dynamic_source(sArray_t<Array_view_4D_t>& sDeltaDm_src,
+                            const sArray_t<Array_view_5D_t>& sDeltaSigma_tskij);
+
+  /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
    *
    * Computes: ΔN = Tr[S · ΔDm] = Σ_k w_k Tr[S(k) · ΔDm(k)]
@@ -316,6 +366,8 @@ public:
     app_log(level, "{0}      - trailing barrier:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("GATHER_SHM_BARRIER"), _Timer.number_of_calls("GATHER_SHM_BARRIER"));
     print_gather_bandwidth(level, indent);
     app_log(level, "{0}  - Compute ΔDm (incl. gather): {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM"), _Timer.number_of_calls("LR_DYSON_DM"));
+    app_log(level, "{0}  - ΔDm-only pass:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DM_ONLY"), _Timer.number_of_calls("LR_DYSON_DM_ONLY"));
+    app_log(level, "{0}  - ΔDm of frozen ΔΣ (source):  {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_SRC"), _Timer.number_of_calls("LR_DYSON_SRC"));
     app_log(level, "{0}  - Δμ shift (ΔG += Δμ·dG/dμ):   {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_DELTAMU"), _Timer.number_of_calls("LR_DYSON_DELTAMU"));
     app_log(level, "{0}  - Compute ΔN:                 {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_NELEC"), _Timer.number_of_calls("LR_DYSON_NELEC"));
     app_log(level, "{0}  - Misc (barrier/reset):       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_MISC"), _Timer.number_of_calls("LR_DYSON_MISC"));
@@ -383,8 +435,24 @@ private:
   // Turn the Δμ=0 solution retained by the last pass into the solution at Δμ:
   // ΔG(τ) += Δμ·dG/dμ(τ) on the retained distributed array, ΔDm += Δμ·dDm/dμ on the
   // node-replicated one. Both are local adds; nothing is recomputed.
+  void apply_dmu_shift_G(double Delta_mu);
   template<typename DeltaDm_t>
-  void apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu);
+  void apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu);
+
+  // Steps 2-3 of the fix_density solve on the Δμ=0 ΔDm the pass left: Δμ from
+  // the closed form, then the shift of ΔDm (and of the retained ΔG(τ) when
+  // shift_G). Returns 0 and touches nothing unless fix_density at q=Γ.
+  template<typename DeltaDm_t>
+  double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density, bool shift_G);
+
+  // The ΔDm pass behind solve_lr_dm / build_dynamic_source: accumulates
+  // c_ω·G_{k+q}·X·G_k over this rank's (ω, k) block of lr_dyson_omega_pgrid,
+  // reduces over the ω-pool, and assembles ΔDm(Δμ=0) in `sDeltaDm_out` through
+  // gather_to_shm. X = ΔH0 + ΔF (when both are given) + ΔΣ(iω) (when given).
+  void dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
+                    const sArray_t<Array_view_4D_t>* sDeltaH0_skij,
+                    const sArray_t<Array_view_4D_t>* sDeltaF_skij,
+                    const dArray_5D_t* dDeltaSigma_wskij);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;
@@ -427,6 +495,16 @@ private:
   double _cached_dN_dmu = 0.0;
   std::optional<dArray_5D_t> _dG_dmu_tskij;
   std::optional<sArray_t<Array_view_4D_t>> _sdDm_dmu_skij;
+
+  // ΔDm-only pass: c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω), and this rank's (ω, k) block,
+  // ω-pool and band-row slice. Built on first use.
+  nda::array<ComplexType, 1> _c_beta_w;
+  bool _dm_only_layout = false;
+  long _dmo_w_org = 0, _dmo_nw_loc = 0, _dmo_k_org = 0, _dmo_nk_loc = 0;
+  long _dmo_i_org = 0, _dmo_ni_loc = 0;
+  std::array<long, 4> _dmo_grid = {1, 1, 1, 1};
+  std::optional<mpi3::communicator> _wpool_comm;
+  void setup_dm_only_layout();
 
   // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
   size_t _gather_bytes = 0;
