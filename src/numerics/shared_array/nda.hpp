@@ -385,6 +385,62 @@ namespace math {
                      grid, gshape, lshape, origin);
     }
 
+    /**
+     * Sums the n-element per-rank buffer `partial` over `comm`; rank r of `comm` adds
+     * scl · (its stripe r of the sum) into ITS OWN node's window of sA, at flat offset
+     * `offset + stripe_begin`. The write half of the pair whose other half is
+     * shared_array::all_reduce_parallel().
+     *
+     * Collective on comm. No window sync and no internode reduction: when comm spans
+     * several nodes, each node's window receives only the stripes of its own ranks, and
+     * the caller's single all_reduce_parallel() publishes the writes and sums the
+     * per-node partials. So it is correct for comm = node_comm and for a comm that
+     * spans nodes alike. Repeated calls between one set_zero() and that reduction
+     * accumulate into the same stripes.
+     *
+     * Stripes are element-granular, itertools::chunk_range over each chunk of `chunk`
+     * elements. The chunking bounds the MPI accumulation temporaries and keeps every
+     * count below 2^31. `partial` is clobbered.
+     */
+    template<::nda::MemoryArray Array_base_t>
+    void reduce_scatter_add(mpi3::communicator& comm, shared_array<Array_base_t>& sA,
+                            typename shared_array<Array_base_t>::value_type* partial,
+                            long offset, long n,
+                            typename shared_array<Array_base_t>::value_type scl,
+                            long chunk = 1L << 22) {
+      using value_type = typename shared_array<Array_base_t>::value_type;
+      static_assert(std::is_same_v<value_type, std::complex<double>> or
+                    std::is_same_v<value_type, double>,
+                    "reduce_scatter_add: value_type must be double or std::complex<double>");
+      MPI_Datatype dtype = std::is_same_v<value_type, double> ? MPI_DOUBLE
+                                                              : MPI_CXX_DOUBLE_COMPLEX;
+      utils::check(offset >= 0 and n >= 0 and offset + n <= long(sA.size()),
+                   "reduce_scatter_add: range [{}, {}) exceeds the window size {}",
+                   offset, offset + n, sA.size());
+      utils::check(chunk > 0 and chunk <= long(std::numeric_limits<int>::max()),
+                   "reduce_scatter_add: chunk {} outside (0, 2^31)", chunk);
+
+      int np = comm.size();
+      int r = comm.rank();
+      std::vector<int> counts(np);
+      value_type* win = sA.local().data();
+      for (long c0 = 0; c0 < n; c0 += chunk) {
+        long len = std::min(chunk, n - c0);
+        for (int p = 0; p < np; ++p) {
+          auto [b, e] = itertools::chunk_range(0, len, np, p);
+          counts[p] = int(e - b);
+        }
+        // In place: the whole chunk is read from partial + c0, and this rank's stripe
+        // of the sum lands at partial + c0, not at its offset within the chunk.
+        MPI_Reduce_scatter(MPI_IN_PLACE, partial + c0, counts.data(), dtype, MPI_SUM,
+                           comm.get());
+        long i0 = itertools::chunk_range(0, len, np, r).first;
+        value_type* dst = win + offset + c0 + i0;
+        const value_type* src = partial + c0;
+        for (long i = 0; i < counts[r]; ++i) dst[i] += scl * src[i];
+      }
+    }
+
   } // shm
 } // math
 
