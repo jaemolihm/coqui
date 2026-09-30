@@ -215,10 +215,10 @@ struct lr_params {
   int max_iter = 1;               ///< 1 = one-shot
   double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
-  /// Whether the caller will read sDeltaG_tskij after the solve (it is the
-  /// checkpoint's save_DeltaG). Replicating ΔG(τ) is the most expensive step of
-  /// the Dyson phase, so a Σ-free run that is not going to write it never pays:
-  /// see the sDeltaG_tskij note on lr_solve_one for what that means for callers.
+  /// Whether the caller will read sDeltaG_tskij after the solve (the checkpoint's
+  /// save_DeltaG). Replicating ΔG(τ) is the most expensive step of the Dyson
+  /// phase, so it is done only for a reader: see the sDeltaG_tskij note on
+  /// lr_solve_one for when the array is current at exit.
   bool save_DeltaG = true;
   /// Iterations whose kernel reads ΔDm alone (no Σ in K_sc, no qp map) solve for
   /// ΔDm only (lr_dyson::solve_lr_dm) instead of the full ΔG(iω) → ΔG(τ) pass;
@@ -438,10 +438,12 @@ public:
    * The output arrays may be the same ones on every call — they are fully
    * overwritten.
    *
-   * sDeltaG_tskij is the one exception: it is written only when something asks
-   * for it, i.e. when the kernel carries a Σ or p.save_DeltaG is set. Otherwise
-   * ΔG(τ) is left distributed inside lr_dyson and this array keeps whatever it
-   * held before. A caller that reads it must set p.save_DeltaG.
+   * sDeltaG_tskij is the one exception: it holds the ΔG(τ) of the returned ΔDm
+   * at exit if and only if K_sc carries a Σ, p.save_DeltaG is set, or the hessian
+   * is on with a Σ in K_pert. Otherwise it holds whatever was last replicated
+   * into it — a split run with Σ in K_pert leaves the last stage boundary's ΔG
+   * there, a Σ-free run the previous perturbation's. A caller that reads it must
+   * set p.save_DeltaG.
    *
    * @return Tuple of (number of iterations, final Δμ)
    */

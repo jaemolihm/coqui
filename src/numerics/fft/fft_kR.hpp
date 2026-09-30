@@ -43,7 +43,7 @@ namespace fft {
 
 /**
  * Blocked-FFT replacement for the dense k<->R Fourier-transform gemms used by
- * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw).
+ * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw / lr_hf).
  *
  * Design note (why the existing gemm / plain batched-FFT paths are not reused):
  * the LR arrays are (nk, ncols) row-major with k as the SLOW axis. A batched
@@ -80,10 +80,11 @@ public:
 #if defined(ENABLE_FFTW)
     _n[0] = kp_grid(0); _n[1] = kp_grid(1); _n[2] = kp_grid(2);
     _nk = _n[0] * _n[1] * _n[2];
-    // Preconditions are the caller's responsibility (the LR path forbids
-    // symmetry and guards the Γ-only case): assert loudly rather than silently
-    // reverting to the gemm path on a grid the FFT cannot represent. A caller
-    // that wants the fallback asks mesh_ok() first.
+    // Preconditions are the caller's responsibility: assert loudly rather than
+    // silently reverting to the gemm path on a grid the FFT cannot represent.
+    // lr_gw / lr_rpa_pi forbid symmetry and guard the Γ-only case; lr_hf, which
+    // supports symmetry-reduced inputs, asks mesh_ok() first and falls back to
+    // gemm.
     std::string why;
     auto slots = mesh_slots(kpts_cart, lattv, kp_grid, &why);
     utils::check(slots.has_value(), "fft_kR_t: {}", why);
