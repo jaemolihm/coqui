@@ -466,11 +466,24 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
-      // FT ΔDm k→R
+      // FT ΔDm k→R. Only the R = 0 row is read below, which off the gemm path is
+      // the plain k average (the transform's 1/nk Σ_k e^{-ik·0}).
       if (nkpts != 1) {
-        k_to_R_DeltaDm(dDeltaDm_skPQ, sf_Rk, buffer, R_grid);
+        if (_use_fft) {
+          _Timer.start("FT_R");
+          auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(),
+                                         shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
+          for (int s = 0; s < ns; ++s) {
+            auto R0 = DeltaDm_3D(s, 0, nda::range::all);
+            for (long ik = 1; ik < nkpts; ++ik) R0 += DeltaDm_3D(s, ik, nda::range::all);
+            R0 *= 1.0 / double(nkpts);
+          }
+          _Timer.stop("FT_R");
+        } else {
+          k_to_R_DeltaDm(dDeltaDm_skPQ, sf_Rk, buffer, R_grid);
+        }
       }
-      // After FT: dDeltaDm_skPQ is now dDeltaDm_sRPQ
+      // After FT: dDeltaDm_skPQ is now dDeltaDm_sRPQ (row R = 0 only on the FFT path)
       auto& dDeltaDm_sRPQ = dDeltaDm_skPQ;
 
       // Accumulate DeltaDm_QQ diagonal
