@@ -81,7 +81,7 @@ double lr_dyson::solve_lr_dyson(
   // A ΔG(τ) nobody gathered before this solve is dead by definition. Dropped
   // before anything is allocated, so the in-solve memory peak is unchanged.
   _dDeltaG_tau_buffer.reset();
-  _dG_replicated_into = nullptr;
+  _sDeltaG_holder = nullptr;
 
   // Processor grid of the ω-side arrays. A pure function of the sizes, so
   // solve_lr_dyson_impl derives the same one and the two agree by construction.
@@ -397,7 +397,7 @@ void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
 
 
 void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) {
-  if (_dG_replicated_into == &sDeltaG_tskij) return;
+  if (_sDeltaG_holder == &sDeltaG_tskij) return;
   utils::check(bool(_dDeltaG_tau_buffer),
                "lr_dyson::materialize_DeltaG_tau: no ΔG(τ) to replicate. Either "
                "solve_lr_dyson() has not run since the last call, or ΔG(τ) was "
@@ -408,7 +408,7 @@ void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) 
   _Timer.stop("LR_DYSON_GATHER");
 
   _dDeltaG_tau_buffer.reset();
-  _dG_replicated_into = &sDeltaG_tskij;
+  _sDeltaG_holder = &sDeltaG_tskij;
 }
 
 
@@ -498,7 +498,7 @@ void lr_dyson::build_dmu_response() {
                "build_dmu_response: the Dyson pass retained no ΔG(τ).");
   _dG_dmu_tskij.emplace(std::move(*_dDeltaG_tau_buffer));
   _dDeltaG_tau_buffer.reset();
-  _dG_replicated_into = nullptr;
+  _sDeltaG_holder = nullptr;
   _sdDm_dmu_skij.emplace(std::move(sdDm_dmu_skij));
 
   // N = Tr[S·Dm] summed over k with the spin factor, so differentiating at fixed

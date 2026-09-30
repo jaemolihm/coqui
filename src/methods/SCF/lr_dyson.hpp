@@ -405,8 +405,9 @@ private:
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
   // of every solve so a solve never inherits the previous one's array.
   std::optional<dArray_5D_t> _dDeltaG_tau_buffer;
-  // The array the current solve's ΔG(τ) was replicated into; null until then.
-  const void* _dG_replicated_into = nullptr;
+  // The shared array holding the current solve's replicated ΔG(τ); null until
+  // materialize_DeltaG_tau() has run for this solve.
+  const sArray_t<Array_view_5D_t>* _sDeltaG_holder = nullptr;
 
   // Δμ response of the LR solution. Δμ enters the RHS only through the −Δμ·S
   // term, so ΔG is affine in it:

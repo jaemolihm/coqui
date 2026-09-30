@@ -1072,8 +1072,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   //
   // The ΔΣ the Dyson RHS reads. When only K_pert carries a Σ, there is none until
   // the first K_pert evaluation writes it.
-  sArray_t<Array_view_5D_t>* dyson_sigma =
-      (k.any_Sigma() && !k.sc.is_qp() && k.sc.has_Sigma()) ? sDeltaSigma_tskij : nullptr;
+  sArray_t<Array_view_5D_t>* dyson_DeltaSigma_tskij =
+      k.sc.mixes_Sigma() ? sDeltaSigma_tskij : nullptr;
 
   const bool log_sigma_col = k.sc.has_Sigma();
 
@@ -1137,11 +1137,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         k.sc.is_qp() ? &sDeltaVcorr_skij : nullptr;
     Delta_mu = _lr_dyson.solve_lr_dyson(
         sDeltaDm_skij, sDeltaH0_skij,
-        sDeltaF_skij, dyson_sigma,
+        sDeltaF_skij, dyson_DeltaSigma_tskij,
         p.fix_density, dyson_vcorr);
 
-    // The solve leaves ΔG(τ) distributed; replicating it is the single most
-    // expensive step of the Dyson phase. A Σ in K_sc reads it every iteration.
+    // The solve leaves ΔG(τ) distributed, and replicating it is the single most
+    // expensive step of the Dyson phase. If K_sc evaluates a ΔΣ, we need ΔG(τ)
+    // materialized as a shared-memory array every iteration.
     if (k.sc.has_Sigma()) _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
@@ -1342,7 +1343,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
         apply_kernel(k.pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
-        if (k.any_Sigma() && !k.sc.is_qp()) dyson_sigma = sDeltaSigma_tskij;
+        if (k.pert.has_Sigma()) dyson_DeltaSigma_tskij = sDeltaSigma_tskij;
 
         // Extrapolate the perturbative source. Only a quantity the channel
         // actually carries may be mixed — a pert ΔΣ handle of a channel without Σ
