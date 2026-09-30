@@ -24,6 +24,7 @@
 #include "methods/SCF/lr_dyson.hpp"
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "itertools/itertools.hpp"
 
 namespace methods {
 
@@ -55,6 +56,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
   for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
                   "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
                   "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_DELTAMU", "LR_DYSON_MISC",
+                  "LR_DYSON_DM_ONLY", "LR_DYSON_SRC",
                   "GATHER_SHM_ZERO", "GATHER_SHM_ASSIGN", "GATHER_SHM_SKEW",
                   "GATHER_SHM_REDUCE", "GATHER_SHM_BARRIER"}) {
     _Timer.add(v);
@@ -120,53 +122,11 @@ double lr_dyson::solve_lr_dyson(
   //
   // There is therefore one Dyson pass in every mode, always at Δμ = 0; only
   // steps 2-3 are conditional.
-  double Delta_mu = 0.0;
-  double dN_dmu = 0.0;
-  if (fix_density and _is_q_gamma) {
-    utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
-                 "solve_lr_dyson: fix_density=true but the Δμ response is not cached. "
-                 "Call build_dmu_response() before the SCF loop.");
-
-    app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
-    dN_dmu = _cached_dN_dmu;
-  }
-
-  // Step 1 in fix_density mode, the whole solve otherwise.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
                       dDeltaSigma_wskij, /*Delta_mu=*/0.0,
                       sDeltaVcorr_skij);
 
-  if (fix_density and _is_q_gamma) {
-    _Timer.start("LR_DYSON_NELEC");
-    const double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
-    _Timer.stop("LR_DYSON_NELEC");
-
-    if (std::abs(dN_dmu) < 1e-15) {
-      // Δμ stays 0, which leaves ΔDm untouched, so ΔN(Δμ=0) is already the final
-      // ΔN — and it is exactly the density error the warning is about.
-      app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
-      app_log(3, "  Final ΔN = {:.6e} (density not restored)", DeltaN_0);
-    } else {
-      // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
-      // (The LR Dyson equation is linear in Δμ, so this is exact)
-      Delta_mu = -DeltaN_0 / dN_dmu;
-      app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
-      app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
-
-      // Step 3, as a local axpy on the Δμ=0 solution:
-      //   ΔG(τ; Δμ) = ΔG(τ; 0) + Δμ·(dG/dμ)(τ)
-      //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dDm/dμ)
-      _Timer.start("LR_DYSON_DELTAMU");
-      apply_dmu_shift(sDeltaDm_skij, Delta_mu);
-      _Timer.stop("LR_DYSON_DELTAMU");
-
-      // Verify ΔN ≈ 0
-      _Timer.start("LR_DYSON_NELEC");
-      const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
-      _Timer.stop("LR_DYSON_NELEC");
-      app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
-    }
-  }
+  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density, /*shift_G=*/true);
 
   _Timer.stop("LR_DYSON");
   print_timers(3);  // per-step diagnostics only at verbosity >= 3
@@ -374,7 +334,51 @@ void lr_dyson::solve_lr_dyson_impl(
 
 
 template<typename DeltaDm_t>
-void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
+double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density,
+                                   bool shift_G) {
+  if (!(fix_density and _is_q_gamma)) return 0.0;
+  utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
+               "solve_lr_dyson: fix_density=true but the Δμ response is not cached. "
+               "Call build_dmu_response() before the SCF loop.");
+  app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
+  const double dN_dmu = _cached_dN_dmu;
+
+  _Timer.start("LR_DYSON_NELEC");
+  const double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
+  _Timer.stop("LR_DYSON_NELEC");
+
+  if (std::abs(dN_dmu) < 1e-15) {
+    // Δμ stays 0, which leaves ΔDm untouched, so ΔN(Δμ=0) is already the final
+    // ΔN — and it is exactly the density error the warning is about.
+    app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
+    app_log(3, "  Final ΔN = {:.6e} (density not restored)", DeltaN_0);
+    return 0.0;
+  }
+
+  // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
+  // (The LR Dyson equation is linear in Δμ, so this is exact)
+  const double Delta_mu = -DeltaN_0 / dN_dmu;
+  app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
+  app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
+
+  // Step 3, as a local axpy on the Δμ=0 solution:
+  //   ΔG(τ; Δμ) = ΔG(τ; 0) + Δμ·(dG/dμ)(τ)
+  //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dDm/dμ)
+  _Timer.start("LR_DYSON_DELTAMU");
+  if (shift_G) apply_dmu_shift_G(Delta_mu);
+  apply_dmu_shift_Dm(sDeltaDm_skij, Delta_mu);
+  _Timer.stop("LR_DYSON_DELTAMU");
+
+  // Verify ΔN ≈ 0
+  _Timer.start("LR_DYSON_NELEC");
+  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
+  _Timer.stop("LR_DYSON_NELEC");
+  app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
+  return Delta_mu;
+}
+
+
+void lr_dyson::apply_dmu_shift_G(double Delta_mu) {
   // dG/dμ(τ) came out of solve_lr_dyson_impl, so its grid is derived from the same
   // (comm.size(), nkpts_ibz, nbnd) as the ΔG(τ) sitting in _dDeltaG_tau_buffer
   // and the two blocks coincide. Checked rather than assumed: a mismatch would
@@ -386,12 +390,171 @@ void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
                "apply_dmu_shift: ΔG(τ) and dG/dμ(τ) are distributed differently.");
 
   _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dG_dmu_tskij->local();
+}
 
+
+template<typename DeltaDm_t>
+void lr_dyson::apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
   // ΔDm and dDm/dμ are both node-replicated, so the add runs once per node.
   sDeltaDm_skij.win().fence();
   if (_context->node_comm.root())
     sDeltaDm_skij.local() += ComplexType(Delta_mu) * _sdDm_dmu_skij->local();
   sDeltaDm_skij.win().fence();
+}
+
+
+bool lr_dyson::dm_only_supported() const {
+  auto [w_pgrid, w_bsize] =
+      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  return w_pgrid[3] * w_pgrid[4] == 1 and _nbnd >= w_pgrid[0];
+}
+
+
+void lr_dyson::setup_dm_only_layout() {
+  if (_dm_only_layout) return;
+  utils::check(dm_only_supported(),
+               "lr_dyson: the ΔDm-only pass needs undivided band axes and nbnd >= "
+               "the number of ω pools; take solve_lr_dyson instead.");
+  using math::nda::make_distributed_array;
+
+  // c_ω: the ω→τ matrix followed by the τ→β⁻ vector, as one length-nw vector.
+  {
+    auto Ttw = _dyson.FT()->Ttw_ff();
+    auto Tb = _dyson.FT()->T_beta_t_ff();
+    _c_beta_w = nda::array<ComplexType, 1>(_nw);
+    for (long n = 0; n < _nw; ++n) {
+      ComplexType c(0.0);
+      for (long t = 0; t < _nts; ++t) c += Tb(t) * Ttw(t, n);
+      _c_beta_w(n) = -c;
+    }
+  }
+
+  // The (ω, k) block solve_lr_dyson_impl gives this rank: the same pgrid on the
+  // same (ω, s, k) extents, with the band axes collapsed to a single element.
+  auto [w_pgrid, w_bsize] =
+      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  auto own = make_distributed_array<nda::array<ComplexType, 5>>(
+      _context->comm, w_pgrid, {_nw, _ns, _nkpts_ibz, 1, 1});
+  _dm_w_origin = own.origin()[0];
+  _dm_nw_local = own.local_shape()[0];
+  _dm_k_origin = own.origin()[2];
+  _dm_nk_local = own.local_shape()[2];
+
+  // The ranks sharing a k block form an ω pool. After the pool's reduction every
+  // member holds the same partial ΔDm, so each hands a disjoint band-row slice to
+  // gather_to_shm and the slices cover all ranks exactly once.
+  _wpool_comm.emplace(_context->comm.split(int(_dm_k_origin), _context->comm.rank()));
+  utils::check(_wpool_comm->size() == w_pgrid[0],
+               "lr_dyson: ω pool of size {} for {} ω pools.",
+               _wpool_comm->size(), w_pgrid[0]);
+  auto [i0, i1] = itertools::chunk_range(0, long(_nbnd), long(_wpool_comm->size()),
+                                         long(_wpool_comm->rank()));
+  _dm_row_origin = i0;
+  _dm_nrow_local = i1 - i0;
+  _dm_rows_grid = {1, w_pgrid[2], w_pgrid[0], 1};
+  _dm_only_layout = true;
+}
+
+
+void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
+                            const sArray_t<Array_view_4D_t>* sDeltaH0_skij,
+                            const sArray_t<Array_view_4D_t>* sDeltaF_skij,
+                            const dArray_5D_t* dDeltaSigma_wskij) {
+  utils::check(_cached_G_wskij != nullptr,
+               "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
+  setup_dm_only_layout();
+  const bool has_static = sDeltaH0_skij and sDeltaF_skij;
+  utils::check(has_static != (dDeltaSigma_wskij != nullptr),
+               "lr_dyson::dm_only_pass: give either the static ΔH0 + ΔF or ΔΣ(iω).");
+  if (dDeltaSigma_wskij) {
+    utils::check(dDeltaSigma_wskij->origin()[0] == _dm_w_origin and
+                 dDeltaSigma_wskij->origin()[2] == _dm_k_origin and
+                 dDeltaSigma_wskij->local_shape()[0] == _dm_nw_local and
+                 dDeltaSigma_wskij->local_shape()[2] == _dm_nk_local,
+                 "lr_dyson: ΔΣ(iω) is not on the ω-side Dyson grid.");
+  }
+
+  auto G_w = _cached_G_wskij->local();
+  nda::array<ComplexType, 4> part(_ns, _dm_nk_local, _nbnd, _nbnd);
+  part() = ComplexType(0.0);
+  nda::matrix<ComplexType> X_static(_nbnd, _nbnd);
+  nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
+
+  for (long s = 0; s < _ns; ++s) {
+    for (long k = 0; k < _dm_nk_local; ++k) {
+      const long ik = k + _dm_k_origin;
+      const long ikq = _kpq_map(ik);
+      auto Dm_k = part(s, k, nda::range::all, nda::range::all);
+      if (has_static)
+        X_static = sDeltaH0_skij->local()(s, ik, nda::range::all, nda::range::all) +
+                   sDeltaF_skij->local()(s, ik, nda::range::all, nda::range::all);
+      for (long n = 0; n < _dm_nw_local; ++n) {
+        const long iw = n + _dm_w_origin;
+        auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
+        auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
+        if (has_static)
+          nda::blas::gemm(_c_beta_w(iw), X_static, G_k, ComplexType(0.0), tmp);
+        else
+          nda::blas::gemm(_c_beta_w(iw),
+                          dDeltaSigma_wskij->local()(n, s, k, nda::range::all, nda::range::all),
+                          G_k, ComplexType(0.0), tmp);
+        nda::blas::gemm(ComplexType(1.0), G_kq, tmp, ComplexType(1.0), Dm_k);
+      }
+    }
+  }
+
+  _wpool_comm->all_reduce_in_place_n(part.data(), part.size(), std::plus<>{});
+
+  nda::array<ComplexType, 4> rows =
+      part(nda::range::all, nda::range::all,
+           nda::range(_dm_row_origin, _dm_row_origin + _dm_nrow_local), nda::range::all);
+  using dArray_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+  dArray_4D_t dDm(std::addressof(_context->comm), _dm_rows_grid, {_ns, _nkpts_ibz, _nbnd, _nbnd},
+                  {0, _dm_k_origin, _dm_row_origin, 0}, {1, 1, 1, 1}, std::move(rows));
+  math::nda::gather_to_shm(dDm, sDeltaDm_out);
+}
+
+
+double lr_dyson::solve_lr_dm(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                             const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                             const sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                             const sArray_t<Array_view_4D_t>* sDeltaDm_src,
+                             bool fix_density) {
+  _Timer.start("LR_DYSON");
+  // A ΔG(τ) nobody gathered before this solve is dead, and this one makes none.
+  _dDeltaG_tau_buffer.reset();
+
+  _Timer.start("LR_DYSON_DM_ONLY");
+  dm_only_pass(sDeltaDm_skij, &sDeltaH0_skij, &sDeltaF_skij, nullptr);
+  if (sDeltaDm_src) {
+    sDeltaDm_skij.win().fence();
+    if (_context->node_comm.root()) sDeltaDm_skij.local() += sDeltaDm_src->local();
+    sDeltaDm_skij.win().fence();
+  }
+  _Timer.stop("LR_DYSON_DM_ONLY");
+
+  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density, /*shift_G=*/false);
+
+  _Timer.stop("LR_DYSON");
+  print_timers(3);
+  return Delta_mu;
+}
+
+
+void lr_dyson::build_dynamic_source(sArray_t<Array_view_4D_t>& sDeltaDm_src,
+                                    const sArray_t<Array_view_5D_t>& sDeltaSigma_tskij) {
+  _Timer.start("LR_DYSON");
+  _Timer.start("LR_DYSON_SRC");
+  auto [w_pgrid, w_bsize] =
+      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  _Timer.start("LR_DYSON_TAU_TO_W");
+  auto dDeltaSigma_wskij =
+      distributed_tau_to_w(_context->comm, sDeltaSigma_tskij, *_dyson.FT(), w_pgrid,
+                           w_bsize, __app_verbosity__ >= 3);
+  _Timer.stop("LR_DYSON_TAU_TO_W");
+  dm_only_pass(sDeltaDm_src, nullptr, nullptr, &dDeltaSigma_wskij);
+  _Timer.stop("LR_DYSON_SRC");
+  _Timer.stop("LR_DYSON");
 }
 
 
