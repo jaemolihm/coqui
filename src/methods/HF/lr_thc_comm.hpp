@@ -207,17 +207,21 @@ namespace methods {
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        * @param Timer    - [INPUT] optional sub-clock manager: SIGMA_A2P_ALLOC for the
-       *                   scratch, then the SIGMA_A2P_* clocks of aux_to_primary_local.
+       *                   scratch, SIGMA_A2P_GEMM for the local contraction and
+       *                   SIGMA_A2P_REDUCE for the node reduce-scatter and stripe add.
        *
-       * Does NOT reduce over nodes, and does not synchronize the window: the only
-       * writer is O_IPQ's reduce root — a single rank in the whole job, since (s,k)
-       * is undivided — so a group of these calls races with nothing. The caller
-       * accumulates every (ip, iq) block it needs and then reduces once.
+       * Each rank contracts its (P,Q) tile into a full (s,k,a,b) partial; the partials
+       * are summed over the node with shm::reduce_scatter_add, each node-local rank
+       * adding its own disjoint element stripe into the window. Does NOT reduce over
+       * nodes and does not synchronize the window: the stripes are disjoint, so a group
+       * of these calls races with nothing.
        *
        * Caller's side of the contract:
        *   - zero O_Iab before the first call of a group (this accumulates with +=,
        *     and a stale window would be folded into the reduction);
-       *   - reduce before anything reads O_Iab across ranks.
+       *   - every rank of O_IPQ's communicator calls, with the same arguments;
+       *   - all_reduce_parallel() before anything reads O_Iab across ranks: it
+       *     publishes the stripes and sums the per-node partials.
        * set_zero() and all_reduce_parallel() each open and close with node_sync(),
        * so those two calls alone publish the writes made in between.
        */
@@ -235,19 +239,46 @@ namespace methods {
         static_assert(nda::get_rank<AF_t> == 4,
                       "lr_thc_comm::aux_to_primary: primary rank must be 4");
 
-        auto s_rng = O_IPQ.local_range(0);
-        auto k_rng = O_IPQ.local_range(1);
-        auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
+        auto pgrid = O_IPQ.grid();
+        long ns = O_IPQ.global_shape()[0];
+        long nkpts = O_IPQ.global_shape()[1];
+        auto const& org = O_IPQ.origin();
+        // (s,k) undivided: every rank holds a partial of the whole window.
+        utils::check(pgrid[0] == 1 and pgrid[1] == 1,
+                     "lr_thc_comm::aux_to_primary: expected (s,k) undivided, "
+                     "got pgrid ({},{})", pgrid[0], pgrid[1]);
+        utils::check(ns == O_Iab.shape()[0] and nkpts == O_Iab.shape()[1],
+                     "lr_thc_comm::aux_to_primary: (s,k) extents ({},{}) differ from the "
+                     "window's ({},{})", ns, nkpts, O_Iab.shape()[0], O_Iab.shape()[1]);
+        // The union of the window's node communicators must be exactly O_IPQ's
+        // communicator, or some node's reduce-scatter misses ranks (hang) or partials.
+        // Checked on the global communicators; it assumes O_Iab.node_comm() is the node
+        // split of O_Iab.communicator(), as make_shared_array(mpi_context) builds it.
+        utils::check(O_Iab.communicator() != nullptr and O_Iab.node_comm() != nullptr,
+                     "lr_thc_comm::aux_to_primary: the window needs a global and a node "
+                     "communicator.");
+        int cmp = MPI_UNEQUAL;
+        MPI_Comm_compare(O_IPQ.communicator()->get(), O_Iab.communicator()->get(), &cmp);
+        utils::check(cmp == MPI_IDENT or cmp == MPI_CONGRUENT,
+                     "lr_thc_comm::aux_to_primary: the window and the aux array live on "
+                     "different communicators.");
 
-        // This entry point is not on the Sigma hot path, so it owns the scratch itself
-        // rather than making every caller thread one through. It is sized here, under
-        // its own clock, so the resize inside the impl is a no-op.
+        auto O_Iab_loc = O_Iab.local();
+
+        // Allocated per call rather than cached: a full (s,k,a,b) partial per rank is
+        // too large to keep alive across calls at production sizes.
         if (Timer) Timer->start("SIGMA_A2P_ALLOC");
         long nbnd = O_Iab_loc.extent(2);
-        nda::array<ComplexType, 3> O_buf(s_rng.size() * k_rng.size(), nbnd, nbnd);
+        nda::array<ComplexType, 3> O_buf(ns * nkpts, nbnd, nbnd);
         if (Timer) Timer->stop("SIGMA_A2P_ALLOC");
-        aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
-                             kp_map, kpq_map, Timer, O_buf);
+
+        _aux_to_primary_gemm(ip, iq, O_IPQ.local(), nbnd, thc, kp_map, kpq_map,
+                             org[1], org[2], org[3], Timer, O_buf);
+
+        if (Timer) Timer->start("SIGMA_A2P_REDUCE");
+        math::shm::reduce_scatter_add(*O_Iab.node_comm(), O_Iab, O_buf.data(), 0,
+                                      long(O_buf.size()), scl);
+        if (Timer) Timer->stop("SIGMA_A2P_REDUCE");
       }
 
       /**
@@ -654,53 +685,49 @@ namespace methods {
       }
 
       /**
-       * LR aux→primary impl. Matches thc_solver_comm::_aux_to_primary_impl
-       * (its communicator overload) line-by-line, except the X lookup:
+       * Local part of the LR aux→primary contraction: fills O_buf(i,·,·) with this
+       * rank's (P,Q)-tile contribution to X(k+q)† · O_PQ(k) · X(k) for every flattened
+       * leading index i, with no communication. Matches the gemm loop of
+       * thc_solver_comm::_aux_to_primary_impl, except the X lookup:
        *   - Left X uses X(kpq_map(kp_map(k))) instead of X(kp_map(k))
        *   - Right X uses X(kp_map(k)) (unchanged)
        */
-      template<nda::Array Array_aux_t, nda::Array Array_primary_t, typename communicator_t>
-      static void _aux_to_primary_impl(int ip, int iq,
-                                       communicator_t &dim0_comm,
-                                       ComplexType scl,
+      template<nda::Array Array_aux_t>
+      static void _aux_to_primary_gemm(int ip, int iq,
                                        const Array_aux_t &O_tskPQ,
-                                       Array_primary_t &O_tskab,
+                                       size_t nbnd,
                                        THC_ERI auto& thc,
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
                                        long k_offset, long P_offset, long Q_offset,
                                        utils::TimerManager* Timer,
                                        nda::array<ComplexType, 3>& O_buf) {
-        static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
-                      "lr_thc_comm::_aux_to_primary_impl: Rank mismatch");
-        static_assert(nda::get_rank<Array_primary_t> >= 4,
-                      "lr_thc_comm::_aux_to_primary_impl: Rank < 4");
+        static_assert(nda::get_rank<Array_aux_t> >= 4,
+                      "lr_thc_comm::_aux_to_primary_gemm: Rank < 4");
 
         auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
         auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
 
         decltype(nda::range::all) all;
 
-        constexpr int N = nda::get_rank<Array_primary_t>;
+        constexpr int N = nda::get_rank<Array_aux_t>;
 
-        size_t nbnd = O_tskab.shape(N-2);
         size_t ns_loc = O_tskPQ.shape(N-4);
         size_t nk_loc = O_tskPQ.shape(N-3);
         size_t NP_loc = O_tskPQ.shape(N-2);
         size_t NQ_loc = O_tskPQ.shape(N-1);
         nda::range P_rng(P_offset, P_offset+NP_loc);
         nda::range Q_rng(Q_offset, Q_offset+NQ_loc);
-        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_aux_to_primary_impl: NP_loc+P_offset > thc.Np()");
-        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_aux_to_primary_impl: NQ_loc+Q_offset > thc.Np()");
+        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_aux_to_primary_gemm: NP_loc+P_offset > thc.Np()");
+        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_aux_to_primary_gemm: NQ_loc+Q_offset > thc.Np()");
 
         size_t dim0 = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-2, (size_t)1, std::multiplies<>{});
 
-        // Both operands are flattened over the leading axes, which is only a
-        // relabelling of the same memory when they are contiguous.
-        utils::check(O_tskPQ.indexmap().is_contiguous() and O_tskab.indexmap().is_contiguous(),
-                     "lr_thc_comm::_aux_to_primary_impl: aux and primary arrays must be contiguous.");
+        // Flattened over the leading axes, which is only a relabelling of the same
+        // memory when it is contiguous.
+        utils::check(O_tskPQ.indexmap().is_contiguous(),
+                     "lr_thc_comm::_aux_to_primary_gemm: the aux array must be contiguous.");
         auto O_iPQ_3D = nda::reshape(O_tskPQ, shape_t<3>{dim0, NP_loc, NQ_loc});
-        auto O_iab_3D = nda::reshape(O_tskab, shape_t<3>{dim0, nbnd, nbnd});
 
         // X† · O_PQ · X can be associated either way. Both cost nbnd·NP_loc·NQ_loc
         // for the first gemm plus nbnd² times the extent contracted last, so
@@ -709,9 +736,9 @@ namespace methods {
         nda::array<ComplexType, 2> Ask_buf(q_first ? NP_loc : nbnd,
                                            q_first ? nbnd : NQ_loc);
 
-        // Caller-owned buffer holding local (t,s,k) slices of O_iab for reduction. It
-        // needs no zeroing: the loop below closes every (i,·,·) block with a 3-argument
-        // gemm, i.e. β = 0, so the whole buffer is assigned before it is read.
+        // Caller-owned buffer holding local (t,s,k) slices of O_iab. It needs no
+        // zeroing: the loop below closes every (i,·,·) block with a 3-argument gemm,
+        // i.e. β = 0, so the whole buffer is assigned before it is read.
         auto buf_shape = shape_t<3>{(long)dim0, (long)nbnd, (long)nbnd};
         if (O_buf.shape() != buf_shape) O_buf.resize(buf_shape);
         nda::array_view<ComplexType, 3> O_buf_iab(O_buf);
@@ -738,6 +765,41 @@ namespace methods {
           }
         } // i
         toc("SIGMA_A2P_GEMM");
+      }
+
+      /**
+       * LR aux→primary impl: _aux_to_primary_gemm, then a reduce of the local
+       * slices to dim0_comm's root, which accumulates scl · the sum into O_tskab.
+       * Matches thc_solver_comm::_aux_to_primary_impl (its communicator overload).
+       */
+      template<nda::Array Array_aux_t, nda::Array Array_primary_t, typename communicator_t>
+      static void _aux_to_primary_impl(int ip, int iq,
+                                       communicator_t &dim0_comm,
+                                       ComplexType scl,
+                                       const Array_aux_t &O_tskPQ,
+                                       Array_primary_t &O_tskab,
+                                       THC_ERI auto& thc,
+                                       nda::ArrayOfRank<1> auto const& kp_map,
+                                       nda::ArrayOfRank<1> auto const& kpq_map,
+                                       long k_offset, long P_offset, long Q_offset,
+                                       utils::TimerManager* Timer,
+                                       nda::array<ComplexType, 3>& O_buf) {
+        auto tic = [&](const char* c) { if(Timer) Timer->start(c); };
+        auto toc = [&](const char* c) { if(Timer) Timer->stop(c); };
+
+        static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
+                      "lr_thc_comm::_aux_to_primary_impl: Rank mismatch");
+        constexpr int N = nda::get_rank<Array_primary_t>;
+        // Flattened over the leading axes below, like the aux operand in the gemm.
+        utils::check(O_tskab.indexmap().is_contiguous(),
+                     "lr_thc_comm::_aux_to_primary_impl: the primary array must be contiguous.");
+        size_t nbnd = O_tskab.shape(N-2);
+
+        _aux_to_primary_gemm(ip, iq, O_tskPQ, nbnd, thc, kp_map, kpq_map,
+                             k_offset, P_offset, Q_offset, Timer, O_buf);
+
+        nda::array_view<ComplexType, 3> O_buf_iab(O_buf);
+        auto O_iab_3D = nda::reshape(O_tskab, O_buf_iab.shape());
 
         // Accumulate all (t,s,k) slices locally and reduce once.
         // mpi3 narrows the element count to MPI's int, silently, so guard it.
