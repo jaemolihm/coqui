@@ -108,8 +108,11 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
                                       "mesh, or no FFTW)"));
   }
 
+  // Every clock print_subclocks_all reads, including the Aux->Primary sub-clocks
+  // that only the dense path starts: elapsed() aborts on an unregistered name.
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
-                  "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R"}) {
+                  "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R",
+                  "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM", "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -525,7 +528,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     for (auto ip : nda::range(npol))
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                               dDeltaF_skPQ, sDeltaF_skij, thc,
-                                              _MF->ks_to_k(0), _kpq_map);
+                                              _MF->ks_to_k(0), _kpq_map, &_Timer);
     _Timer.stop("AUX_TO_PRIM");
 
     // One reduction over the polarization blocks, which accumulated node-locally.
@@ -714,7 +717,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // After this, we will symmetrize ΔF_ij and ΔF_ji to enforce Hermiticity.
         lr_thc_comm::aux_to_primary<AF_t>(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
                                                 dDeltaF_skPQ, sDeltaF_skij, thc,
-                                                _MF->ks_to_k(0), _kpq_map);
+                                                _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       } // iq
     } // ip
@@ -745,7 +748,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         for (auto ip : nda::range(npol))
           lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                                   dDeltaF_skPQ, sDeltaF_skij, thc,
-                                                  _MF->ks_to_k(0), _kpq_map);
+                                                  _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       }
     }
