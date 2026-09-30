@@ -243,16 +243,6 @@ public:
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 
   /**
-   * @brief Whether solve_lr_dm / build_dynamic_source can run at this size.
-   *
-   * They reuse lr_dyson_omega_pgrid's (ω, k) ownership and slice the band rows
-   * of the reduced ΔDm over each ω-pool, so they need the band axes undivided
-   * and at least one band row per ω-pool member. Otherwise the caller takes
-   * solve_lr_dyson.
-   */
-  bool dm_only_supported() const;
-
-  /**
    * @brief ΔDm only, for a static one-body RHS: the part of solve_lr_dyson an
    *        SCF iteration that does not read ΔG(τ) needs.
    *
@@ -270,7 +260,8 @@ public:
    * q=Γ the Δμ closed form of solve_lr_dyson follows, shifting ΔDm alone.
    *
    * Leaves no ΔG(τ) behind: materialize_DeltaG_tau() after this throws.
-   * Requires dm_only_supported(). Collective on comm.
+   * Reuses lr_dyson_omega_pgrid's (ω, k) ownership, so it aborts on a rank count
+   * that grid can only place by splitting the bands. Collective on comm.
    *
    * @return the Δμ used, as solve_lr_dyson
    */
@@ -286,8 +277,8 @@ public:
    * The Dyson map is linear in its RHS, so a ΔΣ that is frozen over many
    * solve_lr_dm calls is summed once here and handed to each of them as
    * `sDeltaDm_src`. Transforms ΔΣ to iω on the ω-side grid, runs the same pass
-   * as solve_lr_dm with X(iω) = ΔΣ(iω), and frees the ω array.
-   * Requires dm_only_supported(). Collective on comm.
+   * as solve_lr_dm with X(iω) = ΔΣ(iω), and frees the ω array. Same grid
+   * requirement as solve_lr_dm. Collective on comm.
    */
   void build_dynamic_source(sArray_t<Array_view_4D_t>& sDeltaDm_src,
                             const sArray_t<Array_view_5D_t>& sDeltaSigma_tskij);

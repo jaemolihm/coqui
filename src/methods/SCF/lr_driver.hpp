@@ -738,14 +738,6 @@ private:
    */
   std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel(bool counter_term);
 
-  /// Whether this run's SCF iterations take the ΔDm-only Dyson pass
-  /// (lr_dyson::solve_lr_dm) instead of the full ΔG(iω) → ΔG(τ) pass: no reader
-  /// of ΔG(τ) inside the loop's sc channel (no Σ in K_sc, no qp map) and a size
-  /// lr_dyson supports. ΔG(τ) is then formed only where it is read, and a frozen
-  /// perturbative ΔΣ is summed once per stage. Agrees with the full pass to
-  /// round-off.
-  bool use_dm_only(lr_kernel_split const& k) const;
-
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
@@ -838,7 +830,7 @@ private:
   /// instances above.
   lr_kernel_split _split;
 
-  // --- ΔDm-only Dyson pass (use_dm_only).
+  // --- ΔDm-only Dyson pass (K_sc without a Σ).
   /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_src;
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
