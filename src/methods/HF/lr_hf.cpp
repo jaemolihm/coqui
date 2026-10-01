@@ -101,7 +101,7 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   // that only the dense path starts: elapsed() aborts on an unregistered name.
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
                   "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R",
-                  "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM", "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
+                  "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM", "SIGMA_A2P_REDUCE"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
