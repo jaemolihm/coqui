@@ -32,6 +32,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/lr_diis.hpp"
+#include "methods/SCF/lr_krylov.hpp"
 #include "methods/SCF/lr_ibc.hpp"
 #include "methods/HF/lr_hf.hpp"
 #include "methods/GW/lr_gw.hpp"
@@ -212,7 +213,9 @@ struct lr_params {
 
   // --- SCF control ---
   int max_iter = 1;               ///< 1 = one-shot
-  double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
+  /// DIIS/damping: on the successive-iterate differences of ΔDm, ΔF, ΔΣ.
+  /// GCR: on the residual ||g(x) - x|| of the ΔF iterate.
+  double tol = 1e-8;
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
   /// reads it regardless when the kernel has a Σ (see lr_solve_one).
@@ -760,6 +763,8 @@ private:
   /// history and warmup: the inner one restarts at every stage boundary while
   /// this one is keyed on the outer step index, so the two share nothing.
   std::unique_ptr<lr_diis> _outer_diis;
+  /// GCR in place of _lr_diis when iter_params.alg == "GCR".
+  std::unique_ptr<lr_gcr> _lr_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
   // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
