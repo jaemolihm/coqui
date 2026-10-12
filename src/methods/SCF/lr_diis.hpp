@@ -45,6 +45,8 @@ namespace methods {
 struct lr_iter_params {
   std::string alg = "DIIS";
   double mixing = 1.0;
+  /// DIIS subspace depth, or the GCR basis capacity. For GCR, 0 selects the
+  /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
   size_t max_subsp_size = 10;
   size_t diis_warmup = 0;
 
@@ -166,8 +168,7 @@ public:
    * Every mixing option takes the same path through here, undamped Picard
    * included: its damping write is a no-op (mixing >= 1 leaves the arrays
    * untouched) and its ring is never read, but it is still stored, so the caller
-   * needs no per-algorithm branch and the raw pre-mixing slice is available for
-   * every configuration.
+   * needs no per-algorithm branch.
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
   void next_step_combined(Comm& comm, utils::part_map const& pmap,
@@ -270,28 +271,6 @@ public:
     }
 
     app_log(3, "    DIIS: extrapolation with subspace size {}", _n);
-  }
-
-  /**
-   * @brief This rank's slice of the newest step's ΔF / ΔΣ, as it was BEFORE any
-   *        mixing.
-   *
-   * next_step_combined stores the incoming iterate into the ring ahead of both
-   * the extrapolation and the damping write, so this is the raw kernel output of
-   * the step just taken — the one quantity the caller's shared arrays no longer
-   * hold once mixing has run. Invalidated by reset(), and by the next
-   * next_step_combined call.
-   *
-   * newest_raw_Sigma() is meaningful only when the second slot actually carried a
-   * quantity; a ΔF-only call leaves it empty.
-   */
-  Vec1D const& newest_raw_F() const {
-    utils::check(_n > 0, "lr_diis::newest_raw_F: the subspace is empty.");
-    return _xF[slot(_n - 1)];
-  }
-  Vec1D const& newest_raw_Sigma() const {
-    utils::check(_n > 0, "lr_diis::newest_raw_Sigma: the subspace is empty.");
-    return _xS[slot(_n - 1)];
   }
 
 private:

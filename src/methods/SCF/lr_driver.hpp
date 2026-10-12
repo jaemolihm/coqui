@@ -214,7 +214,8 @@ struct lr_params {
   // --- SCF control ---
   int max_iter = 1;               ///< 1 = one-shot
   /// DIIS/damping: on the successive-iterate differences of ΔDm, ΔF, ΔΣ.
-  /// GCR: on the residual ||g(x) - x|| of the ΔF iterate.
+  /// GCR: on the residual ||g(x) - x|| of the self-consistent channel's
+  /// iterate, the concatenation (ΔF, ΔΣ) (ΔF alone for a Σ-free K_sc).
   double tol = 1e-8;
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
@@ -280,8 +281,7 @@ struct lr_params {
   /// Evaluate the free-energy hessian through the variationally-stationary
   /// (quadratic-error) functional as well as the plain contraction, for a batch of
   /// this many perturbations; 0 leaves it off. Opt-in: it costs one extra Dyson
-  /// solve per perturbation plus two striped ω stores, and it needs the RAW
-  /// (pre-mixing) ΔF/ΔΣ of the final iteration.
+  /// solve and one K_sc evaluation per perturbation, plus two striped ω stores.
   ///
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
@@ -480,34 +480,15 @@ public:
       int* n_pert_applied_out = nullptr);
 
   /**
-   * @brief Replace the ΔF / ΔΣ the last lr_solve_one returned with the RAW kernel
-   *        output of its final iteration, so the stationary hessian functional can
-   *        be handed ΔV' = ΔH0 + K(ΔG').
+   * @brief Re-evaluate K_pert on the ΔG the last lr_solve_one returned, so the
+   *        stationary hessian functional is handed ΔV' = ΔH0 + K(ΔG').
    *
-   * Two things stand between the returned arrays and that ΔV'.
+   * With the hessian on, lr_solve_one already returns K_sc evaluated at ΔG'. On a
+   * split-kernel run the perturbative source is still frozen at K_pert(ΔG at stage
+   * start), so this evaluates K_pert at ΔG' and rebuilds the totals; otherwise the
+   * functional loses its second-order property. Nothing to do without a K_pert.
    *
-   * The mixing block destroys the raw output: it overwrites the shared arrays in
-   * place, and the "previous iterate" buffers hold the previous *already mixed*
-   * value. The raw slice survives in the inner accelerator's ring, which stores it
-   * ahead of both the extrapolation and the damping write.
-   *
-   * Reading that ring is not, however, the whole of it, which is why this exists as
-   * a function at all. The ring holds each rank's element STRIPE of the SC CHANNEL
-   * alone, and every consumer wants the node-replicated TOTAL. So this also adds the
-   * perturbative source back in and republishes — the same fence / node-barrier /
-   * allgatherv-among-node-roots epilogue the SCF loop's own mixing block runs.
-   * Nothing to do when the final iteration did not mix at all (a one-iteration
-   * stage), since the arrays are then already the kernel output.
-   *
-   * On a split-kernel run the perturbative source is additionally frozen at
-   * K_pert(ΔG at stage start), so this re-evaluates K_pert on the returned ΔG
-   * first — otherwise the total is not K(ΔG') and the functional loses its
-   * second-order property just as surely as with a mixed iterate. The raw total is
-   * then raw-sc (from the ring) plus that fresh source. The OUTER accelerator's
-   * ring is deliberately not consulted: its newest slot is an extrapolate.
-   *
-   * Collective on comm. Call after the checkpoint dump: it changes what the shared
-   * arrays hold.
+   * Collective on comm.
    */
   template<THC_ERI THC_t>
   void get_full_kernel_result(sArray_t<Array_view_4D_t>& sDeltaF_skij,
@@ -763,7 +744,7 @@ private:
   /// history and warmup: the inner one restarts at every stage boundary while
   /// this one is keyed on the outer step index, so the two share nothing.
   std::unique_ptr<lr_diis> _outer_diis;
-  /// GCR in place of _lr_diis when iter_params.alg == "GCR".
+  /// GCR in place of _lr_diis when iter_params.alg == "GCR" and K_sc is not empty.
   std::unique_ptr<lr_gcr> _lr_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
@@ -787,21 +768,12 @@ private:
     long n_flat = 0;                  ///< elements of the flattened array (0 = inactive)
     long i0 = 0, i1 = 0;              ///< this rank's slice
     nda::array<ComplexType, 1> prev;  ///< previous iterate over [i0, i1)
-    /// The same slice of this iteration's kernel output BEFORE mixing, i.e. what
-    /// K returned rather than what the accelerator wrote back. `prev` is the
-    /// previous MIXED value; this is the current UNMIXED one. Read only by the
-    /// hessian estimator, and empty unless alloc_kernel_out() was called.
-    nda::array<ComplexType, 1> kernel_out;
 
     void alloc(utils::part_map const& pmap, long n) {
       n_flat = n;
       std::tie(i0, i1) = pmap.my_slice(n);
       prev = nda::array<ComplexType, 1>(i1 - i0);
     }
-    /// Add the kernel_out buffer. Separate from alloc() so the ordinary path allocates
-    /// nothing extra; call after alloc().
-    void alloc_kernel_out() { kernel_out = nda::array<ComplexType, 1>(i1 - i0); }
-    bool has_kernel_out() const { return kernel_out.size() > 0; }
     void zero() { prev() = ComplexType{0}; }
     /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
     auto slice(auto&& A) const {
@@ -841,14 +813,6 @@ private:
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
 
   bool _setup_done = false;
-
-  // --- State of the last lr_solve_one, read by the hessian hooks.
-  /// The returned ΔF/ΔΣ went through the mixing block in the final iteration,
-  /// hence are the mixed iterate rather than the raw kernel output. The raw values
-  /// themselves live in _DeltaF.kernel_out / _DeltaSigma.kernel_out, filled the moment
-  /// accelerator stores them: reading the ring later cannot work, since it is
-  /// reset at every split-kernel stage boundary.
-  bool _mixed_last_iter = false;
 
   int _nts;
   int _ns;
