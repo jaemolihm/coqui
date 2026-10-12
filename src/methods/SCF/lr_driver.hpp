@@ -214,8 +214,8 @@ struct lr_params {
   int max_iter = 1;               ///< 1 = one-shot
   double tol = 1e-8;              ///< on ||ΔDm_new - ΔDm_old||
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
-  /// Whether the caller will read sDeltaG_tskij after the solve (the checkpoint's
-  /// save_DeltaG).
+  /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
+  /// reads it regardless when the kernel has a Σ (see lr_solve_one).
   bool save_DeltaG = true;
   lr_iter_params iter_params{};   ///< damping / DIIS
 
@@ -456,7 +456,8 @@ public:
    * overwritten.
    *
    * sDeltaG_tskij is the one exception: it holds the ΔG(τ) of the returned ΔDm
-   * only if p.save_DeltaG is set.
+   * only if p.save_DeltaG is set or p.hessian() and the kernel has a Σ (the
+   * hessian's Σ refresh reads it).
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
