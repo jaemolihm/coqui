@@ -89,7 +89,8 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
   // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1 selects
-  // the gemm path with explicit FT coefficients (kept for testing).
+  // the gemm path with explicit FT coefficients (kept for testing). fft_kR_t
+  // aborts on a shifted / non-Monkhorst-Pack mesh and in a build without FFTW.
   if (_nkpts != 1 and not utils::lr_debug_gemm_ft()) {
     _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
     _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
@@ -282,15 +283,15 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   nda::matrix<ComplexType> buffer;
   _Timer.stop("ALLOC");
 
-  // k -> R in place on each (nk, ncols) slice of A_3D, over kpts or (on_Q) Qpts.
-  auto k_to_R = [&](auto&& A_3D, bool on_Q) {
+  // k -> R in place on each (nk, ncols) slice of A_3D, over Qpts if on_q, else kpts.
+  auto k_to_R = [&](auto&& A_3D, bool on_q) {
     _Timer.start("FT_R");
     if (_fft_k) {
-      auto& fft = on_Q ? *_fft_q : *_fft_k;
+      auto& fft = on_q ? *_fft_q : *_fft_k;
       for (long s = 0; s < A_3D.extent(0); ++s)
         fft.k_to_R(A_3D(s, nda::ellipsis{}), A_3D(s, nda::ellipsis{}));
     } else {
-      if (on_Q)
+      if (on_q)
         utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
                                    _MF->lattv(), R_grid, *sf_Rk);
       else
@@ -432,8 +433,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("COULOMB");
-      // Only ΔDm(R = 0) is read below: the k average 1/nk Σ_k ΔDm(k), written
-      // into row 0. The other rows keep ΔDm(k) and are not read.
+      // Only ΔDm(R = 0) = 1/nk Σ_k ΔDm(k) is read below; it is formed in row 0.
       if (nkpts != 1) {
         auto DeltaDm_3D = nda::reshape(dDeltaDm_skPQ.local(),
                                        shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
