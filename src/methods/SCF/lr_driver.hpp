@@ -348,8 +348,6 @@ struct lr_kernel {
   bool has_Sigma() const { return terms.has_sigma(); }
   /// LR-qpGW: this channel's ΔΣ is statified into ΔV_QPGW (see `qp`).
   bool is_qp() const { return qp != nullptr; }
-  /// The dynamic ΔΣ(iω) itself is this channel's mixed/tracked second quantity.
-  bool mixes_Sigma() const { return has_Sigma() && !is_qp(); }
   bool is_empty() const { return !has_F() && !has_Sigma(); }
 };
 
@@ -829,6 +827,13 @@ private:
   /// The kernel split, built once by lr_setup; its channels hold the evaluator
   /// instances above.
   lr_kernel_split _split;
+
+  // --- ΔDm-only Dyson pass (K_sc without a Σ).
+  /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pert_Sigma;
+  /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
+  /// it, since the caller's ΔF has been mixed by then.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
 
   bool _setup_done = false;
 

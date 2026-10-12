@@ -24,6 +24,7 @@
 #include "methods/SCF/lr_dyson.hpp"
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "itertools/itertools.hpp"
 
 namespace methods {
 
@@ -40,6 +41,18 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
       _kpq_map(_nkpts),
       _Timer() {
 
+  // c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω): ω→τ followed by τ→β⁻, so ΔDm = Σ_ω c_ω ΔG(iω).
+  {
+    auto Ttw = _dyson.FT()->Ttw_ff();
+    auto Tb = _dyson.FT()->T_beta_t_ff();
+    _c_beta_w = nda::array<ComplexType, 1>(_nw);
+    for (long n = 0; n < _nw; ++n) {
+      ComplexType c(0.0);
+      for (long t = 0; t < _nts; ++t) c += Tb(t) * Ttw(t, n);
+      _c_beta_w(n) = -c;
+    }
+  }
+
   // Compute k+q mapping
   auto kpts_crys = dyson.MF()->kpts_crystal();
   utils::calculate_kpq_map(kpts_crys, _q_vec, _kpq_map);
@@ -55,6 +68,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
   for (auto& v : {"LR_DYSON", "LR_DYSON_TAU_TO_W", "LR_DYSON_LOOP", "LR_DYSON_GATHER",
                   "LR_DYSON_ALLOC", "LR_DYSON_REDIST", "LR_DYSON_G_W_TO_T",
                   "LR_DYSON_DM", "LR_DYSON_NELEC", "LR_DYSON_DELTAMU", "LR_DYSON_MISC",
+                  "LR_DYSON_DM_ONLY",
                   "GATHER_SHM_ZERO", "GATHER_SHM_ASSIGN", "GATHER_SHM_SKEW",
                   "GATHER_SHM_REDUCE", "GATHER_SHM_BARRIER"}) {
     _Timer.add(v);
@@ -120,53 +134,12 @@ double lr_dyson::solve_lr_dyson(
   //
   // There is therefore one Dyson pass in every mode, always at Δμ = 0; only
   // steps 2-3 are conditional.
-  double Delta_mu = 0.0;
-  double dN_dmu = 0.0;
-  if (fix_density and _is_q_gamma) {
-    utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
-                 "solve_lr_dyson: fix_density=true but the Δμ response is not cached. "
-                 "Call build_dmu_response() before the SCF loop.");
-
-    app_log(3, "solve_lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
-    dN_dmu = _cached_dN_dmu;
-  }
-
-  // Step 1 in fix_density mode, the whole solve otherwise.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
                       dDeltaSigma_wskij, /*Delta_mu=*/0.0,
                       sDeltaVcorr_skij);
 
-  if (fix_density and _is_q_gamma) {
-    _Timer.start("LR_DYSON_NELEC");
-    const double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
-    _Timer.stop("LR_DYSON_NELEC");
-
-    if (std::abs(dN_dmu) < 1e-15) {
-      // Δμ stays 0, which leaves ΔDm untouched, so ΔN(Δμ=0) is already the final
-      // ΔN — and it is exactly the density error the warning is about.
-      app_log(1, "[WARNING] solve_lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
-      app_log(3, "  Final ΔN = {:.6e} (density not restored)", DeltaN_0);
-    } else {
-      // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
-      // (The LR Dyson equation is linear in Δμ, so this is exact)
-      Delta_mu = -DeltaN_0 / dN_dmu;
-      app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
-      app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
-
-      // Step 3, as a local axpy on the Δμ=0 solution:
-      //   ΔG(τ; Δμ) = ΔG(τ; 0) + Δμ·(dG/dμ)(τ)
-      //   ΔDm(Δμ)   = ΔDm(0)   + Δμ·(dDm/dμ)
-      _Timer.start("LR_DYSON_DELTAMU");
-      apply_dmu_shift(sDeltaDm_skij, Delta_mu);
-      _Timer.stop("LR_DYSON_DELTAMU");
-
-      // Verify ΔN ≈ 0
-      _Timer.start("LR_DYSON_NELEC");
-      const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
-      _Timer.stop("LR_DYSON_NELEC");
-      app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
-    }
-  }
+  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
+  if (Delta_mu != 0.0) apply_dmu_shift_G(Delta_mu);
 
   _Timer.stop("LR_DYSON");
   print_timers(3);  // per-step diagnostics only at verbosity >= 3
@@ -374,24 +347,118 @@ void lr_dyson::solve_lr_dyson_impl(
 
 
 template<typename DeltaDm_t>
-void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
+double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density) {
+  if (!(fix_density and _is_q_gamma)) return 0.0;
+  utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
+               "lr_dyson: fix_density=true but the Δμ response is not cached. "
+               "Call build_dmu_response() before the SCF loop.");
+  app_log(3, "lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
+  const double dN_dmu = _cached_dN_dmu;
+
+  _Timer.start("LR_DYSON_NELEC");
+  const double DeltaN_0 = compute_lr_Nelec(sDeltaDm_skij);
+  _Timer.stop("LR_DYSON_NELEC");
+
+  if (std::abs(dN_dmu) < 1e-15) {
+    // Δμ stays 0, which leaves ΔDm untouched, so ΔN(Δμ=0) is already the final
+    // ΔN — and it is exactly the density error the warning is about.
+    app_log(1, "[WARNING] lr_dyson: dN/dμ ≈ 0, cannot compute Δμ. Using Δμ=0.");
+    app_log(3, "  Final ΔN = {:.6e} (density not restored)", DeltaN_0);
+    return 0.0;
+  }
+
+  // Closed-form solution: Δμ = -ΔN(0) / (dN/dμ)
+  // (The LR Dyson equation is linear in Δμ, so this is exact)
+  const double Delta_mu = -DeltaN_0 / dN_dmu;
+  app_log(3, "  ΔN(Δμ=0) = {:.6e}, dN/dμ = {:.6e}", DeltaN_0, dN_dmu);
+  app_log(3, "  Computed Δμ = {:.6e}", Delta_mu);
+
+  // Step 3 for ΔDm, as a local axpy on the Δμ=0 solution:
+  //   ΔDm(Δμ) = ΔDm(0) + Δμ·(dDm/dμ)
+  // solve_lr_dyson shifts the retained ΔG(τ) the same way (apply_dmu_shift_G).
+  apply_dmu_shift_Dm(sDeltaDm_skij, Delta_mu);
+
+  // Verify ΔN ≈ 0
+  _Timer.start("LR_DYSON_NELEC");
+  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
+  _Timer.stop("LR_DYSON_NELEC");
+  app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
+  return Delta_mu;
+}
+
+
+void lr_dyson::apply_dmu_shift_G(double Delta_mu) {
   // dG/dμ(τ) came out of solve_lr_dyson_impl, so its grid is derived from the same
   // (comm.size(), nkpts_ibz, nbnd) as the ΔG(τ) sitting in _dDeltaG_tau_buffer
   // and the two blocks coincide. Checked rather than assumed: a mismatch would
   // add one rank's block to another's, which is silent and wrong everywhere.
   utils::check(bool(_dDeltaG_tau_buffer),
-               "apply_dmu_shift: no ΔG(τ) retained — the Δμ=0 pass must run first.");
+               "apply_dmu_shift_G: no ΔG(τ) retained — the Δμ=0 pass must run first.");
   utils::check(_dDeltaG_tau_buffer->origin() == _dG_dmu_tskij->origin() and
                _dDeltaG_tau_buffer->local_shape() == _dG_dmu_tskij->local_shape(),
-               "apply_dmu_shift: ΔG(τ) and dG/dμ(τ) are distributed differently.");
+               "apply_dmu_shift_G: ΔG(τ) and dG/dμ(τ) are distributed differently.");
 
+  _Timer.start("LR_DYSON_DELTAMU");
   _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dG_dmu_tskij->local();
+  _Timer.stop("LR_DYSON_DELTAMU");
+}
 
+
+template<typename DeltaDm_t>
+void lr_dyson::apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
   // ΔDm and dDm/dμ are both node-replicated, so the add runs once per node.
   sDeltaDm_skij.win().fence();
   if (_context->node_comm.root())
     sDeltaDm_skij.local() += ComplexType(Delta_mu) * _sdDm_dmu_skij->local();
   sDeltaDm_skij.win().fence();
+}
+
+
+double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                                        const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                                        const sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                                        const sArray_t<Array_view_4D_t>* sDeltaDm_src,
+                                        bool fix_density) {
+  utils::check(_cached_G_wskij != nullptr,
+               "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
+  _Timer.start("LR_DYSON");
+  _Timer.start("LR_DYSON_DM_ONLY");
+  // A ΔG(τ) left by an earlier full pass belongs to a different ΔDm.
+  _dDeltaG_tau_buffer.reset();
+
+  // Each rank computes whole (s, k) blocks of ΔDm, summed over all ω, into its
+  // node's copy; the blocks computed on other nodes stay zero until the sum below.
+  sDeltaDm_skij.set_zero();
+  auto G_w = _cached_G_wskij->local();
+  auto DeltaDm = sDeltaDm_skij.local();
+  nda::matrix<ComplexType> X(_nbnd, _nbnd);
+  nda::matrix<ComplexType> XG(_nbnd, _nbnd);
+  auto [b0, b1] = itertools::chunk_range(0, _ns * _nkpts_ibz, long(_context->comm.size()),
+                                         long(_context->comm.rank()));
+  for (long b = b0; b < b1; ++b) {
+    const long s = b / _nkpts_ibz;
+    const long ik = b % _nkpts_ibz;
+    const long ikq = _kpq_map(ik);
+    auto DeltaDm_k = DeltaDm(s, ik, nda::range::all, nda::range::all);
+    if (sDeltaDm_src) DeltaDm_k = sDeltaDm_src->local()(s, ik, nda::range::all, nda::range::all);
+    X = sDeltaH0_skij.local()(s, ik, nda::range::all, nda::range::all) +
+        sDeltaF_skij.local()(s, ik, nda::range::all, nda::range::all);
+    // ΔDm(k) += c_ω · G_{k+q}(iω) · X(k) · G_k(iω)
+    for (long iw = 0; iw < _nw; ++iw) {
+      auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
+      auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
+      nda::blas::gemm(_c_beta_w(iw), X, G_k, ComplexType(0.0), XG);
+      nda::blas::gemm(ComplexType(1.0), G_kq, XG, ComplexType(1.0), DeltaDm_k);
+    }
+  }
+  sDeltaDm_skij.all_reduce_parallel();
+  _Timer.stop("LR_DYSON_DM_ONLY");
+
+  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
+
+  _Timer.stop("LR_DYSON");
+  print_timers(3);
+  return Delta_mu;
 }
 
 
