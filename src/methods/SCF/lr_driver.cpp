@@ -1066,8 +1066,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   bool outer_converged = false;
 
   // ΔG(τ) is materialized into sDeltaG_tskij at most once per Dyson solve: after
-  // the solve when K_sc has a Σ, at a stage boundary, and after the loop when it
-  // is read. lr_dyson throws on a second materialization of the same solve.
+  // the solve when K_sc has a Σ, at a stage boundary when K_pert has a Σ, and
+  // after the loop when it is read. lr_dyson throws on a second materialization
+  // of the same solve.
   //
   // Whether the current Dyson solve's ΔG(τ) is already in sDeltaG_tskij (shm).
   bool DeltaG_materialized = false;
@@ -1349,7 +1350,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (!outer_converged) {
         if (outer_tol > 0.0) outer_save(*_sDeltaDm_stage_prev, sDeltaDm_skij);
 
-        materialize_DeltaG();
+        if (k.pert.has_Sigma()) materialize_DeltaG();
         apply_kernel(k.pert, sDeltaF_pert_skij, pDeltaSigma_pert,
                      sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
         if (k.pert.has_Sigma()) dyson_DeltaSigma_tskij = sDeltaSigma_tskij;
