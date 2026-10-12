@@ -206,6 +206,8 @@ namespace methods {
        * @param thc      - [INPUT] THC-ERI handler
        * @param kp_map   - [INPUT] IBZ k → full BZ k mapping, i.e. ks_to_k(0) (nkpts_ibz,)
        * @param kpq_map  - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
+       * @param Timer    - [INPUT] optional sub-clock manager: SIGMA_A2P_ALLOC for the
+       *                   scratch, then the SIGMA_A2P_* clocks of aux_to_primary_local.
        *
        * Does NOT reduce over nodes, and does not synchronize the window: the only
        * writer is O_IPQ's reduce root — a single rank in the whole job, since (s,k)
@@ -226,7 +228,8 @@ namespace methods {
                                  sArray_t<AF_t>& O_Iab,
                                  THC_ERI auto& thc,
                                  nda::ArrayOfRank<1> auto const& kp_map,
-                                 nda::ArrayOfRank<1> auto const& kpq_map) {
+                                 nda::ArrayOfRank<1> auto const& kpq_map,
+                                 utils::TimerManager* Timer = nullptr) {
         static_assert(nda::get_rank<Array_aux_t> == 4,
                       "lr_thc_comm::aux_to_primary: aux rank must be 4");
         static_assert(nda::get_rank<AF_t> == 4,
@@ -237,10 +240,14 @@ namespace methods {
         auto O_Iab_loc = O_Iab.local()(s_rng, k_rng, nda::ellipsis{});
 
         // This entry point is not on the Sigma hot path, so it owns the scratch itself
-        // rather than making every caller thread one through.
-        nda::array<ComplexType, 3> O_buf;
+        // rather than making every caller thread one through. It is sized here, under
+        // its own clock, so the resize inside the impl is a no-op.
+        if (Timer) Timer->start("SIGMA_A2P_ALLOC");
+        long nbnd = O_Iab_loc.extent(2);
+        nda::array<ComplexType, 3> O_buf(s_rng.size() * k_rng.size(), nbnd, nbnd);
+        if (Timer) Timer->stop("SIGMA_A2P_ALLOC");
         aux_to_primary_local(ip, iq, scl, O_IPQ, O_Iab_loc, thc,
-                             kp_map, kpq_map, nullptr, O_buf);
+                             kp_map, kpq_map, Timer, O_buf);
       }
 
       /**
