@@ -661,8 +661,8 @@ void lr_driver::lr_setup(
   if (outer_tol > 0.0)
     _sDeltaDm_stage_prev.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-  // A K_sc without a Σ takes the ΔDm-only Dyson pass.
   if (!k.sc.has_Sigma()) {
+    // Allocations for the ΔDm-only Dyson pass (the inner solve has no Σ)
     _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
     if (k.pert.has_Sigma())
@@ -1073,11 +1073,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm falls below outer_tol, which stops the schedule short of pert_order.
   bool outer_converged = false;
 
-  // The ΔΣ the Dyson RHS reads: K_sc's ΔΣ (mixes_Sigma: K_sc has a Σ that is not
-  // replaced by ΔV_QPGW in qp mode). When only K_pert carries a Σ, there is none
-  // until the first K_pert evaluation writes it.
+  // The ΔΣ the Dyson RHS reads: K_sc's ΔΣ, unless qp mode replaces it by ΔV_QPGW.
+  // When only K_pert carries a Σ, there is none until the first K_pert evaluation
+  // writes it.
   sArray_t<Array_view_5D_t>* dyson_DeltaSigma_tskij =
-      k.sc.mixes_Sigma() ? sDeltaSigma_tskij : nullptr;
+      (k.sc.has_Sigma() && !k.sc.is_qp()) ? sDeltaSigma_tskij : nullptr;
 
   // Fill sDeltaG_tskij with the ΔG(τ) of the current ΔDm, at most once per Dyson solve.
   bool DeltaG_in_shm = false;
