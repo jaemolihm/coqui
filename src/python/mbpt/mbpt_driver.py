@@ -454,7 +454,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     max_iter : int, optional
         Maximum number of SCF iterations (default 50). Use 1 for one-shot.
     tol : float, optional
-        Convergence tolerance for ||ΔDm_new - ΔDm_old|| (default 1e-8)
+        Convergence tolerance (default 1e-8). DIIS/damping converge on the
+        successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
+        ||g(x) - x|| of the ΔF iterate.
     fix_density : bool, optional
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
@@ -467,10 +469,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
           basis capacity (default 100)
         "GCR" solves the affine inner problem by GCR in probe form, converging
         on the residual ||r|| <= tol and keeping its Krylov basis across the
-        stages of a split-kernel solve. It requires the ΔDm-only Dyson pass to
-        apply -- a static self-consistent kernel (no Sigma, no qpGW map in it)
-        and nbnd >= the number of frequency pools -- and is rejected with
-        hessian.
+        stages of a split-kernel solve. It requires a self-consistent kernel
+        without Sigma and outside the qpGW map that evaluates ΔF, and is
+        rejected with hessian.
         - diis_warmup : int - Warmup iterations before DIIS (default 0)
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",

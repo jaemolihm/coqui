@@ -61,20 +61,17 @@ namespace methods {
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
- * Named for the flexible variant of docs/plan_lr_krylov_solver.md (Phase 1): the
- * preconditioner hook z = P⁻¹ r is reserved for it; here z = r.
- *
  * Why not src/numerics/iter_scf/: its solvers keep their vectors in HDF5-backed
  * VSpace storage behind a file-I/O Vector interface, and have no notion of a
  * striped slice or of recycling a basis across right-hand sides. lr_diis
  * already stands apart from it for the same reasons.
  */
-class lr_fgcr {
+class lr_gcr {
 public:
   using Vec1D = nda::array<ComplexType, 1>;
 
-  explicit lr_fgcr(size_t max_basis) : _cap(max_basis) {
-    utils::check(_cap >= 1, "lr_fgcr: the basis capacity must be >= 1.");
+  explicit lr_gcr(size_t max_basis) : _cap(max_basis) {
+    utils::check(_cap >= 1, "lr_gcr: the basis capacity must be >= 1.");
   }
 
   /// Forget the basis (buffers kept) and the right-hand side: a new solve.
@@ -112,7 +109,7 @@ public:
     auto [f0, f1] = pmap.my_slice(nF);
     auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
     utils::check(static_cast<long>(F_probe.size()) == f1 - f0,
-                 "lr_fgcr: probe slice size {} != partition slice size {}",
+                 "lr_gcr: probe slice size {} != partition slice size {}",
                  F_probe.size(), f1 - f0);
 
     Vec1D r_y = F_loc - F_probe;
@@ -165,7 +162,7 @@ public:
         // adds no direction, and repeating it would add none either. Restart
         // from the next probe x + r with an empty basis; its first step then
         // re-forms r from the true residual.
-        app_log(1, "    [WARNING] lr_fgcr: breakdown (||w|| = {:.3e} after "
+        app_log(1, "    [WARNING] lr_gcr: breakdown (||w|| = {:.3e} after "
                    "orthogonalization, {:.3e} before); restarting with an empty "
                    "basis.", wn, w0n);
         _n = 0;
@@ -205,7 +202,7 @@ private:
   size_t push_slot() {
     if (_n == _cap) {
       if (!_warned_full) {
-        app_log(1, "    [WARNING] lr_fgcr: the basis reached its capacity ({}); "
+        app_log(1, "    [WARNING] lr_gcr: the basis reached its capacity ({}); "
                    "evicting the oldest pair from now on.", _cap);
         _warned_full = true;
       }
@@ -221,11 +218,16 @@ private:
     return s;
   }
 
+  // Re⟨W_i, v⟩ for every stored pair, reduced over comm in one all_reduce: each
+  // rank holds its pmap slice of every vector, so the summed partial dots are
+  // the full ones.
   template<typename Comm>
   std::vector<double> dots(Comm& comm, Vec1D const& v) const {
-    std::vector<Vec1D const*> W(_n);
-    for (size_t i = 0; i < _n; ++i) W[i] = &_W[slot(i)];
-    return utils::striped_dotc_batch(comm, W, v);
+    std::vector<double> h(_n, 0.0);
+    if (v.size() > 0)
+      for (size_t i = 0; i < _n; ++i) h[i] = std::real(nda::blas::dotc(_W[slot(i)], v));
+    if (!h.empty()) comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
+    return h;
   }
 
   template<typename Comm>
