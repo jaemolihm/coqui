@@ -41,7 +41,7 @@ namespace fft {
 
 /**
  * Blocked-FFT replacement for the dense k<->R Fourier-transform gemms used by
- * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·) in lr_rpa_pi / lr_gw).
+ * the LR solvers (gemm(f_Rk, ·) / gemm(f_kR, ·)).
  *
  * Design note (why the existing gemm / plain batched-FFT paths are not reused):
  * the LR arrays are (nk, ncols) row-major with k as the SLOW axis. A batched
@@ -80,8 +80,7 @@ public:
     _nk = _n[0] * _n[1] * _n[2];
     long nk_in = kpts_cart.shape(0);
     // Preconditions are the caller's responsibility (the LR path forbids
-    // symmetry and guards the Γ-only case): assert loudly rather than silently
-    // reverting to the gemm path on a grid the FFT cannot represent.
+    // symmetry and guards the Γ-only case).
     utils::check(nk_in == _nk,
                  "fft_kR_t: k-point count {} does not match the MP-mesh product {}", nk_in, _nk);
     utils::check(_nk > 1,
@@ -92,7 +91,7 @@ public:
     _mesh_of_k.resize(_nk);
     std::vector<bool> seen(_nk, false);
     // Build _mesh_of_k and validate the grid: map each input k-point's crystal
-    // coords to its lexicographic MP-mesh slot; bail (unusable) on any off-mesh
+    // coords to its lexicographic MP-mesh slot; abort on any off-mesh
     // point or duplicate slot (i.e. shifted / IBZ-reduced / non-mesh grids).
     for (long q = 0; q < _nk; ++q) {
       std::array<long, 3> m;
