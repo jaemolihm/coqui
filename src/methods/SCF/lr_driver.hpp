@@ -582,8 +582,7 @@ public:
                              lr_diis_hist_t outer_hist = {},
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
-                             long hessian_nmodes = 0,
-                             int n_dm_only = 0);
+                             long hessian_nmodes = 0);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -833,7 +832,7 @@ private:
 
   // --- ΔDm-only Dyson pass (K_sc without a Σ).
   /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_src;
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pert_Sigma;
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
