@@ -1206,8 +1206,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // node root copies it whole; the mixed quantities are saved as this rank's
     // partition slice only, in parallel across the node.
     _Timer.start("LR_SAVE");
-    // GCR also needs the probe of a stage's first iteration: that step opens the
-    // new right-hand side.
+    // GCR also needs the input ΔF/ΔΣ of a stage's first iteration: that step opens
+    // the new right-hand side.
     if (stage_iter > 1 || use_gcr) {
       _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
       if (k.sc.has_Sigma() && !k.sc.is_qp())
@@ -1412,11 +1412,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     }
     _Timer.stop("LR_CONVERGENCE");
 
-    // GCR converged: the slot holds x, not the probe the ΔDm above came from (DIIS
-    // returns that last probe, whose ΔDm the loop already has). Form ΔDm at x
-    // before anything reads it (the outer test, K_pert, the exit):
-    // the same Dyson pass as Step 1, so with a Σ in K_sc ΔG(τ) at x is
-    // materialized too; otherwise only if a reader asks for it (update_DeltaG).
+    // GCR converged: ΔF_sc (and ΔΣ_sc with a Σ in K_sc) now hold GCR's solution
+    // x = (ΔF, ΔΣ), a combination of its basis, while the ΔDm above is that of this
+    // iteration's input ΔF/ΔΣ. DIIS keeps that input's ΔDm, so it needs nothing here.
+    // Form ΔDm at x before the outer test, K_pert or the exit reads it, with the
+    // Step 1 Dyson pass (with a Σ in K_sc it also materializes ΔG(τ); otherwise
+    // update_DeltaG forms it on demand).
     if (use_gcr && inner_converged) {
       rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
       _Timer.start("LR_DYSON");
