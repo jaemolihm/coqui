@@ -450,7 +450,7 @@ void lr_driver::lr_setup(
 
   // ΔΣ-sized striped previous iterates: the inner loop's tracked ΔΣ, plus the
   // outer accelerator's previous source when it mixes one.
-  const long n_sigma_prev = (k.sc.mixes_Sigma() ? 1 : 0)
+  const long n_sigma_prev = ((k.sc.has_Sigma() && !k.sc.is_qp()) ? 1 : 0)
                           + ((outer_diis_on && k.pert.has_Sigma()) ? 1 : 0);
 
   // The inner accelerator, built once: lr_solve_one reset()s the subspace rather
@@ -481,7 +481,7 @@ void lr_driver::lr_setup(
   if (!k.sc.is_empty()) {
     inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
     inner_hist.n_F = k.sc.is_qp() ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
-    inner_hist.n_Sigma = k.sc.mixes_Sigma() ? 1 : 0;
+    inner_hist.n_Sigma = (k.sc.has_Sigma() && !k.sc.is_qp()) ? 1 : 0;
     inner_hist.with_residuals = _lr_diis->stores_residuals();
   }
   if (outer_diis_on) {
@@ -614,7 +614,7 @@ void lr_driver::lr_setup(
   // n_flat = 0.
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
   _DeltaF.alloc(_pmap, nF);
-  _DeltaSigma.alloc(_pmap, k.sc.mixes_Sigma() ? _nts * nF : 0);
+  _DeltaSigma.alloc(_pmap, (k.sc.has_Sigma() && !k.sc.is_qp()) ? _nts * nF : 0);
   _DeltaVcorr.alloc(_pmap, k.sc.is_qp() ? nF : 0);
 
   // Raw (pre-mixing) capture buffers for the hessian estimator: one
@@ -623,7 +623,7 @@ void lr_driver::lr_setup(
   // unchanged in both memory and work.
   if (p.hessian()) {
     _DeltaF.alloc_kernel_out();
-    if (k.sc.mixes_Sigma()) _DeltaSigma.alloc_kernel_out();
+    if (k.sc.has_Sigma() && !k.sc.is_qp()) _DeltaSigma.alloc_kernel_out();
   }
 
   // Static ΔV_QPGW tracked in qp mode.
@@ -1149,7 +1149,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
       if (k.sc.is_qp()) {
         _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
-      } else if (k.sc.mixes_Sigma()) {
+      } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
         _DeltaSigma.prev = _DeltaSigma.slice(pDeltaSigma_sc->local());
       }
     }
@@ -1244,7 +1244,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
             sDeltaVcorr_skij.local(), _DeltaVcorr.prev, stage_iter);
-      } else if (k.sc.mixes_Sigma()) {
+      } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
         _lr_diis->next_step_combined(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
@@ -1268,7 +1268,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // every iteration and discard what lr_setup allocated.
       if (p.hessian()) {
         _DeltaF.kernel_out() = _lr_diis->newest_raw_F();
-        if (k.sc.mixes_Sigma()) _DeltaSigma.kernel_out() = _lr_diis->newest_raw_Sigma();
+        if (k.sc.has_Sigma() && !k.sc.is_qp()) _DeltaSigma.kernel_out() = _lr_diis->newest_raw_Sigma();
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
       // place with no trailing collective. Fence + barrier make every slice
@@ -1276,7 +1276,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // insufficient under the MPI-3 separate shared-memory model).
       sDeltaF_sc_skij.win().fence();
       if (k.sc.is_qp()) sDeltaVcorr_skij.win().fence();
-      else if (k.sc.mixes_Sigma()) pDeltaSigma_sc->win().fence();
+      else if (k.sc.has_Sigma() && !k.sc.is_qp()) pDeltaSigma_sc->win().fence();
       _mpi->node_comm.barrier();
       // Each node now holds a valid copy of its own contiguous element run
       // only; one allgatherv among the node roots completes every replica. With
@@ -1287,7 +1287,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         if (k.sc.is_qp()) {
           utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                          sDeltaVcorr_skij.local().data(), _DeltaVcorr.n_flat);
-        } else if (k.sc.mixes_Sigma()) {
+        } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
           utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                          pDeltaSigma_sc->local().data(), _DeltaSigma.n_flat);
         }
@@ -1295,7 +1295,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // Make node root's overwrite visible to its node peers
       sDeltaF_sc_skij.win().fence();
       if (k.sc.is_qp()) sDeltaVcorr_skij.win().fence();
-      else if (k.sc.mixes_Sigma()) pDeltaSigma_sc->win().fence();
+      else if (k.sc.has_Sigma() && !k.sc.is_qp()) pDeltaSigma_sc->win().fence();
       _mpi->comm.barrier();
     }
     _Timer.stop("LR_ITER_ALG");
@@ -1319,7 +1319,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           stage_iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
-    } else if (k.sc.mixes_Sigma()) {
+    } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
       auto norms_Sigma = utils::striped_norm(
           _mpi->comm, _DeltaSigma.slice(pDeltaSigma_sc->local()), _DeltaSigma.prev,
           stage_iter > 1);
@@ -1679,7 +1679,7 @@ void lr_driver::get_full_kernel_result(
     F_loc = _DeltaF.kernel_out;
     if (k.pert.has_F()) F_loc += _DeltaF.slice(_sDeltaF_pert->local());
   }
-  if (k.sc.mixes_Sigma()) {
+  if (k.sc.has_Sigma() && !k.sc.is_qp()) {
     utils::check(_DeltaSigma.has_kernel_out(),
                  "lr_driver::get_full_kernel_result: lr_setup allocated no kernel_out "
                  "ΔΣ slice.");
@@ -1691,18 +1691,18 @@ void lr_driver::get_full_kernel_result(
   // Republication: the same fence / node barrier / allgatherv-among-node-roots
   // sequence the SCF loop's mixing epilogue uses.
   if (k.sc.has_F()) sDeltaF_skij.win().fence();
-  if (k.sc.mixes_Sigma()) sDeltaSigma_tskij->win().fence();
+  if (k.sc.has_Sigma() && !k.sc.is_qp()) sDeltaSigma_tskij->win().fence();
   _mpi->node_comm.barrier();
   if (_mpi->node_comm.root()) {
     if (k.sc.has_F())
       utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                   sDeltaF_skij.local().data(), _DeltaF.n_flat);
-    if (k.sc.mixes_Sigma())
+    if (k.sc.has_Sigma() && !k.sc.is_qp())
       utils::complete_node_slices(_mpi->internode_comm, _pmap,
                                   sDeltaSigma_tskij->local().data(), _DeltaSigma.n_flat);
   }
   if (k.sc.has_F()) sDeltaF_skij.win().fence();
-  if (k.sc.mixes_Sigma()) sDeltaSigma_tskij->win().fence();
+  if (k.sc.has_Sigma() && !k.sc.is_qp()) sDeltaSigma_tskij->win().fence();
   _mpi->comm.barrier();
 }
 

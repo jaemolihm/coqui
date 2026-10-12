@@ -348,8 +348,6 @@ struct lr_kernel {
   bool has_Sigma() const { return terms.has_sigma(); }
   /// LR-qpGW: this channel's ΔΣ is statified into ΔV_QPGW (see `qp`).
   bool is_qp() const { return qp != nullptr; }
-  /// The dynamic ΔΣ(iω) itself is this channel's mixed/tracked second quantity.
-  bool mixes_Sigma() const { return has_Sigma() && !is_qp(); }
   bool is_empty() const { return !has_F() && !has_Sigma(); }
 };
 
