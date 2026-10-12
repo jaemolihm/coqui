@@ -423,9 +423,10 @@ namespace lr_dyson_tests {
 
   TEST_CASE("lr_dyson_dm_only_vs_full", "[methods_scf]") {
     /**
-     * solve_lr_dyson_dm_only (with and without a DeltaDm_of_Sigma source) against
-     * the ΔDm of solve_lr_dyson on the same RHS: (a) X = ΔH0 + ΔF, (b) X = ΔH0 + ΔF
-     * + ΔΣ, (c) both with fix_density at q = Γ. The two share G(iω) and the ω-side
+     * solve_lr_dyson_dm_only against the ΔDm of solve_lr_dyson on the same RHS:
+     * (a) X = ΔH0 + ΔF, (b) X = ΔH0 + ΔF + ΔΣ, with the ΔΣ part handed in as the
+     * source ΔDm of a solve_lr_dyson with ΔΣ alone, (c) both with fix_density at
+     * q = Γ. The two share G(iω) and the ω-side
      * grid but not the ΔG(iω) → ΔG(τ) → ΔDm route, so they agree to round-off.
      *
      * With more ranks per ω pool than bands (nbnd = 8 here, e.g. 16 ranks) some
@@ -460,6 +461,8 @@ namespace lr_dyson_tests {
     };
     sArray_t<Array_view_4D_t> F(make4()), Dm(make4()), DeltaH0(make4()), DeltaF(make4());
     sArray_t<Array_view_4D_t> Dm_full(make4()), Dm_only(make4()), Dm_src(make4());
+    sArray_t<Array_view_4D_t> Zero(make4());
+    Zero.set_zero();
     sArray_t<Array_view_5D_t> G(make5()), Sigma(make5()), DeltaSigma(make5());
 
     hamilt::pseudopot psp(mf);
@@ -510,7 +513,7 @@ namespace lr_dyson_tests {
         for (bool with_sigma : {false, true}) {
           const sArray_t<Array_view_5D_t>* pS = with_sigma ? &DeltaSigma : nullptr;
           double mu_full = lr_dys.solve_lr_dyson(Dm_full, DeltaH0, DeltaF, pS, fd);
-          if (with_sigma) lr_dys.DeltaDm_of_Sigma(Dm_src, DeltaSigma);
+          if (with_sigma) lr_dys.solve_lr_dyson(Dm_src, Zero, Zero, &DeltaSigma, false);
           double mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, DeltaH0, DeltaF,
                                                          with_sigma ? &Dm_src : nullptr, fd);
           context->comm.barrier();

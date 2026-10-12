@@ -448,23 +448,12 @@ lr_dyson::dm_only_layout_t& lr_dyson::dm_only_layout() {
 
 
 void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                            const sArray_t<Array_view_4D_t>* sDeltaH0_skij,
-                            const sArray_t<Array_view_4D_t>* sDeltaF_skij,
-                            const dArray_5D_t* dDeltaSigma_wskij) {
+                            const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                            const sArray_t<Array_view_4D_t>& sDeltaF_skij) {
   utils::check(_cached_G_wskij != nullptr,
                "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
   _Timer.start("LR_DYSON_DM_ONLY");
   auto& L = dm_only_layout();
-  const bool has_static = sDeltaH0_skij and sDeltaF_skij;
-  utils::check(has_static != (dDeltaSigma_wskij != nullptr),
-               "lr_dyson::dm_only_pass: give either the static ΔH0 + ΔF or ΔΣ(iω).");
-  if (dDeltaSigma_wskij) {
-    utils::check(dDeltaSigma_wskij->origin()[0] == L.w0 and
-                 dDeltaSigma_wskij->origin()[2] == L.k0 and
-                 dDeltaSigma_wskij->local_shape()[0] == L.nw and
-                 dDeltaSigma_wskij->local_shape()[2] == L.nk,
-                 "lr_dyson: ΔΣ(iω) is not on the ω-side Dyson grid.");
-  }
 
   auto G_w = _cached_G_wskij->local();
   nda::array<ComplexType, 4> part(_ns, L.nk, _nbnd, _nbnd);
@@ -477,19 +466,13 @@ void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
       const long ik = k + L.k0;
       const long ikq = _kpq_map(ik);
       auto Dm_k = part(s, k, nda::range::all, nda::range::all);
-      if (has_static)
-        X_static = sDeltaH0_skij->local()(s, ik, nda::range::all, nda::range::all) +
-                   sDeltaF_skij->local()(s, ik, nda::range::all, nda::range::all);
+      X_static = sDeltaH0_skij.local()(s, ik, nda::range::all, nda::range::all) +
+                 sDeltaF_skij.local()(s, ik, nda::range::all, nda::range::all);
       for (long n = 0; n < L.nw; ++n) {
         const long iw = n + L.w0;
         auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
         auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
-        if (has_static)
-          nda::blas::gemm(L.c_w(iw), X_static, G_k, ComplexType(0.0), tmp);
-        else
-          nda::blas::gemm(L.c_w(iw),
-                          dDeltaSigma_wskij->local()(n, s, k, nda::range::all, nda::range::all),
-                          G_k, ComplexType(0.0), tmp);
+        nda::blas::gemm(L.c_w(iw), X_static, G_k, ComplexType(0.0), tmp);
         nda::blas::gemm(ComplexType(1.0), G_kq, tmp, ComplexType(1.0), Dm_k);
       }
     }
@@ -517,7 +500,7 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
   // A ΔG(τ) nobody gathered before this solve is dead, and this one makes none.
   _dDeltaG_tau_buffer.reset();
 
-  dm_only_pass(sDeltaDm_skij, &sDeltaH0_skij, &sDeltaF_skij, nullptr);
+  dm_only_pass(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij);
   if (sDeltaDm_src) {
     sDeltaDm_skij.win().fence();
     if (_context->node_comm.root()) sDeltaDm_skij.local() += sDeltaDm_src->local();
@@ -529,21 +512,6 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
   _Timer.stop("LR_DYSON");
   print_timers(3);
   return Delta_mu;
-}
-
-
-void lr_dyson::DeltaDm_of_Sigma(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                                const sArray_t<Array_view_5D_t>& sDeltaSigma_tskij) {
-  _Timer.start("LR_DYSON");
-  auto [w_pgrid, w_bsize] =
-      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
-  _Timer.start("LR_DYSON_TAU_TO_W");
-  auto dDeltaSigma_wskij =
-      distributed_tau_to_w(_context->comm, sDeltaSigma_tskij, *_dyson.FT(), w_pgrid,
-                           w_bsize, __app_verbosity__ >= 3);
-  _Timer.stop("LR_DYSON_TAU_TO_W");
-  dm_only_pass(sDeltaDm_out, nullptr, nullptr, &dDeltaSigma_wskij);
-  _Timer.stop("LR_DYSON");
 }
 
 

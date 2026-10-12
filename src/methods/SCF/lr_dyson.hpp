@@ -255,7 +255,8 @@ public:
    * agrees with solve_lr_dyson to round-off, not bitwise.
    *
    * `sDeltaDm_src`, when given, is a ΔDm(Δμ=0) contribution computed elsewhere
-   * (DeltaDm_of_Sigma) and added before the Δμ step. With fix_density at
+   * (e.g. solve_lr_dyson at fix_density=false with a frozen ΔΣ alone) and added
+   * before the Δμ step. With fix_density at
    * q=Γ the Δμ closed form of solve_lr_dyson follows, shifting ΔDm alone.
    *
    * Leaves no ΔG(τ) behind: materialize_DeltaG_tau() after this throws.
@@ -269,18 +270,6 @@ public:
                                 const sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                 const sArray_t<Array_view_4D_t>* sDeltaDm_src,
                                 bool fix_density);
-
-  /**
-   * @brief The ΔDm(Δμ=0) of a dynamic RHS ΔΣ(τ) alone, into `sDeltaDm_out`.
-   *
-   * The Dyson map is linear in its RHS, so a ΔΣ that is frozen over many
-   * solve_lr_dyson_dm_only calls is summed once here and handed to each of them
-   * as `sDeltaDm_src`. Transforms ΔΣ to iω on the ω-side grid, runs the same pass
-   * as solve_lr_dyson_dm_only with X(iω) = ΔΣ(iω), and frees the ω array. Same
-   * grid requirement as solve_lr_dyson_dm_only. Collective on comm.
-   */
-  void DeltaDm_of_Sigma(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                        const sArray_t<Array_view_5D_t>& sDeltaSigma_tskij);
 
   /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
@@ -433,14 +422,13 @@ private:
   template<typename DeltaDm_t>
   double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density);
 
-  // The ΔDm pass behind solve_lr_dyson_dm_only / DeltaDm_of_Sigma: accumulates
-  // c_ω·G_{k+q}·X·G_k over this rank's (ω, k) block of lr_dyson_omega_pgrid,
-  // reduces over the ω-pool, and assembles ΔDm(Δμ=0) in `sDeltaDm_out` through
-  // gather_to_shm. X = ΔH0 + ΔF, or X = ΔΣ(iω); exactly one of the two is given.
+  // The ΔDm pass behind solve_lr_dyson_dm_only: accumulates c_ω·G_{k+q}·X·G_k,
+  // X = ΔH0 + ΔF, over this rank's (ω, k) block of lr_dyson_omega_pgrid, reduces
+  // over the ω-pool, and assembles ΔDm(Δμ=0) in `sDeltaDm_out` through
+  // gather_to_shm.
   void dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                    const sArray_t<Array_view_4D_t>* sDeltaH0_skij,
-                    const sArray_t<Array_view_4D_t>* sDeltaF_skij,
-                    const dArray_5D_t* dDeltaSigma_wskij);
+                    const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                    const sArray_t<Array_view_4D_t>& sDeltaF_skij);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;

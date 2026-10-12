@@ -665,9 +665,15 @@ void lr_driver::lr_setup(
     // Allocations for the ΔDm-only Dyson pass (the inner solve has no Σ)
     _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-    if (k.pert.has_Sigma())
+    if (k.pert.has_Sigma()) {
+      // The frozen K_pert ΔΣ enters through its own ΔDm, from a full Dyson solve
+      // with that ΔΣ alone: _sZero_skij stands in for its ΔH0 and ΔF.
       _sDeltaDm_pert_Sigma.emplace(math::shm::make_shared_array<Array_view_4D_t>(
           *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+      _sZero_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+      _sZero_skij->set_zero();
+    }
   }
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
 
@@ -1167,11 +1173,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
       DeltaG_in_shm = true;
     } else {
-      // The frozen perturbative ΔΣ enters through its own ΔDm, summed at the
-      // first pass of each stage; the static RHS is summed every pass. The ΔF
-      // the pass is fed is kept for update_DeltaG.
+      // The frozen perturbative ΔΣ enters through its own ΔDm(Δμ=0), from a full
+      // Dyson solve with ΔΣ alone at the first pass of each stage; the static RHS
+      // is summed every pass. The ΔG(τ) that solve leaves is dropped by the
+      // ΔDm-only pass below. The ΔF the pass is fed is kept for update_DeltaG.
       if (dyson_DeltaSigma_tskij && first_of_stage)
-        _lr_dyson.DeltaDm_of_Sigma(*_sDeltaDm_pert_Sigma, *dyson_DeltaSigma_tskij);
+        _lr_dyson.solve_lr_dyson(*_sDeltaDm_pert_Sigma, *_sZero_skij, *_sZero_skij,
+                                 dyson_DeltaSigma_tskij, /*fix_density=*/false,
+                                 static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
       _sDeltaF_dyson_in->win().fence();
       if (_mpi->node_comm.root()) _sDeltaF_dyson_in->local() = sDeltaF_skij.local();
       _sDeltaF_dyson_in->win().fence();

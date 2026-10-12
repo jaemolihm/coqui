@@ -833,6 +833,8 @@ private:
   // --- ΔDm-only Dyson pass (K_sc without a Σ).
   /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pert_Sigma;
+  /// Zero (ns, nk, nb, nb), the ΔH0 and ΔF of the solve that gives it.
+  std::optional<sArray_t<Array_view_4D_t>> _sZero_skij;
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
