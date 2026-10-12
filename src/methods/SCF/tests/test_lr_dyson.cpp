@@ -426,11 +426,11 @@ namespace lr_dyson_tests {
      * solve_lr_dyson_dm_only against the ΔDm of solve_lr_dyson on the same RHS:
      * (a) X = ΔH0 + ΔF, (b) X = ΔH0 + ΔF + ΔΣ, with the ΔΣ part handed in as the
      * source ΔDm of a solve_lr_dyson with ΔΣ alone, (c) both with fix_density at
-     * q = Γ. The two share G(iω) and the ω-side
-     * grid but not the ΔG(iω) → ΔG(τ) → ΔDm route, so they agree to round-off.
+     * q = Γ. The two share G(iω) but not the ΔG(iω) → ΔG(τ) → ΔDm route, so they
+     * agree to round-off.
      *
-     * With more ranks per ω pool than bands (nbnd = 8 here, e.g. 16 ranks) some
-     * ranks hand an empty band-row slice to gather_to_shm.
+     * With more ranks than (s, k) blocks (nk = 8 here, e.g. 16 ranks) some ranks
+     * own no block.
      */
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;

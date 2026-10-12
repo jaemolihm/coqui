@@ -41,6 +41,18 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
       _kpq_map(_nkpts),
       _Timer() {
 
+  // c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω): ω→τ followed by τ→β⁻, so ΔDm = Σ_ω c_ω ΔG(iω).
+  {
+    auto Ttw = _dyson.FT()->Ttw_ff();
+    auto Tb = _dyson.FT()->T_beta_t_ff();
+    _c_beta_w = nda::array<ComplexType, 1>(_nw);
+    for (long n = 0; n < _nw; ++n) {
+      ComplexType c(0.0);
+      for (long t = 0; t < _nts; ++t) c += Tb(t) * Ttw(t, n);
+      _c_beta_w(n) = -c;
+    }
+  }
+
   // Compute k+q mapping
   auto kpts_crys = dyson.MF()->kpts_crystal();
   utils::calculate_kpq_map(kpts_crys, _q_vec, _kpq_map);
@@ -402,110 +414,45 @@ void lr_dyson::apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
 }
 
 
-lr_dyson::dm_only_layout_t& lr_dyson::dm_only_layout() {
-  if (_dm_only) return *_dm_only;
-  using math::nda::make_distributed_array;
-
-  // c_ω: the ω→τ matrix followed by the τ→β⁻ vector, as one length-nw vector.
-  nda::array<ComplexType, 1> c_w(_nw);
-  {
-    auto Ttw = _dyson.FT()->Ttw_ff();
-    auto Tb = _dyson.FT()->T_beta_t_ff();
-    for (long n = 0; n < _nw; ++n) {
-      ComplexType c(0.0);
-      for (long t = 0; t < _nts; ++t) c += Tb(t) * Ttw(t, n);
-      c_w(n) = -c;
-    }
-  }
-
-  // The (ω, k) block solve_lr_dyson_impl gives this rank: the same pgrid on the
-  // same (ω, s, k) extents, with the band axes collapsed to a single element.
-  auto [w_pgrid, w_bsize] =
-      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
-  utils::check(w_pgrid[3] * w_pgrid[4] == 1,
-               "lr_dyson: the ΔDm-only pass needs undivided band axes, but {} ranks "
-               "have no (ω pools x k pools) factorisation with nw = {}, nk = {}. Use a "
-               "rank count without a prime factor larger than both.",
-               _context->comm.size(), _nw, _nkpts_ibz);
-  auto own = make_distributed_array<nda::array<ComplexType, 5>>(
-      _context->comm, w_pgrid, {_nw, _ns, _nkpts_ibz, 1, 1});
-  const long k0 = own.origin()[2];
-
-  // The ranks sharing a k block form an ω pool. After the pool's reduction every
-  // member holds the same partial ΔDm, so each hands a disjoint band-row slice to
-  // gather_to_shm and the slices cover all rows exactly once. With more members
-  // than bands some slices are empty.
-  auto wpool = _context->comm.split(int(k0), _context->comm.rank());
-  utils::check(wpool.size() == w_pgrid[0],
-               "lr_dyson: ω pool of size {} for {} ω pools.", wpool.size(), w_pgrid[0]);
-  auto [i0, i1] = itertools::chunk_range(0, long(_nbnd), long(wpool.size()),
-                                         long(wpool.rank()));
-  _dm_only.emplace(dm_only_layout_t{std::move(c_w), own.origin()[0], own.local_shape()[0],
-                                    k0, own.local_shape()[2], i0, i1 - i0,
-                                    {1, w_pgrid[2], w_pgrid[0], 1}, std::move(wpool)});
-  return *_dm_only;
-}
-
-
-void lr_dyson::dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                            const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                            const sArray_t<Array_view_4D_t>& sDeltaF_skij) {
-  utils::check(_cached_G_wskij != nullptr,
-               "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
-  _Timer.start("LR_DYSON_DM_ONLY");
-  auto& L = dm_only_layout();
-
-  auto G_w = _cached_G_wskij->local();
-  nda::array<ComplexType, 4> part(_ns, L.nk, _nbnd, _nbnd);
-  part() = ComplexType(0.0);
-  nda::matrix<ComplexType> X_static(_nbnd, _nbnd);
-  nda::matrix<ComplexType> tmp(_nbnd, _nbnd);
-
-  for (long s = 0; s < _ns; ++s) {
-    for (long k = 0; k < L.nk; ++k) {
-      const long ik = k + L.k0;
-      const long ikq = _kpq_map(ik);
-      auto Dm_k = part(s, k, nda::range::all, nda::range::all);
-      X_static = sDeltaH0_skij.local()(s, ik, nda::range::all, nda::range::all) +
-                 sDeltaF_skij.local()(s, ik, nda::range::all, nda::range::all);
-      for (long n = 0; n < L.nw; ++n) {
-        const long iw = n + L.w0;
-        auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
-        auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
-        nda::blas::gemm(L.c_w(iw), X_static, G_k, ComplexType(0.0), tmp);
-        nda::blas::gemm(ComplexType(1.0), G_kq, tmp, ComplexType(1.0), Dm_k);
-      }
-    }
-  }
-
-  L.wpool.all_reduce_in_place_n(part.data(), part.size(), std::plus<>{});
-
-  nda::array<ComplexType, 4> rows =
-      part(nda::range::all, nda::range::all, nda::range(L.row0, L.row0 + L.nrow),
-           nda::range::all);
-  using dArray_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
-  dArray_4D_t dDm(std::addressof(_context->comm), L.rows_grid, {_ns, _nkpts_ibz, _nbnd, _nbnd},
-                  {0, L.k0, L.row0, 0}, {1, 1, 1, 1}, std::move(rows));
-  math::nda::gather_to_shm(dDm, sDeltaDm_out);
-  _Timer.stop("LR_DYSON_DM_ONLY");
-}
-
-
 double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                                         const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
                                         const sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                         const sArray_t<Array_view_4D_t>* sDeltaDm_src,
                                         bool fix_density) {
+  utils::check(_cached_G_wskij != nullptr,
+               "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
   _Timer.start("LR_DYSON");
-  // A ΔG(τ) nobody gathered before this solve is dead, and this one makes none.
+  _Timer.start("LR_DYSON_DM_ONLY");
+  // A ΔG(τ) left by an earlier full pass belongs to a different ΔDm.
   _dDeltaG_tau_buffer.reset();
 
-  dm_only_pass(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij);
-  if (sDeltaDm_src) {
-    sDeltaDm_skij.win().fence();
-    if (_context->node_comm.root()) sDeltaDm_skij.local() += sDeltaDm_src->local();
-    sDeltaDm_skij.win().fence();
+  // Each rank computes whole (s, k) blocks of ΔDm, summed over all ω, into its
+  // node's copy; the blocks computed on other nodes stay zero until the sum below.
+  sDeltaDm_skij.set_zero();
+  auto G_w = _cached_G_wskij->local();
+  auto DeltaDm = sDeltaDm_skij.local();
+  nda::matrix<ComplexType> X(_nbnd, _nbnd);
+  nda::matrix<ComplexType> XG(_nbnd, _nbnd);
+  auto [b0, b1] = itertools::chunk_range(0, _ns * _nkpts_ibz, long(_context->comm.size()),
+                                         long(_context->comm.rank()));
+  for (long b = b0; b < b1; ++b) {
+    const long s = b / _nkpts_ibz;
+    const long ik = b % _nkpts_ibz;
+    const long ikq = _kpq_map(ik);
+    auto DeltaDm_k = DeltaDm(s, ik, nda::range::all, nda::range::all);
+    if (sDeltaDm_src) DeltaDm_k = sDeltaDm_src->local()(s, ik, nda::range::all, nda::range::all);
+    X = sDeltaH0_skij.local()(s, ik, nda::range::all, nda::range::all) +
+        sDeltaF_skij.local()(s, ik, nda::range::all, nda::range::all);
+    // ΔDm(k) += c_ω · G_{k+q}(iω) · X(k) · G_k(iω)
+    for (long iw = 0; iw < _nw; ++iw) {
+      auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
+      auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
+      nda::blas::gemm(_c_beta_w(iw), X, G_k, ComplexType(0.0), XG);
+      nda::blas::gemm(ComplexType(1.0), G_kq, XG, ComplexType(1.0), DeltaDm_k);
+    }
   }
+  sDeltaDm_skij.all_reduce_parallel();
+  _Timer.stop("LR_DYSON_DM_ONLY");
 
   const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
 

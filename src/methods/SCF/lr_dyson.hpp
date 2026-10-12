@@ -260,8 +260,8 @@ public:
    * q=Γ the Δμ closed form of solve_lr_dyson follows, shifting ΔDm alone.
    *
    * Leaves no ΔG(τ) behind: materialize_DeltaG_tau() after this throws.
-   * Reuses lr_dyson_omega_pgrid's (ω, k) ownership, so it aborts on a rank count
-   * that grid can only place by splitting the bands. Collective on comm.
+   * Each rank computes whole (s, k) blocks over all ω from the node-replicated
+   * G(iω); the nodes' blocks are combined by one internode sum. Collective on comm.
    *
    * @return the Δμ used, as solve_lr_dyson
    */
@@ -422,13 +422,6 @@ private:
   template<typename DeltaDm_t>
   double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density);
 
-  // The ΔDm pass behind solve_lr_dyson_dm_only: accumulates c_ω·G_{k+q}·X·G_k,
-  // X = ΔH0 + ΔF, over this rank's (ω, k) block of lr_dyson_omega_pgrid, reduces
-  // over the ω-pool, and assembles ΔDm(Δμ=0) in `sDeltaDm_out` through
-  // gather_to_shm.
-  void dm_only_pass(sArray_t<Array_view_4D_t>& sDeltaDm_out,
-                    const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                    const sArray_t<Array_view_4D_t>& sDeltaF_skij);
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _context;
@@ -472,18 +465,8 @@ private:
   std::optional<dArray_5D_t> _dG_dmu_tskij;
   std::optional<sArray_t<Array_view_4D_t>> _sdDm_dmu_skij;
 
-  // ΔDm-only pass: c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω), and this rank's (ω, k) block
-  // (origin, extent), band-row slice, the grid of those slices, and ω pool.
-  // Built on first use, not in the ctor: a run that never takes the pass must
-  // neither split the communicator nor hit the band-split abort.
-  struct dm_only_layout_t {
-    nda::array<ComplexType, 1> c_w;
-    long w0, nw, k0, nk, row0, nrow;
-    std::array<long, 4> rows_grid;
-    mpi3::communicator wpool;
-  };
-  std::optional<dm_only_layout_t> _dm_only;
-  dm_only_layout_t& dm_only_layout();
+  // c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω), the ω weights of ΔDm in the ΔDm-only pass.
+  nda::array<ComplexType, 1> _c_beta_w;
 
   // Bytes of ΔG(τ) replicated per node by the gather; used to report the achieved rate.
   size_t _gather_bytes = 0;
