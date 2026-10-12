@@ -242,33 +242,6 @@ public:
     return rn;
   }
 
-  /// This rank's slice of the current iterate x, as [F; S].
-  Vec1D const& x() const { return _x; }
-
-  /**
-   * @brief ‖[F; S] − x‖ over `comm`, for full arrays F and S (S empty for a
-   *        ΔF-only iterate) laid out as in step(). With F, S = g(x) this is the
-   *        true residual, to set next to the recursive ‖r‖.
-   */
-  template<typename Comm, typename FView, typename SView>
-  double true_residual(Comm& comm, utils::part_map const& pmap,
-                       FView const& F, SView const& S) const {
-    const long nF = F.size();
-    auto [f0, f1] = pmap.my_slice(nF);
-    auto F_loc = nda::reshape(F, std::array<long, 1>{nF})(nda::range(f0, f1));
-    const long mF = f1 - f0;
-    double d2 = 0.0;
-    for (long i = 0; i < mF; ++i) d2 += std::norm(F_loc(i) - _x(i));
-    const long nS = S.size();
-    if (nS > 0) {
-      auto [s0, s1] = pmap.my_slice(nS);
-      auto S_loc = nda::reshape(S, std::array<long, 1>{nS})(nda::range(s0, s1));
-      for (long i = 0; i < s1 - s0; ++i) d2 += std::norm(S_loc(i) - _x(mF + i));
-    }
-    comm.all_reduce_in_place_n(&d2, 1, std::plus<>{});
-    return std::sqrt(d2);
-  }
-
 private:
   size_t _cap;
   size_t _n = 0;       // live basis pairs

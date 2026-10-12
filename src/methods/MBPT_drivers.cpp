@@ -2180,11 +2180,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
-    // Store this mode's operands for the stationary hessian estimator, after the
-    // dump so what lands on disk stays the mixed iterate exactly as before. A copy
-    // out and nothing else: the raw (pre-mixing) kernel output lives in the
-    // accelerator's per-solve history and ΔDm/ΔG in shm windows, so both have to be
-    // taken here, before the next perturbation destroys them. Every contraction
+    // Store this mode's operands for the stationary hessian estimator. A copy out
+    // and nothing else: ΔF/ΔΣ and ΔDm/ΔG live in shm windows, so they have to be
+    // taken here, before the next perturbation overwrites them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
       driver.get_full_kernel_result(

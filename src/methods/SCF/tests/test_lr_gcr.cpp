@@ -138,15 +138,6 @@ TEST_CASE("lr_gcr_two_slot_recycling", "[methods_scf]") {
   REQUIRE(n1 <= 200);
   REQUIRE(affine_residual(P1, x1) < 10 * tol);
 
-  // true_residual on g(x) against the stored x is the affine residual.
-  {
-    auto g = P1.apply(x1);
-    nda::reshape(F, shape_t<1>{12}) = g(nda::range(0, 12));
-    nda::reshape(S, shape_t<1>{30}) = g(nda::range(12, 42));
-    REQUIRE_THAT(gcr.true_residual(world, pmap, F(), S()),
-                 Catch::Matchers::WithinAbs(affine_residual(P1, x1), 1e-13));
-  }
-
   // A new right-hand side on the same operator, mostly inside the Krylov space
   // of the first (as a later stage's is): the recycled pairs stay valid, so the
   // projection removes most of r0 and fewer steps are needed.

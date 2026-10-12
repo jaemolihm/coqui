@@ -378,7 +378,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     sDeltaH0.broadcast_to_nodes(0);
     _mpi->comm.barrier();
 
-    // Mode p's raw (pre-mixing) ΔF/ΔΣ out of the stores and back into shm, which is
+    // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
 

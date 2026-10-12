@@ -71,14 +71,14 @@ struct lr_hessian_result_t {
  *
  * ## 2. What the LR solve returns, and what it does not satisfy
  *
- * One lr_solve_one gives `(ΔG, ΔDm, ΔF, ΔΣ)`, where ΔF/ΔΣ are the RAW (pre-mixing)
- * kernel output of the final iteration. That set satisfies the kernel relation
+ * One lr_solve_one gives `(ΔG, ΔDm, ΔF, ΔΣ)`, where with the hessian on ΔF/ΔΣ are
+ * K evaluated at the returned ΔDm/ΔG. That set satisfies the kernel relation
  * exactly,
  *
  *   (ΔF, ΔΣ) = K(ΔDm, ΔG)                                        [holds]
  *
- * because the loop applies K after the Dyson solve and get_full_kernel_result
- * hands back the value before mixing touched it. What it does NOT satisfy is the
+ * because lr_solve_one evaluates K_sc once more at the returned ΔDm/ΔG and
+ * get_full_kernel_result does the same for K_pert. What it does NOT satisfy is the
  * Dyson equation,
  *
  *   (ΔDm, ΔG) = D[ΔH0 + ΔF + ΔΣ]                                 [fails by the
@@ -193,9 +193,8 @@ struct lr_hessian_result_t {
  * No trace is taken while the caller's mode loop runs. `store_mode` only packs one
  * mode's five operands into the striped stores; every contraction happens after the
  * loop. It has to be that way round, because a mode's data does not survive the
- * next one: the raw pre-mixing ΔF/ΔΣ live in the inner accelerator's ring, which
- * lr_solve_one resets per solve, and ΔDm/ΔG live in shm windows the next solve
- * overwrites in place. Storing is a copy-out, not a first half of the arithmetic.
+ * next one: ΔF/ΔΣ and ΔDm/ΔG live in shm windows the next solve overwrites in
+ * place. Storing is a copy-out, not a first half of the arithmetic.
  *
  * Evaluation is then all of `evaluate`: one loop over p that solves ΔX'_p and
  * takes column p of all four terms against every stored λ, followed by the
@@ -248,8 +247,7 @@ public:
    *
    * A copy-out, not a stage of the arithmetic: no trace is taken here. It runs in
    * the caller's mode loop because that is the only place mode p's operands exist —
-   * the raw (pre-mixing) ΔF/ΔΣ live in the per-solve DIIS ring and ΔDm/ΔG in shm
-   * windows, and the next mode's solve destroys both.
+   * ΔF/ΔΣ and ΔDm/ΔG live in shm windows that the next mode's solve overwrites.
    *
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
