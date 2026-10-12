@@ -196,9 +196,9 @@ public:
    *
    * For q≠0, fix_density is ignored (Δμ contribution vanishes).
    *
-   * ΔG(τ) itself is left distributed: the solve retains it and the caller must
-   * call materialize_DeltaG_tau() exactly once to replicate it into shared
-   * memory. ΔDm, which most callers actually want, is produced here as usual.
+   * ΔG(τ) itself is left distributed: the solve retains it until the caller
+   * replicates it into shared memory with materialize_DeltaG_tau(), at most
+   * once. ΔDm, which most callers actually want, is produced here as usual.
    *
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
    * @param sDeltaH0_skij     - [INPUT] Perturbation (ns, nk, nb, nb)
@@ -233,13 +233,12 @@ public:
    * the solve does not do it: a Σ-free run that never writes ΔG(τ) skips it
    * entirely, and its buffer is dropped by the next solve.
    *
-   * The caller owns that decision outright: this throws if the buffer is empty
-   * rather than skipping quietly, so "has ΔG(τ) been replicated?" is answered by
-   * the call sites and never by state inside lr_dyson.
+   * At most once per solve: the gather consumes the buffer, and a second call
+   * throws rather than leave its array with a stale ΔG(τ). The call sites are
+   * therefore responsible for calling it once.
    *
-   * Collective: every rank must call it, or none. In lr_driver that follows from
-   * k.any_Sigma() and p.save_DeltaG, both loop-invariant and identical on
-   * every rank.
+   * Collective: every rank must call it, or none. In lr_driver every call site
+   * depends only on kernel flags and loop state that agree on every rank.
    */
   void materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij);
 

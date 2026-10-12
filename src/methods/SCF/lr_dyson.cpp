@@ -396,9 +396,8 @@ void lr_dyson::apply_dmu_shift(DeltaDm_t& sDeltaDm_skij, double Delta_mu) {
 
 
 void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) {
-  // Unconditional, not idempotent: a solve leaves one ΔG(τ) in the buffer and
-  // the caller gathers it at most once. Checked rather than silently skipped,
-  // so a caller that loses track fails here instead of reading a stale ΔG(τ).
+  // Once per solve: the gather consumes the buffer, so a second call throws
+  // instead of leaving its array with a stale ΔG(τ).
   utils::check(bool(_dDeltaG_tau_buffer),
                "lr_dyson::materialize_DeltaG_tau: no ΔG(τ) to replicate. Either "
                "solve_lr_dyson() has not run since the last call, or ΔG(τ) was "
