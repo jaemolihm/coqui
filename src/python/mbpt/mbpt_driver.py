@@ -456,7 +456,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
-        ||g(x) - x|| of the ΔF iterate.
+        ||g(x) - x|| of the self-consistent iterate, the concatenation
+        (ΔF, ΔΣ) (ΔF alone when the self-consistent kernel has no Sigma).
     fix_density : bool, optional
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
@@ -466,12 +467,17 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - alg : str - "DIIS" (default), "damping" or "GCR"
         - mixing : float - Damping/mixing parameter (default 1.0; ignored by GCR)
         - max_subsp_size : int - DIIS subspace size (default 10), or the GCR
-          basis capacity (default 100)
+          basis capacity (default 50 when the self-consistent kernel has no
+          Sigma, i.e. a ΔF-only iterate; 10 when it has one, since each pair
+          then holds a ΔΣ(τ))
         "GCR" solves the affine inner problem by GCR in probe form, converging
         on the residual ||r|| <= tol and keeping its Krylov basis across the
-        stages of a split-kernel solve. It requires a self-consistent kernel
-        without Sigma and outside the qpGW map that evaluates ΔF, and is
-        rejected with hessian.
+        stages of a split-kernel solve. It is rejected only for a qpGW
+        self-consistent kernel, whose Pade statification of ΔΣ is not
+        additive. With hessian on, K_sc is evaluated once more at the solution.
+        Memory: each basis pair holds a ΔF and, with a Sigma in the
+        self-consistent kernel, a ΔΣ(τ), so the basis costs about as much as
+        a DIIS history of the same depth.
         - diis_warmup : int - Warmup iterations before DIIS (default 0)
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
@@ -690,7 +696,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     mixing = float(iter_alg.get("mixing", 1.0))
     if alg == "GCR" and mixing != 1.0:
         warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
-    max_subsp_size = int(iter_alg.get("max_subsp_size", 100 if alg == "GCR" else 10))
+    # GCR: 0 lets lr_setup pick the capacity from the self-consistent kernel.
+    max_subsp_size = int(iter_alg.get("max_subsp_size", 0 if alg == "GCR" else 10))
     diis_warmup = int(iter_alg.get("diis_warmup", 0))
 
     if MPI.COMM_WORLD.Get_rank() == 0:
