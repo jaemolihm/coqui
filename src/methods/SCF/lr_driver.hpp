@@ -214,7 +214,8 @@ struct lr_params {
   // --- SCF control ---
   int max_iter = 1;               ///< 1 = one-shot
   /// DIIS/damping: on the successive-iterate differences of ΔDm, ΔF, ΔΣ.
-  /// GCR: on the residual ||g(x) - x|| of the ΔF iterate.
+  /// GCR: on the residual ||g(x) - x|| of the self-consistent channel's
+  /// iterate, the concatenation (ΔF, ΔΣ) (ΔF alone for a Σ-free K_sc).
   double tol = 1e-8;
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
@@ -763,7 +764,7 @@ private:
   /// history and warmup: the inner one restarts at every stage boundary while
   /// this one is keyed on the outer step index, so the two share nothing.
   std::unique_ptr<lr_diis> _outer_diis;
-  /// GCR in place of _lr_diis when iter_params.alg == "GCR".
+  /// GCR in place of _lr_diis when iter_params.alg == "GCR" and K_sc is not empty.
   std::unique_ptr<lr_gcr> _lr_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
@@ -847,7 +848,8 @@ private:
   /// hence are the mixed iterate rather than the raw kernel output. The raw values
   /// themselves live in _DeltaF.kernel_out / _DeltaSigma.kernel_out, filled the moment
   /// accelerator stores them: reading the ring later cannot work, since it is
-  /// reset at every split-kernel stage boundary.
+  /// reset at every split-kernel stage boundary. Always false after a GCR solve
+  /// with the hessian on, whose K_sc refresh at the returned ΔX leaves raw output.
   bool _mixed_last_iter = false;
 
   int _nts;

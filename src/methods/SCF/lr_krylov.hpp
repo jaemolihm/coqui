@@ -22,6 +22,7 @@
 #define COQUI_LR_KRYLOV_HPP
 
 #include <cmath>
+#include <tuple>
 #include <vector>
 
 #include "nda/nda.hpp"
@@ -54,8 +55,17 @@ namespace methods {
  * start over the recycled space). reset() drops them, for a new perturbation.
  * At capacity the oldest pair is evicted.
  *
- * The inner product is Re Σ conj(a) b: with fix_density at q = Γ the map is
+ * The iterate is the self-consistent channel's (ΔF, ΔΣ(τ)), ΔΣ empty for a
+ * Σ-free kernel; every vector here is this rank's slice of the concatenation
+ * [ΔF; ΔΣ]. The inner product is Re Σ conj(a) b over it, unweighted, the same
+ * combined product lr_diis's B-matrix uses: with fix_density at q = Γ the map is
  * ℝ-linear only, and the real inner product is what keeps GCR exact there.
+ * The map must be affine for w = A z and the recycled pairs to hold, which rules
+ * out the qpGW statification (its Padé continuation is not additive in ΔΣ).
+ *
+ * Memory: 2·capacity stored pairs plus x, r and two scratch vectors, each a
+ * (ΔF + ΔΣ)-sized slice. With a Σ in the kernel one pair costs a ΔΣ, as one
+ * DIIS depth unit does; the pairs are allocated as the basis grows.
  *
  * SPMD: every rank of `comm` holds its `pmap` slice of every vector, and the
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
@@ -92,30 +102,62 @@ public:
   double rhs_residual_projected() const { return _r0_proj; }
 
   /**
-   * @brief One GCR step.
+   * @brief One GCR step on the iterate (ΔF, ΔΣ).
    *
-   * @param F_inout   - [IN/OUT] the full array (pass .local()); g(y) on entry, and
+   * The same argument layout as lr_diis::next_step_combined: two slots, each a
+   * full array plus this rank's slice of the probe. The second slot may be empty
+   * (a ΔF-only iterate). Internally the two slices are concatenated into one
+   * vector [F; S], and every inner product is Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
+   *
+   * @param F_inout   - [IN/OUT] the full ΔF (pass .local()); g(y) on entry, and
    *                            this rank's slice of the next probe (x + r), or of x
    *                            once converged, on exit
-   * @param F_probe   - [INPUT]  this rank's slice of the probe y g was applied to
-   * @param tol       - [INPUT]  convergence threshold on ‖r‖
+   * @param F_probe   - [INPUT]  this rank's slice of the ΔF probe y g was applied to
+   * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
+   * @param S_probe   - [INPUT]  this rank's slice of the ΔΣ probe
+   * @param tol       - [INPUT]  convergence threshold on ‖r‖ of the concatenation
    * @param converged - [OUTPUT] ‖r‖ ≤ tol
    * @return ‖r‖ after the step
    */
-  template<typename Comm, typename FView, typename FProbe>
-  double step(Comm& comm, utils::part_map const& pmap, FView F_inout,
-              FProbe const& F_probe, double tol, bool& converged) {
+  template<typename Comm, typename FView, typename FProbe, typename SView, typename SProbe>
+  double step(Comm& comm, utils::part_map const& pmap,
+              FView F_inout, FProbe const& F_probe,
+              SView S_inout, SProbe const& S_probe,
+              double tol, bool& converged) {
     const long nF = F_inout.size();
     auto [f0, f1] = pmap.my_slice(nF);
     auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
     utils::check(static_cast<long>(F_probe.size()) == f1 - f0,
-                 "lr_gcr: probe slice size {} != partition slice size {}",
+                 "lr_gcr: ΔF probe slice size {} != partition slice size {}",
                  F_probe.size(), f1 - f0);
+    const long nS = S_inout.size();
+    long s0 = 0, s1 = 0;
+    if (nS > 0) {
+      std::tie(s0, s1) = pmap.my_slice(nS);
+      utils::check(static_cast<long>(S_probe.size()) == s1 - s0,
+                   "lr_gcr: ΔΣ probe slice size {} != partition slice size {}",
+                   S_probe.size(), s1 - s0);
+    }
+    const long mF = f1 - f0, n = mF + (s1 - s0);
+    auto rF = nda::range(0, mF);
+    auto rS = nda::range(mF, n);
 
-    Vec1D r_y = F_loc - F_probe;
+    // _g <- g(y), _y <- y, both as [F; S]. Sized once per (layout of) solve.
+    if (_g.size() != n) { _g = Vec1D(n); _y = Vec1D(n); }
+    _g(rF) = F_loc;
+    _y(rF) = F_probe;
+    if (nS > 0) {
+      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
+      _g(rS) = S_loc;
+      _y(rS) = S_probe;
+    }
+
+    _g -= _y;                             // r(y) = g(y) − y
     if (!_have_rhs) {
-      _x = F_probe;
-      _r = r_y;
+      // First probe of a right-hand side
+      if (_x.size() != n) { _x = Vec1D(n); _r = Vec1D(n); }
+      _x() = _y;
+      _r() = _g;
       _r0_raw = norm(comm, _r);
       // Minimum-residual start over the recycled space: x += Z h, r −= W h with
       // h = Wᵀ r, twice for orthogonality.
@@ -129,8 +171,11 @@ public:
       _r0_proj = (_n > 0) ? norm(comm, _r) : _r0_raw;
       _have_rhs = true;
     } else {
-      Vec1D z = F_probe - _x;
-      Vec1D w = _r - r_y;                 // = A z
+      // Later probe: extend the basis
+      auto& z = _y;
+      auto& w = _g;
+      z -= _x;                            // z = y − x
+      w() = _r - w;                       // w = r − r(y) = A z
       // CGS2. The first pass also carries ‖w‖² before orthogonalization, the
       // scale the breakdown test below is relative to.
       double w0n = 0.0;
@@ -182,9 +227,46 @@ public:
 
     const double rn = norm(comm, _r);
     converged = (rn <= tol);
-    if (converged) F_loc = _x;
-    else           F_loc = _x + _r;
+    if (converged) {
+      // Converged: hand back x
+      _y() = _x;
+    } else {
+      // Next probe x + r
+      _y() = _x + _r;
+    }
+    F_loc = _y(rF);
+    if (nS > 0) {
+      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
+      S_loc = _y(rS);
+    }
     return rn;
+  }
+
+  /// This rank's slice of the current iterate x, as [F; S].
+  Vec1D const& x() const { return _x; }
+
+  /**
+   * @brief ‖[F; S] − x‖ over `comm`, for full arrays F and S (S empty for a
+   *        ΔF-only iterate) laid out as in step(). With F, S = g(x) this is the
+   *        true residual, to set next to the recursive ‖r‖.
+   */
+  template<typename Comm, typename FView, typename SView>
+  double true_residual(Comm& comm, utils::part_map const& pmap,
+                       FView const& F, SView const& S) const {
+    const long nF = F.size();
+    auto [f0, f1] = pmap.my_slice(nF);
+    auto F_loc = nda::reshape(F, std::array<long, 1>{nF})(nda::range(f0, f1));
+    const long mF = f1 - f0;
+    double d2 = 0.0;
+    for (long i = 0; i < mF; ++i) d2 += std::norm(F_loc(i) - _x(i));
+    const long nS = S.size();
+    if (nS > 0) {
+      auto [s0, s1] = pmap.my_slice(nS);
+      auto S_loc = nda::reshape(S, std::array<long, 1>{nS})(nda::range(s0, s1));
+      for (long i = 0; i < s1 - s0; ++i) d2 += std::norm(S_loc(i) - _x(mF + i));
+    }
+    comm.all_reduce_in_place_n(&d2, 1, std::plus<>{});
+    return std::sqrt(d2);
   }
 
 private:
@@ -196,6 +278,9 @@ private:
   double _r0_raw = 0.0, _r0_proj = 0.0;
   std::vector<Vec1D> _Z, _W;   // this rank's slices of z_i and w_i = A z_i
   Vec1D _x, _r;
+  // Per-step scratch, kept across calls: g(y), then r(y), then w; y, then z,
+  // then the next probe.
+  Vec1D _g, _y;
 
   size_t slot(size_t i) const { return (_head + i) % _Z.size(); }
 

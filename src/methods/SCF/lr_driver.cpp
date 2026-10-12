@@ -242,21 +242,13 @@ void lr_driver::lr_setup(
                p.iter_params.alg == "GCR",
                "lr_driver::lr_setup: unknown iter_alg '{}'. Must be 'damping', 'DIIS' "
                "or 'GCR'.", p.iter_params.alg);
-  if (p.iter_params.alg == "GCR") {
-    // GCR's vectors are ΔF-sized and its basis stays valid only while the map is
-    // one fixed affine operator, and the converged iterate x is turned into ΔDm
-    // by the ΔDm-only pass: a K_sc without Σ (and not qp) that evaluates ΔF.
-    utils::check(!k.sc.has_Sigma() && !k.sc.is_qp(),
-                 "lr_driver::lr_setup: iter_alg 'GCR' needs a self-consistent kernel "
-                 "without Σ and outside the qpGW map ({}).", k.sc.terms.to_string());
-    utils::check(k.sc.has_F(),
-                 "lr_driver::lr_setup: iter_alg 'GCR' needs a self-consistent kernel "
-                 "that evaluates ΔF.");
-    utils::check(!p.hessian(),
-                 "lr_driver::lr_setup: iter_alg 'GCR' is incompatible with the hessian "
-                 "estimator, which reads the raw pre-mixing kernel output of the "
-                 "accelerator's ring.");
-  }
+  // GCR's basis stays valid only while the inner map is one fixed affine
+  // operator. qp mode statifies ΔΣ through a Padé continuation, which is not
+  // additive in ΔΣ, so neither w = A z nor the recycled pairs would hold.
+  utils::check(p.iter_params.alg != "GCR" || !k.sc.is_qp(),
+               "lr_driver::lr_setup: iter_alg 'GCR' is incompatible with qp_static "
+               "mode: the Padé statification of ΔΣ is not additive, so the inner map "
+               "is not affine.");
 
   // Split-kernel (two-step) schedule: K = K_sc + K_pert, with K_sc resummed to
   // all orders by the inner SCF and K_pert applied `pert_order` times, each on a
@@ -485,11 +477,24 @@ void lr_driver::lr_setup(
   // slice available, which the hessian estimator needs.
   //
   // GCR replaces it at the same slot, keeping its basis across the stages of one
-  // solve. Exactly one of the two exists.
+  // solve. At most one of the two exists; GCR is built only for a K_sc with
+  // something to iterate, since an empty one never steps it.
   if (p.iter_params.alg == "GCR") {
-    _lr_gcr = std::make_unique<lr_gcr>(p.iter_params.max_subsp_size);
+    // GCR
+    if (!k.sc.is_empty()) {
+      // K_sc has something to iterate.
+      // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ in
+      // K_sc every pair costs a ΔΣ, as one DIIS depth unit does.
+      size_t cap = p.iter_params.max_subsp_size;
+      if (cap == 0) cap = (k.sc.has_Sigma() && !k.sc.is_qp()) ? 10 : 50;
+      _lr_gcr = std::make_unique<lr_gcr>(cap);
+    } else {
+      // Empty K_sc: no accelerator
+      _lr_gcr.reset();
+    }
     _lr_diis.reset();
   } else {
+    // DIIS, damping or undamped Picard
     _lr_diis = std::make_unique<lr_diis>(p.iter_params);
     _lr_gcr.reset();
   }
@@ -507,6 +512,7 @@ void lr_driver::lr_setup(
     // 2M basis vectors plus x and r: the depth-M, residual-carrying layout.
     inner_hist.depth = static_cast<long>(_lr_gcr->capacity());
     inner_hist.n_F = 1;
+    inner_hist.n_Sigma = (k.sc.has_Sigma() && !k.sc.is_qp()) ? 1 : 0;
     inner_hist.with_residuals = true;
   } else if (_lr_diis && !k.sc.is_empty()) {
     inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
@@ -650,8 +656,9 @@ void lr_driver::lr_setup(
   // Raw (pre-mixing) capture buffers for the hessian estimator: one
   // more striped ΔF slice, and one more striped ΔΣ slice when the sc channel
   // carries a Σ. Allocated only under the flag, so the ordinary path is
-  // unchanged in both memory and work.
-  if (p.hessian()) {
+  // unchanged in both memory and work. GCR needs none: lr_solve_one evaluates K_sc
+  // once at the solution instead.
+  if (p.hessian() && !_lr_gcr) {
     _DeltaF.alloc_kernel_out();
     if (k.sc.has_Sigma() && !k.sc.is_qp()) _DeltaSigma.alloc_kernel_out();
   }
@@ -1142,6 +1149,59 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     DeltaG_in_shm = false;
   };
 
+  // One Dyson pass on the current totals, K_sc's choice of pass:
+  // ΔG = G_{k+q} · [ΔH0 + ΔF + (ΔΣ | ΔV_QPGW) - Δμ·S] · G_k
+  // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
+  // the static ΔV_QPGW enters as a frequency-independent one-body term.
+  // A Σ-free K_sc reads ΔDm alone, so it takes the ΔDm-only pass.
+  auto dyson_pass = [&](bool first_of_stage) {
+    if (k.sc.has_Sigma()) {
+      // K_sc with a Σ: full pass, ΔG(τ) materialized
+      const sArray_t<Array_view_4D_t>* dyson_vcorr =
+          k.sc.is_qp() ? &sDeltaVcorr_skij : nullptr;
+      Delta_mu = _lr_dyson.solve_lr_dyson(
+          sDeltaDm_skij, sDeltaH0_skij,
+          sDeltaF_skij, dyson_DeltaSigma_tskij,
+          p.fix_density, dyson_vcorr);
+      // K_sc evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
+      _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
+      DeltaG_in_shm = true;
+    } else {
+      // Σ-free K_sc: ΔDm-only pass.
+      // The frozen perturbative ΔΣ enters through its own ΔDm(Δμ=0), from a full
+      // Dyson solve with ΔΣ alone at the first pass of each stage; the static RHS
+      // is summed every pass. The ΔG(τ) that solve leaves is dropped by the
+      // ΔDm-only pass below.
+      if (dyson_DeltaSigma_tskij && first_of_stage) {
+        auto dummy_zero = math::shm::make_shared_array<Array_view_4D_t>(
+            *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+        dummy_zero.set_zero();
+        _lr_dyson.solve_lr_dyson(*_sDeltaDm_pert_Sigma, dummy_zero, dummy_zero,
+                                 dyson_DeltaSigma_tskij, /*fix_density=*/false,
+                                 static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+      }
+      solve_dm_only();
+    }
+  };
+
+  // K_sc evaluated at the current ΔDm / ΔG(τ), into the given ΔF / ΔΣ (/ ΔΣ term
+  // 2) destinations.
+  auto eval_K_sc_at_current = [&](sArray_t<Array_view_4D_t>& F_out,
+                                  sArray_t<Array_view_5D_t>* S_out,
+                                  sArray_t<Array_view_5D_t>* T2_out) {
+    apply_kernel(k.sc, F_out, S_out, sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
+                 T2_out);
+  };
+  // ‖K_sc(x) − x‖ for a K_sc output already in (F, S), against GCR's stored x.
+  auto gcr_true_residual = [&](sArray_t<Array_view_4D_t>& F,
+                               sArray_t<Array_view_5D_t>* S) {
+    nda::array<ComplexType, 5> empty_sigma;
+    return (k.sc.has_Sigma() && !k.sc.is_qp())
+        ? _lr_gcr->true_residual(_mpi->comm, _pmap, F.local(), S->local())
+        : _lr_gcr->true_residual(_mpi->comm, _pmap, F.local(), empty_sigma);
+  };
+  double gcr_rnorm_last = -1.0;
+
   const bool log_sigma_col = k.sc.has_Sigma();
 
   // SCF iteration header
@@ -1186,50 +1246,23 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.start("LR_SAVE");
     // GCR also needs the probe of a stage's first iteration: that step opens the
     // new right-hand side.
-    if (stage_iter > 1 || use_gcr) _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
+    if (stage_iter > 1 || use_gcr) {
+      _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
+      if (k.sc.has_Sigma() && !k.sc.is_qp())
+        _DeltaSigma.prev = _DeltaSigma.slice(pDeltaSigma_sc->local());
+    }
     if (stage_iter > 1) {
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
-      if (k.sc.is_qp()) {
+      if (k.sc.is_qp())
         _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
-      } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
-        _DeltaSigma.prev = _DeltaSigma.slice(pDeltaSigma_sc->local());
-      }
     }
     _mpi->comm.barrier();
     _Timer.stop("LR_SAVE");
 
     // Step 1: Solve LR Dyson equation
-    // ΔG = G_{k+q} · [ΔH0 + ΔF + (ΔΣ | ΔV_QPGW) - Δμ·S] · G_k
-    // In qp mode the dynamic ΔΣ is dropped from the RHS (skipping its τ→ω) and
-    // the static ΔV_QPGW enters as a frequency-independent one-body term.
-    // A Σ-free K_sc reads ΔDm alone, so it takes the ΔDm-only pass.
     _Timer.start("LR_DYSON");
-    if (k.sc.has_Sigma()) {
-      const sArray_t<Array_view_4D_t>* dyson_vcorr =
-          k.sc.is_qp() ? &sDeltaVcorr_skij : nullptr;
-      Delta_mu = _lr_dyson.solve_lr_dyson(
-          sDeltaDm_skij, sDeltaH0_skij,
-          sDeltaF_skij, dyson_DeltaSigma_tskij,
-          p.fix_density, dyson_vcorr);
-      // K_sc evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
-      _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
-      DeltaG_in_shm = true;
-    } else {
-      // The frozen perturbative ΔΣ enters through its own ΔDm(Δμ=0), from a full
-      // Dyson solve with ΔΣ alone at the first pass of each stage; the static RHS
-      // is summed every pass. The ΔG(τ) that solve leaves is dropped by the
-      // ΔDm-only pass below.
-      if (dyson_DeltaSigma_tskij && first_of_stage) {
-        auto dummy_zero = math::shm::make_shared_array<Array_view_4D_t>(
-            *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-        dummy_zero.set_zero();
-        _lr_dyson.solve_lr_dyson(*_sDeltaDm_pert_Sigma, dummy_zero, dummy_zero,
-                                 dyson_DeltaSigma_tskij, /*fix_density=*/false,
-                                 static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
-      }
-      solve_dm_only();
-    }
+    dyson_pass(first_of_stage);
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
@@ -1247,9 +1280,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_CONVERGENCE");
 
     // Steps 2-3: apply K_sc — the ΔF branch, then the ΔΠ -> ΔW -> ΔΣ pipeline.
-    apply_kernel(k.sc, sDeltaF_sc_skij, pDeltaSigma_sc,
-                 sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
-                 sDeltaSigma_term2_tskij);
+    eval_K_sc_at_current(sDeltaF_sc_skij, pDeltaSigma_sc, sDeltaSigma_term2_tskij);
 
     // Step 3g (qp mode): statify the dynamic ΔΣ(iω) into the static ΔV_QPGW(k)
     // using the frozen QP orbitals/energies. ΔV_QPGW is the tracked/mixed static
@@ -1281,28 +1312,34 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // are already this rank's slice.
       //
       // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
-      // standard path, or the static ΔV_QPGW in qp mode.
+      // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
+      // the same two-slot arguments.
+      auto inner_step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
+        if (use_gcr) {
+          // GCR
+          gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, F, F_prev, S, S_prev,
+                                     p.tol, gcr_converged);
+        } else {
+          // DIIS / damping
+          _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev,
+                                       stage_iter);
+        }
+      };
       if (k.sc.is_qp()) {
-        _lr_diis->next_step_combined(
-            _mpi->comm, _pmap,
-            sDeltaF_sc_skij.local(), _DeltaF.prev,
-            sDeltaVcorr_skij.local(), _DeltaVcorr.prev, stage_iter);
+        // qp mode: (ΔF, ΔV_QPGW)
+        inner_step(sDeltaF_sc_skij.local(), _DeltaF.prev,
+                   sDeltaVcorr_skij.local(), _DeltaVcorr.prev);
       } else if (k.sc.has_Sigma() && !k.sc.is_qp()) {
-        _lr_diis->next_step_combined(
-            _mpi->comm, _pmap,
-            sDeltaF_sc_skij.local(), _DeltaF.prev,
-            pDeltaSigma_sc->local(), _DeltaSigma.prev, stage_iter);
-      } else if (use_gcr) {
-        gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, sDeltaF_sc_skij.local(),
-                                   _DeltaF.prev, p.tol, gcr_converged);
+        // K_sc with a Σ: (ΔF, ΔΣ)
+        inner_step(sDeltaF_sc_skij.local(), _DeltaF.prev,
+                   pDeltaSigma_sc->local(), _DeltaSigma.prev);
       } else {
+        // Σ-free K_sc: ΔF alone
         nda::array<ComplexType, 5> empty_sigma;
         nda::array<ComplexType, 1> empty_prev;
-        _lr_diis->next_step_combined(
-            _mpi->comm, _pmap,
-            sDeltaF_sc_skij.local(), _DeltaF.prev,
-            empty_sigma, empty_prev, stage_iter);
+        inner_step(sDeltaF_sc_skij.local(), _DeltaF.prev, empty_sigma, empty_prev);
       }
+      if (use_gcr) gcr_rnorm_last = gcr_rnorm;
       mixed_this_iter = true;
       // The raw kernel output of THIS iteration, taken while it is still in the
       // ring. Copying here rather than reading the ring after the solve is what
@@ -1312,7 +1349,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // Assigned THROUGH a view: whole-array assignment on an nda owning array
       // reallocates unconditionally, which would both churn a ΔΣ-sized buffer
       // every iteration and discard what lr_setup allocated.
-      if (_lr_diis && p.hessian()) {
+      if (!use_gcr && p.hessian()) {
         _DeltaF.kernel_out() = _lr_diis->newest_raw_F();
         if (k.sc.has_Sigma() && !k.sc.is_qp()) _DeltaSigma.kernel_out() = _lr_diis->newest_raw_Sigma();
       }
@@ -1426,27 +1463,36 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_CONVERGENCE");
 
     // GCR converged: the slot holds x, not the probe the ΔDm above came from.
-    // Form ΔDm at x before anything reads it (the outer test, K_pert, the exit);
-    // ΔG(τ) at x only if a reader asks for it (update_DeltaG).
+    // Form ΔDm at x before anything reads it (the outer test, K_pert, the exit):
+    // the same Dyson pass as Step 1, so with a Σ in K_sc ΔG(τ) at x is
+    // materialized too; otherwise only if a reader asks for it (update_DeltaG).
     if (use_gcr && inner_converged) {
       rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
       _Timer.start("LR_DYSON");
-      solve_dm_only();
+      dyson_pass(false);
       _Timer.stop("LR_DYSON");
       _mpi->comm.barrier();
-      // Diagnostic (verbosity >= 3): the true residual ‖K_sc(ΔDm(x)) − x‖ next to
+      // Diagnostic (verbosity >= 3): the true residual ‖K_sc(ΔX(x)) − x‖ next to
       // the recursive one, which would expose drift carried into the recycled
-      // basis. Costs one more K_sc evaluation per converged stage.
-      if (__app_verbosity__ >= 3) {
+      // basis (or a non-affine piece of the map). Costs one more K_sc evaluation
+      // per converged stage. With the hessian on, the post-loop refresh logs the
+      // final one at no extra cost instead.
+      if (__app_verbosity__ >= 3 && !p.hessian()) {
         auto sF_check = math::shm::make_shared_array<Array_view_4D_t>(
             *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-        apply_kernel(k.sc, sF_check, nullptr, sDeltaDm_skij, sDeltaG_tskij,
-                     sG_tskij, thc, p);
-        double true_res = utils::lr_distributed_norm(
-            _mpi->node_comm, sF_check.local(), sDeltaF_sc_skij.local(), true).second;
-        _mpi->comm.broadcast_n(&true_res, 1, 0);
+        std::optional<sArray_t<Array_view_5D_t>> sS_check, sT2_check;
+        if (k.sc.has_Sigma())
+          sS_check.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+              *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
+        if (sDeltaSigma_term2_tskij)
+          sT2_check.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+              *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
+        eval_K_sc_at_current(sF_check, sS_check ? &(*sS_check) : nullptr,
+                             sT2_check ? &(*sT2_check) : nullptr);
         app_log(3, "          [GCR] converged: true ||g(x) - x|| = {:.6e}, "
-                   "recursive ||r|| = {:.6e}", true_res, gcr_rnorm);
+                   "recursive ||r|| = {:.6e}",
+                gcr_true_residual(sF_check, sS_check ? &(*sS_check) : nullptr),
+                gcr_rnorm);
       }
     }
 
@@ -1600,6 +1646,22 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // skipping this would hand those readers the previous perturbation's ΔG next to
   // this one's ΔDm/ΔF.
   if (p.save_DeltaG || (p.hessian() && k.pert.has_Sigma())) update_DeltaG();
+
+  // GCR + hessian: the estimator needs the returned (ΔF, ΔΣ) to be K_sc of the
+  // returned ΔDm / ΔG, which GCR's x is only to within tol. One K_sc evaluation
+  // at the returned ΔX makes the pair exact; get_full_kernel_result then adds
+  // the K_pert half and finds nothing mixed to swap. After update_DeltaG above,
+  // whose full pass may have replaced ΔDm. On a max_iter exit ΔX is that of the
+  // last probe, and the pair is still consistent.
+  if (use_gcr && p.hessian()) {
+    eval_K_sc_at_current(sDeltaF_sc_skij, pDeltaSigma_sc, sDeltaSigma_term2_tskij);
+    if (converged)
+      app_log(2, "          [GCR] converged: true ||g(x) - x|| = {:.6e}, "
+                 "recursive ||r|| = {:.6e}",
+              gcr_true_residual(sDeltaF_sc_skij, pDeltaSigma_sc), gcr_rnorm_last);
+    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    _mixed_last_iter = false;
+  }
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
   if (k.sc.is_qp() && sDeltaVcorr_out_skij != nullptr) {
@@ -1889,7 +1951,9 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                                   h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
-  push_hist(inner_hist, _lr_gcr ? "inner GCR basis" : "inner DIIS history");
+  push_hist(inner_hist, !_lr_gcr               ? "inner DIIS history"
+                       : inner_hist.n_Sigma > 0 ? "inner GCR basis (ΔF+ΔΣ)"
+                                                : "inner GCR basis (ΔF)");
   push_hist(outer_hist, "outer DIIS history");
 
   // Stationary hessian estimator. The ω stores — ΔΣ_λ(iω) and ΔG_p(iω) for every

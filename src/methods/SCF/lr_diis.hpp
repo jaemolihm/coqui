@@ -45,6 +45,8 @@ namespace methods {
 struct lr_iter_params {
   std::string alg = "DIIS";
   double mixing = 1.0;
+  /// DIIS subspace depth, or the GCR basis capacity. For GCR, 0 selects the
+  /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
   size_t max_subsp_size = 10;
   size_t diis_warmup = 0;
 
