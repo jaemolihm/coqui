@@ -1043,9 +1043,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   if (_lr_diis) _lr_diis->reset();
-  // clear, not reset_rhs: each perturbation starts from an empty basis, so its
-  // result does not depend on the perturbations solved before it.
-  if (_lr_gcr) _lr_gcr->clear();
+  if (_lr_gcr) _lr_gcr->reset();
   if (outer_diis_on) _outer_diis->reset();
   _mixed_last_iter = false;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
@@ -1556,8 +1554,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // The next stage solves a different fixed point: the DIIS history from
         // this one is invalid and its warmup keys off the stage-local iteration
         // index. ΔF_sc/ΔΣ_sc are deliberately kept as the warm start for the
-        // next stage. GCR keeps its basis: only the right-hand side changed.
-        if (_lr_gcr) _lr_gcr->reset_rhs();
+        // next stage.
+        if (_lr_gcr) _lr_gcr->reset_rhs();  // keep the Krylov basis: only the RHS changes
         if (_lr_diis) _lr_diis->reset();
       } else {
         app_log(1, "    [outer] converged after {} K_pert evaluation(s): "

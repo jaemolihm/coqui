@@ -51,7 +51,7 @@ namespace methods {
  * Only b changes between the stages of a split-kernel solve, so the stored
  * (z_i, w_i = A z_i) stay valid: reset_rhs() keeps them, and the first probe of
  * the new right-hand side is projected onto them (a Galerkin minimum-residual
- * start over the recycled space). clear() drops them, for a new perturbation.
+ * start over the recycled space). reset() drops them, for a new perturbation.
  * At capacity the oldest pair is evicted.
  *
  * The inner product is Re Σ conj(a) b: with fix_density at q = Γ the map is
@@ -75,7 +75,7 @@ public:
   }
 
   /// Forget the basis (buffers kept) and the right-hand side: a new solve.
-  void clear() {
+  void reset() {
     _n = 0;
     _head = 0;
     _have_rhs = false;
