@@ -91,12 +91,13 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1 selects
   // the gemm path with explicit FT coefficients (kept for testing). fft_kR_t
   // aborts on a shifted / non-Monkhorst-Pack mesh and in a build without FFTW.
-  if (_nkpts != 1 and not utils::lr_debug_gemm_ft()) {
+  _use_fft = (_nkpts != 1 and not utils::lr_debug_gemm_ft());
+  if (_use_fft) {
     _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
     _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
   }
   if (_nkpts != 1)
-    app_log(2, "  - k<->R transform: {}", _fft_k ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
+    app_log(2, "  - k<->R transform: {}", _use_fft ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
 
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
                   "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R"}) {
@@ -279,18 +280,20 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // Dense k<->R coefficients, gemm path only.
   _Timer.start("ALLOC");
   std::optional<math::shm::shared_array<nda::array_view<ComplexType, 2>>> sf_Rk;
-  if (nkpts != 1 and not _fft_k) sf_Rk.emplace(*_mpi, std::array<long, 2>{nkpts, nkpts});
+  if (nkpts != 1 and not _use_fft) sf_Rk.emplace(*_mpi, std::array<long, 2>{nkpts, nkpts});
   nda::matrix<ComplexType> buffer;
   _Timer.stop("ALLOC");
 
   // k -> R in place on each (nk, ncols) slice of A_3D, over Qpts if on_q, else kpts.
   auto k_to_R = [&](auto&& A_3D, bool on_q) {
     _Timer.start("FT_R");
-    if (_fft_k) {
+    if (_use_fft) {
+      // Using FFT
       auto& fft = on_q ? *_fft_q : *_fft_k;
       for (long s = 0; s < A_3D.extent(0); ++s)
         fft.k_to_R(A_3D(s, nda::ellipsis{}), A_3D(s, nda::ellipsis{}));
     } else {
+      // Using slow FT via gemm
       if (on_q)
         utils::k_to_R_coefficients(_mpi->comm, nda::range(nkpts), _MF->Qpts(),
                                    _MF->lattv(), R_grid, *sf_Rk);
@@ -632,13 +635,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
           _Timer.start("FT_R");
           auto DeltaK_R_3D = nda::reshape(dDeltaK_sRPQ.local(), shape_t<3>{ns, nkpts, NP_loc * NQ_loc});
           auto DeltaF_k_3D = nda::reshape(dDeltaF_skPQ.local(), shape_t<3>{ns, nkpts_ibz, NP_loc * NQ_loc});
-          if (_fft_k) {
-            // In place: ΔK(R) is dead after this.
+          if (_use_fft) {
+            // Using FFT, in place: ΔK(R) is dead after this.
             for (int s = 0; s < ns; ++s) {
               _fft_k->R_to_k(DeltaK_R_3D(s, nda::ellipsis{}), DeltaK_R_3D(s, nda::ellipsis{}));
               DeltaF_k_3D(s, nda::ellipsis{}) += DeltaK_R_3D(s, nda::ellipsis{});
             }
           } else {
+            // Using slow FT via gemm
             auto f_kR = sf_Rk->local();
             utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
                                        _MF->lattv(), R_grid, *sf_Rk);

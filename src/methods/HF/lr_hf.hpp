@@ -245,6 +245,8 @@ private:
   // (COQUI_LR_DEBUG_GEMM_FT) and at a single k-point. Members because each
   // caches its FFTW_MEASURE plans across calls.
   std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
+  // k<->R transforms by FFT (_fft_k/_fft_q) rather than by gemm.
+  bool _use_fft = false;
 
   utils::TimerManager _Timer;
 
