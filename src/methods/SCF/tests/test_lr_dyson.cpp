@@ -421,6 +421,118 @@ namespace lr_dyson_tests {
     context->comm.barrier();
   }
 
+  TEST_CASE("lr_dyson_dm_only_vs_full", "[methods_scf]") {
+    /**
+     * solve_lr_dyson_dm_only (with and without a DeltaDm_of_Sigma source) against
+     * the ΔDm of solve_lr_dyson on the same RHS: (a) X = ΔH0 + ΔF, (b) X = ΔH0 + ΔF
+     * + ΔΣ, (c) both with fix_density at q = Γ. The two share G(iω) and the ω-side
+     * grid but not the ΔG(iω) → ΔG(τ) → ΔDm route, so they agree to round-off.
+     *
+     * With more ranks per ω pool than bands (nbnd = 8 here, e.g. 16 ranks) some
+     * ranks hand an empty band-row slice to gather_to_shm.
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+    {
+      auto [pg, bs] = lr_dyson_omega_pgrid(context->comm.size(), ft.nw_f(), nk, nb);
+      app_log(2, "lr_dyson_dm_only_vs_full: nw = {}, nk_ibz = {}, nbnd = {}, "
+                 "LR pgrid (w,s,k,i,j) = ({},{},{},{},{})",
+              ft.nw_f(), nk, nb, pg[0], pg[1], pg[2], pg[3], pg[4]);
+    }
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    auto make4 = [&]() {
+      return math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb});
+    };
+    auto make5 = [&]() {
+      return math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb});
+    };
+    sArray_t<Array_view_4D_t> F(make4()), Dm(make4()), DeltaH0(make4()), DeltaF(make4());
+    sArray_t<Array_view_4D_t> Dm_full(make4()), Dm_only(make4()), Dm_src(make4());
+    sArray_t<Array_view_5D_t> G(make5()), Sigma(make5()), DeltaSigma(make5());
+
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+    if (context->node_comm.root()) Sigma.local()() = 0.0;
+    context->comm.barrier();
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    context->comm.barrier();
+
+    if (context->node_comm.root()) {
+      std::srand(7);
+      auto rnd = []() { return 0.01 * (std::rand() / double(RAND_MAX) - 0.5); };
+      // Hermitian in the band indices, ΔΣ at every τ.
+      auto fill = [&](auto&& A) {
+        for (int is = 0; is < ns; ++is)
+          for (int ik = 0; ik < nk; ++ik)
+            for (int i = 0; i < nb; ++i)
+              for (int j = 0; j <= i; ++j) {
+                double re = rnd(), im = (i == j) ? 0.0 : rnd();
+                A(is, ik, i, j) = ComplexType(re, im);
+                A(is, ik, j, i) = ComplexType(re, -im);
+              }
+      };
+      fill(DeltaH0.local());
+      fill(DeltaF.local());
+      for (int it = 0; it < nt; ++it) fill(DeltaSigma.local()(it, nda::ellipsis{}));
+    }
+    context->comm.barrier();
+
+    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    auto fro = [](auto const& a, auto const& b, double sb) {
+      double d = 0.0;
+      for (long n = 0; n < a.size(); ++n) d += std::norm(a.data()[n] - sb * b.data()[n]);
+      return std::sqrt(d);
+    };
+    auto norm = [&](auto const& a) { return fro(a, a, 0.0); };
+    auto rel = [&](auto const& a, auto const& b) { return fro(a, b, 1.0) / norm(b); };
+
+    for (auto q : {std::array<double, 3>{0.0, 0.0, 0.0}, std::array<double, 3>{0.5, 0.0, 0.0}}) {
+      nda::array<double, 1> q_vec{q[0], q[1], q[2]};
+      lr_dyson lr_dys(dyson, q_vec);
+      lr_dys.set_cached_G_omega(&sG_wskij);
+      if (lr_dys.is_q_gamma()) lr_dys.build_dmu_response();
+
+      for (bool fd : {false, true}) {
+        if (fd and not lr_dys.is_q_gamma()) continue;
+        for (bool with_sigma : {false, true}) {
+          const sArray_t<Array_view_5D_t>* pS = with_sigma ? &DeltaSigma : nullptr;
+          double mu_full = lr_dys.solve_lr_dyson(Dm_full, DeltaH0, DeltaF, pS, fd);
+          if (with_sigma) lr_dys.DeltaDm_of_Sigma(Dm_src, DeltaSigma);
+          double mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, DeltaH0, DeltaF,
+                                                         with_sigma ? &Dm_src : nullptr, fd);
+          context->comm.barrier();
+          double err = rel(Dm_only.local(), Dm_full.local());
+          app_log(2, "[TEST] dm_only vs full: q = ({},{},{}) fix_density = {} ΔΣ = {}: "
+                     "rel ΔDm = {:.3e}, Δμ = {:.6e}, |ΔΔμ| = {:.3e}",
+                  q[0], q[1], q[2], fd, with_sigma, err, mu_full, std::abs(mu_only - mu_full));
+          INFO("q = (" << q[0] << "," << q[1] << "," << q[2] << ") fd = " << fd
+               << " sigma = " << with_sigma);
+          CHECK(norm(Dm_full.local()) > 1e-8);
+          CHECK(err < 1e-12);
+          // Δμ = −ΔN(0)/(dN/dμ), and ΔN(0) is a small trace of ΔDm: compare in ΔN,
+          // against the size of ΔDm.
+          if (fd)
+            CHECK(std::abs(mu_only - mu_full) * std::abs(lr_dys.dN_dmu()) <
+                  1e-12 * norm(Dm_full.local()));
+        }
+      }
+    }
+    context->comm.barrier();
+  }
+
   TEST_CASE("lr_dyson_omega_pgrid_no_band_split", "[methods_scf]") {
     /**
      * lr_dyson_omega_pgrid is a pure function, so the rank counts and system sizes
