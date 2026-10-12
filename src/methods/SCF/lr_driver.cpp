@@ -1043,6 +1043,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   if (_lr_diis) _lr_diis->reset();
+  // clear, not reset_rhs: each perturbation starts from an empty basis, so its
+  // result does not depend on the perturbations solved before it.
   if (_lr_gcr) _lr_gcr->clear();
   if (outer_diis_on) _outer_diis->reset();
   _mixed_last_iter = false;
@@ -1114,7 +1116,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   sArray_t<Array_view_5D_t>* dyson_DeltaSigma_tskij =
       (k.sc.has_Sigma() && !k.sc.is_qp()) ? sDeltaSigma_tskij : nullptr;
 
-  const bool gcr = (_lr_gcr != nullptr);
+  const bool use_gcr = (_lr_gcr != nullptr);
   // Fill sDeltaG_tskij with the ΔG(τ) of the current ΔDm, at most once per Dyson solve.
   bool DeltaG_in_shm = false;
   auto update_DeltaG = [&]() {
@@ -1186,7 +1188,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.start("LR_SAVE");
     // GCR also needs the probe of a stage's first iteration: that step opens the
     // new right-hand side.
-    if (stage_iter > 1 || gcr) _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
+    if (stage_iter > 1 || use_gcr) _DeltaF.prev = _DeltaF.slice(sDeltaF_track_skij.local());
     if (stage_iter > 1) {
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
@@ -1274,7 +1276,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.start("LR_ITER_ALG");
     double gcr_rnorm = -1.0;
     bool gcr_converged = false;
-    if ((stage_iter > 1 || gcr) && !k.sc.is_empty()) {
+    if ((stage_iter > 1 || use_gcr) && !k.sc.is_empty()) {
       // Striped: every rank of the global comm participates, each operating on its
       // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
       // back in place. Pass .local() views directly (in/out); the "prev" arguments
@@ -1292,7 +1294,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
             _mpi->comm, _pmap,
             sDeltaF_sc_skij.local(), _DeltaF.prev,
             pDeltaSigma_sc->local(), _DeltaSigma.prev, stage_iter);
-      } else if (gcr) {
+      } else if (use_gcr) {
         gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, sDeltaF_sc_skij.local(),
                                    _DeltaF.prev, p.tol, gcr_converged);
       } else {
@@ -1385,7 +1387,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // first iteration can already meet when the recycled basis covers its
     // right-hand side. The difference norms above remain diagnostics.
     bool inner_converged = (k.do_pert() && k.sc.is_empty()) ? true
-                         : gcr ? gcr_converged : inner_conv_std;
+                         : use_gcr ? gcr_converged : inner_conv_std;
 
     // Log iteration. This closes the iteration that produced the norms above,
     // so it comes before the stage-boundary block: K_pert logs of its own
@@ -1413,7 +1415,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                 iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
       }
     }
-    if (gcr) {
+    if (use_gcr) {
       if (first_of_stage)
         app_log(1, "          [GCR] ||r|| = {:.6e}  (new RHS: ||r0|| {:.6e} -> {:.6e} "
                    "after projection on {} recycled pair(s))",
@@ -1428,7 +1430,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // GCR converged: the slot holds x, not the probe the ΔDm above came from.
     // Form ΔDm at x before anything reads it (the outer test, K_pert, the exit);
     // ΔG(τ) at x only if a reader asks for it (update_DeltaG).
-    if (gcr && inner_converged) {
+    if (use_gcr && inner_converged) {
       rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
       _Timer.start("LR_DYSON");
       solve_dm_only();
