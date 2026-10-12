@@ -667,12 +667,9 @@ void lr_driver::lr_setup(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
     if (k.pert.has_Sigma()) {
       // The frozen K_pert ΔΣ enters through its own ΔDm, from a full Dyson solve
-      // with that ΔΣ alone: _sZeroRHS_skij stands in for its ΔH0 and ΔF.
+      // with that ΔΣ alone.
       _sDeltaDm_pert_Sigma.emplace(math::shm::make_shared_array<Array_view_4D_t>(
           *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-      _sZeroRHS_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-      _sZeroRHS_skij->set_zero();
     }
   }
   _Timer.stop("LR_DRIVER_SETUP_ALLOC");
@@ -1176,10 +1173,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // Dyson solve with ΔΣ alone at the first pass of each stage; the static RHS
       // is summed every pass. The ΔG(τ) that solve leaves is dropped by the
       // ΔDm-only pass below. The ΔF the pass is fed is kept for update_DeltaG.
-      if (dyson_DeltaSigma_tskij && first_of_stage)
-        _lr_dyson.solve_lr_dyson(*_sDeltaDm_pert_Sigma, *_sZeroRHS_skij, *_sZeroRHS_skij,
+      if (dyson_DeltaSigma_tskij && first_of_stage) {
+        auto dummy_zero = math::shm::make_shared_array<Array_view_4D_t>(
+            *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+        dummy_zero.set_zero();
+        _lr_dyson.solve_lr_dyson(*_sDeltaDm_pert_Sigma, dummy_zero, dummy_zero,
                                  dyson_DeltaSigma_tskij, /*fix_density=*/false,
                                  static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+      }
       copy_shm(*_sDeltaF_dyson_in, sDeltaF_skij);
       Delta_mu = _lr_dyson.solve_lr_dyson_dm_only(
           sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
