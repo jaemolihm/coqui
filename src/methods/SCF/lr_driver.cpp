@@ -530,7 +530,7 @@ void lr_driver::lr_setup(
   print_memory_estimate(thc.Np(), k.any_Sigma(), k.needs_dW(), extra_sigma,
                         n_sigma_prev, inner_hist, outer_hist,
                         p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W,
-                        p.hessian_nmodes);
+                        p.hessian_nmodes, schur_dmu(p));
   print_distribution_summary(thc.Np(), k.any_Sigma(), k.needs_dW());
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -1003,6 +1003,18 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                "lr_driver::lr_solve_one: sDeltaSigma_term2_tskij presence must match "
                "the p.split_sigma_terms lr_setup was given.");
 
+  // Δμ by a Schur complement outside the iteration (see schur_dmu); the inner
+  // passes then run without the ΔN constraint. The μ-shift response is solved
+  // once per q, before the first perturbation.
+  const bool schur = schur_dmu(p);
+  const bool fd_in_loop = p.fix_density && !schur;
+  bool gauge_fresh = false;
+  if (schur && !_dmu_gauge) {
+    build_dmu_gauge(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, sDeltaSigma_tskij,
+                    sG_tskij, thc, p, sDeltaSigma_term2_tskij);
+    gauge_fresh = true;
+  }
+
   const lr_channel_targets tgt = channel_targets(k, sDeltaSigma_tskij);
   auto& sDeltaF_sc_skij   = *tgt.F_sc;
   auto& sDeltaF_pert_skij = *tgt.F_pert;
@@ -1038,7 +1050,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   _DeltaF_pert.zero(); _DeltaSigma_pert.zero();
   if (_lr_diis) _lr_diis->reset();
-  if (_lr_gcr) _lr_gcr->reset();
+  if (_lr_gcr) {
+    // The μ-shift response just solved used the same operator, so its basis
+    // carries over and only the right-hand side is new.
+    if (gauge_fresh) _lr_gcr->reset_rhs();
+    else             _lr_gcr->reset();
+  }
   if (outer_diis_on) _outer_diis->reset();
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
@@ -1118,7 +1135,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _Timer.start("LR_DYSON");
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij, *_sDeltaF_dyson_in, dyson_DeltaSigma_tskij,
-          p.fix_density, static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+          fd_in_loop, static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
       _Timer.stop("LR_DYSON");
       _mpi->comm.barrier();
     }
@@ -1132,7 +1149,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     copy_shm(*_sDeltaF_dyson_in, sDeltaF_skij);
     Delta_mu = _lr_dyson.solve_lr_dyson_dm_only(
         sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-        dyson_DeltaSigma_tskij ? &(*_sDeltaDm_pert_Sigma) : nullptr, p.fix_density);
+        dyson_DeltaSigma_tskij ? &(*_sDeltaDm_pert_Sigma) : nullptr, fd_in_loop);
     DeltaG_in_shm = false;
   };
 
@@ -1149,7 +1166,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij,
           sDeltaF_skij, dyson_DeltaSigma_tskij,
-          p.fix_density, dyson_vcorr);
+          fd_in_loop, dyson_vcorr);
       // K_sc evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
       _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
       DeltaG_in_shm = true;
@@ -1169,6 +1186,54 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       }
       solve_dm_only();
     }
+  };
+
+  // The Schur step of schur_dmu, on the current unconstrained iterate z:
+  //   Δμ = −ΔN(z)/κ_int,  then one Dyson pass on x = z + Δμ·x_v at that Δμ,
+  //   ΔG = χ₀(ΔH0 + x − Δμ·S), so ΔN = 0 and x = K_sc ΔG + (K_pert source).
+  // At a stage end ΔDm is already that of the totals: the iteration wrote only the
+  // sc channel, and the totals are rebuilt after K_pert. Δμ·x_v goes into those
+  // totals, so the inner iterate z is untouched. At exit the sc channel holds the
+  // accelerator's next iterate, so ΔDm is recomputed first, and Δμ·x_v goes into
+  // the sc channel, the returned iterate.
+  auto schur_apply = [&](bool final_exit) {
+    _Timer.start("LR_DYSON");
+    if (final_exit)
+      _lr_dyson.solve_lr_dyson_at_dmu(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                                      dyson_DeltaSigma_tskij, 0.0);
+    const double DeltaN_free = _lr_dyson.compute_lr_Nelec(sDeltaDm_skij);
+    const double dmu = _dmu_gauge->singular ? 0.0 : -DeltaN_free / _dmu_gauge->kappa_int;
+    if (final_exit)
+      app_log(2, "  [Δμ Schur] ΔN_free = {:.6e}, Δμ = {:.6e}", DeltaN_free, dmu);
+    else
+      app_log(2, "    [Δμ Schur, stage {}] ΔN_free = {:.6e}, Δμ = {:.6e}",
+              stage, DeltaN_free, dmu);
+
+    // dst += Δμ·x_v on this rank's `_pmap` slices, then complete the node replicas.
+    auto add_gauge = [&](sArray_t<Array_view_4D_t>& F, sArray_t<Array_view_5D_t>& S) {
+      F.win().fence();
+      S.win().fence();
+      auto F_s = _DeltaF.slice(F.local());
+      F_s += ComplexType(dmu) * _dmu_gauge->F_v;
+      auto S_s = _DeltaSigma.slice(S.local());
+      S_s += ComplexType(dmu) * _dmu_gauge->Sigma_v;
+      outer_sync(&F, &S);
+    };
+    if (final_exit) {
+      add_gauge(sDeltaF_sc_skij, *pDeltaSigma_sc);
+      rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    } else {
+      // In scope a K_pert carries Σ2, so the ΔΣ total is per-channel and rebuilt.
+      add_gauge(sDeltaF_skij, *sDeltaSigma_tskij);
+    }
+
+    _lr_dyson.solve_lr_dyson_at_dmu(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                                    dyson_DeltaSigma_tskij, dmu);
+    DeltaG_in_shm = false;
+    update_DeltaG();
+    _Timer.stop("LR_DYSON");
+    _mpi->comm.barrier();
+    Delta_mu = dmu;
   };
 
   const bool log_sigma_col = k.sc.has_Sigma();
@@ -1434,6 +1499,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       double outer_dm_diff = -1.0;
       double outer_res = -1.0;
 
+      // Impose ΔN = 0 on this stage's solution before the outer test and K_pert
+      // read ΔDm/ΔG.
+      if (schur) schur_apply(/*final_exit=*/false);
+
       // Outer convergence is tested on the stage-to-stage change of ΔDm, and
       // BEFORE the next K_pert evaluation: the source residual would need the
       // very evaluation it proves unnecessary, and one such evaluation is the
@@ -1567,6 +1636,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.stop("LR_SCF");
 
+  if (schur) schur_apply(/*final_exit=*/true);
+
   // After the solve ΔG(τ) is read by the checkpoint and the hessian's Σ refresh.
   // sDeltaG_tskij outlives the solve and is reused by the next perturbation, so
   // skipping this would hand those readers the previous perturbation's ΔG next to
@@ -1679,6 +1750,78 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
 
 template<THC_ERI THC_t>
+void lr_driver::build_dmu_gauge(sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                                sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                                sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                                sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
+                                const sArray_t<Array_view_5D_t>& sG_tskij,
+                                THC_t& thc,
+                                const lr_params& p,
+                                sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
+  const lr_kernel_split& k = _split;
+  app_log(1, "\n  [Δμ gauge] solving the μ-shift response (ΔH0 = −S, K_sc only)");
+
+  // ΔH0 = −S is a uniform μ shift Δμ = +1 in the convention X = … − Δμ·S.
+  auto sMinusS = math::shm::make_shared_array<Array_view_4D_t>(
+      *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+  sMinusS.win().fence();
+  if (_mpi->node_comm.root()) sMinusS.local() = -_dyson.sS_skij().local();
+  sMinusS.win().fence();
+  _mpi->comm.barrier();
+
+  // The operator of every inner solve at this q, with the perturbation-constant
+  // sources (IBC, δV) dropped: they belong to ΔH0's right-hand side, not to v's.
+  lr_params p_v = p;
+  p_v.fix_density = false;
+  p_v.pert_order = 0;
+  p_v.outer_accel = lr_outer_accel_params{};
+  p_v.hessian_nmodes = 0;
+  p_v.save_DeltaG = false;
+  p_v.DeltaV_qPQ = nullptr;
+  std::optional<lr_ibc_DeltaX> ibc_held;
+  ibc_held.swap(_opt_ibc);
+  const int niter_v = std::get<0>(lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij,
+                                                sDeltaSigma_tskij, sG_tskij, sMinusS, thc,
+                                                p_v, sDeltaSigma_term2_tskij));
+  ibc_held.swap(_opt_ibc);
+  app_log(1, "  [Δμ gauge] end of μ-shift response");
+
+  // κ_int from the ΔDm of the returned source x_v, so it matches the x_v the
+  // Schur step adds.
+  _lr_dyson.solve_lr_dyson_at_dmu(sDeltaDm_skij, sMinusS, sDeltaF_skij,
+                                  sDeltaSigma_tskij, 0.0);
+  auto& g = _dmu_gauge.emplace();
+  g.kappa_int = _lr_dyson.compute_lr_Nelec(sDeltaDm_skij);
+
+  // x_v is the sc channel: the solve ran no K_pert stage.
+  const lr_channel_targets tgt = channel_targets(k, sDeltaSigma_tskij);
+  tgt.F_sc->win().fence();
+  tgt.S_sc->win().fence();
+  g.F_v = _DeltaF.slice(tgt.F_sc->local());
+  g.Sigma_v = _DeltaSigma.slice(tgt.S_sc->local());
+
+  if (niter_v > p.max_iter)
+    app_log(1, "[WARNING] lr_driver: the μ-shift response did not converge in {} "
+               "iterations; κ_int and Δμ inherit its residual.", p.max_iter);
+  else
+    app_log(1, "  [Δμ gauge] μ-shift response converged in {} iterations", niter_v);
+  const double kappa_0 = _lr_dyson.dN_dmu();
+  app_log(2, "  [Δμ gauge] κ₀ = dN/dμ|_Σ = {:.12e}, κ_int = {:.12e}, κ_int/κ₀ = {:.6e}",
+          kappa_0, g.kappa_int, g.kappa_int / kappa_0);
+  g.singular = std::abs(g.kappa_int) < 1e-12 * std::abs(kappa_0);
+  if (g.singular)
+    app_log(1, "[WARNING] lr_driver: κ_int ≈ 0 (κ_int/κ₀ = {:.3e}), cannot compute Δμ. "
+               "Using Δμ=0: the density is not restored.", g.kappa_int / kappa_0);
+  else if (std::abs(g.kappa_int) < 1e-3 * std::abs(kappa_0))
+    app_log(1, "[WARNING] lr_driver: κ_int/κ₀ = {:.3e} (κ_int = {:.6e}, κ₀ = {:.6e}): Δμ is "
+               "ill-conditioned (∝ 1/κ_int) and may be dominated by IR-discretization "
+               "residuals.\n  ΔDm, ΔF and the hessian depend on it only at O(ΔN_free); "
+               "ΔG/ΔΣ carry a rigid shift of all levels by −Δμ relative to μ.",
+            g.kappa_int / kappa_0, g.kappa_int, kappa_0);
+}
+
+
+template<THC_ERI THC_t>
 void lr_driver::get_full_kernel_result(
     sArray_t<Array_view_4D_t>& sDeltaF_skij,
     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
@@ -1725,7 +1868,8 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                                       lr_diis_hist_t outer_hist,
                                       bool need_Delta_mu,
                                       bool exchange_static_W,
-                                      long hessian_nmodes) {
+                                      long hessian_nmodes,
+                                      bool dmu_gauge) {
   // Dimensions of the large arrays.
   const long nt   = _nts;                          // # imaginary-time points (full grid)
   const long nw   = _dyson.FT()->nw_f();           // # fermionic Matsubara frequencies (G(iω))
@@ -1816,6 +1960,9 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   };
   push_hist(inner_hist, _lr_gcr ? "inner GCR basis" : "inner DIIS history");
   push_hist(outer_hist, "outer DIIS history");
+  // The μ-shift source x_v = (ΔF_v, ΔΣ_v) of schur_dmu, kept for the whole run.
+  if (dmu_gauge)
+    arrays.push_back({"x_v = ΔΣ_v (Δμ gauge)", shp5b(nt), band5(nt), true, PERSIST});
 
   // Stationary hessian estimator. The ω stores — ΔΣ_λ(iω) and ΔG_p(iω) for every
   // perturbation of the batch — are the largest thing the feature allocates and the

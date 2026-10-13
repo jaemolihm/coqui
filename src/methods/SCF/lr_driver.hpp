@@ -556,6 +556,8 @@ public:
    * (0 = off). Its two striped ω stores scale with it and are the largest thing the
    * feature allocates, so they are listed here with everything else rather than
    * reported separately by lr_hessian_t.
+   *
+   * `dmu_gauge` marks schur_dmu, which keeps the μ-shift source x_v striped.
    */
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                              std::vector<std::string> const& extra_sigma = {},
@@ -564,7 +566,8 @@ public:
                              lr_diis_hist_t outer_hist = {},
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
-                             long hessian_nmodes = 0);
+                             long hessian_nmodes = 0,
+                             bool dmu_gauge = false);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -720,6 +723,35 @@ private:
    */
   std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel(bool counter_term);
 
+  /**
+   * fix_density at q=Γ with a Σ in K_sc (not qp): Δμ is solved outside the inner
+   * iteration. The constrained problem is the bordered system
+   *   (1 − χ₀K) ΔG − Δμ·u = χ₀ΔH0,   cᴴΔG = 0,   u = χ₀(−S),
+   * whose Schur complement is κ_int = cᴴ(1 − χ₀K)⁻¹u. The inner loop solves the
+   * unconstrained problem for z, and each stage end and the exit set
+   *   Δμ = −ΔN(z)/κ_int,   x = z + Δμ·x_v,
+   * with x_v the source of v = (1 − χ₀K_sc)⁻¹u.
+   */
+  bool schur_dmu(const lr_params& p) const {
+    return p.fix_density && is_q_gamma() && _split.sc.has_Sigma() && !_split.sc.is_qp();
+  }
+
+  /**
+   * Solve the μ-shift response once per q: lr_solve_one on ΔH0 = −S (Δμ = 1)
+   * with K_sc only, no ΔN constraint, no IBC or δV source and no K_pert stage.
+   * Stores x_v = (ΔF_v, ΔΣ_v) and κ_int = ΔN(ΔDm_v) in _dmu_gauge. Uses
+   * the caller's output arrays as scratch; lr_solve_one overwrites them next.
+   */
+  template<THC_ERI THC_t>
+  void build_dmu_gauge(sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                       sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                       sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
+                       const sArray_t<Array_view_5D_t>& sG_tskij,
+                       THC_t& thc,
+                       const lr_params& p,
+                       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
+
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
@@ -804,6 +836,16 @@ private:
   /// The kernel split, built once by lr_setup; its channels hold the evaluator
   /// instances above.
   lr_kernel_split _split;
+
+  /// The μ-shift response of schur_dmu, built by the first lr_solve_one at a q
+  /// and reused by every perturbation after it.
+  struct dmu_gauge_t {
+    /// x_v = (ΔF_v, ΔΣ_v), this rank's slices in the _DeltaF / _DeltaSigma partition
+    nda::array<ComplexType, 1> F_v, Sigma_v;
+    double kappa_int;   ///< ΔN(ΔDm_v), the interacting dN/dμ
+    bool singular;      ///< |κ_int| < 1e-12·|κ₀|: Δμ is set to 0
+  };
+  std::optional<dmu_gauge_t> _dmu_gauge;
 
   // --- ΔDm-only Dyson pass (K_sc without a Σ).
   /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
