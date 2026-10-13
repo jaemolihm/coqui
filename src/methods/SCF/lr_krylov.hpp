@@ -49,6 +49,20 @@ namespace methods {
  * stored, and x, r take the minimum-residual update along it. The next probe is
  * x + r (no preconditioner), or x itself once ‖r‖ ≤ tol.
  *
+ * Stagnation. With z = r the step reduces ‖r‖ by the factor √(1 − η²), with
+ * η = |⟨w⊥, r⟩| / (‖w⊥‖ ‖r‖) and w⊥ the orthogonalized image. Since r ⟂ W,
+ * ⟨w⊥, r⟩ = ⟨A r, r⟩, so where A is not positive-real (⟨A r, r⟩ ≈ 0) truncated
+ * GCR stalls: each step stores a pair that reduces nothing and evicts a useful
+ * one. When η < eta_kick the pair is stored as usual, but the next probe is
+ * x + ‖r‖ w_new along the newest image instead of x + r: its image A w_new
+ * extends the Krylov space (as GMRES does) where A r would not. The kick costs no
+ * extra evaluation and leaves every step with η ≥ eta_kick unchanged.
+ * An image nearly inside span(W) (‖w⊥‖ ≤ dep_tol ‖w‖) is not stored and takes no
+ * step, since normalizing it would mostly amplify round-off; the next probe is
+ * then a kick, and if that probe was itself a kick the basis restarts, as at a
+ * breakdown. No progress for stag_steps steps (‖r‖ above stag_ratio of its
+ * last marked value) raises stagnated() for one step, for the caller to warn.
+ *
  * Only b changes between the stages of a split-kernel solve, so the stored
  * (z_i, w_i = A z_i) stay valid: reset_rhs() keeps them, and the first probe of
  * the new right-hand side is projected onto them (a Galerkin minimum-residual
@@ -84,12 +98,23 @@ public:
     utils::check(_cap >= 1, "lr_gcr: the basis capacity must be >= 1.");
   }
 
+  /// A step with η below this redirects the next probe along the newest image.
+  static constexpr double eta_kick = 0.01;
+  /// ‖w⊥‖ / ‖w‖ at or below this marks the image as dependent on the stored W.
+  static constexpr double dep_tol = 1e-8;
+  /// stagnated() is raised after this many steps without ‖r‖ dropping below
+  /// stag_ratio times its last marked value.
+  static constexpr int stag_steps = 20;
+  static constexpr double stag_ratio = 0.99;
+
   /// Forget the basis (buffers kept) and the right-hand side: a new solve.
   void reset() {
     _n = 0;
     _head = 0;
     _have_rhs = false;
     _warned_full = false;
+    _kick = false;
+    _kicks = 0;
   }
   /// Keep the basis; the next step starts a new right-hand side.
   void reset_rhs() { _have_rhs = false; }
@@ -100,6 +125,12 @@ public:
   /// basis, for the first probe of the current right-hand side.
   double rhs_residual_raw() const { return _r0_raw; }
   double rhs_residual_projected() const { return _r0_proj; }
+  /// The probe handed out by the last step is a kick along the newest image.
+  bool kicked() const { return _kick; }
+  /// Kicks since the last reset().
+  size_t kicks() const { return _kicks; }
+  /// The last step completed stag_steps steps without progress.
+  bool stagnated() const { return _stagnated; }
 
   /**
    * @brief One GCR step on the iterate (ΔF, ΔΣ).
@@ -110,8 +141,8 @@ public:
    * vector [F; S], and every inner product is Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *
    * @param F_inout   - [IN/OUT] the full ΔF (pass .local()); g(y) on entry, and
-   *                            this rank's slice of the next probe (x + r), or of x
-   *                            once converged, on exit
+   *                            this rank's slice of the next probe (x + r, or a
+   *                            kick), or of x once converged, on exit
    * @param F_probe   - [INPUT]  this rank's slice of the ΔF probe y g was applied to
    * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
    * @param S_probe   - [INPUT]  this rank's slice of the ΔΣ probe
@@ -153,6 +184,9 @@ public:
     }
 
     _g -= _y;                             // r(y) = g(y) − y
+    const bool probe_was_kick = _kick;
+    bool kick = false, extended = false;
+    _stagnated = false;
     if (!_have_rhs) {
       // First probe of a right-hand side
       if (_x.size() != n) { _x = Vec1D(n); _r = Vec1D(n); }
@@ -170,8 +204,11 @@ public:
       }
       _r0_proj = (_n > 0) ? norm(comm, _r) : _r0_raw;
       _have_rhs = true;
+      _r_mark = _r0_proj;
+      _nflat = 0;
     } else {
       // Later probe: extend the basis
+      extended = true;
       auto& z = _y;
       auto& w = _g;
       z -= _x;                            // z = y − x
@@ -202,17 +239,21 @@ public:
       }
       comm.all_reduce_in_place_n(acc, 2, std::plus<>{});
       const double wn = std::sqrt(acc[0]);
-      if (wn <= 1e-14 * w0n || wn == 0.0) {
-        // A z lies in the span of the stored W to working precision: this probe
-        // adds no direction, and repeating it would add none either. Restart
-        // from the next probe x + r with an empty basis; its first step then
-        // re-forms r from the true residual.
+      const bool dependent = (wn <= dep_tol * w0n);
+      if (wn <= 1e-14 * w0n || wn == 0.0 || (dependent && probe_was_kick)) {
+        // A z lies in the span of the stored W to working precision, or nearly
+        // so after a kick: this probe adds no direction, and repeating it would
+        // add none either. Restart from the next probe x + r with an empty
+        // basis; its first step then re-forms r from the true residual.
         app_log(1, "    [WARNING] lr_gcr: breakdown (||w|| = {:.3e} after "
                    "orthogonalization, {:.3e} before); restarting with an empty "
                    "basis.", wn, w0n);
         _n = 0;
         _head = 0;
         _have_rhs = false;
+      } else if (dependent) {
+        // A z nearly inside span(W): not stored, no step; kick next
+        kick = true;
       } else {
         w *= 1.0 / wn;
         z *= 1.0 / wn;
@@ -222,14 +263,31 @@ public:
         const double alpha = acc[1] / wn;
         _x += alpha * z;
         _r -= alpha * w;
+        // η of this step; ‖r‖ before it is the previous step's return value.
+        kick = (std::abs(alpha) < eta_kick * _rn);
       }
     }
 
     const double rn = norm(comm, _r);
     converged = (rn <= tol);
+    if (extended && _have_rhs) {
+      // Progress check
+      if (rn < stag_ratio * _r_mark) {
+        _r_mark = rn;
+        _nflat = 0;
+      } else if (++_nflat == stag_steps) {
+        _stagnated = !converged;
+      }
+    }
+    _kick = kick && !converged;
+    _rn = rn;
     if (converged) {
       // Converged: hand back x
       _y() = _x;
+    } else if (_kick) {
+      // Next probe x + ‖r‖ w_new, along the newest stored image
+      ++_kicks;
+      _y() = _x + rn * _W[slot(_n - 1)];
     } else {
       // Next probe x + r
       _y() = _x + _r;
@@ -248,6 +306,11 @@ private:
   size_t _head = 0;    // ring origin
   bool _have_rhs = false;
   bool _warned_full = false;
+  bool _kick = false;         // the last probe handed out is a kick
+  bool _stagnated = false;
+  size_t _kicks = 0;
+  int _nflat = 0;             // steps since ‖r‖ last dropped below stag_ratio·_r_mark
+  double _rn = 0.0, _r_mark = 0.0;  // ‖r‖ after the last step; last marked ‖r‖
   double _r0_raw = 0.0, _r0_proj = 0.0;
   std::vector<Vec1D> _Z, _W;   // this rank's slices of z_i and w_i = A z_i
   Vec1D _x, _r;
