@@ -220,6 +220,24 @@ public:
       const DeltaF_t* sDeltaVcorr_skij = nullptr);
 
   /**
+   * @brief One LR Dyson pass at a given Δμ, with no ΔN constraint.
+   *
+   * Computes ΔG = G_{k+q}·[ΔH0 + ΔF + ΔΣ + ΔV_QPGW − Δμ·S]·G_k and ΔDm, as
+   * solve_lr_dyson does, but with Δμ an input: nothing is projected and the
+   * Δμ-response cache is not read. ΔG(τ) is retained for materialize_DeltaG_tau().
+   * A nonzero Δμ requires q=Γ.
+   */
+  template<typename DeltaDm_t, typename DeltaH0_t,
+           typename DeltaF_t, typename DeltaSigma_t>
+  void solve_lr_dyson_at_dmu(
+      DeltaDm_t& sDeltaDm_skij,
+      const DeltaH0_t& sDeltaH0_skij,
+      const DeltaF_t& sDeltaF_skij,
+      const DeltaSigma_t* sDeltaSigma_tskij,
+      double Delta_mu,
+      const DeltaF_t* sDeltaVcorr_skij = nullptr);
+
+  /**
    * @brief Gather the distributed _dDeltaG_tau_buffer left by the last solve
    *        into the shared-memory array sDeltaG_tskij.
    *
@@ -406,6 +424,18 @@ private:
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const dArray_5D_t* dDeltaSigma_wskij,
+      double Delta_mu,
+      const DeltaF_t* sDeltaVcorr_skij);
+
+  // One Dyson pass at the given Δμ: ΔΣ(τ) → ΔΣ(iω), then solve_lr_dyson_impl.
+  // The shared body of solve_lr_dyson and solve_lr_dyson_at_dmu.
+  template<typename DeltaDm_t, typename DeltaH0_t,
+           typename DeltaF_t, typename DeltaSigma_t>
+  void solve_lr_dyson_pass(
+      DeltaDm_t& sDeltaDm_skij,
+      const DeltaH0_t& sDeltaH0_skij,
+      const DeltaF_t& sDeltaF_skij,
+      const DeltaSigma_t* sDeltaSigma_tskij,
       double Delta_mu,
       const DeltaF_t* sDeltaVcorr_skij);
 

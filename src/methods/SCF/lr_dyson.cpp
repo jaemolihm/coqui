@@ -92,6 +92,68 @@ double lr_dyson::solve_lr_dyson(
 
   _Timer.start("LR_DYSON");
 
+  // At q≠0 the Δμ·S term vanishes and Δμ is meaningless.
+  if (!_is_q_gamma and fix_density)
+    app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
+
+  // The perturbation is solved at fixed μ, so the Dyson pass always runs at
+  // Δμ = 0; only fix_density at q=0 shifts off it, in three steps:
+  // 1. the single Dyson pass below, giving ΔG(0) and ΔN(0)
+  // 2. Δμ = -ΔN(0) / (dN/dμ), with dN/dμ from the cached Δμ response
+  // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dDm/dμ
+  //
+  // Δμ reaches the RHS only through the −Δμ·S term, so ΔG is affine in it and
+  // dG/dμ is a function of the reference G(iω) and S alone — the same statement
+  // the closed form in step 2 rests on. build_dmu_response() builds that response
+  // once, before the SCF loop, which makes step 3 a local axpy (exact in exact
+  // arithmetic) rather than a second Dyson pass.
+  //
+  // There is therefore one Dyson pass in every mode, always at Δμ = 0; only
+  // steps 2-3 are conditional.
+  solve_lr_dyson_pass(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, sDeltaSigma_tskij,
+                      /*Delta_mu=*/0.0, sDeltaVcorr_skij);
+
+  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
+  if (Delta_mu != 0.0) apply_dmu_shift_G(Delta_mu);
+
+  _Timer.stop("LR_DYSON");
+  print_timers(3);  // per-step diagnostics only at verbosity >= 3
+
+  return Delta_mu;
+}
+
+
+template<typename DeltaDm_t, typename DeltaH0_t,
+         typename DeltaF_t, typename DeltaSigma_t>
+void lr_dyson::solve_lr_dyson_at_dmu(
+    DeltaDm_t& sDeltaDm_skij,
+    const DeltaH0_t& sDeltaH0_skij,
+    const DeltaF_t& sDeltaF_skij,
+    const DeltaSigma_t* sDeltaSigma_tskij,
+    double Delta_mu,
+    const DeltaF_t* sDeltaVcorr_skij) {
+
+  utils::check(_cached_G_wskij != nullptr,
+               "solve_lr_dyson_at_dmu: cached G(iω) not set. Call set_cached_G_omega() first.");
+
+  _Timer.start("LR_DYSON");
+  solve_lr_dyson_pass(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, sDeltaSigma_tskij,
+                      Delta_mu, sDeltaVcorr_skij);
+  _Timer.stop("LR_DYSON");
+  print_timers(3);
+}
+
+
+template<typename DeltaDm_t, typename DeltaH0_t,
+         typename DeltaF_t, typename DeltaSigma_t>
+void lr_dyson::solve_lr_dyson_pass(
+    DeltaDm_t& sDeltaDm_skij,
+    const DeltaH0_t& sDeltaH0_skij,
+    const DeltaF_t& sDeltaF_skij,
+    const DeltaSigma_t* sDeltaSigma_tskij,
+    double Delta_mu,
+    const DeltaF_t* sDeltaVcorr_skij) {
+
   // A ΔG(τ) nobody gathered before this solve is dead by definition. Dropped
   // before anything is allocated, so the in-solve memory peak is unchanged.
   _dDeltaG_tau_buffer.reset();
@@ -116,35 +178,8 @@ double lr_dyson::solve_lr_dyson(
   const dArray_5D_t* dDeltaSigma_wskij =
       opt_dDeltaSigma_wskij ? &(*opt_dDeltaSigma_wskij) : nullptr;
 
-  // At q≠0 the Δμ·S term vanishes and Δμ is meaningless.
-  if (!_is_q_gamma and fix_density)
-    app_log(3, "solve_lr_dyson: fix_density ignored for q≠0 (Δμ term vanishes)");
-
-  // The perturbation is solved at fixed μ, so the Dyson pass always runs at
-  // Δμ = 0; only fix_density at q=0 shifts off it, in three steps:
-  // 1. the single Dyson pass below, giving ΔG(0) and ΔN(0)
-  // 2. Δμ = -ΔN(0) / (dN/dμ), with dN/dμ from the cached Δμ response
-  // 3. ΔG(Δμ) = ΔG(0) + Δμ·dG/dμ and ΔDm(Δμ) = ΔDm(0) + Δμ·dDm/dμ
-  //
-  // Δμ reaches the RHS only through the −Δμ·S term, so ΔG is affine in it and
-  // dG/dμ is a function of the reference G(iω) and S alone — the same statement
-  // the closed form in step 2 rests on. build_dmu_response() builds that response
-  // once, before the SCF loop, which makes step 3 a local axpy (exact in exact
-  // arithmetic) rather than a second Dyson pass.
-  //
-  // There is therefore one Dyson pass in every mode, always at Δμ = 0; only
-  // steps 2-3 are conditional.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                      dDeltaSigma_wskij, /*Delta_mu=*/0.0,
-                      sDeltaVcorr_skij);
-
-  const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
-  if (Delta_mu != 0.0) apply_dmu_shift_G(Delta_mu);
-
-  _Timer.stop("LR_DYSON");
-  print_timers(3);  // per-step diagnostics only at verbosity >= 3
-
-  return Delta_mu;
+                      dDeltaSigma_wskij, Delta_mu, sDeltaVcorr_skij);
 }
 
 
@@ -590,6 +625,14 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
+    const sArray_t<Array_view_4D_t>*);
+
+template void lr_dyson::solve_lr_dyson_at_dmu(
+    sArray_t<Array_view_4D_t>&,
+    const sArray_t<Array_view_4D_t>&,
+    const sArray_t<Array_view_4D_t>&,
+    const sArray_t<Array_view_5D_t>*,
+    double,
     const sArray_t<Array_view_4D_t>*);
 
 template void lr_dyson::solve_lr_dyson_impl(
