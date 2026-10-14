@@ -150,6 +150,8 @@ TEST_CASE("lr_gcr_two_slot_recycling", "[methods_scf]") {
   REQUIRE(affine_residual(P2, x2) < 10 * tol);
   REQUIRE(gcr.rhs_residual_projected() < 1e-2 * gcr.rhs_residual_raw());
   REQUIRE(n2 < n1);
+  // ‖M‖ < 1 keeps A positive-real, so no step stagnates.
+  REQUIRE(gcr.kicks() == 0);
 
   // ΔF-only iterate: an empty second slot.
   methods::lr_gcr gcr_f(100);
@@ -159,6 +161,69 @@ TEST_CASE("lr_gcr_two_slot_recycling", "[methods_scf]") {
   const int nf = solve(world, pmap, gcr_f, PF, F, S_empty, xf, tol, 200);
   REQUIRE(nf <= 200);
   REQUIRE(affine_residual(PF, xf) < 10 * tol);
+}
+
+// g(x) = (I − A) x + b for a real A with xᵀ A x = 0 for every real x: each step
+// along r has η = 0, so plain GCR never reduces ‖r‖, while the kick reaches A r.
+TEST_CASE("lr_gcr_kick_skew", "[methods_scf]") {
+  auto world = mpi3::environment::get_world_instance();
+  utils::part_map pmap;
+  pmap.nparts = world.size();
+  pmap.part_idx = world.rank();
+  const double tol = 1e-11;
+  auto skew_problem = [](long nF, long nS, nda::array<double, 2> const& A,
+                         nda::array<ComplexType, 1> const& b) {
+    affine_problem P(nF, nS, 0.0);
+    const long n = nF + nS;
+    for (long i = 0; i < n; ++i)
+      for (long j = 0; j < n; ++j) P.M(i, j) = (i == j ? 1.0 : 0.0) - A(i, j);
+    P.b = b;
+    return P;
+  };
+
+  // The 2×2 rotation A = [[0, −1], [1, 0]].
+  {
+    nda::array<double, 2> A(2, 2);
+    A() = 0;
+    A(0, 1) = -1.0;
+    A(1, 0) = 1.0;
+    nda::array<ComplexType, 1> b(2);
+    b(0) = 1.0;
+    b(1) = 0.0;
+    auto P = skew_problem(2, 0, A, b);
+    nda::array<ComplexType, 4> F(shape_t<4>{1, 1, 1, 2});
+    nda::array<ComplexType, 5> S_empty;
+    nda::array<ComplexType, 1> x;
+    methods::lr_gcr gcr(10);
+    const int n = solve(world, pmap, gcr, P, F, S_empty, x, tol, 50);
+    REQUIRE(n <= 3);
+    REQUIRE(gcr.kicks() == 1);
+    REQUIRE(affine_residual(P, x) < 10 * tol);
+  }
+
+  // Two rotation blocks of different scale over [F; S], complex b, capacity 2.
+  {
+    nda::array<double, 2> A(4, 4);
+    A() = 0;
+    A(0, 1) = -1.0;
+    A(1, 0) = 1.0;
+    A(2, 3) = -3.0;
+    A(3, 2) = 3.0;
+    nda::array<ComplexType, 1> b(4);
+    b(0) = ComplexType(0.3, 0.2);
+    b(1) = -1.2;
+    b(2) = ComplexType(0.0, 0.7);
+    b(3) = 0.5;
+    auto P = skew_problem(2, 2, A, b);
+    nda::array<ComplexType, 4> F(shape_t<4>{1, 1, 1, 2});
+    nda::array<ComplexType, 5> S(shape_t<5>{1, 1, 1, 1, 2});
+    nda::array<ComplexType, 1> x;
+    methods::lr_gcr gcr(2);
+    const int n = solve(world, pmap, gcr, P, F, S, x, tol, 50);
+    REQUIRE(n <= 6);
+    REQUIRE(gcr.kicks() >= 1);
+    REQUIRE(affine_residual(P, x) < 10 * tol);
+  }
 }
 
 } // namespace bdft_tests
