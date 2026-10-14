@@ -901,6 +901,35 @@ class IAFT(object):
         """
         return self._impl.wn_mesh(stats, phys_notation=phys_notation, positive_only=positive_only)
 
+    def wn_values(self, stats: str, wn=None, *, phys_notation: bool=False):
+        """
+        Return the Matsubara frequencies ω_n (iω_n divided by i) of the given indices.
+
+        :param stats: str
+            Particle statistics: [``'f'``, ``'fermion'``] for fermions,
+            [``'b'``, ``'boson'``] for bosons.
+        :param wn: array_like of int, optional
+            Matsubara indices in the convention set by ``phys_notation``.
+            Default: the IAFT's own mesh, ``wn_mesh(stats, phys_notation=phys_notation)``.
+        :param phys_notation: bool, keyword-only
+            Frequency-index convention:
+
+            - ``False`` (default): CoQuí/IR convention, ω_n = n·π/β for all
+              statistics (n odd for fermions, even for bosons).
+            - ``True``: physical convention, ω_n = (2n+1)·π/β for fermions
+              and ω_n = 2n·π/β for bosons.
+        :return: numpy.ndarray of float, same shape as ``wn``
+            Physical Matsubara frequencies ω_n.
+        """
+        stats = _normalize_stats(stats)
+        wn = self.wn_mesh(stats, phys_notation=phys_notation) if wn is None else np.asarray(wn)
+        if not phys_notation:
+            return wn * np.pi / self.beta
+        elif stats == "fermion":
+            return (2*wn + 1) * np.pi / self.beta
+        else:
+            return 2*wn * np.pi / self.beta
+
     def tau_mesh(self, stats: str, rel_notation: bool=False):
         """
         Return the imaginary-time sampling points.

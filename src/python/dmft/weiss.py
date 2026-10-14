@@ -163,44 +163,47 @@ def dynamic_4idx_u_to_dd_basis(u_wabcd_pb, nspin=2, screen_j=False):
     return U_s1s2
 
 
-def estimate_zero_moment(Aw, iw_mesh):
+def estimate_zero_moment(Aw_pos, Aw_neg, iw_mesh):
     """
-    Estimate the zeroth moment (high-frequency constant term) of A(iω). 
+    Estimate the zeroth moment (high-frequency constant term) of A(iω).
 
     Assumes that at large Matsubara frequencies the function behaves as
 
-        A(iω) ≈ t + B / (iω) + O(1/ω²),
+        A(iω) ≈ t + B / (iω) + C / (iω)² + O(1/ω³).
 
-    where `t` is the zeroth moment (constant term). The estimate uses the values
-    of A(iω) at the last two frequencies in `iw_mesh` to extrapolate to the
-    ω → ∞ limit.
+    The even part A_even(ω) = ½[A(iω) + A(-iω)] = t + C / (iω)² + O(1/ω⁴) cancels every odd
+    term exactly, and its values at the last two frequencies of `iw_mesh` are extrapolated
+    to ω → ∞ assuming a 1/ω² decay. No Hermitian projection is applied, so the estimate is
+    valid for any A, including a non-Hermitian response δA.
 
     Parameters
     ----------
-    Aw : array of complex, shape (nw, ...)
-        Values of A(iω) on the Matsubara frequency mesh. Must be ordered such
-        that the last entries correspond to the largest |ω|.
-    iw_mesh : array of complex, shape (nw)
-        Matsubara frequency mesh corresponding to `Aw`. The last two entries are
-        used for the extrapolation.
+    Aw_pos : array of complex, shape (nw, ..., nbnd, nbnd)
+        A(iω) at the frequencies ω = `iw_mesh`, ordered such that the last entries
+        correspond to the largest ω.
+    Aw_neg : array of complex, shape (nw, ..., nbnd, nbnd)
+        A(-iω) at the same frequencies.
+    iw_mesh : array of float, shape (nw)
+        Matsubara frequencies ω (positive). The last two entries are used for the
+        extrapolation.
 
     Returns
     -------
-    t : complex
-        Estimated zeroth moment (constant term) of A(iω) in the high-frequency
-        expansion.
+    t : ndarray, complex, shape (..., nbnd, nbnd)
+        Estimated zeroth moment of A(iω).
 
     Notes
     -----
     - Accuracy depends on how far into the asymptotic regime the last two
       frequencies are. If the frequencies are not sufficiently large, the
       estimate may be biased.
+    - The map from (Aw_pos, Aw_neg) to t is real-linear, so it also gives the linear
+      response of t.
     """
     iw_m1 = iw_mesh[-1]
     iw_m2 = iw_mesh[-2]
-    t = Aw[-1].real - (Aw[-1] - Aw[-2]).real * iw_m2 ** 2 / (
-           iw_m2 ** 2 - iw_m1 ** 2)
-    t = t.astype(complex)
+    A_even = 0.5 * (Aw_pos[-2:] + Aw_neg[-2:])
+    t = A_even[-1] - (A_even[-1] - A_even[-2]) * iw_m2 ** 2 / (iw_m2 ** 2 - iw_m1 ** 2)
 
     return t
 
@@ -211,10 +214,11 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
     from a Weiss Green's function G₀(iω) sampled on a fermionic Matsubara mesh.
 
     The method:
-      1) Interpolate G₀(iω) to a few very large Matsubara frequencies (scaled by
+      1) Interpolate G₀(±iω) to a few very large Matsubara frequencies (scaled by
          `high_freq_multiplier`) to probe the asymptotic regime.
-      2) Construct W(iω) = iω·I - [G₀(iω)]⁻¹ and estimate its zeroth moment
-         t_sIab = lim_{|ω|→∞} W(iω) via `estimate_zero_moment`.
+      2) Construct W(±iω) = ±iω·I - [G₀(±iω)]⁻¹ and estimate its zeroth moment
+         t_sIab = lim_{|ω|→∞} W(iω) via `estimate_zero_moment`, and take its Hermitian
+         part ½(t + t†) if `make_hermitian`.
       3) Build Δ(iω) from the Dyson-like relation:
             Δ(iω) = iω·I - t_sIab - [G₀(iω)]⁻¹.
 
@@ -228,6 +232,9 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
         Multiplier applied to the last few (three) IR fermionic frequencies (in IR notation)
         before converting to physical Matsubara frequencies, to push evaluation deep into
         the asymptotic region for a more stable moment estimate.
+    make_hermitian : bool, default True
+        If True, replace t_sIab by its Hermitian part ½(t + t†) and enforce
+        Δ(-iω) = Δ(iω)† on the returned Δ.
 
     Returns
     -------
@@ -242,20 +249,26 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
     """
     nspin = g_weiss_wsab.shape[1]
     
-    # 1) Interpolate G0 to very high fermionic frequencies to improve the accuracy of high-frequency fitting
+    # 1) Interpolate G0 to very high fermionic frequencies ±iω to improve the accuracy of high-frequency fitting
     iwn_interp = iaft.wn_mesh('f', phys_notation=True)[-3:] * high_freq_multiplier
-    g_weiss_interp = iaft.w_interpolate(g_weiss_wsab, iwn_interp, 'f', phys_notation=True)
-    iwn_interp = (2*iwn_interp.astype(float) + 1) * np.pi / iaft.beta
-    weiss_tmp = np.zeros(g_weiss_interp.shape, dtype=complex)
-    for n, g in enumerate(g_weiss_interp):
-        for s in range(nspin):
-            weiss_tmp[n, s] = 1j * iwn_interp[n] - np.linalg.inv(g[s])
+    weiss_tmp = []
+    for iwn_idx in (iwn_interp, -iwn_interp - 1):   # n and -n-1: ω_{-n-1} = -ω_n
+        g_weiss_interp = iaft.w_interpolate(g_weiss_wsab, iwn_idx, 'f', phys_notation=True)
+        iwn = iaft.wn_values('f', iwn_idx, phys_notation=True)
+        w_tmp = np.zeros(g_weiss_interp.shape, dtype=complex)
+        for n, g in enumerate(g_weiss_interp):
+            for s in range(nspin):
+                w_tmp[n, s] = 1j * iwn[n] - np.linalg.inv(g[s])
+        weiss_tmp.append(w_tmp)
+    iwn_interp = iaft.wn_values('f', iwn_interp, phys_notation=True)
 
     # 2) Fitting the zeroth moment as the non-interacting Hamiltonian
-    t_sIab_estimate = estimate_zero_moment(weiss_tmp, iwn_interp)
+    t_sIab_estimate = estimate_zero_moment(weiss_tmp[0], weiss_tmp[1], iwn_interp)
+    if make_hermitian:
+        t_sIab_estimate = 0.5 * (t_sIab_estimate + np.swapaxes(t_sIab_estimate, -1, -2).conj())
 
     # 3) Construct Δ(iω) = iω·I - t_sIab - [G0(iω)]^{-1} on the original mesh
-    iwn_mesh_imp = iaft.wn_mesh('f') * np.pi / iaft.beta
+    iwn_mesh_imp = iaft.wn_values('f')
     delta_estimate = np.zeros(g_weiss_wsab.shape, dtype=complex)
     nbnd = t_sIab_estimate.shape[-1]
     for n in range(delta_estimate.shape[0]):
@@ -264,21 +277,29 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
             delta_estimate[n, s] = 1j * iwn_mesh_imp[n] * np.eye(nbnd) - t_sIab_estimate[s] - g_weiss_inv
 
     if make_hermitian:
-        # enforce hermiticity of Δ(iω)
-        nw = delta_estimate.shape[0]
-        for n_neg in range(nw//2+nw%2):
-            n_pos = nw - 1 - n_neg
-            if n_pos == n_neg:
-                continue
-            for s in range(nspin):
-                delta_estimate[n_pos, s] = 0.5 * (delta_estimate[n_pos, s] + delta_estimate[n_neg, s].conj().T)
-                delta_estimate[n_neg, s] = delta_estimate[n_pos, s].conj().T
+        _hermitize_delta(delta_estimate)
 
     # 4) checking the leakage of the resulting Δ(iω)
     iaft.check_leakage(delta_estimate, 'f', 'delta', w_input=True)
     app_log(1, "")
 
     return t_sIab_estimate, delta_estimate
+
+
+def _hermitize_delta(delta_wsab):
+    """
+    Enforce Δ(-iω) = Δ(iω)^† in place on the fermionic IAFT mesh (shape (nw, nspin, nbnd, nbnd)),
+    pairing index n with nw-1-n. Returns delta_wsab.
+    """
+    nw, nspin = delta_wsab.shape[:2]
+    for n_neg in range(nw//2+nw%2):
+        n_pos = nw - 1 - n_neg
+        if n_pos == n_neg:
+            continue
+        for s in range(nspin):
+            delta_wsab[n_pos, s] = 0.5 * (delta_wsab[n_pos, s] + delta_wsab[n_neg, s].conj().T)
+            delta_wsab[n_neg, s] = delta_wsab[n_pos, s].conj().T
+    return delta_wsab
 
 # TODO merge call compute_weiss_fields_w internally to avoid code duplication
 def init_weiss_fields_w(*, iaft, local_gf, init_imp_results="dc", density_only=False):
