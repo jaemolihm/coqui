@@ -328,6 +328,106 @@ def test_gw_edmft_params_forward_mu(tmp_path):
     assert "mu" not in p["gw"] and "mu" not in p["dmft_embed"]
 
 
+def test_impurity_mu_update_validation():
+    pytest.importorskip("triqs")
+    from coqui.dmft.io import _normalize_solver_params_list
+    solver = {"n_cycles": 100, "n_warmup_cycles": 10, "length_cycle": 5}
+    for update in ("search", "predict"):
+        _normalize_solver_params_list([dict(solver, chemical_potential={"update": update})], 1)
+    with pytest.raises(ValueError):
+        _normalize_solver_params_list([dict(solver, chemical_potential={"update": "serach"})], 1)
+
+
+def _mu_predictor_inputs(norb=2, nw=3, seed=7):
+    rng = np.random.default_rng(seed)
+    def herm(n):
+        a = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+        return a + a.conj().T
+    h0 = np.array([herm(norb) for _ in range(2)])
+    u_prev = rng.standard_normal((nw,) + (norb,) * 4) + 0j
+    vloc = rng.standard_normal((norb,) * 4) + 0j
+    for a in range(norb):
+        vloc[a, a, a, a] = 0.3 + 0.1 * a
+    return h0, u_prev, vloc
+
+
+def test_impurity_mu_predictor():
+    pytest.importorskip("triqs_modest")
+    from coqui.dmft.scf_driver import _predict_mu_imp
+    norb, mu0, n_imp = 2, 0.05, 1.7
+    h0, u_prev, vloc = _mu_predictor_inputs(norb)
+    level = lambda h: np.mean([np.diag(hs).real.mean() for hs in h])
+    Res = {"mu_imp": mu0, "density": n_imp}
+
+    # Hartree shift: dU_aabb(nu=0) = c on the density-density elements raises mu_imp by c*n_imp;
+    # other elements of dU, nu != 0 and the level change of h0 enter as documented.
+    c, s = 0.02, -0.11
+    u_new = u_prev.copy()
+    u_new[1:] += 5.0
+    u_new[0] += 0.3 * (np.arange(norb**4).reshape((norb,) * 4) % 3 == 1)
+    for a in range(norb):
+        for b in range(norb):
+            u_new[0, a, a, b, b] = u_prev[0, a, a, b, b] + c
+    h0_new = h0 + s * np.eye(norb)
+    Input = {"h0": h0_new, "u_weiss_iw": u_new, "Vloc": vloc, "density": n_imp}
+    mu = _predict_mu_imp(Input, Res, h0, u_prev, {"update": "predict"})
+    assert abs(level(h0_new) - level(h0) - s) < 1e-14
+    assert abs(mu - (mu0 + s + c * n_imp)) < 1e-14
+
+    # Density feedback: an impurity below the target density raises mu_imp by gain*(n_target - n_imp);
+    # the default gain is the bare density-density interaction averaged over spin-orbital pairs,
+    # [V_0000 + V_1111 + 2 V_0011 - V_0101 + 2 V_1100 - V_1010] / 6 for two orbitals (product basis).
+    n_target = 1.8
+    Input = {"h0": h0, "u_weiss_iw": u_prev, "Vloc": vloc, "density": n_target}
+    v = vloc.real
+    gain = (v[0, 0, 0, 0] + v[1, 1, 1, 1] + 2 * v[0, 0, 1, 1] - v[0, 1, 0, 1] + 2 * v[1, 1, 0, 0] - v[1, 0, 1, 0]) / 6
+    mu = _predict_mu_imp(Input, Res, h0, u_prev, {"update": "predict"})
+    assert mu > mu0
+    assert abs(mu - (mu0 + gain * (n_target - n_imp))) < 1e-14
+    mu = _predict_mu_imp(Input, Res, h0, u_prev, {"update": "predict", "gain": 0.7})
+    assert abs(mu - (mu0 + 0.7 * (n_target - n_imp))) < 1e-14
+
+    # Restart: the previous h0/u_weiss are not reloaded -> keep the stored mu_imp.
+    assert _predict_mu_imp(Input, Res, None, None, {}) == mu0
+    assert _predict_mu_imp(Input, Res, h0, None, {}) == mu0
+    # A restart from results without a stored density keeps the stored mu_imp as well.
+    assert _predict_mu_imp(Input, {"mu_imp": mu0}, h0, u_prev, {}) == mu0
+    assert _predict_mu_imp(Input, {"mu_imp": mu0}, None, None, {}) == mu0
+    # No previous solve -> 0.
+    assert _predict_mu_imp(Input, {"mu_imp": 0.0}, None, None, {}) == 0.0
+    assert _predict_mu_imp(Input, {}, None, None, {}) == 0.0
+
+
+def test_impurity_mu_resolve_uses_stored_value(tmp_path):
+    pytest.importorskip("triqs_modest")
+    from h5 import HDFArchive
+    from coqui.dmft.io import _read_impurity_mu_imp
+    from coqui.dmft.scf_driver import _stored_mu_imp_for_resolve
+    fn = str(tmp_path / "imp.h5")
+    with HDFArchive(fn, "w") as ar:
+        ar.create_group("dmft")
+        ar["dmft"]["final_iter"] = 3
+        for it, mus in ((2, (0.01, None)), (3, (0.04, -0.02))):
+            ar["dmft"].create_group(f"iter{it}")
+            for i, m in enumerate(mus):
+                ar["dmft"][f"iter{it}"].create_group(f"impurity_{i}")
+                imp = ar["dmft"][f"iter{it}"][f"impurity_{i}"]
+                imp.create_group("inputs")
+                if m is not None:
+                    imp.create_group("results")
+                    imp["results"]["mu_imp"] = m
+    assert _read_impurity_mu_imp(fn) == [0.04, -0.02]
+    assert _read_impurity_mu_imp(fn, 2) == [0.01, None]
+    assert _read_impurity_mu_imp(fn, -1, [1]) == [-0.02]
+
+    predict = {"chemical_potential": {"update": "predict"}}
+    assert _stored_mu_imp_for_resolve(predict, -0.02, -1) == -0.02
+    assert _stored_mu_imp_for_resolve({"chemical_potential": {"update": "search"}}, -0.02, -1) == 0.0
+    assert _stored_mu_imp_for_resolve({}, -0.02, -1) == 0.0
+    with pytest.raises(ValueError):
+        _stored_mu_imp_for_resolve(predict, None, 2)
+
+
 # LR on the t' != 0, n = 0.85 Hubbard model (particle-hole symmetry broken, so the GW kernel carries a
 # non-zero DeltaW): per (q, kernel), DeltaN = 2 sum_k w_k DeltaDm_k (q = 0 only) and ||DeltaDm||, generated
 # at np = 1. The LR result does not depend on the MPI distribution, so every rank count reproduces them;
