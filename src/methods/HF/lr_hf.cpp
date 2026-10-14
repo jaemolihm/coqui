@@ -103,7 +103,7 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   // that only the dense path starts: elapsed() aborts on an unregistered name.
   for (auto& v : {"LR_HF", "ALLOC", "PRIM_TO_AUX", "COULOMB", "EXCHANGE", "AUX_TO_PRIM",
                   "FINAL_REDUCE", "Z_FETCH", "UQ_TO_UR", "MADELUNG", "MISC", "FT_R",
-                  "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM", "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
+                  "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM", "SIGMA_A2P_REDUCE"}) {
     _Timer.add(v);
   }
   _mpi->comm.barrier();
@@ -490,7 +490,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     _Timer.start("AUX_TO_PRIM");
     for (auto ip : nda::range(npol))
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
-                                              dDeltaF_skPQ, sDeltaF_skij, thc,
+                                              dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                               _MF->ks_to_k(0), _kpq_map, &_Timer);
     _Timer.stop("AUX_TO_PRIM");
 
@@ -670,7 +670,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // Factor 2 for ip /= iq because we only compute (1, 0), not (0, 1).
         // After this, we will symmetrize ΔF_ij and ΔF_ji to enforce Hermiticity.
         lr_thc_comm::aux_to_primary<AF_t>(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
-                                                dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                                 _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       } // iq
@@ -701,7 +701,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.start("AUX_TO_PRIM");
         for (auto ip : nda::range(npol))
           lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
-                                                  dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                  dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                                   _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       }

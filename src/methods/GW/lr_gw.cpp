@@ -60,8 +60,8 @@ namespace methods {
                       "SIGMA_FT_COEFF", "SIGMA_W_COPY",
                       "SIGMA_FINAL_REDUCE",
                       "SIGMA_DIV_CORR",
-                      "SIGMA_A2P_GEMM",
-                      "SIGMA_A2P_REDUCE", "SIGMA_A2P_AXPY"}) {
+                      "SIGMA_A2P_ALLOC", "SIGMA_A2P_GEMM",
+                      "SIGMA_A2P_REDUCE"}) {
         _Timer.add(v);
       }
     }
@@ -265,7 +265,7 @@ namespace methods {
       long nkpts   = gshape[1];
       long t_origin = dW_ref.origin()[0];
 
-      // aux_to_primary_local flattens (s,k) of the aux and primary operands
+      // aux_to_primary flattens (s,k) of the aux and primary operands
       // onto a common leading index, so the two k-axes must have equal extent.
       utils::check(nk_ibz == nkpts,
                    "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
@@ -283,13 +283,14 @@ namespace methods {
           {1, 1, P_bs, Q_bs}));
 
       // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
-      // of ΔΣ has exactly one writer, _tau_comm rank 0 — the premise of the
-      // all_reduce_parallel that closes _eval_sigma_Rspace.
+      // of ΔΣ is written only by its pool, each rank of _tau_mpi->node_comm adding a
+      // disjoint stripe. The all_reduce_parallel that closes _eval_sigma_Rspace sums
+      // a pool's per-node partials when the pool spans nodes.
 
       // W2 tau-slice buffer (term 2 only; term 1 uses a contiguous view)
       if (do_term2) _W2_tau_RPQ.resize(nkpts, NP_loc, NQ_loc);
 
-      // Aux→Primary reduction buffer: one (nbnd, nbnd) block per local (s,k).
+      // Aux→Primary partial: one (nbnd, nbnd) block per (s,k).
       _A2P_buf_iab.resize(ns * nkpts, MF->nbnd(), MF->nbnd());
 
       // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
@@ -430,7 +431,6 @@ namespace methods {
       // Local aliases so the loop body below reads as before.
       // The Σ buffer is accumulated in R-space (dSigma_sRPQ) and FT'd in place
       // to k-space (aliased dSigma_skPQ) before aux_to_primary.
-      auto& tau_comm = *_tau_comm;
       auto& dSigma_sRPQ = *_dSigma_skPQ;
       auto& ft_buffer = _ft_buffer;
       auto& W2_tau_RPQ = _W2_tau_RPQ;
@@ -571,19 +571,12 @@ namespace methods {
           }
           auto& dSigma_skPQ = dSigma_sRPQ;  // now in k-space after the R→k FT
 
-          // --- aux_to_primary on accumulated Sigma (once) ---
-          auto DeltaSigma_slab = sDeltaSigma_tskij.local()(it_out, nda::ellipsis{});
-          const bool add_ibc = (ibc && ibc->sDeltaSigma_ibc_tskij.has_value());
-
+          // --- aux_to_primary on accumulated Sigma (once), into τ slab it_out ---
           _Timer.start("SIGMA_AUX_TO_PRIM");
-          lr_thc_comm::aux_to_primary_local(0, 0, ComplexType(1.0), dSigma_skPQ,
-                                            DeltaSigma_slab, thc, MF->ks_to_k(0), _kpq_map,
-                                            &_Timer, _A2P_buf_iab);
-
-          // Add precomputed IBC correction for this τ-point
-          if (add_ibc && tau_comm.rank() == 0) {
-            DeltaSigma_slab += ibc->sDeltaSigma_ibc_tskij->local()(it_out, nda::ellipsis{});
-          }
+          long slab = long(sDeltaSigma_tskij.size()) / sDeltaSigma_tskij.shape()[0];
+          lr_thc_comm::aux_to_primary(0, 0, ComplexType(1.0), dSigma_skPQ,
+                                      sDeltaSigma_tskij, it_out * slab, _tau_mpi->node_comm,
+                                      thc, MF->ks_to_k(0), _kpq_map, &_Timer, &_A2P_buf_iab);
           _Timer.stop("SIGMA_AUX_TO_PRIM");
         } // pass
       } // it_local
@@ -592,6 +585,25 @@ namespace methods {
       _Timer.start("SIGMA_FINAL_REDUCE");
       sDeltaSigma_tskij.all_reduce_parallel();
       _Timer.stop("SIGMA_FINAL_REDUCE");
+
+      // Precomputed IBC correction, added once per node after the reduction: every
+      // τ slab was written above, and each node holds the full ΔΣ. Striped over the
+      // node's ranks, as _sigma_div_correction.
+      if (ibc && ibc->sDeltaSigma_ibc_tskij.has_value()) {
+        _Timer.start("SIGMA_AUX_TO_PRIM");
+        utils::check(ibc->sDeltaSigma_ibc_tskij->shape() == sDeltaSigma_tskij.shape(),
+                     "lr_gw::_eval_sigma_Rspace: IBC ΔΣ shape differs from ΔΣ's");
+        auto node_comm = sDeltaSigma_tskij.node_comm();
+        auto [i0, i1] = itertools::chunk_range(0, long(sDeltaSigma_tskij.size()),
+                                               node_comm->size(), node_comm->rank());
+        ComplexType* sigma = sDeltaSigma_tskij.local().data();
+        const ComplexType* sigma_ibc = ibc->sDeltaSigma_ibc_tskij->local().data();
+        sDeltaSigma_tskij.win().fence();
+        for (long i = i0; i < i1; ++i) sigma[i] += sigma_ibc[i];
+        sDeltaSigma_tskij.win().fence();
+        sDeltaSigma_tskij.communicator()->barrier();
+        _Timer.stop("SIGMA_AUX_TO_PRIM");
+      }
 
       _Timer.stop("EVALUATE_SIGMA_R");
     }

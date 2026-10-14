@@ -252,9 +252,9 @@ namespace methods {
       app_log(level, "{0}  - FT (k<->R):                 {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FT_R"), cnt("SIGMA_FT_R"));
       app_log(level, "{0}  - Hadamard product:           {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_HADPROD_R"), cnt("SIGMA_HADPROD_R"));
       app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_AUX_TO_PRIM"), cnt("SIGMA_AUX_TO_PRIM"));
+      app_log(level, "{0}    - Alloc (scratch):          {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_ALLOC"), cnt("SIGMA_A2P_ALLOC"));
       app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_GEMM"), cnt("SIGMA_A2P_GEMM"));
-      app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
-      app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_AXPY"), cnt("SIGMA_A2P_AXPY"));
+      app_log(level, "{0}    - node reduce-scatter+add:  {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
       app_log(level, "{0}  - Final reduce (ΔΣ):          {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_FINAL_REDUCE"), cnt("SIGMA_FINAL_REDUCE"));
       app_log(level, "{0}  - Div correction:             {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_DIV_CORR"), cnt("SIGMA_DIV_CORR"));
     }
@@ -291,7 +291,7 @@ namespace methods {
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;
       nda::array<ComplexType, 3> _W2_tau_RPQ;
-      // Aux→Primary reduction buffer, one (nbnd, nbnd) block per local (s,k).
+      // Aux→Primary partial, one (nbnd, nbnd) block per (s,k).
       nda::array<ComplexType, 3> _A2P_buf_iab;
 
       /// Initialize _kpq_map from THC's mean-field k-points (lazy, once)

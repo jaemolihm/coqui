@@ -214,8 +214,7 @@ public:
     app_log(level, "{0}  - Aux->Primary:               {1:8.3f} sec  {2:4d} calls", indent, sec("AUX_TO_PRIM"), cnt("AUX_TO_PRIM"));
     app_log(level, "{0}    - Alloc (scratch):          {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_ALLOC"), cnt("SIGMA_A2P_ALLOC"));
     app_log(level, "{0}    - GEMM:                     {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_GEMM"), cnt("SIGMA_A2P_GEMM"));
-    app_log(level, "{0}    - MPI reduce:               {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
-    app_log(level, "{0}    - AXPY (root):              {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_AXPY"), cnt("SIGMA_A2P_AXPY"));
+    app_log(level, "{0}    - node reduce-scatter+add:  {1:8.3f} sec  {2:4d} calls", indent, sec("SIGMA_A2P_REDUCE"), cnt("SIGMA_A2P_REDUCE"));
     app_log(level, "{0}  - Final reduce (ΔF):          {1:8.3f} sec  {2:4d} calls", indent, sec("FINAL_REDUCE"), cnt("FINAL_REDUCE"));
     app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, sec("MADELUNG"), cnt("MADELUNG"));
   }
