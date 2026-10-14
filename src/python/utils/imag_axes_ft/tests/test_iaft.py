@@ -265,6 +265,30 @@ def test_tau_notation(basis):
     assert np.allclose(Dm_abs, Dm_rel, atol=1e-12)
 
 
+@pytest.mark.parametrize("basis", ["dlr", "ir"])
+@pytest.mark.parametrize("stats", ["f", "b"])
+def test_wn_values(basis, stats):
+    """wn_values maps the indices of either notation to the same physical frequencies."""
+    iaft = IAFT(beta=5.0, wmax=10.0, prec="low", basis=basis)
+    n_ir = iaft.wn_mesh(stats)
+    n_phys = iaft.wn_mesh(stats, phys_notation=True)
+    w_ref = n_ir * np.pi / iaft.beta
+    if stats == "f":
+        assert np.array_equal(w_ref, (2 * n_phys + 1) * np.pi / iaft.beta)
+    else:
+        assert np.array_equal(w_ref, 2 * n_phys * np.pi / iaft.beta)
+
+    # default indices: the IAFT's own mesh, in either notation
+    assert np.allclose(iaft.wn_values(stats), w_ref, rtol=1e-15, atol=0)
+    assert np.allclose(iaft.wn_values(stats, phys_notation=True), w_ref, rtol=1e-15, atol=0)
+    # explicit indices, including ones off the mesh
+    assert np.allclose(iaft.wn_values(stats, n_ir), w_ref, rtol=1e-15, atol=0)
+    assert np.allclose(iaft.wn_values(stats, n_phys, phys_notation=True), w_ref, rtol=1e-15, atol=0)
+    n_off = np.array([-3, 0, 7])
+    w_off = (2 * n_off + 1) * np.pi / iaft.beta if stats == "f" else 2 * n_off * np.pi / iaft.beta
+    assert np.allclose(iaft.wn_values(stats, n_off, phys_notation=True), w_off, rtol=1e-15, atol=0)
+
+
 @pytest.mark.parametrize("basis", [
     ("dlr"),
     ("ir"),
