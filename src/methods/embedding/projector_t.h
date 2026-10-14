@@ -224,8 +224,14 @@ namespace methods {
 
     template<nda::ArrayOfRank<4> Array_base_t, nda::ArrayOfRank<4> Oloc_t>
     void upfold(sArray_t<Array_base_t> &O_skij, const Oloc_t &Oloc_sIab) const;
+    /**
+     * O_tskij = sum_ab C^{kpq(k)*}_{ai} Oloc_tsab C^k_{bj} on the band window (no 1/N_k). With kpq_map
+     * (k -> k+Q, full BZ only) this is the (k+Q, k) block of the upfold of a response at momentum
+     * transfer Q; without it, kpq(k) = k.
+     */
     template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<5> Oloc_t>
-    void upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab) const;
+    void upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab,
+                const nda::array<long, 1> *kpq_map = nullptr) const;
     template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<6> Ac_t>
     void upfold(sArray_t<Array_base_t> &O_tskij, const Ac_t &O_tskIab) const;
     template<nda::ArrayOfRank<5> Array_base_t>

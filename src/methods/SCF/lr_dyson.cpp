@@ -85,7 +85,8 @@ double lr_dyson::solve_lr_dyson(
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
     bool fix_density,
-    const DeltaF_t* sDeltaVcorr_skij) {
+    const DeltaF_t* sDeltaVcorr_skij,
+    bool add_external_sigma) {
 
   utils::check(_cached_G_wskij != nullptr,
                "solve_lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
@@ -113,8 +114,17 @@ double lr_dyson::solve_lr_dyson(
                              __app_verbosity__ >= 3));
     _Timer.stop("LR_DYSON_TAU_TO_W");
   }
+  const bool ext = add_external_sigma and _dDeltaSigma_ext_wskij;
+  if (opt_dDeltaSigma_wskij and ext) {
+    // ΔΣ + frozen external ΔΣ, both on the same ω grid
+    utils::check(opt_dDeltaSigma_wskij->origin() == _dDeltaSigma_ext_wskij->origin() and
+                 opt_dDeltaSigma_wskij->local_shape() == _dDeltaSigma_ext_wskij->local_shape(),
+                 "solve_lr_dyson: ΔΣ(iω) and the external ΔΣ(iω) are distributed differently.");
+    opt_dDeltaSigma_wskij->local() += _dDeltaSigma_ext_wskij->local();
+  }
   const dArray_5D_t* dDeltaSigma_wskij =
-      opt_dDeltaSigma_wskij ? &(*opt_dDeltaSigma_wskij) : nullptr;
+      opt_dDeltaSigma_wskij ? &(*opt_dDeltaSigma_wskij)
+    : ext ? &(*_dDeltaSigma_ext_wskij) : nullptr;
 
   // At q≠0 the Δμ·S term vanishes and Δμ is meaningless.
   if (!_is_q_gamma and fix_density)
@@ -145,6 +155,17 @@ double lr_dyson::solve_lr_dyson(
   print_timers(3);  // per-step diagnostics only at verbosity >= 3
 
   return Delta_mu;
+}
+
+
+void lr_dyson::set_external_sigma(const sArray_t<Array_view_5D_t>* sDeltaSigma_ext_tskij) {
+  _dDeltaSigma_ext_wskij.reset();
+  if (sDeltaSigma_ext_tskij == nullptr) return;
+  auto [w_pgrid, w_bsize] =
+      lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
+  _dDeltaSigma_ext_wskij.emplace(
+      distributed_tau_to_w(_context->comm, *sDeltaSigma_ext_tskij, *_dyson.FT(), w_pgrid, w_bsize,
+                           __app_verbosity__ >= 3));
 }
 
 
@@ -584,7 +605,8 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
-    const sArray_t<Array_view_4D_t>*);
+    const sArray_t<Array_view_4D_t>*,
+    bool);
 
 template double lr_dyson::compute_lr_Nelec(
     const sArray_t<Array_view_4D_t>&);

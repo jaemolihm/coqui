@@ -19,7 +19,7 @@ limitations under the License.
 """
 
 from .embed import read_proj_info, downfold_1e, downfold_2e, downfold_local_gf, downfold_coulomb, dmft_embed, \
-    lr_downfold_local_gf, lr_downfold_coulomb
+    lr_downfold_local_gf, lr_downfold_coulomb, lr_upfold_sigma, lr_upfold_pi
 
 __all__ = ["downfold_1e", "downfold_2e", "downfold_local_gf", "downfold_coulomb", "dmft_embed", "read_proj_info",
-           "lr_downfold_local_gf", "lr_downfold_coulomb"]
+           "lr_downfold_local_gf", "lr_downfold_coulomb", "lr_upfold_sigma", "lr_upfold_pi"]

@@ -81,7 +81,8 @@ namespace methods {
   }
 
   template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<5> Oloc_t>
-  void projector_t::upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab) const {
+  void projector_t::upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab,
+                           const nda::array<long, 1> *kpq_map) const {
 
     utils::check(O_tskij.shape()[0] == Oloc_tsIab.shape(0), "embed_t::upfold: nts mismatches. {}, {}",
                  O_tskij.shape()[0], Oloc_tsIab.shape(0));
@@ -92,6 +93,9 @@ namespace methods {
     utils::check(Oloc_tsIab.shape(3) == _nImpOrbs, "embed_t::upfold: nImpOrbs mismatches. {}, {}", Oloc_tsIab.shape(3), _nImpOrbs);
     utils::check(O_tskij.shape()[2]==_MF->nkpts_ibz(), "embed_t::upfold: O_tskij.shape[2]({})!=nkpts_ibz({}).",
                  O_tskij.shape()[2], _MF->nkpts_ibz());
+    utils::check(kpq_map == nullptr or (_MF->nkpts_ibz() == _MF->nkpts() and kpq_map->shape(0) == _MF->nkpts()),
+                 "embed_t::upfold: a k+Q map requires the full BZ (nkpts_ibz = {}, nkpts = {}).",
+                 _MF->nkpts_ibz(), _MF->nkpts());
 
     O_tskij.set_zero();
     auto [nts, ns, nkpts_ibz, nbnd, nbnd_b] = O_tskij.shape();
@@ -113,8 +117,10 @@ namespace methods {
         long is = (tsk / nkpts_ibz) % ns;
         long ik = tsk % nkpts_ibz;
 
+        long ik_l = (kpq_map == nullptr)? ik : (*kpq_map)(ik);
+
         nda::blas::gemm(ComplexType(1.0),
-                        nda::dagger(_C_skIai(is,ik,imp,nda::ellipsis{})),
+                        nda::dagger(_C_skIai(is,ik_l,imp,nda::ellipsis{})),
                         Oloc_tsIab(it,is,imp,nda::ellipsis{}),
                         ComplexType(0.0),
                         buffer_ib);
@@ -504,7 +510,8 @@ namespace methods {
 namespace methods {
 
   template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 4>>&, const nda::array<ComplexType, 4>&) const;
-  template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 5>&) const;
+  template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 5>&,
+                                    const nda::array<long, 1>*) const;
   template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 6>&) const;
 
   template nda::array<ComplexType, 6> projector_t::downfold_k_fbz(const sArray_t<nda::array_view<ComplexType, 5>>&) const;
