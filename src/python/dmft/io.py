@@ -62,6 +62,8 @@ def convert_gw_edmft_params(gw_edmft_params: dict):
     div_treatment = gw_edmft_group.pop('div_treatment', 'gygi')
     outdir = gw_edmft_group.pop('outdir', './')
     prefix = gw_edmft_group.pop('prefix', 'coqui')
+    # fixed lattice chemical potential (a.u.) for the GW and embedding Dyson solves; None: search for nelec
+    mu = gw_edmft_group.pop('mu', None)
     # restart = False implies the workflow will start from a fresh checkpoint where both GW and EDMFT parts start from scratch;
     # this is not available yet in the current implementation as the GW part is always assumed to restart from a previous checkpoint.
     restart = gw_edmft_group.pop('restart', True)
@@ -101,6 +103,8 @@ def convert_gw_edmft_params(gw_edmft_params: dict):
             'div_treatment': div_treatment,
             'iter_alg': gw_iter_params
         }
+        if mu is not None:
+            gw_edmft_params['gw']['mu'] = mu
 
     # wloc parameters
     gw_edmft_params['wloc'] = {'outdir': outdir, 'prefix': prefix, 'screen_type': screen_type, 
@@ -114,6 +118,8 @@ def convert_gw_edmft_params(gw_edmft_params: dict):
         # disable iterative solver for the embedding step. The iterative solve happens somewhere else. 
         'iter_alg': {'enable': False} 
     }
+    if mu is not None:
+        gw_edmft_params['dmft_embed']['mu'] = mu
 
     # Convert 'edmft' section to 'impurity' (with nested 'impurity' -> 'solver')
     if 'edmft' not in gw_edmft_group:
