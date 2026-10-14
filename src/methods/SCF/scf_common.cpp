@@ -434,15 +434,21 @@ template<typename dyson_type, typename X_t, typename Xt_t>
 double update_mu(double old_mu, dyson_type& dyson, const mf::MF &mf,
                  const imag_axes_ft::IAFT &FT,
                  const X_t&F, const Xt_t&Sigma) {
+  utils::check(dyson.mu_update_alg() == "bisection" or dyson.mu_update_alg() == "midpoint",
+               "scf_common.cpp::update_mu: unknown mu update algorithm {}.", dyson.mu_update_alg());
+  if (dyson.fixed_mu()) {
+    double mu = *dyson.fixed_mu();
+    nda::array<ComplexType, 4> FpSigma_spectra(FT.nw_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd());
+    dyson.compute_eigenspectra(F, Sigma, FpSigma_spectra);
+    app_log(1, "Chemical potential fixed (mu) = {} a.u.", mu);
+    app_log(1, "Number of electrons per unit cell = {}", compute_Nelec(mu, FpSigma_spectra, mf, FT));
+    return mu;
+  }
   if (dyson.mu_update_alg() == "bisection") {
     return update_mu_bisection(old_mu, dyson, mf, FT, F, Sigma);
-  } else if (dyson.mu_update_alg() == "midpoint") {
-    return update_mu_midpoint(old_mu, dyson, mf, FT, F, Sigma);
   } else {
-    utils::check(
-      false, "scf_common.cpp::update_mu: unknown mu update algorithm {}.", dyson.mu_update_alg());
+    return update_mu_midpoint(old_mu, dyson, mf, FT, F, Sigma);
   }
-  return old_mu;
 }
 
 template<typename X_t, typename Xt_t>

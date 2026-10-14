@@ -165,6 +165,75 @@ def test_extended_hubbard_scgw(mpi):
     mpi.barrier()
 
 
+def test_hubbard_scgw_fixed_mu(mpi):
+    """scGW restarts at fixed mu = mu0 +- dmu (input "mu"): every iteration keeps mu, and particle-hole symmetry
+    of the half-filled t' = 0 Hubbard model gives n(mu0 + dmu) - 1 = 1 - n(mu0 - dmu)."""
+    N, t, U, beta, dmu = 4, 0.1, 0.4, 50.0, 0.01
+    nk = N * N
+    kpts, ek = square_lattice(N, t, 0.0)
+    prefix, thc_file = "hubbard_fixed_mu", "hubbard_fixed_mu_thc.h5"
+    write_model_h5(f"./{prefix}.h5", ek.reshape(1, nk, 1, 1).astype(complex), 1.0, kpts_crys=kpts,
+                   kp_grid=(N, N, 1), latt=np.diag([1.0, 1.0, 50.0]), mpi=mpi)
+    write_thc_h5(thc_file, np.ones((1, nk, 1, 1)), np.full((nk, 1, 1), U, dtype=complex), mpi=mpi)
+    mf = coqui.make_mf(mpi, {"prefix": prefix, "outdir": "./"}, "model")
+    thc = coqui.make_thc_coulomb(mf, {"save": thc_file, "storage": "incore"})
+
+    common = {"outdir": "./", "prefix": prefix, "beta": beta, "conv_thr": 1e-11,
+              "iaft": {"prec": "high", "wmax": 3.0, "basis": "dlr"}}
+    coqui.run_hf(dict(common, restart=False, niter=20, iter_alg={"alg": "damping", "mixing": 0.7}), h_int=thc)
+    coqui.run_gw(dict(common, restart=True, niter=100, iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+    mpi.barrier()
+    with h5py.File(f"{prefix}.mbpt.h5", "r") as f:
+        it0 = f["scf/final_iter"][()]
+        mu0 = f[f"scf/iter{it0}/mu"][()]
+    assert abs(mu0 - U / 2) < 1e-8
+
+    def density(chk):
+        with h5py.File(chk, "r") as f:
+            it = f["scf/final_iter"][()]
+            mus = [f[f"scf/iter{i}/mu"][()] for i in range(it0 + 1, it + 1)]
+            dm = read_complex(f[f"scf/iter{it}/Dm_skij"])[0, :, 0, 0].real
+            w = f["system/k_weight"][()]
+        return it, mus, 2 * np.dot(w, dm)
+
+    n = {}
+    for sign in (+1, -1):
+        pre = f"{prefix}_mu{sign:+d}"
+        if mpi.root():
+            shutil.copy(f"{prefix}.mbpt.h5", f"{pre}.mbpt.h5")
+        mpi.barrier()
+        coqui.run_gw(dict(common, prefix=pre, restart=True, niter=100, mu=mu0 + sign * dmu,
+                          iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+        mpi.barrier()
+        it, mus, n[sign] = density(f"{pre}.mbpt.h5")
+        assert it0 < it < it0 + 100, "fixed-mu scGW did not converge"
+        assert np.allclose(mus, mu0 + sign * dmu, rtol=0, atol=1e-14)
+    assert n[+1] - 1 > 1e-3
+    assert abs((n[+1] - 1) - (1 - n[-1])) < 1e-8, (n[+1], n[-1])
+    mpi.barrier()
+
+    if mpi.root():
+        for fn in (f"{prefix}.h5", thc_file, f"{prefix}.mbpt.h5", f"{prefix}_mu+1.mbpt.h5", f"{prefix}_mu-1.mbpt.h5"):
+            if os.path.exists(fn):
+                os.remove(fn)
+    mpi.barrier()
+
+
+def test_gw_edmft_params_forward_mu(tmp_path):
+    """gw_edmft "mu" reaches the GW and dmft_embed groups, and nowhere when absent."""
+    pytest.importorskip("triqs")
+    from coqui.dmft.io import convert_gw_edmft_params
+    (tmp_path / "coqui.mbpt.h5").touch()
+    base = {"niter": 1, "outdir": str(tmp_path), "prefix": "coqui",
+            "edmft": {"impurity": {"n_cycles": 100, "n_warmup_cycles": 10, "length_cycle": 5}}}
+    p = convert_gw_edmft_params(dict(base, mu=0.123))
+    assert p["gw"]["mu"] == 0.123
+    assert p["dmft_embed"]["mu"] == 0.123
+    assert "mu" not in p["wloc"] and "mu" not in p["gloc"] and "mu" not in p["impurity"]
+    p = convert_gw_edmft_params(base)
+    assert "mu" not in p["gw"] and "mu" not in p["dmft_embed"]
+
+
 def test_write_model_h5_validation():
     H0 = np.zeros((1, 4, 1, 1), complex)
     with pytest.raises(ValueError):

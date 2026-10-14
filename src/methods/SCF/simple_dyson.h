@@ -22,6 +22,8 @@
 #ifndef COQUI_SIMPLE_DYSON_H
 #define COQUI_SIMPLE_DYSON_H
 
+#include <optional>
+
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
 
@@ -152,6 +154,8 @@ private:
   std::shared_ptr<hamilt::pseudopot> _PSP;
   double _mu_tol = 1e-9;
   std::string _mu_update_alg = "bisection";
+  // if set, update_mu returns this value instead of searching for the target number of electrons
+  std::optional<double> _fixed_mu;
 
   int _nts;
   int _nw;
@@ -173,6 +177,8 @@ public:
   const hamilt::pseudopot* PSP() const { return _PSP.get(); }
   double mu_tol() const { return _mu_tol; }
   std::string mu_update_alg() const { return _mu_update_alg; }
+  std::optional<double>& fixed_mu() { return _fixed_mu; }
+  const std::optional<double>& fixed_mu() const { return _fixed_mu; }
   auto H0() const& { return _sH0_skij.local(); }
   const auto &sS_skij() const {return _sS_skij;}
   const auto &sH0_skij() const {return _sH0_skij;}
