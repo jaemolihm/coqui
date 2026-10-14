@@ -332,8 +332,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // Direct-channel kernel V(q) (+ Vxc(q)) on this rank's tile, cached across calls
   nda::range P_rng(P_origin, P_origin + NP_loc);
   nda::range Q_rng(Q_origin, Q_origin + NQ_loc);
+  // Read only by the Hartree (ΔJ) gemvs.
   nda::array<ComplexType, 2> Uq_PQ;
-  build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
+  if (compute_hartree) build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
 
   // Accumulate diagonal indices of ΔDm for the Hartree term
   nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
@@ -509,43 +510,45 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // gives the counter-term channel its own instance — so the cached U(R) is
     // valid on every call.
     if (not _U_RPQ_cached) {
-      _Timer.start("Z_FETCH");
-      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
-      _Timer.stop("Z_FETCH");
-      auto dU_qPQ_loc = dU_qPQ.local();
-      utils::check(dU_qPQ.local_range(1).first() == P_rng.first() and
-                   dU_qPQ.local_range(1).size() == P_rng.size() and
-                   dU_qPQ.local_range(2).first() == Q_rng.first() and
-                   dU_qPQ.local_range(2).size() == Q_rng.size(),
-                   "lr_hf: the Coulomb (P,Q) tiling differs from ΔDm's.");
-      utils::check(dU_qPQ_loc.extent(0) == nkpts,
-                   "lr_hf: the exchange q→R transform needs one Coulomb q per k-point "
-                   "(got {} q, {} k).", dU_qPQ_loc.extent(0), nkpts);
+      // The counter-term kernel −W_c(iν=0) replaces V outright, so that instance
+      // never fetches V.
+      const bool counter_term =
+          hsex and hsex->kernel == hsex_kernel_t::kernel_e::minus_Wc0;
+      auto check_tiling = [&](auto const& dU, const char* name) {
+        utils::check(dU.local_range(1).first() == P_rng.first() and
+                     dU.local_range(1).size() == P_rng.size() and
+                     dU.local_range(2).first() == Q_rng.first() and
+                     dU.local_range(2).size() == Q_rng.size(),
+                     "lr_hf: the {} (P,Q) tiling differs from ΔDm's. Build it on "
+                     "utils::lr_aux_kernel_pgrid(comm.size()).", name);
+        utils::check(dU.local_shape()[0] == nkpts,
+                     "lr_hf: the exchange q→R transform needs one {} q per k-point "
+                     "(got {} q, {} k).", name, dU.local_shape()[0], nkpts);
+      };
 
-      // HSEX. Applied after Uq_PQ was copied out above, so the direct (ΔJ)
-      // channel keeps the bare V(q), and before the q→R FT, so the Hadamard
-      // below contracts the substituted kernel in real space. V + W_c(0) is the
-      // object GF2's get_static_W returns.
+      if (not counter_term) {
+        _Timer.start("Z_FETCH");
+        auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+        _Timer.stop("Z_FETCH");
+        check_tiling(dU_qPQ, "Coulomb");
+        _U_RPQ = dU_qPQ.local();
+      }
+      // HSEX, applied to this copy only, so the direct (ΔJ) channel keeps the bare
+      // V(q), and before the q→R FT, so the Hadamard below contracts the substituted
+      // kernel in real space. V + W_c(0) is the object GF2's get_static_W returns.
       if (hsex) {
         auto const& dWc0 = *hsex->Wc0_qPQ;
-        utils::check(dWc0.local_shape() == dU_qPQ.local_shape() and
-                     dWc0.origin() == dU_qPQ.origin(),
-                     "lr_hf: W_c(iν=0) and Coulomb distributions differ. Build it on "
-                     "utils::lr_aux_kernel_pgrid(comm.size()).");
-        if (hsex->kernel == hsex_kernel_t::kernel_e::V_plus_Wc0)
-          dU_qPQ_loc += dWc0.local();       // W(iν=0) = V + W_c(iν=0)
-        else
-          dU_qPQ_loc = ComplexType(-1.0) * dWc0.local();   // -W_c(iν=0), counter-term
+        check_tiling(dWc0, "W_c(iν=0)");
+        if (counter_term) _U_RPQ = ComplexType(-1.0) * dWc0.local();
+        else              _U_RPQ += dWc0.local();
       }
 
       _Timer.start("UQ_TO_UR");
       if (nkpts != 1)
-        k_to_R(nda::reshape(dU_qPQ_loc, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
-      _U_RPQ = dU_qPQ_loc;
+        k_to_R(nda::reshape(_U_RPQ, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
+      _Timer.stop("UQ_TO_UR");
       _U_RPQ_hsex = hsex ? std::optional{hsex->kernel} : std::nullopt;
       _U_RPQ_cached = true;
-      dU_qPQ.reset();
-      _Timer.stop("UQ_TO_UR");
     }
     // Filled once and never refreshed, so a call asking for a different exchange
     // kernel would silently be served the cached one.
