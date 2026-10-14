@@ -113,6 +113,7 @@ struct lr_diis_hist_t {
  */
 struct lr_params {
   using sArray_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+  using sArray_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
 
   // --- Active terms ---
   /// The operator's kernel K_total, applied every iteration.
@@ -180,6 +181,14 @@ struct lr_params {
   const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr;  ///< δV^q in the aux basis
   /// Non-null puts the driver in LR-qpGW static-map mode.
   const lr_qp_static_params* qp_static = nullptr;
+  /// Frozen external ΔΣ(τ) (nt, ns, nk, nb, nb), (k+Q, k) blocks: added to the ΔΣ of
+  /// every Dyson RHS, never mixed or written to the ΔΣ output. GW+EDMFT: the upfolded
+  /// local response C^{k+Q†}(δΣ_imp - δΣ_dc)C^k, plus any band-basis source.
+  const sArray_5D_t* DeltaSigma_ext_tskij = nullptr;
+  /// Frozen external ΔΠ(τ) (nt_half, nkpts, NP, NP), (q+Q, q) blocks: added to ΔΠ before
+  /// the ΔW Dyson wherever Σ2 = -G⊙ΔW is evaluated. GW+EDMFT: the upfolded local response
+  /// B^{q+Q}(δΠ_imp - δΠ_dc)B^{q†}.
+  const sArray_4D_t* DeltaPi_ext_tqPQ = nullptr;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -549,6 +558,9 @@ private:
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
+  /// ΔDm(Δμ=0) of the frozen external ΔΣ (lr_params::DeltaSigma_ext_tskij) alone,
+  /// solved once per perturbation.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_ext_Sigma;
 
   // --- Preconditioner buffers (preconditioned runs only): the gathered residual
   //     (r_F, r_Σ), the ΔDm of r_Σ, the inner iterate y_F and its ΔDm.

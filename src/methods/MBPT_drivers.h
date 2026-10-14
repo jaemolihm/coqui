@@ -22,6 +22,7 @@
 #ifndef METHODS_MBPT_DRIVERS_H
 #define METHODS_MBPT_DRIVERS_H
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -111,6 +112,45 @@ nda::array<ComplexType, 5> lr_downfold_coulomb(
     std::optional<nda::array<ComplexType, 4>> const& DeltaW_xqPQ_root,
     nda::array<double, 1> const& q_vec);
 
+
+/**
+ * @brief Upfold of a local self-energy response at momentum transfer Q
+ *
+ * ΔΣ^k(τ) = C^{k+Q†} Σ_loc(τ) C^k, the (k+Q, k) block, with Σ_loc(τ) = w_to_tau(Σ_loc(iω)) (IAFT of the
+ * checkpoint). No 1/N_k and no hermitization, as projector_t::upfold with a k+Q map. Full BZ only.
+ *
+ * @param pt              - [INPUT] prefix (checkpoint stem, for the IAFT), translate_home_cell
+ * @param Sigma_loc_wsIab - [INPUT] Σ_loc(iω) (nw_f, ns, nImps, nImpOrbs, nImpOrbs), on every rank
+ * @param q_vec           - [INPUT] Q in crystal coordinates (3,)
+ * @return ΔΣ (nt_f, ns, nk, nb, nb) on every rank
+ */
+auto lr_upfold_sigma(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                     nda::array<ComplexType, 5> const& projector_ksIai,
+                     nda::array<long, 3> const& band_window,
+                     nda::array<RealType, 2> const& kpts_crys,
+                     nda::array<ComplexType, 5> const& Sigma_loc_wsIab,
+                     nda::array<double, 1> const& q_vec)
+-> nda::array<ComplexType, 5>;
+
+/**
+ * @brief Upfold of a local polarizability response at momentum transfer Q
+ *
+ * ΔΠ^q_{PQ}(τ) = Σ B^{q+Q}_{P,ab} Π_loc_{ab,cd}(τ) conj(B^q_{Q,cd}), the (q+Q, q) block, with
+ * Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as scr_coulomb_t::upfold_pi_local. Full q mesh only.
+ *
+ * @param pt              - [INPUT] prefix (checkpoint stem, for the IAFT), translate_home_cell
+ * @param Pi_loc_wabcd    - [INPUT] Π_loc(iν) (nw_half, a, b, c, d) in the product basis, on every rank
+ * @param q_vec           - [INPUT] Q in crystal coordinates (3,)
+ * @return ΔΠ (nt_half, nkpts, NP, NP) on every rank
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_upfold_pi(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& projector_ksIai,
+    nda::array<long, 3> const& band_window,
+    nda::array<RealType, 2> const& kpts_crys,
+    nda::array<ComplexType, 5> const& Pi_loc_wabcd,
+    nda::array<double, 1> const& q_vec);
 
 /**
  * @brief Downfolding of one-electron quantities, Green's function, self-energy, and effective potential
@@ -221,6 +261,25 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
                 std::optional<std::map<std::string, nda::array<ComplexType, 5> > > local_selfenergies);
 
 /**
+ * GW+EDMFT local terms of an LR run, in the local basis and with the dict keys of the
+ * ground-state interface (run_gw / dmft_embed): the projector, and maps with keys
+ * "imp" and "dc".
+ *   local_polarizabilities        - ground-state Π_imp, Π_dc (nw_half, a, b, c, d), product basis; W is then
+ *                                   the GW+EDMFT one (screen type gw_edmft)
+ *   local_sigma_response          - δΣ_imp, δΣ_dc (nw_f, ns, nImps, nImpOrbs, nImpOrbs), dynamic only
+ *   local_polarizability_response - δΠ_imp, δΠ_dc (nw_half, a, b, c, d), product basis
+ * The responses are the (k+Q, k) / (q+Q, q) local responses at the run's q_vec.
+ */
+struct lr_local_inputs {
+  nda::array<ComplexType, 5> projector_ksIai;
+  nda::array<long, 3> band_window;
+  nda::array<RealType, 2> kpts_crys;
+  std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities;
+  std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_sigma_response;
+  std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response;
+};
+
+/**
  * @brief Unified linear response calculation
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
@@ -245,7 +304,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
-                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt,
+                                     std::optional<nda::array<ComplexType, 5>> const& DeltaSigma_ext_root = std::nullopt,
+                                     const lr_local_inputs* local = nullptr);
 
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)
@@ -425,18 +486,24 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
  *
  * Reads W_c(τ) from thc_screened_interaction.h5 and IAFT from checkpoint,
  * then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
+ * With local->local_polarizabilities, W_c is instead the GW+EDMFT one built from
+ * G_tskij (RPA bubble + upfolded Π_imp - Π_dc), as run_lr's recompute_W.
  *
  * @param eri           - [INPUT] THC ERI handler
- * @param pt            - [INPUT] Parameters as property tree (prefix)
+ * @param pt            - [INPUT] Parameters as property tree (prefix, input_type)
  * @param q_pert        - [INPUT] LR perturbation wavevector in crystal coords (3,)
  * @param DeltaPi_tqPQ  - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+ * @param G_tskij       - [INPUT] G(τ) of the GW+EDMFT W (root only), required with local
+ * @param local         - [INPUT] projector and ground-state Π_imp, Π_dc (optional)
  * @return ΔW_c(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
  */
 template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_W_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
-    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root);
+    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root = std::nullopt,
+    const lr_local_inputs* local = nullptr);
 
 /**
  * @brief Evaluate screened interaction W_c from polarization Π (FD helper)
