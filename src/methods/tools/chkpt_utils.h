@@ -240,6 +240,17 @@ namespace methods {
                              std::string const& hf_div_treatment);
 
   /**
+   * Record on the group `grp_name` ("scf" or "embed", the groups LR reads) that the
+   * ground state was run at a fixed chemical potential (dataset "fixed_mu", a.u.), so
+   * that LR can refuse fix_density on it. Written only when `mu` has a value; without
+   * one, a stale "fixed_mu" of an earlier run of the same checkpoint is removed and
+   * nothing is written otherwise.
+   */
+  template<typename communicator_t>
+  void dump_fixed_mu(communicator_t& comm, std::string filename, std::optional<double> mu,
+                     std::string const& grp_name = "scf");
+
+  /**
    * Read the qpGW AC parameters written by dump_qp_params. Returns true and
    * fills the outputs if "scf/qp_params" is present; returns false (leaving
    * the outputs untouched) otherwise.

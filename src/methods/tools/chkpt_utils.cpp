@@ -773,6 +773,31 @@ void dump_hf_div_treatment(communicator_t& comm, std::string filename,
 }
 
 template<typename communicator_t>
+void dump_fixed_mu(communicator_t& comm, std::string filename, std::optional<double> mu,
+                   std::string const& grp_name) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_fixed_mu: File {} does not exist. Cannot append.", filename);
+    auto stale = [&]() {
+      h5::file file(filename, 'r');
+      h5::group grp(file);
+      return grp.has_subgroup(grp_name) and grp.open_group(grp_name).has_dataset("fixed_mu");
+    };
+    if (mu) {
+      h5::file file(filename, 'a');
+      h5::group grp(file);
+      auto mu_grp = grp.has_subgroup(grp_name) ? grp.open_group(grp_name) : grp.create_group(grp_name);
+      h5::h5_write(mu_grp, "fixed_mu", *mu);
+    } else if (stale()) {
+      h5::file file(filename, 'a');
+      h5::group grp(file);
+      H5Ldelete(h5::hid_t(grp.open_group(grp_name)), "fixed_mu", H5P_DEFAULT);
+    }
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
 bool read_qp_params(communicator_t& comm, std::string filename,
                     std::string& off_diag_mode, double& eta,
                     std::string& ac_alg, int& Nfit) {
@@ -818,6 +843,7 @@ template void dump_qp_params(mpi3::communicator&, std::string,
 template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
 template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
+template void dump_fixed_mu(mpi3::communicator&, std::string, std::optional<double>, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,
