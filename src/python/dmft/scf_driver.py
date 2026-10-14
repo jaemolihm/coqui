@@ -83,6 +83,9 @@ def run_gw_edmft(h_int, embedding, inner_loop_alg=1, *, proj_info=None, params: 
                 ``q -> 0`` divergence.
             - ``corr_only`` (bool, default ``True``): embmeding dynamic part of 
                 the self-energy only. 
+            - ``mu`` (float, optional): fixed lattice chemical potential (a.u.) in the
+                GW and embedding Dyson solves. Default: searched for the mean-field
+                number of electrons. The impurity targets the local density either way.
 
         ``iter_alg`` section (optional): Iterative controls for GW and EDMFT inner loops.
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
