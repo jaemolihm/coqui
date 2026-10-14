@@ -571,6 +571,160 @@ def lr_pi_dc_t(G_tsab, dG_tsab, *, density_only=True):
             + eval_pi_rpa_pair(G_tsab, dG_tsab, density_only=density_only))
 
 
+def lr_weiss_fermion_w(g_wsab, dg_wsab, vhf_sab, dvhf_sab, sigma_wsab, dsigma_wsab):
+    """
+    Linear response of compute_weiss_fermion_w, g_weiss = [G^{-1} + vhf + Sigma]^{-1}, per (iw, s):
+        d(g_weiss^{-1}) = -G^{-1} dG G^{-1} + dvhf + dSigma,   dg_weiss = -g_weiss d(g_weiss^{-1}) g_weiss.
+    vhf (Sigma_infty of the impurity) and Sigma (its dynamic part) enter as in the ground state.
+    All factors are local and pointwise in iw, so a response at momentum transfer Q uses the same
+    ground-state factors and no -Q partner.
+
+    Returns (dg_weiss_wsab, dg_weiss_inv_wsab).
+    """
+    g_weiss_wsab = compute_weiss_fermion_w(g_wsab, vhf_sab, sigma_wsab)
+
+    nw, nspin, nbnd = g_wsab.shape[:3]
+    dg_weiss_wsab = np.zeros(g_wsab.shape, dtype=complex)
+    dg_weiss_inv_wsab = np.zeros(g_wsab.shape, dtype=complex)
+    for ws in range(nw*nspin):
+        w = ws // nspin
+        s = ws % nspin
+        g_inv = np.linalg.solve(g_wsab[w, s], np.eye(nbnd))
+        dX_inv = -g_inv @ dg_wsab[w, s] @ g_inv + dvhf_sab[s] + dsigma_wsab[w, s]
+        dg_weiss_inv_wsab[w, s] = dX_inv
+        dg_weiss_wsab[w, s] = -g_weiss_wsab[w, s] @ dX_inv @ g_weiss_wsab[w, s]
+
+    return dg_weiss_wsab, dg_weiss_inv_wsab
+
+
+def lr_weiss_boson_w(V_abcd, W_wabcd, dW_wabcd, Pi_wabcd, dPi_wabcd):
+    """
+    Linear response of compute_weiss_boson_w, u = U - V with U = W_f (1 + Pi W_f)^{-1} and
+    W_f = W + V (product basis, (n^2, n^2) per iv). The bare V does not respond, so dW_f = dW and du = dU:
+        du = (1 + W_f Pi)^{-1} dW (1 + Pi W_f)^{-1} - U dPi U.
+    Both ground-state factors use the full W_f and U = u + V.
+    Pi, dPi are either in the product basis (nw, n, n, n, n) or density-density (nw, n, n), which is placed
+    at [a,a,b,b] by density_density_to_product_basis. The ground-state pinv is replaced by solve/inv, which is
+    the same where 1 + Pi W_f is nonsingular (the ground state warns when its condition number exceeds 100).
+
+    Returns du in the shape of W_wabcd.
+    """
+    if Pi_wabcd.ndim == 3:
+        Pi_wabcd = density_density_to_product_basis(Pi_wabcd)
+    if dPi_wabcd.ndim == 3:
+        dPi_wabcd = density_density_to_product_basis(dPi_wabcd)
+
+    nbnd = V_abcd.shape[0]
+    nbnd2 = nbnd*nbnd
+    U_pb = (compute_weiss_boson_w(V_abcd, W_wabcd, Pi_wabcd) + V_abcd[np.newaxis, ...]).reshape(-1, nbnd2, nbnd2)
+    Wfull_pb = (W_wabcd + V_abcd[np.newaxis, ...]).reshape(-1, nbnd2, nbnd2)
+    Pi_pb = Pi_wabcd.reshape(-1, nbnd2, nbnd2)
+    dW_pb = dW_wabcd.reshape(-1, nbnd2, nbnd2)
+    dPi_pb = dPi_wabcd.reshape(-1, nbnd2, nbnd2)
+
+    dU_pb = np.zeros(Wfull_pb.shape, dtype=complex)
+    for n, W in enumerate(Wfull_pb):
+        left = np.linalg.solve(np.eye(nbnd2) + W @ Pi_pb[n], dW_pb[n])
+        right = np.linalg.inv(np.eye(nbnd2) + Pi_pb[n] @ W)
+        dU_pb[n] = left @ right - U_pb[n] @ dPi_pb[n] @ U_pb[n]
+
+    return dU_pb.reshape(W_wabcd.shape)
+
+
+def lr_extract_h0_and_delta(g_weiss_wsab, dg_weiss_wsab, iaft, high_freq_multiplier=10, herm_tol=1e-12):
+    """
+    Linear response of extract_h0_and_delta for a Q = 0 perturbation:
+      dh0 = estimate_zero_moment of dA(±iw) = g_weiss^{-1} dg_weiss g_weiss^{-1} at the same interpolated
+            frequencies ±iw as the ground state (g_weiss and dg_weiss are interpolated, then inverted there);
+            estimate_zero_moment is real-linear, so it applies to dA as is,
+      dDelta(iw) = -dh0 + g_weiss^{-1} dg_weiss g_weiss^{-1} on the mesh.
+
+    The hermitization of Delta(iw) against Delta(-iw) in the ground state is omitted. Instead, dg_weiss must
+    satisfy dg(-iw) = dg(iw)^dagger to a relative residual of herm_tol, which holds for a Hermitian Q = 0
+    perturbation; a ValueError is raised otherwise.
+
+    Returns (dh0_sab, ddelta_wsab).
+    """
+    nspin = g_weiss_wsab.shape[1]
+
+    dg_norm = np.linalg.norm(dg_weiss_wsab)
+    herm_res = np.linalg.norm(dg_weiss_wsab - _hermitize_delta(dg_weiss_wsab.copy()))
+    if herm_res > herm_tol * dg_norm:
+        raise ValueError(f"lr_extract_h0_and_delta: dg_weiss is not Hermitian in iw "
+                         f"(relative residual {herm_res / dg_norm:.3e} > {herm_tol:.1e}). "
+                         "Only Q = 0 Hermitian perturbations are supported.")
+
+    iwn_interp = iaft.wn_mesh('f', phys_notation=True)[-3:] * high_freq_multiplier
+    dA_interp = []
+    for iwn_idx in (iwn_interp, -iwn_interp - 1):   # +iw and -iw
+        g_weiss_interp = iaft.w_interpolate(g_weiss_wsab, iwn_idx, 'f', phys_notation=True)
+        dg_weiss_interp = iaft.w_interpolate(dg_weiss_wsab, iwn_idx, 'f', phys_notation=True)
+        dA = np.zeros(g_weiss_interp.shape, dtype=complex)
+        for n in range(g_weiss_interp.shape[0]):
+            for s in range(nspin):
+                g_inv = np.linalg.inv(g_weiss_interp[n, s])
+                dA[n, s] = g_inv @ dg_weiss_interp[n, s] @ g_inv
+        dA_interp.append(dA)
+    iwn_interp = (2*iwn_interp.astype(float) + 1) * np.pi / iaft.beta
+    dh0_sab = estimate_zero_moment(dA_interp[0], dA_interp[1], iwn_interp)
+
+    ddelta_wsab = np.zeros(g_weiss_wsab.shape, dtype=complex)
+    for n in range(g_weiss_wsab.shape[0]):
+        for s in range(nspin):
+            g_inv = np.linalg.inv(g_weiss_wsab[n, s])
+            ddelta_wsab[n, s] = -dh0_sab[s] + g_inv @ dg_weiss_wsab[n, s] @ g_inv
+
+    return dh0_sab, ddelta_wsab
+
+
+def lr_compute_weiss_fields_w(*, iaft, local_gf, d_local_gf, impurity_selfenergies, d_impurity_selfenergies):
+    """
+    Linear response of compute_weiss_fields_w: (dg_weiss_w, du_weiss_w) for responses of the local lattice
+    quantities, d_local_gf = {"Gloc_t", "Wloc_t"} (dVloc = 0), and of the impurity self-energies,
+    d_impurity_selfenergies = {"Vhf_imp", "Sigma_imp_w", "Pi_imp_w"}, in the layouts of the ground-state dicts.
+    Wloc_t, Vloc and d Wloc_t are in the product basis, as the driver's solver inputs: apply
+    chemistry_to_product_basis to the chemistry-order output of downfold_coulomb / lr_downfold_coulomb first.
+
+    Defined only for causal_projection = None: fit_local_results_boson and fit_u_weiss are nonlinear bath fits.
+    With screen_type = "rpa" the ground state takes Pi_imp = eval_pi_rpa(Gloc), so dPi_imp is then
+    tau_to_w_phsym(lr_pi_dc_t(Gloc, dGloc)).
+    """
+    missing = {"Gloc_t", "Wloc_t", "Vloc"} - local_gf.keys()
+    if missing:
+        raise ValueError(f"Missing keys in local_gf: {missing}")
+    missing = {"Gloc_t", "Wloc_t"} - d_local_gf.keys()
+    if missing:
+        raise ValueError(f"Missing keys in d_local_gf: {missing}")
+    for name, d in (("impurity_selfenergies", impurity_selfenergies),
+                    ("d_impurity_selfenergies", d_impurity_selfenergies)):
+        missing = {"Vhf_imp", "Sigma_imp_w", "Pi_imp_w"} - d.keys()
+        if missing:
+            raise ValueError(f"Missing keys in {name}: {missing}")
+
+    app_log(2, "Evaluate the linear response of the bosonic Weiss field.")
+    du_weiss_w = lr_weiss_boson_w(
+        local_gf["Vloc"],
+        iaft.tau_to_w_phsym(local_gf["Wloc_t"], stats='b'),
+        iaft.tau_to_w_phsym(d_local_gf["Wloc_t"], stats='b'),
+        impurity_selfenergies["Pi_imp_w"],
+        d_impurity_selfenergies["Pi_imp_w"]
+    )
+    iaft.check_leakage_phsym(du_weiss_w, 'b', 'du_weiss', w_input=True)
+    app_log(2, "")
+
+    app_log(2, "Evaluate the linear response of the fermionic Weiss field.")
+    dg_weiss_w, _ = lr_weiss_fermion_w(
+        iaft.tau_to_w(local_gf["Gloc_t"], stats='f'),
+        iaft.tau_to_w(d_local_gf["Gloc_t"], stats='f'),
+        impurity_selfenergies["Vhf_imp"], d_impurity_selfenergies["Vhf_imp"],
+        impurity_selfenergies["Sigma_imp_w"], d_impurity_selfenergies["Sigma_imp_w"]
+    )
+    iaft.check_leakage(dg_weiss_w, 'f', 'dg_weiss', w_input=True)
+    app_log(2, "")
+
+    return dg_weiss_w, du_weiss_w
+
+
 def embed_impurities(embeding_1e, embeding_2e, solver_results, spin_average=False):
     # A list of 3D arrays (w, i, j) with the length of the list = number of spins
     Sigma_imp_embed = embeding_1e.embed([ Res['Sigma_iw_data'] for Res in solver_results ])
