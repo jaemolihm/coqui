@@ -1410,10 +1410,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         app_log(1, "          [GCR] ||r|| = {:.6e}  (basis {}){}", gcr_rnorm,
                 _lr_gcr->basis_size(), _lr_gcr->kicked() ? "  kick" : "");
       if (_lr_gcr->stagnated())
-        app_log(1, "    [WARNING] LR GCR, stage {}: no progress in {} steps "
-                   "(||r|| = {:.3e}, tol = {:.3e}); DIIS or a larger "
-                   "max_subsp_size may converge.",
-                stage, lr_gcr::stag_steps, gcr_rnorm, p.tol);
+        app_log(1, "    [WARNING] LR GCR, stage {}: ||r|| = {:.3e} has not dropped "
+                   "below {:.0f}% of its value {} steps ago (tol = {:.3e}), which "
+                   "the Krylov kick normally prevents; if it does not converge, "
+                   "retry with DIIS or a larger max_subsp_size.",
+                stage, gcr_rnorm, 100.0 * lr_gcr::stag_ratio, lr_gcr::stag_steps, p.tol);
     }
     _Timer.stop("LR_CONVERGENCE");
 
