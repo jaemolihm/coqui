@@ -234,6 +234,16 @@ def test_gw_edmft_params_forward_mu(tmp_path):
     assert "mu" not in p["gw"] and "mu" not in p["dmft_embed"]
 
 
+def test_impurity_mu_update_validation():
+    pytest.importorskip("triqs")
+    from coqui.dmft.io import _normalize_solver_params_list
+    solver = {"n_cycles": 100, "n_warmup_cycles": 10, "length_cycle": 5}
+    for update in ("search", "predict"):
+        _normalize_solver_params_list([dict(solver, chemical_potential={"update": update})], 1)
+    with pytest.raises(ValueError):
+        _normalize_solver_params_list([dict(solver, chemical_potential={"update": "serach"})], 1)
+
+
 def test_write_model_h5_validation():
     H0 = np.zeros((1, 4, 1, 1), complex)
     with pytest.raises(ValueError):
