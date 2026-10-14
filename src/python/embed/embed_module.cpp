@@ -82,6 +82,31 @@ namespace coqui_py {
     return methods::downfold_gloc(mf.get_mf(), parser.get_root(), projector_ksIai, band_window, kpts_crys);
   }
 
+  auto lr_downfold_gloc(const Mf &mf, const std::string &df_params,
+                        const nda::array<ComplexType, 5> &projector_ksIai,
+                        const nda::array<long, 3> &band_window,
+                        const nda::array<RealType, 2> &kpts_crys,
+                        std::optional<nda::array<ComplexType, 5>> DeltaG_tskij,
+                        const nda::array<double, 1> &q_vec)
+  -> nda::array<ComplexType, 5> {
+    auto parser = InputParser(df_params);
+    return methods::lr_downfold_gloc(mf.get_mf(), parser.get_root(), projector_ksIai, band_window, kpts_crys,
+                                     DeltaG_tskij, q_vec);
+  }
+
+  template<typename eri_handler_t>
+  nda::array<ComplexType, 5>
+  lr_downfold_coulomb(eri_handler_t &eri, const std::string &df_params,
+                      const nda::array<ComplexType, 5> &projector_ksIai,
+                      const nda::array<long, 3> &band_window,
+                      const nda::array<RealType, 2> &kpts_crys,
+                      std::optional<nda::array<ComplexType, 4>> DeltaW_xqPQ,
+                      const nda::array<double, 1> &q_vec) {
+    auto parser = InputParser(df_params);
+    return methods::lr_downfold_coulomb(eri.get_eri(), parser.get_root(), projector_ksIai, band_window, kpts_crys,
+                                        DeltaW_xqPQ, q_vec);
+  }
+
   void downfold_1e(const Mf &mf, const std::string &df_params) {
     auto parser = InputParser(df_params);
     methods::downfolding_1e(mf.get_mf(), parser.get_root());
@@ -121,6 +146,14 @@ namespace coqui_py {
                 std::optional<std::map<std::string, nda::array<ComplexType, 5> > >);
 
   template void downfold_2e(ThcCoulomb&, const std::string&, std::optional<std::map<std::string, nda::array<ComplexType, 5> > >);
+
+  template nda::array<ComplexType, 5>
+  lr_downfold_coulomb(ThcCoulomb&, const std::string &,
+                      const nda::array<ComplexType, 5> &,
+                      const nda::array<long, 3> &,
+                      const nda::array<RealType, 2> &,
+                      std::optional<nda::array<ComplexType, 4>>,
+                      const nda::array<double, 1> &);
 
 } // coqui_py
 

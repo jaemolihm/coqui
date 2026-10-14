@@ -22,6 +22,7 @@
 #ifndef METHODS_MBPT_DRIVERS_H
 #define METHODS_MBPT_DRIVERS_H
 
+#include <optional>
 #include <string>
 
 #include "configuration.hpp"
@@ -70,6 +71,45 @@ auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
                    nda::array<long, 3> const& band_window,
                    nda::array<RealType, 2> const& kpts_crys)
 -> nda::array<ComplexType, 5>;
+
+
+/**
+ * @brief LR of the local Green's function at momentum transfer Q
+ *
+ * ΔG_loc = (1/N_k) Σ_k C^{k+Q} ΔG^k C^{k†}, with ΔG^k the (k+Q, k) block. Full BZ only, no hermitization.
+ *
+ * @param pt                 - [INPUT] translate_home_cell (default false)
+ * @param DeltaG_tskij_root  - [INPUT] ΔG (nt, ns, nk, nb, nb) on the MPI root; ignored elsewhere
+ * @param q_vec              - [INPUT] Q in crystal coordinates (3,)
+ * @return ΔG_loc (nt, ns, nImps, nImpOrbs, nImpOrbs) on every rank
+ */
+auto lr_downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                      nda::array<ComplexType, 5> const& projector_ksIai,
+                      nda::array<long, 3> const& band_window,
+                      nda::array<RealType, 2> const& kpts_crys,
+                      std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root,
+                      nda::array<double, 1> const& q_vec)
+-> nda::array<ComplexType, 5>;
+
+/**
+ * @brief LR of the local screened interaction at momentum transfer Q
+ *
+ * ΔW_loc_{x,cdab} = (1/N_q) Σ_q conj(B^{q+Q}_{P,dc}) ΔW^q_{x,PQ} B^q_{Q,ab}, with ΔW^q the (q+Q, q) block.
+ * Full q mesh only; no head correction (div_treatment must resolve to "ignore_g0").
+ *
+ * @param pt                 - [INPUT] div_treatment, translate_home_cell
+ * @param DeltaW_xqPQ_root   - [INPUT] ΔW (nx, nq, NP, NP), any leading axis, on the MPI root
+ * @param q_vec              - [INPUT] Q in crystal coordinates (3,)
+ * @return ΔW_loc (nx, c, d, a, b) on every rank
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_downfold_coulomb(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& projector_ksIai,
+    nda::array<long, 3> const& band_window,
+    nda::array<RealType, 2> const& kpts_crys,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaW_xqPQ_root,
+    nda::array<double, 1> const& q_vec);
 
 
 /**
