@@ -386,13 +386,18 @@ namespace math {
     }
 
     /**
-     * Sums the n-element per-rank buffer `partial` over sA's node communicator; node
-     * rank r adds scl · (its stripe r of the node sum) into the window at flat offset
+     * Sums the n-element per-rank buffer `partial` over `comm`; rank r of `comm` adds
+     * scl · (its stripe r of the sum) into the window at flat offset
      * `offset + stripe_begin`. The write half of the pair whose other half is
      * shared_array::all_reduce_parallel().
      *
-     * Collective on sA.node_comm(). No window sync and no internode reduction: the
-     * caller's single all_reduce_parallel() publishes the writes and sums the per-node
+     * `comm` holds ranks of sA's node only: sA.node_comm() itself (overload below), or
+     * a sub-communicator of it such as the node split of a pool communicator. Several
+     * disjoint such communicators may write disjoint [offset, offset + n) ranges of the
+     * same window between one set_zero() and the reduction.
+     *
+     * Collective on `comm`. No window sync and no internode reduction: the caller's
+     * single all_reduce_parallel() publishes the writes and sums the per-node
      * partials. Repeated calls between one set_zero() and that reduction accumulate
      * into the same stripes.
      *
@@ -402,6 +407,7 @@ namespace math {
      */
     template<::nda::MemoryArray Array_base_t>
     void reduce_scatter_add(shared_array<Array_base_t>& sA,
+                            mpi3::shared_communicator& comm,
                             typename shared_array<Array_base_t>::value_type* partial,
                             long offset, long n,
                             typename shared_array<Array_base_t>::value_type scl,
@@ -417,8 +423,10 @@ namespace math {
                    offset, offset + n, sA.size());
       utils::check(chunk > 0 and chunk <= long(std::numeric_limits<int>::max()),
                    "reduce_scatter_add: chunk {} outside (0, 2^31)", chunk);
+      utils::check(comm.size() <= sA.node_comm()->size(),
+                   "reduce_scatter_add: communicator of size {} exceeds the window's node "
+                   "communicator ({})", comm.size(), sA.node_comm()->size());
 
-      auto& comm = *sA.node_comm();
       int np = comm.size();
       int r = comm.rank();
       std::vector<int> counts(np);
@@ -438,6 +446,16 @@ namespace math {
         const value_type* src = partial + c0;
         for (long i = 0; i < counts[r]; ++i) dst[i] += scl * src[i];
       }
+    }
+
+    /// reduce_scatter_add over the window's own node communicator.
+    template<::nda::MemoryArray Array_base_t>
+    void reduce_scatter_add(shared_array<Array_base_t>& sA,
+                            typename shared_array<Array_base_t>::value_type* partial,
+                            long offset, long n,
+                            typename shared_array<Array_base_t>::value_type scl,
+                            long chunk = 1L << 22) {
+      reduce_scatter_add(sA, *sA.node_comm(), partial, offset, n, scl, chunk);
     }
 
   } // shm

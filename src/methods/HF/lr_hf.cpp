@@ -490,7 +490,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     _Timer.start("AUX_TO_PRIM");
     for (auto ip : nda::range(npol))
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
-                                              dDeltaF_skPQ, sDeltaF_skij, thc,
+                                              dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                               _MF->ks_to_k(0), _kpq_map, &_Timer);
     _Timer.stop("AUX_TO_PRIM");
 
@@ -670,7 +670,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // Factor 2 for ip /= iq because we only compute (1, 0), not (0, 1).
         // After this, we will symmetrize ΔF_ij and ΔF_ji to enforce Hermiticity.
         lr_thc_comm::aux_to_primary<AF_t>(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
-                                                dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                                 _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       } // iq
@@ -701,7 +701,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         _Timer.start("AUX_TO_PRIM");
         for (auto ip : nda::range(npol))
           lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
-                                                  dDeltaF_skPQ, sDeltaF_skij, thc,
+                                                  dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
                                                   _MF->ks_to_k(0), _kpq_map, &_Timer);
         _Timer.stop("AUX_TO_PRIM");
       }

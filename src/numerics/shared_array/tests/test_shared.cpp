@@ -238,6 +238,34 @@ TEST_CASE("reduce_scatter_add_synthetic_nodes", "[math]") {
       nbad = world.all_reduce_value(nbad, std::plus<>{});
       REQUIRE(nbad == 0);
     }
+
+    // Two pools, each reduce-scattering over its own node split into its own range,
+    // as the τ pools of lr_gw do: a pool's node partials meet in all_reduce_parallel.
+    {
+      int pool = world.rank() % 2;
+      auto pool_node = fake_node.split(pool, fake_node.rank());
+      long n = 1009, W = 2 * n + 3;
+      auto sP = shared_array<nda::array_view<ComplexType, 1>>(
+          std::addressof(world), std::addressof(fake_internode), std::addressof(fake_node), {W});
+      std::vector<ComplexType> buf(n);
+      for (long i = 0; i < n; ++i) buf[i] = part(pool, world.rank(), i);
+      reduce_scatter_add(sP, pool_node, buf.data(), 1 + pool * n, n, scl0, 64);
+      sP.all_reduce_parallel();
+      long nbad = 0;
+      auto P = sP.local();
+      for (long j = 0; j < W; ++j) {
+        ComplexType ref(0.0);
+        long p = (j - 1) / n, i = (j - 1) % n;
+        if (j >= 1 and p < 2) {
+          for (int r = p; r < world.size(); r += 2) ref += part(int(p), r, i);
+          ref *= scl0;
+        }
+        if (P(j) != ref) ++nbad;
+      }
+      nbad = world.all_reduce_value(nbad, std::plus<>{});
+      app_log(2, "reduce_scatter_add pools [{}]: mismatches = {}", tag, nbad);
+      REQUIRE(nbad == 0);
+    }
   };
 
   run(2, -1, "even, 2 nodes");
