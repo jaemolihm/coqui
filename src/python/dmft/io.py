@@ -170,6 +170,9 @@ def _normalize_solver_params_list(solver_params_list, comm_size):
         solver_params_norm = deepcopy(solver_params)
 
         mu_params = solver_params_norm.get('chemical_potential')
+        if mu_params is not None and mu_params.get('update', 'search') not in ('search', 'predict'):
+            raise ValueError(f"chemical_potential.update = {mu_params['update']!r}: "
+                             "valid options are 'search' and 'predict'")
         if mu_params: 
             mu_params.setdefault('n_cycles', int(solver_params_norm['n_cycles']*0.05))
             mu_params['n_cycles'] = int(mu_params['n_cycles']/comm_size) 
