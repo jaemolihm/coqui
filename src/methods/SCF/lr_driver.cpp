@@ -175,6 +175,15 @@ void lr_driver::lr_setup(
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
 
+  // Frozen external sources: ΔΠ_ext needs a channel that evaluates ΔW; neither is
+  // carried by the qp static map or by the hessian's extra Dyson solve.
+  utils::check(!p.DeltaPi_ext_tqPQ || K.sigma_G_dW,
+               "lr_driver::lr_setup: an external ΔΠ requires gw_mode = full (it enters "
+               "through ΔW = W ΔΠ W).");
+  utils::check(!(p.DeltaSigma_ext_tskij || p.DeltaPi_ext_tqPQ) || (!qp && !p.hessian()),
+               "lr_driver::lr_setup: external ΔΣ / ΔΠ sources are incompatible with "
+               "qp_static mode and with the hessian.");
+
   // GCR's basis stays valid only while the map is one fixed affine operator. qp
   // mode statifies ΔΣ through a Padé continuation, which is not additive in ΔΣ,
   // so neither w = A z nor the recycled pairs would hold.
@@ -363,6 +372,9 @@ void lr_driver::lr_setup(
   _Timer.start("LR_DRIVER_SETUP_G_OMEGA");
   _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
   _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
+  // The frozen external ΔΣ enters every Dyson pass of the LR iteration; transformed
+  // to iω once here.
+  _lr_dyson.set_external_sigma(p.DeltaSigma_ext_tskij);
   _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
   utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
 
@@ -395,6 +407,20 @@ void lr_driver::lr_setup(
     // ΔDm-only Dyson pass (Σ-free kernel)
     _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+    if (p.DeltaSigma_ext_tskij) {
+      // The frozen external ΔΣ enters the ΔDm-only pass through its own ΔDm(Δμ=0),
+      // from one full Dyson pass with that ΔΣ alone.
+      _sDeltaDm_ext_Sigma.emplace(math::shm::make_shared_array<Array_view_4D_t>(
+          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
+      auto zero = math::shm::make_shared_array<Array_view_4D_t>(
+          *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+      zero.set_zero();
+      _lr_dyson.solve_lr_dyson(*_sDeltaDm_ext_Sigma, zero, zero,
+                               static_cast<const sArray_t<Array_view_5D_t>*>(nullptr),
+                               /*fix_density=*/false,
+                               static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
+                               /*add_external_sigma=*/true);
+    }
   }
   if (!p.precond_kernel.empty()) {
     // Preconditioner: the gathered residual, the ΔDm of its ΔΣ part, and the
@@ -466,6 +492,12 @@ void lr_driver::apply_kernel_gw(
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
       sG_tskij.local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
+  if (p.DeltaPi_ext_tqPQ) {
+    // + frozen external ΔΠ: this rank's block of the node-replicated array
+    auto ext = p.DeltaPi_ext_tqPQ->local();
+    dDeltaPi_tqPQ.local() += ext(dDeltaPi_tqPQ.local_range(0), dDeltaPi_tqPQ.local_range(1),
+                                 dDeltaPi_tqPQ.local_range(2), dDeltaPi_tqPQ.local_range(3));
+  }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_PI");
 
@@ -722,7 +754,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _Timer.start("LR_DYSON");
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij, *_sDeltaF_dyson_in, pDeltaSigma,
-          p.fix_density, static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+          p.fix_density, static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
+          /*add_external_sigma=*/true);
       _Timer.stop("LR_DYSON");
       _mpi->comm.barrier();
     }
@@ -741,15 +774,17 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij,
           sDeltaF_skij, track_sigma ? sDeltaSigma_tskij : nullptr,
-          p.fix_density, qp ? sDeltaVcorr_skij : nullptr);
+          p.fix_density, qp ? sDeltaVcorr_skij : nullptr, /*add_external_sigma=*/true);
       // The kernel evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
       _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
       DeltaG_in_shm = true;
     } else {
-      // Σ-free kernel: ΔDm-only pass. The ΔF it is fed is kept for update_DeltaG.
+      // Σ-free kernel: ΔDm-only pass, with the ΔDm of the frozen external ΔΣ when
+      // there is one. The ΔF it is fed is kept for update_DeltaG.
       copy_shm(*_sDeltaF_dyson_in, sDeltaF_skij);
       Delta_mu = _lr_dyson.solve_lr_dyson_dm_only(
-          sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, nullptr, p.fix_density);
+          sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+          p.DeltaSigma_ext_tskij ? &(*_sDeltaDm_ext_Sigma) : nullptr, p.fix_density);
       DeltaG_in_shm = false;
     }
   };

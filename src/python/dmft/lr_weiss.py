@@ -29,6 +29,8 @@ from .weiss import (eval_gw_dc_t, eval_pi_rpa_pair, compute_weiss_fermion_w, den
 def lr_sigma_dc_t(G_tsab, dG_tsab, W_tabcd, dW_tabcd):
     """
     Linear response of eval_gw_dc_t (bilinear in G and W): dSigma_dc(tau) = Sigma[dG, W] + Sigma[G, dW].
+    Only the correlation part of the DC self-energy, not its static exchange: W is the full screened interaction
+    minus the bare V, which decays to 0 at high frequency, so dSigma_dc(iw) -> 0 as |w| -> inf.
     W, dW are in the product basis on the half tau grid, as for eval_gw_dc_t: apply chemistry_to_product_basis to
     the chemistry-order output of downfold_coulomb / lr_downfold_coulomb first, as the GW+EDMFT driver does.
     The half tau grid (tau <= beta/2) assumes the tau-reflection evenness of the response, which is exact when

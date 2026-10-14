@@ -115,10 +115,18 @@ static auto const fun_7 = c2py::dispatcher_f_kw_t{c2py::cfun(
 static auto const fun_8 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
        const nda::array<double, 1> &q_pert,
-       std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ) {
-      return coqui_py::lr_gw_W(lr_params, h_int, q_pert, DeltaPi_tqPQ);
+       std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ,
+       std::optional<nda::array<ComplexType, 5>> G_tskij,
+       std::optional<nda::array<ComplexType, 5>> proj_mat,
+       std::optional<nda::array<long, 3>> band_window,
+       std::optional<nda::array<double, 2>> kpts_w90,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities) {
+      return coqui_py::lr_gw_W(lr_params, h_int, q_pert, DeltaPi_tqPQ, G_tskij,
+                               proj_mat, band_window, kpts_w90,
+                               local_polarizabilities);
     },
-    "lr_params", "h_int", "q_pert", "DeltaPi_tqPQ")};
+    "lr_params", "h_int", "q_pert", "DeltaPi_tqPQ", "G_tskij", "proj_mat",
+    "band_window", "kpts_w90", "local_polarizabilities")};
 
 // lr_gw_sigma_DeltaG
 static auto const fun_9 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -312,12 +320,24 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
        std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
        std::optional<nda::array<ComplexType, 4>> DeltaX_left,
        std::optional<nda::array<ComplexType, 4>> DeltaX_right,
-       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
+       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ,
+       std::optional<nda::array<ComplexType, 5>> DeltaSigma_ext_tskij,
+       std::optional<nda::array<ComplexType, 5>> proj_mat,
+       std::optional<nda::array<long, 3>> band_window,
+       std::optional<nda::array<double, 2>> kpts_w90,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_sigma_response,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
-                              DeltaX_left, DeltaX_right, DeltaV_qPQ);
+                              DeltaX_left, DeltaX_right, DeltaV_qPQ, DeltaSigma_ext_tskij,
+                              proj_mat, band_window, kpts_w90,
+                              local_polarizabilities, local_sigma_response,
+                              local_polarizability_response);
     },
     "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
-    "DeltaX_right", "DeltaV_qPQ")};
+    "DeltaX_right", "DeltaV_qPQ", "DeltaSigma_ext_tskij", "proj_mat",
+    "band_window", "kpts_w90", "local_polarizabilities",
+    "local_sigma_response", "local_polarizability_response")};
 
 // lr_DeltaH0_from_thc_aux
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -543,6 +563,16 @@ q_pert : {par_2}
    - [INPUT] LR perturbation wavevector (3,)
 DeltaPi_tqPQ : {par_3}
    - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+G_tskij : {par_4}
+   - [INPUT] Optional G(τ) of the GW+EDMFT W (root only)
+proj_mat : {par_5}
+   - [INPUT] Optional projector (GW+EDMFT)
+band_window : {par_6}
+   - [INPUT] Optional band window of the projector
+kpts_w90 : {par_7}
+   - [INPUT] Optional k-points of the projector
+local_polarizabilities : {par_8}
+   - [INPUT] Optional ground-state {"imp", "dc"} Π: W_c is the GW+EDMFT W of G_tskij
 
 Returns
 -------
@@ -552,7 +582,12 @@ Returns
     {{c2py::python_typename<const std::string &>()},
      {c2py::python_typename<coqui_py::ThcCoulomb &>()},
      {c2py::python_typename<const nda::array<double, 1> &>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
+     {}},
     {c2py::python_typename<nda::array<ComplexType, 4>>()});
 static const auto doc_d_9 = fun_9.doc(
     R"DOC(
@@ -725,6 +760,20 @@ DeltaX_right : {par_5}
    - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
 DeltaV_qPQ : {par_6}
    - [INPUT] Optional THC Coulomb perturbation δV (root only)
+DeltaSigma_ext_tskij : {par_7}
+   - [INPUT] Optional frozen external ΔΣ(τ) in the band basis (root only)
+proj_mat : {par_8}
+   - [INPUT] Optional projector (GW+EDMFT)
+band_window : {par_9}
+   - [INPUT] Optional band window of the projector
+kpts_w90 : {par_10}
+   - [INPUT] Optional k-points of the projector
+local_polarizabilities : {par_11}
+   - [INPUT] Optional ground-state {"imp", "dc"} Π (GW+EDMFT W)
+local_sigma_response : {par_12}
+   - [INPUT] Optional {"imp", "dc"} δΣ (iω), upfolded into ΔΣ_ext
+local_polarizability_response : {par_13}
+   - [INPUT] Optional {"imp", "dc"} δΠ (iν), upfolded into ΔΠ_ext
 
 Returns
 -------
@@ -737,7 +786,14 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
+     {},
+     {},
+     {}},
     {c2py::python_typename<
         std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
 static const auto doc_d_15 = fun_15.doc(
