@@ -78,6 +78,11 @@ def run_hf(params, h_int, h_int_exchange=None):
           from an existing checkpoint file.
         - ``const_mu`` *(bool, optional, default ``False``)* — if ``True``, fixes the
           chemical potential throughout the SCF loop.
+        - ``mu`` *(float, optional, units: Hartree; ``hf``, ``gw``, ``rpa`` and ``gf2``
+          only — ``run_evgw`` and ``run_qpgw`` abort)* — fixed chemical potential, used in
+          every Dyson solve including the first one after a restart; the number of
+          electrons then follows from it instead of being imposed. ``run_lr`` aborts
+          with ``fix_density=True`` on such a ground state.
         - ``mu_tolerance`` *(float, optional, default ``1e-9``)* — tolerance for the
           chemical potential search.
         - ``div_treatment`` *(str, optional, default ``"gygi"``)* — treatment of the

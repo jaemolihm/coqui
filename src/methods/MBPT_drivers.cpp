@@ -155,6 +155,18 @@ inline std::array<long, 4> compute_proc_grid_4D(long nproc, std::array<long, 4> 
   return grid;
 }
 
+// Optional input "mu" (a.u.): fixed chemical potential. Every Dyson solve uses it, including the first one after a
+// restart, instead of searching for the number of electrons of the mean-field.
+inline void set_fixed_mu(simple_dyson& dyson, ptree const& pt) {
+  if (pt.get_child_optional("mu"))
+    dyson.fixed_mu() = io::get_value<double>(pt, "mu", "fixed chemical potential (a.u.)");
+}
+
+// Solvers without a fixed-mu Dyson solve reject the input "mu".
+inline void reject_fixed_mu(ptree const& pt, std::string const& solver) {
+  utils::check(!pt.get_child_optional("mu"), "\"mu\" (fixed chemical potential) is not supported by {}", solver);
+}
+
 // Helper function to prepare checkpoint file for downfold_coulomb
 inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& output, 
                               std::string const& greens_func_source, ptree const& pt) {
@@ -202,6 +214,7 @@ inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& out
  *  - niter: "1" Number of iterations in the self-consistent loop.
  *  - conv_thr: "1e-9" Convergence threshold for the self-consistent loop.
  *  - const_mu: "false" Fix the chemical potential during the self-consistent loop.
+ *  - mu: Optional. Fixed chemical potential (a.u.), also on restart; the number of electrons then follows.
  *  - output: Optional legacy output flag. If present, this is used directly.
  *  - outdir: "./" Output directory used when output is not provided.
  *  - prefix: "bdft.mbpt" Prefix used when output is not provided.
@@ -216,6 +229,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   if (mpi->comm.size()%mpi->node_comm.size()!=0) {
     APP_ABORT("MBPT: number of processors on each node should be the same.");
   }
+  // "mu" (fixed chemical potential) is applied by the Dyson solve of these solvers only
+  if (solver_type != "hf" and solver_type != "gw" and solver_type != "rpa" and solver_type != "gf2")
+    reject_fixed_mu(pt, "solver " + solver_type + " (supported: hf, gw, rpa, gf2)");
   std::string err = std::string("mbpt - Incorrect input - ");
   auto div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
   auto hf_div_treatment = io::get_value_with_default<std::string>(pt, "hf_div_treatment", "gygi");
@@ -278,6 +294,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   if(solver_type == "rpa") {
 
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    set_fixed_mu(dyson, pt);
     gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
     rpa_loop(mb_state, dyson, eri, ft, mb_solver_t(&hf,&gw));
@@ -285,6 +302,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   } else if(solver_type == "hf") {
 
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -302,6 +320,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -354,6 +373,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     }
 
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -539,6 +559,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
@@ -578,6 +599,7 @@ void downfolding_1e(std::shared_ptr<mf::MF> mf, ptree const& pt) {
   MBState mb_state(ft, outdir+"/"+prefix, mf, wannier_file, trans_home_cell, false);
 
   if (qp_selfenergy) {
+    reject_fixed_mu(pt, "downfold_1e with qp_selfenergy = true");
     auto ac_alg  = io::get_value_with_default<std::string>(pt,"ac_alg","pade");
     auto off_diag_mode = io::get_value_with_default<std::string>(pt,"off_diag_mode","qp_energy");
     io::tolower(ac_alg);
@@ -795,6 +817,7 @@ void downfolding_2e(eri_t &eri, ptree const& pt,
 template<typename eri_t>
 void hf_downfold(eri_t &eri, ptree const& pt) {
   std::string err = std::string("hf_downfold - Incorrect input - ");
+  reject_fixed_mu(pt, "hf_downfold");
   auto prefix = io::get_value<std::string>(pt,"prefix",err+"prefix");
   auto outdir = io::get_value_with_default<std::string>(pt,"outdir","./");
   auto wannier_file = io::get_value<std::string>(pt,"wannier_file",err+"wannier_file");
@@ -866,6 +889,7 @@ void hf_downfold(eri_t &eri, ptree const& pt) {
 template<typename eri_t>
 void gw_downfold(eri_t &eri, ptree &pt) {
   std::string err = std::string("gw_downfold - Incorrect input - ");
+  reject_fixed_mu(pt, "gw_downfold");
   auto prefix = io::get_value<std::string>(pt,"prefix",err+"prefix");
   auto outdir = io::get_value_with_default<std::string>(pt,"outdir","./");
   auto wannier_file = io::get_value<std::string>(pt,"wannier_file",err+"wannier_file");
@@ -948,11 +972,14 @@ void dmft_embed_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& 
   auto dyson = simple_dyson(mf.get(), &ft, mb_state.coqui_prefix,
                             io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9),
                             io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint"));
+  set_fixed_mu(dyson, pt);
 
   embed_t embed(*mf);
   embed.dmft_embed(mb_state, dyson, iter_solver.get(),
                    io::get_value_with_default<bool>(pt,"qp_approx_mbpt",false),
                    io::get_value_with_default<bool>(pt,"corr_only",false));
+  // Mark an embedding step run at a fixed chemical potential (see chkpt::dump_fixed_mu)
+  chkpt::dump_fixed_mu(mf->mpi()->comm, mb_state.coqui_prefix+".mbpt.h5", dyson.fixed_mu(), "embed");
 }
 
 void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
@@ -985,11 +1012,14 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
   auto dyson = simple_dyson(mf.get(), &ft, mb_state.coqui_prefix,
                             io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9),
                             io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint"));
+  set_fixed_mu(dyson, pt);
 
   embed_t embed(*mf);
   embed.dmft_embed(mb_state, dyson, iter_solver.get(),
                    io::get_value_with_default<bool>(pt,"qp_approx_mbpt",false),
                    io::get_value_with_default<bool>(pt,"corr_only",false));
+  // Mark an embedding step run at a fixed chemical potential (see chkpt::dump_fixed_mu)
+  chkpt::dump_fixed_mu(mf->mpi()->comm, mb_state.coqui_prefix+".mbpt.h5", dyson.fixed_mu(), "embed");
 }
 
 
@@ -1080,6 +1110,33 @@ std::optional<std::string> read_scf_string(mpi_context_t& mpi,
   if (!found) return std::nullopt;
   mpi.comm.broadcast_n(buf, sizeof(buf), 0);
   return std::string(buf);
+}
+
+/**
+ * Read the fixed chemical potential (a.u.) the ground state was run at, stashed on
+ * the checkpoint group `input_grp` ("scf" or "embed") by chkpt::dump_fixed_mu; nullopt
+ * for a ground state that searched for the number of electrons.
+ */
+template<typename mpi_context_t>
+std::optional<double> read_fixed_mu(mpi_context_t& mpi,
+                                        const std::string& input_file,
+                                        const std::string& input_grp)
+{
+  double mu[2] = {0.0, 0.0};  // {found, value}
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    if (root_grp.has_subgroup(input_grp)) {
+      auto grp = root_grp.open_group(input_grp);
+      if (grp.has_dataset("fixed_mu")) {
+        mu[0] = 1.0;
+        h5::h5_read(grp, "fixed_mu", mu[1]);
+      }
+    }
+  }
+  mpi.comm.broadcast_n(mu, 2, 0);
+  if (mu[0] == 0.0) return std::nullopt;
+  return mu[1];
 }
 
 /**
@@ -1598,6 +1655,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                "run_lr_calc: Input checkpoint {} does not exist!", input_file);
 
   utils::memlog("run_lr_calc: entry");
+
+  // fix_density imposes dN = 0 on a ground state that searched for the number of electrons
+  if (fix_density) {
+    auto fixed_mu = read_fixed_mu(*mpi, input_file, input_grp);
+    utils::check(!fixed_mu.has_value(),
+                 "run_lr_calc: fix_density = true is not meaningful on a ground state converged at a fixed "
+                 "chemical potential (mu = {} a.u. in {}/{}/fixed_mu); use fix_density = false.",
+                 fixed_mu.value_or(0.0), input_file, input_grp);
+  }
 
   // Validate checkpoint contains required data. The "mf_dft" reference rebuilds
   // G0 from the mean field and reads only IAFT + metadata from the checkpoint,
