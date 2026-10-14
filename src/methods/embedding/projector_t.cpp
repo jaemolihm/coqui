@@ -346,6 +346,15 @@ namespace methods {
     return O_tskIab;
   }
 
+  void projector_t::add_C_O_Cdag(long is, long ik_l, long ik_r, long imp,
+                                 const nda::array<ComplexType, 2> &O_ij_W, nda::array<ComplexType, 2> &buffer_aj,
+                                 nda::MemoryArrayOfRank<2> auto &&O_ab) const {
+    nda::blas::gemm(_C_skIai(is, ik_l, imp, nda::ellipsis{}), O_ij_W, buffer_aj);
+
+    nda::blas::gemm(ComplexType(1.0), buffer_aj, nda::dagger(_C_skIai(is, ik_r, imp, nda::ellipsis{})),
+                    ComplexType(1.0), O_ab);
+  }
+
   template<bool force_real, typename comm_t>
   auto projector_t::downfold_loc(const nda::MemoryArrayOfRank<4> auto &O_skij,
                                  comm_t comm, std::string name) const
@@ -380,11 +389,7 @@ namespace methods {
         else
           O_ij_W = O_skij(is, ik_ibz, _W_rng[imp], _W_rng[imp]);
 
-        nda::blas::gemm(_C_skIai(is, ik, imp, nda::ellipsis{}), O_ij_W, buffer_aj);
-
-
-        nda::blas::gemm(ComplexType(1.0), buffer_aj, nda::dagger(_C_skIai(is, ik, imp, nda::ellipsis{})),
-                        ComplexType(1.0), O_sIab(is, imp, nda::ellipsis{}));
+        add_C_O_Cdag(is, ik, ik, imp, O_ij_W, buffer_aj, O_sIab(is, imp, nda::ellipsis{}));
       }
     }
     comm.all_reduce_in_place_n(O_sIab.data(), O_sIab.size(), std::plus<>{});
@@ -417,9 +422,9 @@ namespace methods {
     return downfold_loc<force_real>(O_skij.local(), *O_skij.communicator(), name);
   }
 
-  template<bool force_real, typename comm_t>
-  auto projector_t::downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
-                                 std::string name) const
+  template<typename comm_t>
+  auto projector_t::sum_C_O_Cdag(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
+                                 const nda::array<long, 1> *kpq_map) const
   -> nda::array<ComplexType, 5> {
 
     utils::check(O_tskij.shape()[1] == _C_skIai.shape(0), "downfold_loc: ns mismatches.{}, {}",
@@ -452,15 +457,21 @@ namespace methods {
         else
           O_ij_W = O_tskij(it, is, ik_ibz, _W_rng[imp], _W_rng[imp]);
 
-        nda::blas::gemm(_C_skIai(is, ik, imp, nda::ellipsis{}), O_ij_W, buffer_aj);
-
-
-        nda::blas::gemm(ComplexType(1.0), buffer_aj, nda::dagger(_C_skIai(is, ik, imp, nda::ellipsis{})),
-                        ComplexType(1.0), O_tsIab(it, is, imp, nda::ellipsis{}));
+        long ik_l = (kpq_map == nullptr)? ik : (*kpq_map)(ik);
+        add_C_O_Cdag(is, ik_l, ik, imp, O_ij_W, buffer_aj, O_tsIab(it, is, imp, nda::ellipsis{}));
       }
     }
     comm.all_reduce_in_place_n(O_tsIab.data(), O_tsIab.size(), std::plus<>{});
     O_tsIab() /= nkpts;
+    return O_tsIab;
+  }
+
+  template<bool force_real, typename comm_t>
+  auto projector_t::downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
+                                 std::string name) const
+  -> nda::array<ComplexType, 5> {
+
+    auto O_tsIab = sum_C_O_Cdag(O_tskij, comm, nullptr);
 
     // check the largest imaginary element
     double max_imag = -1;
@@ -480,6 +491,17 @@ namespace methods {
     }
 
     return O_tsIab;
+  }
+
+  template<typename comm_t>
+  auto projector_t::lr_downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
+                                    const nda::array<long, 1> &kpq_map, std::string name) const
+  -> nda::array<ComplexType, 5> {
+    utils::check(_MF->nkpts_ibz() == _MF->nkpts() and kpq_map.shape(0) == _MF->nkpts(),
+                 "lr_downfold_loc({}): requires the full BZ (nkpts_ibz = {}, nkpts = {}, kpq_map: {}).",
+                 name, _MF->nkpts_ibz(), _MF->nkpts(), kpq_map.shape(0));
+    // The response at momentum transfer Q is not Hermitian: it is returned as is
+    return sum_C_O_Cdag(O_tskij, comm, &kpq_map);
   }
 
   template<bool force_real, nda::ArrayOfRank<5> Array_base_t>
@@ -531,6 +553,10 @@ namespace methods {
   template nda::array<ComplexType, 4> projector_t::downfold_loc<false>(const nda::array_view<ComplexType, 4, nda::C_layout>&, mpi3::communicator, std::string) const;
   template nda::array<ComplexType, 5> projector_t::downfold_loc<true>(const nda::array_view<ComplexType, 5, nda::C_layout>&, mpi3::communicator, std::string) const;
   template nda::array<ComplexType, 5> projector_t::downfold_loc<false>(const nda::array_view<ComplexType, 5, nda::C_layout>&, mpi3::communicator, std::string) const;
+
+  template nda::array<ComplexType, 5> projector_t::lr_downfold_loc(const nda::array<ComplexType, 5>&, mpi3::communicator, const nda::array<long, 1>&, std::string) const;
+  template nda::array<ComplexType, 5> projector_t::lr_downfold_loc(const nda::array_view<ComplexType, 5>&, mpi3::communicator, const nda::array<long, 1>&, std::string) const;
+  template nda::array<ComplexType, 5> projector_t::lr_downfold_loc(const nda::array_view<ComplexType, 5, nda::C_layout>&, mpi3::communicator, const nda::array<long, 1>&, std::string) const;
 
   template nda::array<ComplexType, 5> projector_t::downfold_loc<true>(const sArray_t<nda::array_view<ComplexType, 5>>&, std::string) const;
   template nda::array<ComplexType, 5> projector_t::downfold_loc<false>(const sArray_t<nda::array_view<ComplexType, 5>>&, std::string) const;

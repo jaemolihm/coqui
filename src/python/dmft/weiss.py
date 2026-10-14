@@ -438,8 +438,13 @@ def compute_weiss_boson_w(V_abcd, W_wabcd, Pi_wabcd):
     return U_pb.reshape(W_wabcd.shape) - V_abcd
 
 
-def eval_pi_rpa(G_tsab, *, density_only=False):
-    nts, nspin, nbnd = G_tsab.shape[:3]
+def eval_pi_rpa_pair(G1_tsab, G2_tsab, *, density_only=False):
+    """
+    Bilinear form behind eval_pi_rpa on the half tau grid (mt = nts-1-t):
+    Pi[t]_{abcd} = sf * G1_bd(tau_t) G2_ca(tau_mt), or Pi[t]_{ab} = sf * G1_ab(tau_t) G2_ba(tau_mt) if
+    density_only, with sf = -2 (nspin = 1) or -1 and a spin sum.
+    """
+    nts, nspin, nbnd = G1_tsab.shape[:3]
     nts_half = nts//2 if nts%2==0 else nts//2 + 1
     spin_factor = -2.0 if nspin == 1 else -1.0
     if not density_only:
@@ -448,7 +453,7 @@ def eval_pi_rpa(G_tsab, *, density_only=False):
             mt = nts-t-1
             pi_t[t] += spin_factor * np.einsum(
                 'sbd,sca->abcd',
-                G_tsab[t], G_tsab[mt]
+                G1_tsab[t], G2_tsab[mt]
             )
     else:
         pi_t = np.zeros((nts_half, nbnd, nbnd), dtype=complex)
@@ -456,8 +461,12 @@ def eval_pi_rpa(G_tsab, *, density_only=False):
             mt = nts-t-1
             for s in range(nspin):
                 for a, b in itertools.product(range(nbnd), repeat=2):
-                    pi_t[t, a, b] += spin_factor * G_tsab[t, s, a, b] * G_tsab[mt, s, b, a]
+                    pi_t[t, a, b] += spin_factor * G1_tsab[t, s, a, b] * G2_tsab[mt, s, b, a]
     return pi_t
+
+
+def eval_pi_rpa(G_tsab, *, density_only=False):
+    return eval_pi_rpa_pair(G_tsab, G_tsab, density_only=density_only)
 
 
 def eval_hf_dc(Dm_sab, V_abcd, U0_abcd):

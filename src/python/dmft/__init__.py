@@ -28,6 +28,7 @@ try:
   from .triqs_utils import *
   from .chemical_potential import *
   from .weiss import *
+  from .lr_weiss import *
   from .bath_fit import *
   from .io import *
   from .plot import *

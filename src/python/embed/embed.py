@@ -137,6 +137,60 @@ def downfold_coulomb(h_int, params, *, projector_info=None, local_polarizabiliti
 
 
 
+def _root_input(arr, dtype):
+    from mpi4py import MPI
+    return np.asarray(arr, dtype=dtype) if MPI.COMM_WORLD.Get_rank() == 0 else None
+
+
+def lr_downfold_local_gf(mf, params, dG_tskij, q_vec, *, projector_info):
+    """
+    Linear response of the local Green's function at momentum transfer Q:
+    dGloc = (1/N_k) sum_k C^{k+Q} dG^k C^{k,dagger}, with dG^k the (k+Q, k) block.
+    The projector algebra is tested at Q != 0 (synthetic adjoint and NumPy references); the physical Q != 0
+    end-to-end response is not yet validated.
+
+    Args:
+        mf: Mean-field object (full BZ, no symmetry).
+        params (dict): optional "translate_home_cell".
+        dG_tskij (np.ndarray): (nt, ns, nk, nbnd, nbnd); required on the MPI root, ignored elsewhere.
+        q_vec: Q in crystal coordinates (3,).
+        projector_info (dict): "proj_mat", "band_window", "kpts_w90" as for downfold_local_gf.
+
+    Returns:
+        np.ndarray: (nt, ns, nImpOrbs, nImpOrbs) on every rank. Not hermitized.
+    """
+    return embed_cxx.lr_downfold_gloc(
+        mf, json.dumps(params), projector_info["proj_mat"], projector_info["band_window"],
+        projector_info["kpts_w90"], _root_input(dG_tskij, np.complex128), np.asarray(q_vec, dtype=np.float64)
+    )[:,:,0]
+
+
+def lr_downfold_coulomb(h_int, params, dW_xqPQ, q_vec, *, projector_info):
+    """
+    Linear response of the local screened interaction at momentum transfer Q:
+    dWloc_{x,cdab} = (1/N_q) sum_q conj(B^{q+Q}_{P,dc}) dW^q_{x,PQ} B^q_{Q,ab}, with dW^q the (q+Q, q) block.
+    Full q mesh, single impurity. The q->0 head term is not included: the result is exact when the head of dW
+    vanishes (models), otherwise it omits the head that the ground-state Wloc carries with "gygi".
+    The projector algebra is tested at Q != 0 (synthetic adjoint and NumPy references); the physical Q != 0
+    end-to-end response is not yet validated.
+
+    Args:
+        h_int (ThcCoulomb): THC Coulomb handler (full q mesh).
+        params (dict): optional "translate_home_cell".
+        dW_xqPQ (np.ndarray): (nx, nq, NP, NP) with any leading axis (tau or iw); required on the MPI root.
+        q_vec: Q in crystal coordinates (3,).
+        projector_info (dict): "proj_mat", "band_window", "kpts_w90" as for downfold_coulomb.
+
+    Returns:
+        np.ndarray: (nx, c, d, a, b) in chemistry order, as the screened part returned by downfold_coulomb.
+        The DC and Weiss kernels of coqui.dmft.weiss take the product basis (chemistry_to_product_basis).
+    """
+    return embed_cxx.lr_downfold_coulomb(
+        h_int, json.dumps(params), projector_info["proj_mat"], projector_info["band_window"],
+        projector_info["kpts_w90"], _root_input(dW_xqPQ, np.complex128), np.asarray(q_vec, dtype=np.float64)
+    )
+
+
 def downfold_1e(mf, params):
     embed_cxx.downfold_1e(mf, json.dumps(params))
 

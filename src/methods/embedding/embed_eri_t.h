@@ -278,6 +278,17 @@ namespace methods {
                      const B_t &B_qIPab)
     -> nda::array<ComplexType, 6>;
 
+    /**
+     * Local projection of a screened-interaction response at momentum transfer Q:
+     *   W_xcdab = (1/N_q) sum_q conj(B^{kpq(q)}_{P,dc}) W_xqPQ B^q_{Q,ab},
+     * where W_xqPQ at q is the (q+Q, q) block (any leading axis x) and kpq_map(q) = q+Q.
+     * Full q mesh only, replicated input. No head correction: requires div_treatment == "ignore_g0".
+     */
+    template<nda::ArrayOfRank<5> B_t>
+    auto lr_downfold_DeltaW_q(nda::array_view<ComplexType, 4> W_xqPQ, const B_t &B_qIPab,
+                              const nda::array<long, 1> &kpq_map)
+    -> nda::array<ComplexType, 5>;
+
     template<THC_ERI thc_t, nda::ArrayOfRank<5> B_t>
     void V_div_correction(nda::array<ComplexType, 4> &V_cdab, const B_t &B_qIPab, thc_t &thc);
 
