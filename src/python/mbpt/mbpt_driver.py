@@ -605,28 +605,19 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         DeltaH0_skij = None
     squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
 
-    if gw_mode not in ("none", "fixed_W", "full"):
-        raise ValueError(f"Unknown gw_mode '{gw_mode}'. Must be 'none', 'fixed_W', or 'full'.")
-
     if recompute_W and screened_interaction_file is not None:
         raise ValueError(
             "run_lr: screened_interaction_file and recompute_W are mutually "
             "exclusive. Pass a W file path to read W from disk, or recompute_W=True "
             "to recompute it from the checkpoint Green's function.")
 
-    # Parse iter_alg dict with defaults
-    if iter_alg is None:
-        iter_alg = {}
-    alg = str(iter_alg.get("alg", "DIIS"))
-    if alg not in ("damping", "DIIS", "GCR"):
-        raise ValueError(
-            f"Unknown iter_alg '{alg}'. Must be 'damping', 'DIIS' or 'GCR'.")
-    mixing = float(iter_alg.get("mixing", 1.0))
-    if alg == "GCR" and mixing != 1.0:
+    iter_alg = dict(iter_alg or {})
+    for key, cast in (("alg", str), ("mixing", float), ("max_subsp_size", int),
+                      ("diis_warmup", int)):
+        if key in iter_alg:
+            iter_alg[key] = cast(iter_alg[key])
+    if iter_alg.get("alg") == "GCR" and iter_alg.get("mixing", 1.0) != 1.0:
         warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
-    # GCR: 0 lets lr_setup pick the capacity from the kernel.
-    max_subsp_size = int(iter_alg.get("max_subsp_size", 0 if alg == "GCR" else 10))
-    diis_warmup = int(iter_alg.get("diis_warmup", 0))
 
     if MPI.COMM_WORLD.Get_rank() == 0:
         if (DeltaX_left is None) != (DeltaX_right is None):
@@ -639,8 +630,16 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         dx_right = None
         dv_qPQ = None
 
-    # The C++ run_lr_calc reads its non-positional options off the params dict.
+    # The C++ run_lr_calc reads every option off the params dict; only the
+    # arrays are passed positionally.
     lr_params = dict(params)
+    lr_params["include_hartree"] = bool(include_hartree)
+    lr_params["include_exchange"] = bool(include_exchange)
+    lr_params["gw_mode"] = str(gw_mode)
+    lr_params["max_iter"] = int(max_iter)
+    lr_params["tol"] = float(tol)
+    lr_params["fix_density"] = bool(fix_density)
+    lr_params["iter_alg"] = iter_alg
     # Optional explicit path to the screened-interaction (W) HDF5 file. When
     # omitted, C++ auto-derives it from the input checkpoint's directory.
     if screened_interaction_file is not None:
@@ -657,9 +656,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
     lr_params["lr_hessian"] = bool(hessian)
-    # Kernel ladder alias and the GCR preconditioner kernel. Read by C++
-    # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
-    # are overridden by "method" when it is given.
+    # Kernel ladder alias, which overrides include_hartree/include_exchange/
+    # gw_mode when given, and the GCR preconditioner kernel.
     if method is not None:
         lr_params["method"] = str(method)
     if not isinstance(precond_method, str):
@@ -668,11 +666,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     lr_params["precond_method"] = precond_method
 
     niter, delta_mu = run_lr_cpp(
-        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,
-        bool(include_hartree), bool(include_exchange), str(gw_mode),
-        int(max_iter), float(tol), bool(fix_density),
-        alg, mixing, max_subsp_size, diis_warmup,
-        dx_left, dx_right, dv_qPQ)
+        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ)
     if squeeze:
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu

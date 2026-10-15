@@ -155,7 +155,7 @@ namespace methods {
    * Write unified LR results to HDF5 checkpoint file.
    *
    * Always writes ΔG and ΔDm. Writes ΔF only if include_hartree || include_exchange.
-   * Writes ΔΣ only if include_gw_sigma.
+   * Writes ΔΣ, and include_gw_sigma = 1, only if sDeltaSigma_tskij is non-null.
    *
    * @param comm              - [INPUT] MPI communicator
    * @param filename          - [INPUT] HDF5 file path (e.g., "coqui.mbpt.h5")
@@ -168,28 +168,27 @@ namespace methods {
    * @param niter             - [INPUT] number of SCF iterations
    * @param include_hartree   - [INPUT] whether Hartree was included
    * @param include_exchange  - [INPUT] whether Exchange was included
-   * @param include_gw_sigma  - [INPUT] whether GW self-energy was included
    * @param sDeltaSigma2_tskij - [INPUT] optional G0·dW0 term for split-term
    *   one-shot G0W0 output. When non-null, sDeltaSigma_tskij holds the total ΔΣ
    *   and this holds the G0·dW0 piece, written as "DeltaSigma_GdW_tskij".
    *   Nullptr for the standard fused output.
-   * @param imode          - [INPUT] perturbation index. Unset (default) writes
-   *   "linear_response/" exactly as before; set writes
+   * @param imode          - [INPUT] perturbation index. Unset writes into
+   *   "linear_response/"; set writes
    *   "linear_response/mode{imode}/", for a run covering several perturbations.
-   * @param save_DeltaG    - [INPUT] write DeltaG_tskij (default true). ΔG is the
+   * @param save_DeltaG    - [INPUT] write DeltaG_tskij. ΔG is the
    *   single largest LR dataset, so a batched run that only needs ΔDm/ΔF can drop
    *   it. The one reader, python `coqui.mbpt.read_lr_results`, then returns None
    *   for it.
    * @param nbnd_save      - [INPUT] keep only the leading nbnd_save x nbnd_save
    *   band block of the imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
-   *   DeltaSigma_GdW_tskij); unset (default) writes them whole. Must be in
+   *   DeltaSigma_GdW_tskij); unset writes them whole. Must be in
    *   [0, nbnd]. Each trimmed dataset carries an "nbnd_save" HDF5 attribute —
    *   the only thing on disk that distinguishes a protected-band block from a
    *   full-basis array, so any reader must check for it. The one-time-slice
    *   arrays (DeltaDm_skij, DeltaF_skij, DeltaVcorr_skij) are never trimmed.
    * @param gw_mode        - [INPUT] GW self-energy mode of the kernel that was
-   *   applied ("none"/"fixed_W"/"full"), written whenever non-empty. It refines
-   *   include_gw_sigma, which cannot tell fixed_W from full.
+   *   applied ("none"/"fixed_W"/"full"). It refines include_gw_sigma, which
+   *   cannot tell fixed_W from full.
    * @param precond_method - [INPUT] static kernel that preconditioned GCR
    *   ("Hartree"/"HF"/"HSEX"), written as "precond_method" when non-empty. It
    *   changes the convergence rate only, not the result.
@@ -206,15 +205,14 @@ namespace methods {
                int niter,
                bool include_hartree,
                bool include_exchange,
-               bool include_gw_sigma,
-               Sigma_t const* sDeltaSigma2_tskij = nullptr,
-               F_t const* sDeltaVcorr_skij = nullptr,
-               std::optional<long> imode = std::nullopt,
-               bool save_DeltaG = true,
-               std::optional<long> nbnd_save = std::nullopt,
-               std::string const& gw_mode = "",
-               std::string const& precond_method = "",
-               std::optional<double> exchange_static_W_head = std::nullopt);
+               Sigma_t const* sDeltaSigma2_tskij,
+               F_t const* sDeltaVcorr_skij,
+               std::optional<long> imode,
+               bool save_DeltaG,
+               std::optional<long> nbnd_save,
+               std::string const& gw_mode,
+               std::string const& precond_method,
+               std::optional<double> exchange_static_W_head);
 
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint

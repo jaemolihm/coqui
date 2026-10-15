@@ -45,15 +45,6 @@ namespace methods {
 class thc_reader_t;
 
 /**
- * GW self-energy update mode for the LR SCF loop.
- *
- * none:    ΔΣ_GW = 0
- * fixed_W: ΔΣ = -ΔG ⊙ W,  ΔW = 0
- * full:    ΔΣ = -ΔG ⊙ W - G ⊙ ΔW,  ΔW = (Z+W_c) · ΔΠ · (Z+W_c)
- */
-enum class lr_gw_update_mode { none, fixed_W, full };
-
-/**
  * The kernel components K = δ(ΔF + ΔΣ)/δΔG applied by the LR SCF loop.
  *
  * The named methods form a nested ladder
@@ -69,7 +60,9 @@ struct lr_kernel_spec {
   bool sigma_dG_W = false;   // Σ1 = -ΔG ⊙ W_c, label "dGW"
   bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW,  label "GdW"
 
+  bool has_F() const { return hartree || exchange; }
   bool has_sigma() const { return sigma_dG_W || sigma_G_dW; }
+  bool empty() const { return !has_F() && !has_sigma(); }
 
   /// Component list for logging, e.g. "H, X, dGW" ("-" when empty).
   std::string to_string() const;
@@ -122,12 +115,11 @@ struct lr_params {
   using sArray_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
 
   // --- Active terms ---
-  bool include_hartree = false;   ///< ΔJ in the SCF loop
-  bool include_exchange = false;  ///< ΔK in the SCF loop
-  lr_gw_update_mode gw_mode = lr_gw_update_mode::none;
+  /// The operator's kernel K_total, applied every iteration.
+  lr_kernel_spec kernel{};
   /// LR-DFT: add the semilocal xc kernel to the direct channel, i.e. use
-  /// (V + Vxc)(q) in ΔJ. Requires include_hartree and a THC carrying Vxc;
-  /// rejected together with include_exchange.
+  /// (V + Vxc)(q) in ΔJ. Requires kernel.hartree and a THC carrying Vxc;
+  /// rejected together with kernel.exchange.
   bool include_xc = false;
   /// HSEX: evaluate the exchange channel with the statically screened kernel
   /// V + W_c(iν=0) instead of the bare V, i.e.
@@ -135,7 +127,7 @@ struct lr_params {
   /// A kernel substitution inside the existing exchange path, not a new
   /// self-energy channel: no τ axis, no ΔΣ buffer, one aux<->primary transform
   /// pair per iteration exactly as bare-exchange LR-HF has. Requires
-  /// include_exchange and a W_c on the ω axis handed to lr_setup.
+  /// kernel.exchange and a W_c on the ω axis handed to lr_setup.
   ///
   /// A flag on the exchange channel rather than a component of lr_kernel_spec:
   /// X_sex is not on the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder.
@@ -161,13 +153,15 @@ struct lr_params {
   /// Σ-free kernel K_pc whose resolvent z = (I - K_pc Pχ)⁻¹ r preconditions GCR
   /// on the full equation; empty = no preconditioner. Changes the convergence
   /// rate, not the answer. Requires iter_params.alg == "GCR" and a Σ kernel.
+  /// K_pc never takes the static inputs (ΔV_qPQ, Dm_ab, include_xc) or the IBC
+  /// correction: it must be linear in the residual.
   lr_kernel_spec precond_kernel{};
   /// K_pc's exchange contracts V + W_c(iν=0) (HSEX), as exchange_static_W does
   /// for the operator.
   bool precond_hsex = false;
 
   // --- Screened interaction ---
-  /// Inverse dielectric head on the τ axis; required when gw_mode != none.
+  /// Inverse dielectric head on the τ axis; required when the kernel has a Σ.
   const nda::array<ComplexType, 1>* eps_inv_head = nullptr;
   /// The same head (ε⁻¹ - 1) on the ω axis, q→0 extrapolated. Required when
   /// exchange_static_W, which reads its ν = 0 component. Supplied on the ω axis
@@ -188,7 +182,8 @@ struct lr_params {
   const lr_qp_static_params* qp_static = nullptr;
 
   // --- Output selection ---
-  /// Store the two ΔΣ terms separately instead of fusing them (one-shot G0W0).
+  /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
+  /// G0W0).
   bool split_sigma_terms = false;
   /// Gather the unperturbed V_HF in the aux basis during the IBC build.
   bool keep_F_PQ = false;
@@ -201,73 +196,8 @@ struct lr_params {
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
 
-  /// The kernel the active-term flags name.
-  lr_kernel_spec total_kernel() const {
-    return lr_kernel_spec{include_hartree, include_exchange,
-                          gw_mode != lr_gw_update_mode::none,
-                          gw_mode == lr_gw_update_mode::full};
-  }
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
-  bool use_diis() const { return iter_params.use_diis(); }
-  double mixing() const { return iter_params.mixing; }
   bool hessian() const { return hessian_nmodes > 0; }
-};
-
-/**
- * One kernel the driver evaluates — the operator's or the preconditioner's —
- * fully described, resolved once by make_kernels().
- *
- * The three layers in this header:
- *   lr_kernel_spec  - WHICH components (Hartree, exchange, the two Σ terms) a
- *                     kernel contains. A component mask, nothing more.
- *   lr_kernel       - one kernel, ready to evaluate: its terms, the inputs it
- *                     owns, and the lr_hf/lr_gw instances to drive.
- *   lr_kernels - the operator kernel and the preconditioner kernel.
- *
- * This is what makes apply_kernel agnostic about which of the two it is handed.
- */
-struct lr_kernel {
-  /// The components this kernel evaluates: which of Hartree, exchange,
-  /// Σ1 = -ΔG⊙W and Σ2 = -G⊙ΔW.
-  lr_kernel_spec terms{};
-
-  /// The exchange contracts V + W_c(iν=0) instead of V (HSEX). See
-  /// lr_params::exchange_static_W.
-  bool exchange_static_W = false;
-  /// Forward the static inputs (ΔV_qPQ, the unperturbed Dm, include_xc) and the
-  /// DeltaX IBC correction. The operator owns those; the preconditioner must be
-  /// linear in the residual, so it never takes them.
-  bool static_inputs = false;
-  /// Write ΔΣ term 2 to its own array as well as into the total. A one-shot G0W0
-  /// feature of the operator.
-  bool split_sigma_terms = false;
-  /// Non-null: this kernel's dynamic ΔΣ(iω) is statified into the static
-  /// ΔV_QPGW(k), which enters the Dyson RHS in its place and is the quantity
-  /// mixed and tracked (LR-qpGW). Operator only.
-  const lr_qp_static_params* qp = nullptr;
-
-  solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
-  solvers::lr_gw* gw = nullptr;
-
-  /// This kernel evaluates ΔF at all.
-  bool has_F() const { return terms.hartree || terms.exchange; }
-  /// This kernel evaluates ΔΣ at all.
-  bool has_Sigma() const { return terms.has_sigma(); }
-  /// LR-qpGW: this kernel's ΔΣ is statified into ΔV_QPGW (see `qp`).
-  bool is_qp() const { return qp != nullptr; }
-  bool is_empty() const { return !has_F() && !has_Sigma(); }
-};
-
-/**
- * The kernels a run evaluates: the operator's K_total, applied every iteration,
- * and the Σ-free preconditioner kernel K_pc, empty unless GCR is preconditioned.
- * Built from lr_params alone by make_kernels, once, in lr_setup.
- */
-struct lr_kernels {
-  lr_kernel op{}, pc{};
-
-  /// Σ2 = -G⊙ΔW, hence the ΔW Dyson.
-  bool needs_dW()    const { return op.terms.sigma_G_dW; }
 };
 
 /**
@@ -321,7 +251,7 @@ public:
    * calls independent of each other.
    *
    * The solvers and buffers built here are shaped by `p` — which solvers exist
-   * (gw_mode, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
+   * (kernel, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
    * capacity — so every lr_solve_one must be handed the same `p`. `dW_wqPQ_in` is
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
@@ -476,14 +406,12 @@ private:
                   std::optional<dArr_4D_t>& opt_dW_tRPQ);
 
   /**
-   * Apply one whole kernel — the operator's or the preconditioner's — to the
-   * supplied ΔDm / ΔG.
+   * Apply one whole kernel — the operator's p.kernel or the preconditioner's
+   * p.precond_kernel — to the supplied ΔDm / ΔG. Both branches are optional — a
+   * kernel carrying only ΔF does no Σ work, and vice versa.
    *
-   * `kernel` says which components, which evaluators and which inputs, so both
-   * kernels are the same code with different data. Both branches are optional —
-   * a kernel carrying only ΔF does no Σ work, and vice versa.
-   *
-   * @param kernel          - [INPUT]  _kernels.op or _kernels.pc
+   * @param precond         - [INPUT]  apply K_pc (on _lr_hf_pc, without the
+   *                                   static inputs) instead of the operator
    * @param sDeltaF_out     - [OUTPUT] this kernel's ΔF, OVERWRITTEN (not
    *                                   accumulated). Untouched when the kernel
    *                                   carries no ΔF.
@@ -493,9 +421,9 @@ private:
    * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
    * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
    * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
-   *                                   kernel.split_sigma_terms
+   *                                   p.split_sigma_terms
    */
-  void apply_kernel(lr_kernel const& kernel,
+  void apply_kernel(bool precond,
                     sArray_t<Array_view_4D_t>& sDeltaF_out,
                     sArray_t<Array_view_5D_t>* pDeltaSigma_out,
                     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
@@ -506,7 +434,7 @@ private:
                     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
 
   /**
-   * The GW self-energy branch of apply_kernel: ΔΠ -> ΔW -> ΔΣ,
+   * The GW self-energy branch of apply_kernel, operator only: ΔΠ -> ΔW -> ΔΣ,
    * into `sSigma_tskij_out`, overwriting it. Each divergence correction is applied
    * by the evaluator that owns the term it corrects, so passing the overlap and
    * the heads is all this has to do.
@@ -515,8 +443,7 @@ private:
    * concept: the static ΔF branch is one lr_hf::evaluate call with none of this
    * pipeline behind it.
    */
-  void apply_kernel_gw(lr_kernel const& kernel,
-                       sArray_t<Array_view_5D_t>& sSigma_tskij_out,
+  void apply_kernel_gw(sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                        const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
                        const sArray_t<Array_view_5D_t>& sG_tskij,
                        thc_reader_t& thc,
@@ -615,9 +542,6 @@ private:
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;
   lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
-
-  /// The kernels, built once by lr_setup; they hold the evaluator instances above.
-  lr_kernels _kernels;
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from

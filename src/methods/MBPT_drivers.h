@@ -195,13 +195,7 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij_root - [INPUT] Perturbations (nmodes, ns, nk, nb, nb) on the
  *                            MPI global root; std::nullopt on every other rank.
- * @param include_hartree  - [INPUT] Include ΔJ in SCF loop
- * @param include_exchange - [INPUT] Include ΔK in SCF loop
- * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full)
- * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
- * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
- * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
- * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
+ * Every other option is read from `pt`; the key list is on the definition in MBPT_drivers.cpp.
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
 template<typename eri_t>
@@ -209,13 +203,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                         run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-                                     bool include_hartree,
-                                     bool include_exchange,
-                                     lr_gw_update_mode gw_mode,
-                                     int max_iter,
-                                     double tol,
-                                     bool fix_density,
-                                     const lr_iter_params& iter_params,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);

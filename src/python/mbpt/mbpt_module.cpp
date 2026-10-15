@@ -40,23 +40,14 @@ namespace coqui_py {
    *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence,
    * and writes results to the "linear_response" group of the output checkpoint.
    *
-   * @param lr_params         - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, ...)
+   * @param lr_params         - [INPUT] JSON string with every option (prefix, output,
+   *                            kernel, SCF control, ...); see methods::run_lr_calc
    * @param h_int             - [INPUT] THC ERI handler
    * @param q_vec             - [INPUT] Perturbation wavevector in crystal coords (3,)
    * @param DeltaH0_mskij     - [INPUT] Perturbations (nmodes, ns, nk, nb, nb);
    *                            required on the MPI global root, None elsewhere.
    *                            All share the one q_vec; each is written to its
    *                            own "linear_response/mode{m}" group when nmodes > 1.
-   * @param include_hartree   - [INPUT] Include ΔJ in SCF loop
-   * @param include_exchange  - [INPUT] Include ΔK in SCF loop
-   * @param gw_mode           - [INPUT] GW mode: "none", "fixed_W", or "full"
-   * @param max_iter          - [INPUT] Maximum SCF iterations (1 = one-shot)
-   * @param tol               - [INPUT] Convergence tolerance
-   * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
-   * @param iter_alg          - [INPUT] Iteration algorithm: "damping", "DIIS" or "GCR"
-   * @param mixing            - [INPUT] Damping/mixing parameter
-   * @param max_subsp_size    - [INPUT] DIIS subspace size
-   * @param diis_warmup       - [INPUT] DIIS warmup iterations
    * @param DeltaX_left       - [INPUT] Optional δ^q X collocation perturbation (root only)
    * @param DeltaX_right      - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
    * @param DeltaV_qPQ        - [INPUT] Optional THC Coulomb perturbation δV (root only)
@@ -67,41 +58,12 @@ namespace coqui_py {
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_vec,
       std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
-      bool include_hartree,
-      bool include_exchange,
-      std::string gw_mode_str,
-      int max_iter,
-      double tol,
-      bool fix_density,
-      std::string iter_alg,
-      double mixing,
-      int max_subsp_size,
-      int diis_warmup,
       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
       std::optional<nda::array<ComplexType, 4>> DeltaX_right,
       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    methods::lr_iter_params iter_params;
-    iter_params.alg = iter_alg;
-    iter_params.mixing = mixing;
-    iter_params.max_subsp_size = static_cast<size_t>(max_subsp_size);
-    iter_params.diis_warmup = static_cast<size_t>(diis_warmup);
-
-    methods::lr_gw_update_mode gw_mode;
-    if (gw_mode_str == "none") {
-      gw_mode = methods::lr_gw_update_mode::none;
-    } else if (gw_mode_str == "fixed_W") {
-      gw_mode = methods::lr_gw_update_mode::fixed_W;
-    } else if (gw_mode_str == "full") {
-      gw_mode = methods::lr_gw_update_mode::full;
-    } else {
-      throw std::invalid_argument("run_lr: gw_mode must be 'none', 'fixed_W', or 'full', got '" + gw_mode_str + "'");
-    }
-
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
-                                include_hartree, include_exchange, gw_mode,
-                                max_iter, tol, fix_density, iter_params,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ);
   }
 

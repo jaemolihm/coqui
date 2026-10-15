@@ -310,21 +310,13 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
        const nda::array<double, 1> &q_vec,
        std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
-       bool include_hartree, bool include_exchange, std::string gw_mode_str,
-       int max_iter, double tol, bool fix_density, std::string iter_alg,
-       double mixing, int max_subsp_size, int diis_warmup,
        std::optional<nda::array<ComplexType, 4>> DeltaX_left,
        std::optional<nda::array<ComplexType, 4>> DeltaX_right,
        std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
-                              include_hartree, include_exchange, gw_mode_str,
-                              max_iter, tol, fix_density, iter_alg, mixing,
-                              max_subsp_size, diis_warmup, DeltaX_left,
-                              DeltaX_right, DeltaV_qPQ);
+                              DeltaX_left, DeltaX_right, DeltaV_qPQ);
     },
-    "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "include_hartree",
-    "include_exchange", "gw_mode_str", "max_iter", "tol", "fix_density",
-    "iter_alg", "mixing", "max_subsp_size", "diis_warmup", "DeltaX_left",
+    "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ")};
 
 // lr_DeltaH0_from_thc_aux
@@ -716,7 +708,8 @@ and writes results to the "linear_response" group of the output checkpoint.
 Parameters
 ----------
 lr_params : {par_0}
-   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, ...)
+   - [INPUT] JSON string with every option (prefix, output,
+                              kernel, SCF control, ...); see methods::run_lr_calc
 h_int : {par_1}
    - [INPUT] THC ERI handler
 q_vec : {par_2}
@@ -726,31 +719,11 @@ DeltaH0_mskij : {par_3}
                               required on the MPI global root, None elsewhere.
                               All share the one q_vec; each is written to its
                               own "linear_response/mode{m}" group when nmodes > 1.
-include_hartree : {par_4}
-   - [INPUT] Include ΔJ in SCF loop
-include_exchange : {par_5}
-   - [INPUT] Include ΔK in SCF loop
-gw_mode : {par_6}
-   - [INPUT] GW mode: "none", "fixed_W", or "full"
-max_iter : {par_7}
-   - [INPUT] Maximum SCF iterations (1 = one-shot)
-tol : {par_8}
-   - [INPUT] Convergence tolerance
-fix_density : {par_9}
-   - [INPUT] If true, compute Δμ to enforce ΔN=0
-iter_alg : {par_10}
-   - [INPUT] Iteration algorithm: "damping", "DIIS" or "GCR"
-mixing : {par_11}
-   - [INPUT] Damping/mixing parameter
-max_subsp_size : {par_12}
-   - [INPUT] DIIS subspace size
-diis_warmup : {par_13}
-   - [INPUT] DIIS warmup iterations
-DeltaX_left : {par_14}
+DeltaX_left : {par_4}
    - [INPUT] Optional δ^q X collocation perturbation (root only)
-DeltaX_right : {par_15}
+DeltaX_right : {par_5}
    - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
-DeltaV_qPQ : {par_16}
+DeltaV_qPQ : {par_6}
    - [INPUT] Optional THC Coulomb perturbation δV (root only)
 
 Returns
@@ -762,16 +735,6 @@ Returns
      {c2py::python_typename<coqui_py::ThcCoulomb &>()},
      {c2py::python_typename<const nda::array<double, 1> &>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
-     {c2py::python_typename<bool>()},
-     {c2py::python_typename<bool>()},
-     {},
-     {c2py::python_typename<int>()},
-     {c2py::python_typename<double>()},
-     {c2py::python_typename<bool>()},
-     {c2py::python_typename<std::string>()},
-     {c2py::python_typename<double>()},
-     {c2py::python_typename<int>()},
-     {c2py::python_typename<int>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
