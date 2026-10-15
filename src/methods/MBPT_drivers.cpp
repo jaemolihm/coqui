@@ -1359,22 +1359,23 @@ auto recompute_W_and_eps_inv_head(
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
- * @param include_hartree  - [INPUT] Include ΔJ in SCF loop; overridden by the
- *                             "method" key when that is given
- * @param include_exchange - [INPUT] Include ΔK in SCF loop; likewise
- * @param gw_mode          - [INPUT] GW self-energy mode (none/fixed_W/full); likewise
- * @param max_iter         - [INPUT] Maximum SCF iterations (1 = one-shot)
- * @param tol              - [INPUT] Convergence tolerance for ||ΔDm_new - ΔDm_old||
- * @param fix_density      - [INPUT] If true, compute Δμ to enforce ΔN=0
- * @param iter_params      - [INPUT] Iteration algorithm parameters (damping/DIIS)
  *
- * Kernel-selection keys read from `pt`:
+ * Kernel and SCF keys read from `pt`:
+ *   include_hartree        ΔJ in the SCF loop (default true)
+ *   include_exchange       ΔK in the SCF loop (default true)
+ *   gw_mode                GW self-energy: "none" (default), "fixed_W"
+ *                          (ΔΣ = -ΔG⊙W) or "full" (ΔΣ = -ΔG⊙W - G⊙ΔW)
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
- *                          that expands to include_hartree/include_exchange/gw_mode,
- *                          or "HSEX".
+ *                          that overrides the three keys above, or "HSEX".
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the GCR preconditioner. Requires
  *                          iter_alg GCR and a Σ kernel; changes the rate only.
+ *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
+ *                          (default 1e-8)
+ *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
+ *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
+ *                          "DIIS" (default), "damping" or "GCR"; mixing 1.0;
+ *                          subspace 10 (GCR: 0 = chosen by lr_setup); warmup 0
  *
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
@@ -1383,13 +1384,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                         run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-                                     bool include_hartree,
-                                     bool include_exchange,
-                                     lr_gw_update_mode gw_mode,
-                                     int max_iter,
-                                     double tol,
-                                     bool fix_density,
-                                     const lr_iter_params& iter_params,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root) {
@@ -1420,34 +1414,38 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                "run_lr_calc: unperturbed must be 'checkpoint' or 'mf_dft', got '{}'", unperturbed);
   // One-shot G0W0: store the two ΔΣ terms (dG0·W0, G0·dW0) separately.
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
+  auto max_iter = io::get_value_with_default<int>(pt, "max_iter", 50);
+  auto tol = io::get_value_with_default<double>(pt, "tol", 1e-8);
+  auto fix_density = io::get_value_with_default<bool>(pt, "fix_density", false);
+
+  lr_iter_params iter_params;
+  iter_params.alg = io::get_value_with_default<std::string>(pt, "iter_alg.alg", "DIIS");
+  utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS" ||
+               iter_params.alg == "GCR",
+               "run_lr_calc: unknown iter_alg '{}'. Must be 'damping', 'DIIS' or 'GCR'.",
+               iter_params.alg);
+  iter_params.mixing = io::get_value_with_default<double>(pt, "iter_alg.mixing", 1.0);
+  // GCR: 0 lets lr_setup pick the capacity from the kernel.
+  iter_params.max_subsp_size = static_cast<size_t>(io::get_value_with_default<long>(
+      pt, "iter_alg.max_subsp_size", iter_params.alg == "GCR" ? 0 : 10));
+  iter_params.diis_warmup = static_cast<size_t>(
+      io::get_value_with_default<long>(pt, "iter_alg.diis_warmup", 0));
 
   // Kernel-component ladder: none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW.
   //
-  // "method" is an alias that expands to the include_hartree / include_exchange
-  // / gw_mode triple; when given it defines them, so a caller never has to keep
-  // the triple and the method name in sync.
+  // "method" is an alias for a rung; when given it defines the kernel in place
+  // of the include_hartree / include_exchange / gw_mode triple, so a caller never
+  // has to keep the triple and the method name in sync.
   //
   // "precond_method" names a static kernel that only preconditions GCR: the
   // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
 
-  auto gw_mode_of = [](lr_kernel_spec const& s) {
-    return s.sigma_G_dW ? lr_gw_update_mode::full
-         : s.sigma_dG_W ? lr_gw_update_mode::fixed_W
-                        : lr_gw_update_mode::none;
-  };
-  auto spec_of_flags = [](bool h, bool x, lr_gw_update_mode m) {
-    return lr_kernel_spec{h, x, m != lr_gw_update_mode::none,
-                          m == lr_gw_update_mode::full};
-  };
-  // The spelling the Python layer accepts, so a checkpoint field can be fed
-  // straight back into a run.
-  auto gw_mode_str = [](lr_gw_update_mode m) -> std::string {
-    return m == lr_gw_update_mode::full    ? "full"
-         : m == lr_gw_update_mode::fixed_W ? "fixed_W"
-                                           : "none";
-  };
+  auto gw_mode = io::get_value_with_default<std::string>(pt, "gw_mode", "none");
+  utils::check(gw_mode == "none" || gw_mode == "fixed_W" || gw_mode == "full",
+               "run_lr_calc: gw_mode must be 'none', 'fixed_W', or 'full', got '{}'",
+               gw_mode);
 
   // "HSEX" expands to the HF mask plus lr_params::exchange_static_W (or
   // precond_hsex) rather than to a kernel_spec_from_method name; see that flag
@@ -1455,14 +1453,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   const bool exchange_static_W = (method == "HSEX");
   const bool precond_hsex = (precond_method == "HSEX");
   if (method == "HSEX") method = "HF";
-  if (!method.empty()) {
-    auto s = kernel_spec_from_method(method);
-    include_hartree = s.hartree;
-    include_exchange = s.exchange;
-    gw_mode = gw_mode_of(s);
-  }
-  const lr_kernel_spec total_kernel =
-      spec_of_flags(include_hartree, include_exchange, gw_mode);
+  const lr_kernel_spec total_kernel = !method.empty()
+      ? kernel_spec_from_method(method)
+      : lr_kernel_spec{io::get_value_with_default<bool>(pt, "include_hartree", true),
+                       io::get_value_with_default<bool>(pt, "include_exchange", true),
+                       gw_mode != "none", gw_mode == "full"};
 
   // LR-DFT: add the semilocal xc kernel to the direct channel, i.e. use
   // (V + Vxc)(q) in ΔJ. Deliberately an explicit opt-in rather than keyed off
@@ -1496,14 +1491,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     nbnd_save = io::get_value<long>(pt, "nbnd_save");
   }
   if (include_xc) {
-    utils::check(include_hartree,
+    utils::check(total_kernel.hartree,
                  "run_lr_calc: include_xc = true requires include_hartree = true.");
-    utils::check(!include_exchange,
+    utils::check(!total_kernel.exchange,
                  "run_lr_calc: include_xc = true is incompatible with "
                  "include_exchange = true. The semilocal xc kernel contracts with "
                  "the diagonal density response only; LR-DFT is include_hartree = "
                  "true, include_exchange = false.");
-    utils::check(gw_mode == lr_gw_update_mode::none,
+    utils::check(!total_kernel.has_sigma(),
                  "run_lr_calc: include_xc = true is incompatible with a GW self-energy "
                  "(gw_mode != none): f_xc and ΔΣ_GW both carry the correlation "
                  "response, so the two together double-count it. include_xc works only "
@@ -1521,7 +1516,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   if (qp_static_sigma) {
     utils::check(unperturbed == "checkpoint",
                  "run_lr_calc: qp_static_sigma requires unperturbed='checkpoint' (a qpGW checkpoint).");
-    utils::check(gw_mode != lr_gw_update_mode::none,
+    utils::check(total_kernel.has_sigma(),
                  "run_lr_calc: qp_static_sigma requires a GW self-energy (gw_mode != none).");
     utils::check(!split_sigma_terms,
                  "run_lr_calc: qp_static_sigma is incompatible with split_sigma_terms.");
@@ -1763,7 +1758,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // Split-term output (one-shot G0W0): array for the G0·dW0 piece; the total
   // ΔΣ (= dG0·W_c0 + G0·dW0) stays in sDeltaSigma_tskij.
   if (split_sigma_terms)
-    utils::check(include_gw_sigma && gw_mode == lr_gw_update_mode::full,
+    utils::check(total_kernel.sigma_G_dW,
                  "run_lr_calc: split_sigma_terms requires gw_mode='full'.");
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaSigma2;
   if (include_gw_sigma && split_sigma_terms) {
@@ -1937,9 +1932,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
   lr_params p;
-  p.include_hartree  = include_hartree;
-  p.include_exchange = include_exchange;
-  p.gw_mode          = gw_mode;
+  p.kernel           = total_kernel;
   p.include_xc       = include_xc;
   p.exchange_static_W  = exchange_static_W;
   p.max_iter         = max_iter;
@@ -2019,11 +2012,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
                    sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
                    Delta_mu, niter,
-                   total_kernel.hartree, total_kernel.exchange, include_gw_sigma,
+                   total_kernel.hartree, total_kernel.exchange,
                    pDeltaSigma2, pDeltaVcorr,
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
-                   gw_mode_str(gw_mode),
+                   total_kernel.sigma_G_dW ? "full"
+                       : total_kernel.sigma_dG_W ? "fixed_W" : "none",
                    precond_method != "none" ? precond_method : std::string(),
                    hsex_head);
     mpi->comm.barrier();
@@ -2145,7 +2139,6 @@ template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     ptree const&,
     nda::array<double, 1> const&,
     std::optional<nda::array<ComplexType, 5>> const&,
-    bool, bool, lr_gw_update_mode, int, double, bool, const lr_iter_params&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 3>> const&);

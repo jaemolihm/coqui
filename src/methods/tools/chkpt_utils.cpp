@@ -628,7 +628,6 @@ void dump_lr(communicator_t& comm,
              int niter,
              bool include_hartree,
              bool include_exchange,
-             bool include_gw_sigma,
              Sigma_t const* sDeltaSigma2_tskij,
              F_t const* sDeltaVcorr_skij,
              std::optional<long> imode,
@@ -679,9 +678,9 @@ void dump_lr(communicator_t& comm,
 
     h5::h5_write(lr_grp, "include_hartree", static_cast<int>(include_hartree));
     h5::h5_write(lr_grp, "include_exchange", static_cast<int>(include_exchange));
-    h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(include_gw_sigma));
+    h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(sDeltaSigma_tskij != nullptr));
     // Refines include_gw_sigma, which cannot distinguish fixed_W from full.
-    if (!gw_mode.empty()) h5::h5_write(lr_grp, "gw_mode", gw_mode);
+    h5::h5_write(lr_grp, "gw_mode", gw_mode);
     // HSEX: include_exchange alone cannot say which interaction ΔK contracted.
     // Additive, so a bare-exchange checkpoint keeps exactly the fields it had.
     if (exchange_static_W_head) {
@@ -693,11 +692,8 @@ void dump_lr(communicator_t& comm,
       auto DeltaF_loc = sDeltaF_skij.local();
       nda::h5_write(lr_grp, "DeltaF_skij", DeltaF_loc, false);
     }
-    if (include_gw_sigma) {
-      utils::check(sDeltaSigma_tskij != nullptr,
-                   "dump_lr: include_gw_sigma=true but sDeltaSigma_tskij is null.");
+    if (sDeltaSigma_tskij != nullptr)
       write_tskij("DeltaSigma_tskij", sDeltaSigma_tskij->local());
-    }
     // Split-term one-shot G0W0 output (opt-in): DeltaSigma_tskij above holds the
     // TOTAL correlation ΔΣ = dG0·W_c0 + G0·dW0 (same as the fused output); this
     // breaks out the G0·dW0 piece. So dG0·W_c0 = DeltaSigma_tskij - DeltaSigma_GdW,
@@ -828,7 +824,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_5D_t> const*,
-                      double, int, bool, bool, bool,
+                      double, int, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
