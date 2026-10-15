@@ -998,21 +998,22 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     // Step 5: Check convergence.
     if (iter_converged) {
-      // GCR converged: ΔF (and ΔΣ) now hold GCR's solution x, a combination of its
-      // basis, while the ΔDm above is that of this iteration's input. DIIS keeps
-      // that input's ΔDm, so it needs nothing here. Form ΔDm at x with the Step 1
-      // Dyson pass (with a Σ it also materializes ΔG(τ); otherwise update_DeltaG
-      // forms it on demand).
-      if (use_gcr) {
-        _Timer.start("LR_DYSON");
-        dyson_pass();
-        _Timer.stop("LR_DYSON");
-        _mpi->comm.barrier();
-      }
       converged = true;
       break;
     }
 
+    _mpi->comm.barrier();
+  }
+
+  // GCR exit, converged or at max_iter: ΔF (and ΔΣ) now hold GCR's latest iterate
+  // x, a combination of its basis, while ΔDm is that of the last iteration's input.
+  // DIIS keeps that input's ΔDm, so it needs nothing here. Form ΔDm at x with the
+  // Step 1 Dyson pass (with a Σ it also materializes ΔG(τ); otherwise update_DeltaG
+  // forms it on demand).
+  if (use_gcr && !k.op.is_empty()) {
+    _Timer.start("LR_DYSON");
+    dyson_pass();
+    _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
   }
 
