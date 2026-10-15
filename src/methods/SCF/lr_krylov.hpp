@@ -22,6 +22,7 @@
 #define COQUI_LR_KRYLOV_HPP
 
 #include <cmath>
+#include <functional>
 #include <tuple>
 #include <vector>
 
@@ -43,11 +44,13 @@ namespace methods {
  *
  *   A z = r − r(y) = w,
  *
- * exactly, with no homogeneous kernel: every constant in g (the IBC/δV terms, a
- * frozen perturbative source) cancels in the difference. (z, w) is
- * orthonormalized against the stored pairs (CGS2, real inner product) and
- * stored, and x, r take the minimum-residual update along it. The next probe is
- * x + r (no preconditioner), or x itself once ‖r‖ ≤ tol.
+ * exactly, with no homogeneous kernel: every constant in g (the IBC/δV terms)
+ * cancels in the difference. (z, w) is orthonormalized against the stored pairs
+ * (CGS2, real inner product) and stored, and x, r take the minimum-residual
+ * update along it. The next probe is x + M⁻¹r with an optional preconditioner
+ * M⁻¹ (x + r without one), or x itself once ‖r‖ ≤ tol. Since w is formed from
+ * the probe actually taken, M⁻¹ may change from step to step (an inexact inner
+ * solve): this is flexible GCR, and M⁻¹ affects the rate only.
  *
  * Stagnation. With z = r the step reduces ‖r‖ by the factor √(1 − η²), with
  * η = |⟨w⊥, r⟩| / (‖w⊥‖ ‖r‖) and w⊥ the orthogonalized image. Since r ⟂ W,
@@ -63,16 +66,16 @@ namespace methods {
  * breakdown. No progress for stag_steps steps (‖r‖ above stag_ratio of its
  * last marked value) raises stagnated() for one step, for the caller to warn.
  *
- * Only b changes between the stages of a split-kernel solve, so the stored
+ * For a sequence of right-hand sides of one operator A, the stored
  * (z_i, w_i = A z_i) stay valid: reset_rhs() keeps them, and the first probe of
  * the new right-hand side is projected onto them (a Galerkin minimum-residual
- * start over the recycled space). reset() drops them, for a new perturbation.
- * At capacity the oldest pair is evicted.
+ * start over the recycled space). reset() drops them, for a new operator or
+ * perturbation. At capacity the oldest pair is evicted.
  *
- * The iterate is the self-consistent channel's (ΔF, ΔΣ(τ)), ΔΣ empty for a
- * Σ-free kernel; every vector here is this rank's slice of the concatenation
- * [ΔF; ΔΣ]. The inner product is Re Σ conj(a) b over it, unweighted, the same
- * combined product lr_diis's B-matrix uses: with fix_density at q = Γ the map is
+ * The iterate is (ΔF, ΔΣ(τ)), ΔΣ empty for a Σ-free kernel; every vector here
+ * is this rank's slice of the concatenation [ΔF; ΔΣ]. The inner product is
+ * Re Σ conj(a) b over it, unweighted, the same combined product lr_diis's
+ * B-matrix uses: with fix_density at q = Γ the map is
  * ℝ-linear only, and the real inner product is what keeps GCR exact there.
  * The map must be affine for w = A z and the recycled pairs to hold, which rules
  * out the qpGW statification (its Padé continuation is not additive in ΔΣ).
@@ -141,20 +144,23 @@ public:
    * vector [F; S], and every inner product is Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *
    * @param F_inout   - [IN/OUT] the full ΔF (pass .local()); g(y) on entry, and
-   *                            this rank's slice of the next probe (x + r, or a
-   *                            kick), or of x once converged, on exit
+   *                            this rank's slice of the next probe (x + r,
+   *                            x + M⁻¹r, or a kick), or of x once converged, on exit
    * @param F_probe   - [INPUT]  this rank's slice of the ΔF probe y g was applied to
    * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
    * @param S_probe   - [INPUT]  this rank's slice of the ΔΣ probe
    * @param tol       - [INPUT]  convergence threshold on ‖r‖ of the concatenation
    * @param converged - [OUTPUT] ‖r‖ ≤ tol
+   * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
+   *                            concatenation; collective. Null: z = r
    * @return ‖r‖ after the step
    */
   template<typename Comm, typename FView, typename FProbe, typename SView, typename SProbe>
   double step(Comm& comm, utils::part_map const& pmap,
               FView F_inout, FProbe const& F_probe,
               SView S_inout, SProbe const& S_probe,
-              double tol, bool& converged) {
+              double tol, bool& converged,
+              std::function<void(Vec1D const&, Vec1D&)> const* precond = nullptr) {
     const long nF = F_inout.size();
     auto [f0, f1] = pmap.my_slice(nF);
     auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
@@ -288,6 +294,11 @@ public:
       // Next probe x + ‖r‖ w_new, along the newest stored image
       ++_kicks;
       _y() = _x + rn * _W[slot(_n - 1)];
+    } else if (precond) {
+      // Next probe x + M⁻¹ r
+      if (_z.size() != n) _z = Vec1D(n);
+      (*precond)(_r, _z);
+      _y() = _x + _z;
     } else {
       // Next probe x + r
       _y() = _x + _r;
@@ -315,8 +326,8 @@ private:
   std::vector<Vec1D> _Z, _W;   // this rank's slices of z_i and w_i = A z_i
   Vec1D _x, _r;
   // Per-step scratch, kept across calls: g(y), then r(y), then w; y, then z,
-  // then the next probe.
-  Vec1D _g, _y;
+  // then the next probe; the preconditioned residual M⁻¹ r.
+  Vec1D _g, _y, _z;
 
   size_t slot(size_t i) const { return (_head + i) % _Z.size(); }
 

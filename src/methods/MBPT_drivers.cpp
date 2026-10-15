@@ -1376,13 +1376,11 @@ auto recompute_W_and_eps_inv_head(
  *
  * Kernel-selection keys read from `pt`:
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
- *                          that expands to include_hartree/include_exchange/gw_mode.
- *                          Names the TOTAL kernel, for two-step runs as well.
- *   lr_two_step            enable the split-kernel schedule (default false)
- *   two_step_inner_method  method whose kernel is resummed self-consistently; the
- *                          perturbative kernel is the total minus this one.
- *                          Σ-free: none, Hartree, HF or HSEX.
- *   two_step_order         truncation order n of the K_pert expansion (default 1)
+ *                          that expands to include_hartree/include_exchange/gw_mode,
+ *                          or "HSEX".
+ *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
+ *                          "none") used only as the GCR preconditioner. Requires
+ *                          iter_alg GCR and a Σ kernel; changes the rate only.
  *
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
@@ -1435,37 +1433,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // / gw_mode triple; when given it defines them, so a caller never has to keep
   // the triple and the method name in sync.
   //
-  // "lr_two_step" splits the kernel into a part resummed by the SCF loop
-  // (two_step_inner_method) and a remainder applied `two_step_order` times
-  //   K_pert = kernel(method) \ kernel(two_step_inner_method).
-  // "method" is the TOTAL kernel here too. The inner kernel is static, so the
-  // remainder always contains the whole Σ; it has no name on the ladder and can
-  // only be expressed as a difference.
+  // "precond_method" names a static kernel that only preconditions GCR: the
+  // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
-  auto lr_two_step = io::get_value_with_default<bool>(pt, "lr_two_step", false);
-  auto two_step_inner_method =
-      io::get_value_with_default<std::string>(pt, "two_step_inner_method", "");
-  auto two_step_order = io::get_value_with_default<long>(pt, "two_step_order", 1);
-
-  // Acceleration of the OUTER (perturbative-source) iteration. The outer
-  // sequence is a Picard iteration on an affine map, so the same accelerator
-  // the inner SCF uses applies to it — as a second, fully independent instance.
-  // Defaults reproduce the plain Neumann series exactly.
-  auto two_step_outer_alg =
-      io::get_value_with_default<std::string>(pt, "two_step_outer_alg", "damping");
-  auto two_step_outer_mixing =
-      io::get_value_with_default<double>(pt, "two_step_outer_mixing", 1.0);
-  auto two_step_outer_subsp =
-      io::get_value_with_default<long>(pt, "two_step_outer_subsp", 3);
-  auto two_step_outer_warmup =
-      io::get_value_with_default<long>(pt, "two_step_outer_warmup", 0);
-  auto two_step_outer_tol =
-      io::get_value_with_default<double>(pt, "two_step_outer_tol", 0.0);
-  // History vectors required before the outer DIIS extrapolates. 2 puts the
-  // first extrapolation at the second outer step, which on a short sequence
-  // saves a whole expensive kernel evaluation.
-  auto two_step_outer_min_subsp =
-      io::get_value_with_default<long>(pt, "two_step_outer_min_subsp", 2);
+  auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
 
   auto gw_mode_of = [](lr_kernel_spec const& s) {
     return s.sigma_G_dW ? lr_gw_update_mode::full
@@ -1484,21 +1455,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                            : "none";
   };
 
-  // "HSEX" expands to the HF mask plus lr_params::exchange_static_W rather than
-  // to a kernel_spec_from_method name; see that flag for why it cannot be a
-  // mask component. It may name the TOTAL kernel (a standalone run) or the
-  // self-consistent half of a split one, but not both — the counter-term that
-  // makes a split sum back to bare exchange is defined against a
-  // self-consistent screened exchange.
-  bool exchange_static_W = (method == "HSEX") || (two_step_inner_method == "HSEX");
-  utils::check(!lr_two_step || method != "HSEX",
-               "run_lr_calc: with lr_two_step, HSEX must be the "
-               "two_step_inner_method (the kernel that is resummed), not the "
-               "total 'method'.");
-  // The spelling is kept for the checkpoint, since the mask cannot carry it.
-  const std::string two_step_inner_method_in = two_step_inner_method;
+  // "HSEX" expands to the HF mask plus lr_params::exchange_static_W (or
+  // precond_hsex) rather than to a kernel_spec_from_method name; see that flag
+  // for why it cannot be a mask component.
+  const bool exchange_static_W = (method == "HSEX");
+  const bool precond_hsex = (precond_method == "HSEX");
   if (method == "HSEX") method = "HF";
-  if (two_step_inner_method == "HSEX") two_step_inner_method = "HF";
   if (!method.empty()) {
     auto s = kernel_spec_from_method(method);
     include_hartree = s.hartree;
@@ -1526,11 +1488,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // striped ω stores, and it adds the top-level linear_response/hessian* datasets
   // to the checkpoint. Off by default, so the default output is unchanged.
   auto hessian = io::get_value_with_default<bool>(pt, "lr_hessian", false);
-  // Checked before the include_xc validation below, so that a split-kernel run
-  // is rejected for being a split-kernel run rather than for whichever
-  // include_xc precondition the bed happens to violate first.
-  utils::check(!(lr_two_step && include_xc),
-               "run_lr_calc: lr_two_step is incompatible with include_xc.");
 
   // LR output volume. Defaults reproduce the previous checkpoint byte for byte.
   //   save_DeltaG — write DeltaG_tskij at all. It is the biggest LR dataset and
@@ -1577,9 +1534,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     recompute_W = true;  // W0 = RPA[G_QP]
   }
 
-  // Scope of the stationary hessian estimator: the plain single- or split-kernel
-  // bare-vertex path. Both exclusions are places where its algebra stops holding
-  // rather than places it merely has not been tested.
+  // Scope of the stationary hessian estimator: the bare-vertex path. Both
+  // exclusions are places where its algebra stops holding rather than places it
+  // merely has not been tested.
   if (hessian) {
     // IBC / δX / δV: the left vertex handed to the hessian contraction is then
     // not the ΔH0 that drives the equation, so the functional is no longer the
@@ -1604,93 +1561,33 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "statification, so the functional's raw-ΔΣ algebra does not hold.");
   }
 
-  // Split-kernel schedule: build and validate the two component masks.
-  lr_kernel_spec sc_kernel = total_kernel;
-  lr_kernel_spec pert_kernel;
-  int pert_order = 0;
-  if (lr_two_step) {
-    utils::check(!two_step_inner_method.empty(),
-                 "run_lr_calc: lr_two_step = true requires 'two_step_inner_method'.");
-    sc_kernel = kernel_spec_from_method(two_step_inner_method);
-    utils::check(!(sc_kernel == total_kernel),
-                 "run_lr_calc: two_step_inner_method = '{}' names the whole "
-                 "active kernel ({}), so lr_two_step is a no-op. Drop "
-                 "lr_two_step, or name a smaller self-consistent kernel.",
-                 two_step_inner_method, total_kernel.to_string());
-    pert_kernel = kernel_diff(total_kernel, sc_kernel);
-    utils::check(!sc_kernel.has_sigma(),
-                 "run_lr_calc: two_step_inner_method = '{}' carries a self-energy ({}). "
-                 "The self-consistent kernel of a split run must be static (none, Hartree, "
-                 "HF or HSEX); Σ belongs in K_pert.",
-                 two_step_inner_method_in, sc_kernel.to_string());
-    utils::check(two_step_order >= 0,
-                 "run_lr_calc: two_step_order must be >= 0, got {}.", two_step_order);
-    utils::check(!split_sigma_terms,
-                 "run_lr_calc: lr_two_step is incompatible with split_sigma_terms.");
+  // GCR preconditioner: a static kernel, applied only to map the residual to the
+  // next search direction. All its preconditions are checked here, before the
+  // ERI and W are loaded.
+  lr_kernel_spec precond_kernel;
+  utils::check(precond_method == "none" || precond_method == "Hartree" ||
+               precond_method == "HF" || precond_method == "HSEX",
+               "run_lr_calc: unknown precond_method '{}'. Must be one of 'none', "
+               "'Hartree', 'HF', 'HSEX'.", precond_method);
+  if (precond_method != "none") {
+    precond_kernel = kernel_spec_from_method(precond_hsex ? "HF" : precond_method);
+    utils::check(total_kernel.has_sigma(),
+                 "run_lr_calc: precond_method = '{}' requires a kernel with a "
+                 "self-energy; method ({}) is already static, so run it directly.",
+                 precond_method, total_kernel.to_string());
+    utils::check(iter_params.alg == "GCR",
+                 "run_lr_calc: precond_method = '{}' requires iter_alg 'GCR', got '{}'.",
+                 precond_method, iter_params.alg);
+    // A one-shot run returns GCR's first probe x + M⁻¹r, whose ΔF and ΔΣ are not
+    // one kernel evaluation of the returned ΔDm/ΔG.
+    utils::check(max_iter > 1,
+                 "run_lr_calc: precond_method = '{}' requires max_iter > 1: a one-shot "
+                 "run would return the preconditioned probe, not a kernel evaluation.",
+                 precond_method);
     utils::check(!qp_static_sigma,
-                 "run_lr_calc: lr_two_step is incompatible with qp_static_sigma.");
-    // The IBC / δV perturbations enter every kernel evaluator separately, so a
-    // two-pass schedule would double-count them; reject rather than half-apply.
-    int has_pert_arrays = 0;
-    if (mpi->comm.root())
-      has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
-                         DeltaV_qPQ_root.has_value()) ? 1 : 0;
-    mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
-    utils::check(!has_pert_arrays,
-                 "run_lr_calc: lr_two_step is incompatible with the DeltaX (IBC) "
-                 "and DeltaV_qPQ perturbations.");
-    pert_order = static_cast<int>(two_step_order);
-    app_log(2, "LR split kernel: K_sc = {} ('{}'), K_pert = {} (order {})",
-            sc_kernel.to_string(), two_step_inner_method_in,
-            pert_kernel.to_string(), pert_order);
+                 "run_lr_calc: precond_method = '{}' is incompatible with "
+                 "qp_static_sigma, which iterates by DIIS only.", precond_method);
   }
-
-  // Outer-loop acceleration: validate, and reject a non-default outer key on a
-  // run that has no outer loop rather than silently ignoring it.
-  const bool outer_is_default =
-      two_step_outer_alg == "damping" && two_step_outer_mixing >= 1.0 &&
-      two_step_outer_subsp == 3 && two_step_outer_warmup == 0 &&
-      two_step_outer_tol == 0.0 && two_step_outer_min_subsp == 2;
-  utils::check(lr_two_step || outer_is_default,
-               "run_lr_calc: the two_step_outer_* keys require lr_two_step = true; "
-               "there is no outer (perturbative-source) loop to accelerate otherwise.");
-  // Rejected here rather than in lr_setup so the caller is told before the basis
-  // and the ERI are opened. Must stay in step with
-  // lr_outer_accel_params::active() (lr_driver.hpp), which is not built yet.
-  const bool outer_requested =
-      (two_step_outer_alg == "DIIS" || two_step_outer_tol > 0.0);
-  utils::check(!outer_requested || two_step_order > 0,
-               "run_lr_calc: the two_step_outer_* keys require two_step_order >= 1; "
-               "there is no outer sequence at order 0.");
-  utils::check(two_step_outer_subsp >= 2,
-               "run_lr_calc: two_step_outer_subsp must be >= 2, got {}.",
-               two_step_outer_subsp);
-  utils::check(two_step_outer_min_subsp >= 2 &&
-               two_step_outer_min_subsp <= two_step_outer_subsp,
-               "run_lr_calc: two_step_outer_min_subsp must be in [2, "
-               "two_step_outer_subsp = {}], got {}.",
-               two_step_outer_subsp, two_step_outer_min_subsp);
-  utils::check(two_step_outer_warmup >= 0,
-               "run_lr_calc: two_step_outer_warmup must be >= 0, got {}.",
-               two_step_outer_warmup);
-  utils::check(two_step_outer_tol >= 0.0,
-               "run_lr_calc: two_step_outer_tol must be >= 0, got {}.",
-               two_step_outer_tol);
-  // The outer accelerator does not damp: `mixing` only affects its warmup
-  // steps, so a damping-only request would silently do nothing.
-  utils::check(two_step_outer_alg == "DIIS" || two_step_outer_mixing >= 1.0,
-               "run_lr_calc: two_step_outer_mixing = {} < 1 requires "
-               "two_step_outer_alg = 'DIIS'; the outer loop has no damping-only "
-               "mode.", two_step_outer_mixing);
-
-  lr_outer_accel_params outer_params;
-  outer_params.iter.alg = two_step_outer_alg;
-  outer_params.iter.mixing = two_step_outer_mixing;
-  outer_params.iter.max_subsp_size = static_cast<size_t>(two_step_outer_subsp);
-  outer_params.iter.diis_warmup = static_cast<size_t>(two_step_outer_warmup);
-  outer_params.tol = two_step_outer_tol;
-  outer_params.min_subsp = static_cast<size_t>(two_step_outer_min_subsp);
-  const bool outer_active = lr_two_step && outer_params.active();
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -1866,29 +1763,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   lr_state.sDeltaF_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
-  // The kernel actually applied. With two_step_order = 0 the perturbative half
-  // is never evaluated, so the run is a plain two_step_inner_method run: allocating
-  // and persisting datasets for the total method would advertise components
-  // (a ΔΣ, an exchange ΔF) that stayed identically zero, and would pay for the
-  // W load they need. Everything downstream — allocation, W load, dump_lr — keys
-  // off this, and it matches what run_lr derives internally.
-  // The exception is order 0 WITH the hessian: its refresh evaluates K_pert once
-  // on the returned ΔG, so the run does need the total kernel's ΔΣ store and W
-  // load. This is lr_params::has_pert_kernel(), recomputed here because `p` is
-  // not filled in until below.
-  const bool has_pert_kernel = !pert_kernel.empty() && (pert_order > 0 || hessian);
-  const lr_kernel_spec run_kernel = has_pert_kernel ? total_kernel : sc_kernel;
-  // What the DATASETS are, which at order 0 is not what was allocated: the
-  // schedule applies K_pert never, so ΔF/ΔΣ come from the pure-K_sc solve, and
-  // the refresh that does apply it runs after the dump. Describing them with
-  // run_kernel would stamp include_exchange on a Hartree-only ΔF, and
-  // include_gw_sigma on an identically zero ΔΣ.
-  const lr_kernel_spec dumped_kernel = (pert_order > 0) ? run_kernel : sc_kernel;
-  const bool dump_hartree = dumped_kernel.hartree;
-  const bool dump_exchange = dumped_kernel.exchange;
-  const bool dump_gw_sigma = dumped_kernel.has_sigma();
+  const bool dump_hartree = total_kernel.hartree;
+  const bool dump_exchange = total_kernel.exchange;
+  const bool dump_gw_sigma = total_kernel.has_sigma();
   // Only allocate ΔΣ array when GW is active
-  bool include_gw_sigma = run_kernel.has_sigma();
+  bool include_gw_sigma = total_kernel.has_sigma();
   if (include_gw_sigma) {
     lr_state.sDeltaSigma_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
@@ -2100,12 +1979,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
-  // Split-kernel schedule. It selects which solvers lr_setup builds and how many
-  // ΔΣ-sized buffers it allocates, so it has to be in `p` rather than per-solve.
-  p.sc_kernel        = sc_kernel;
-  p.pert_kernel      = pert_kernel;
-  p.pert_order       = pert_order;
-  if (lr_two_step) p.outer_accel = outer_params;
+  p.precond_kernel   = precond_kernel;
+  p.precond_hsex     = precond_hsex;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
@@ -2141,11 +2016,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       mpi->comm.barrier();
     }
 
-    // K_pert evaluations actually made for THIS perturbation. With an outer
-    // tolerance it is not two_step_order, and it is the cost figure a
-    // downstream reader needs.
-    int n_pert_applied = 0;
-
     auto [niter, Delta_mu] = driver.lr_solve_one(
         lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
         lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -2153,8 +2023,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
-        output_aux_fock ? &DeltaF_PQ_skij : nullptr,
-        &n_pert_applied);
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr);
     niter_m(m) = niter;
     Delta_mu_m(m) = Delta_mu;
     lr_state.Delta_mu.emplace(Delta_mu);
@@ -2178,11 +2047,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    pDeltaSigma2, pDeltaVcorr,
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
-                   gw_mode_str(gw_mode_of(dumped_kernel)),
-                   lr_two_step, two_step_inner_method_in,
-                   static_cast<int>(two_step_order),
-                   outer_active, two_step_outer_alg, two_step_outer_tol,
-                   n_pert_applied, has_pert_kernel && hessian, hsex_head);
+                   gw_mode_str(gw_mode_of(total_kernel)),
+                   precond_method != "none" ? precond_method : std::string(),
+                   hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
@@ -2191,10 +2058,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // taken here, before the next perturbation overwrites them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
-      driver.get_full_kernel_result(
-          lr_state.sDeltaF_skij.value(), pDeltaSigma,
-          lr_state.sDeltaDm_skij.value(), lr_state.sDeltaG_tskij.value(),
-          sG_tskij, thc, p);
       opt_hessian->store_mode(m, lr_state.sDeltaDm_skij.value(),
                            lr_state.sDeltaH0_skij.value(),
                            lr_state.sDeltaF_skij.value(), pDeltaSigma,
@@ -2254,10 +2117,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         pDeltaSigma,
         include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr,
         DeltaH0_mskij_root, fix_density);
-    // The K_pert refresh is the one clock lr_driver owns; the rest of the table is
-    // lr_hessian's own.
-    opt_hessian->print_timers(driver.hessian_refresh_sec(),
-                              driver.hessian_refresh_calls());
+    opt_hessian->print_timers();
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
     // mode-PAIR matrices. dump_lr rebinds its group to mode{m} for a batched run,

@@ -691,14 +691,7 @@ void dump_lr(communicator_t& comm,
              bool save_DeltaG,
              std::optional<long> nbnd_save,
              std::string const& gw_mode,
-             bool lr_two_step,
-             std::string const& two_step_inner_method,
-             int two_step_order,
-             bool two_step_outer_accel,
-             std::string const& two_step_outer_alg,
-             double two_step_outer_tol,
-             int two_step_stages_applied,
-             bool hessian_pert_refresh,
+             std::string const& precond_method,
              std::optional<double> exchange_static_W_head) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
@@ -779,24 +772,8 @@ void dump_lr(communicator_t& comm,
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
     }
-    // Split-kernel (two-step) schedule. DeltaF_skij / DeltaSigma_tskij above are
-    // then the sums of the two channels, with the perturbative part evaluated at
-    // the ΔG of the previous stage — so neither is a self-consistent response to
-    // the ΔG that was written.
-    if (lr_two_step) {
-      h5::h5_write(lr_grp, "lr_two_step", 1);
-      h5::h5_write(lr_grp, "two_step_inner_method", two_step_inner_method);
-      h5::h5_write(lr_grp, "two_step_order", two_step_order);
-      // The cost record: two_step_stages_applied + hessian_pert_refresh is the
-      // K_pert count per perturbation, which two_step_order cannot give.
-      h5::h5_write(lr_grp, "two_step_stages_applied", two_step_stages_applied);
-      h5::h5_write(lr_grp, "hessian_pert_refresh",
-                   static_cast<int>(hessian_pert_refresh));
-      if (two_step_outer_accel) {
-        h5::h5_write(lr_grp, "two_step_outer_alg", two_step_outer_alg);
-        h5::h5_write(lr_grp, "two_step_outer_tol", two_step_outer_tol);
-      }
-    }
+    // GCR preconditioner kernel; absent for an unpreconditioned run.
+    if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
 
     app_log(2, "LR results written to \"{}\" in {}",
             imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
@@ -918,9 +895,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
-                      std::string const&,
-                      bool, std::string const&, int,
-                      bool, std::string const&, double, int, bool,
+                      std::string const&, std::string const&,
                       std::optional<double>);
 
   } // chkpt

@@ -389,11 +389,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            save_DeltaG=True,
            nbnd_save=None,
            method=None,
-           lr_two_step=False,
-           two_step_inner_method=None,
-           two_step_order=1,
-           two_step_outer_iter_alg=None,
-           two_step_outer_tol=0.0,
+           precond_method="none",
            hessian=False):
     """
     Run unified linear response calculation.
@@ -456,8 +452,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
-        ||g(x) - x|| of the self-consistent iterate, the concatenation
-        (ΔF, ΔΣ) (ΔF alone when the self-consistent kernel has no Sigma).
+        ||g(x) - x|| of the iterate, the concatenation (ΔF, ΔΣ) (ΔF alone when
+        the kernel has no Sigma).
     fix_density : bool, optional
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
@@ -467,17 +463,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - alg : str - "DIIS" (default), "damping" or "GCR"
         - mixing : float - Damping/mixing parameter (default 1.0; ignored by GCR)
         - max_subsp_size : int - DIIS subspace size (default 10), or the GCR
-          basis capacity (default 50 when the self-consistent kernel has no
-          Sigma, i.e. a ΔF-only iterate; 10 when it has one, since each pair
-          then holds a ΔΣ(τ))
-        "GCR" solves the affine inner problem by GCR in probe form, converging
-        on the residual ||r|| <= tol and keeping its Krylov basis across the
-        stages of a split-kernel solve. It is rejected only for a qpGW
-        self-consistent kernel, whose Pade statification of ΔΣ is not
-        additive. With hessian on, K_sc is evaluated once more at the solution.
-        Memory: each basis pair holds a ΔF and, with a Sigma in the
-        self-consistent kernel, a ΔΣ(τ), so the basis costs about as much as
-        a DIIS history of the same depth.
+          basis capacity (default 50 when the kernel has no Sigma, i.e. a
+          ΔF-only iterate; 10 when it has one, since each pair then holds a
+          ΔΣ(τ))
+        "GCR" solves the affine problem by GCR in probe form, converging on the
+        residual ||r|| <= tol, optionally preconditioned (see precond_method).
+        It is rejected for a qpGW kernel, whose Pade statification of ΔΣ is
+        not additive. Memory: each basis pair holds a ΔF and, with a Sigma in
+        the kernel, a ΔΣ(τ), so the basis costs about as much as a DIIS
+        history of the same depth.
         - diis_warmup : int - Warmup iterations before DIIS (default 0)
     include_gw_sigma : bool or None, optional
         Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
@@ -541,8 +535,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         inspection rather than a dynamical matrix. Read them with
         coqui.mbpt.read_lr_hessian.
 
-        Requires the plain single- or split-kernel bare-vertex path: rejected
-        together with DeltaX/DeltaV (IBC) and with a qpGW static map.
+        Requires the bare-vertex path: rejected together with DeltaX/DeltaV
+        (IBC) and with a qpGW static map.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -554,8 +548,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     method : str or None, optional
         Alias on the kernel ladder — "none", "Hartree", "HF", "GW0" or "GW" —
         that expands to include_hartree / include_exchange / gw_mode. When
-        given it defines all three, so they need not be passed separately. It
-        names the TOTAL kernel, for a two-step run as well.
+        given it defines all three, so they need not be passed separately.
 
         "HSEX" is additionally accepted, and is *not* a rung of that ladder: it
         is Hartree + exchange with the bare interaction replaced by the
@@ -572,68 +565,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Madelung term (the aux-basis arrays carry no G=0 component, so the q→0
         head of the contracted kernel enters there).
 
-        "HSEX" is also accepted as ``two_step_inner_method`` — the composition
-        the split-kernel machinery is most useful for. Because X_sex is off the
-        {H, X, Σ1, Σ2} component mask, the remainder cannot be a mask
-        difference alone: it carries the static counter-term
-        ``+ΔDm ⊙ W_c(iν=0)``, which the driver supplies for itself, so that
-
-            K_sc + K_pert = [H + X_sex] + [Σ1 + Σ2 + ΔDm ⊙ W_c(0)] = K_GW
-
-        exactly. Nothing extra to pass; ``method="GW"`` (or ``"GW0"``) with
-        ``two_step_inner_method="HSEX"`` is the whole request.
-
-    lr_two_step : bool, optional
-        Split the LR kernel into a part resummed by the SCF loop and a
-        remainder expanded to finite order (default False):
-
-            K_sc   = kernel(two_step_inner_method)
-            K_pert = kernel(method) \\ kernel(two_step_inner_method)
-
-        The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW. K_sc must be a
-        proper subset of the total kernel and Σ-free, so the whole Σ is in
-        K_pert. Costs two_step_order evaluations of K_pert instead of one per
-        SCF iteration.
-    two_step_inner_method : str or None, optional
-        Method whose kernel is resummed self-consistently: one of "none",
-        "Hartree", "HF" or "HSEX". Required with lr_two_step. The total kernel
-        comes from method / include_hartree / include_exchange / gw_mode, and
-        K_pert is the difference.
-    two_step_order : int, optional
-        Truncation order n of the K_pert expansion (default 1). n = 0 solves
-        with the self-consistent kernel alone, and rejects the
-        two_step_outer_* keys: there is no outer sequence to accelerate. With
-        lr_hessian it still costs one K_pert evaluation per perturbation, made
-        by the hessian's consistency refresh after the solve, so the stationary
-        estimator there is the TOTAL kernel's at the K_sc solution. max_iter
-        counts total inner iterations across all n+1 stages. With outer
-        acceleration on, n is an iteration cap rather than a truncation order
-        (see two_step_outer_iter_alg).
-    two_step_outer_iter_alg : dict or None, optional
-        DIIS acceleration of the OUTER (perturbative-source) iteration,
-        mirroring iter_alg but as a fully independent accelerator:
-
-            {"alg": "damping"|"DIIS", "mixing": float,
-             "max_subsp_size": int, "diis_warmup": int, "min_subsp_size": int}
-
-        The default ``{"alg": "damping"}`` is no acceleration. ``mixing``
-        damps only the accelerator's warmup steps (there is no damping-only
-        mode). ``min_subsp_size`` (default 2) is the number of history vectors
-        required to extrapolate, so 2 extrapolates from the second outer step.
-
-        With acceleration on the source is a combination of previous sources,
-        so the result is an accelerated iterate toward the FULL `method` fixed
-        point, with no truncation-order meaning.
-    two_step_outer_tol : float, optional
-        > 0 turns two_step_order into a cap and stops the outer loop once the
-        stage-to-stage change of ΔDm falls below it (default 0.0 = run exactly
-        two_step_order stages).
-
-        Every split-kernel run records what it cost, in K_pert evaluations per
-        perturbation: ``linear_response/two_step_stages_applied`` (the
-        schedule's) plus ``linear_response/hessian_pert_refresh`` (0/1, the
-        hessian's). Their sum is the cost; two_step_order alone cannot give
-        it.
+    precond_method : str, optional
+        Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
+        as the GCR preconditioner: each GCR direction is z ≈ (1 - K_pc χ)⁻¹ r,
+        solved inexactly by a few inner sweeps. The iteration still applies the
+        full `method` kernel every step, so it affects the convergence rate,
+        not the answer. Requires iter_alg {"alg": "GCR"}, max_iter > 1 and a
+        method with a Sigma (GW0 or GW); rejected with qp_static_sigma. A
+        preconditioned run writes
+        ``linear_response/precond_method``.
 
     Returns
     -------
@@ -731,28 +671,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
     lr_params["lr_hessian"] = bool(hessian)
-    # Kernel ladder alias and the split-kernel (two-step) schedule. Read by C++
+    # Kernel ladder alias and the GCR preconditioner kernel. Read by C++
     # run_lr_calc; the positional include_hartree/include_exchange/gw_mode below
     # are overridden by "method" when it is given.
     if method is not None:
         lr_params["method"] = str(method)
-    lr_params["lr_two_step"] = bool(lr_two_step)
-    if two_step_inner_method is not None:
-        lr_params["two_step_inner_method"] = str(two_step_inner_method)
-    lr_params["two_step_order"] = int(two_step_order)
-    # Outer-loop acceleration, flattened to the ptree keys C++ reads. Mirrors
-    # the iter_alg dict; type conversion only.
-    outer = dict(two_step_outer_iter_alg or {})
-    outer_alg = str(outer.get("alg", "damping"))
-    if outer_alg not in ("damping", "DIIS"):
-        raise ValueError(
-            f"Unknown two_step_outer_iter_alg '{outer_alg}'. Must be 'damping' or 'DIIS'.")
-    lr_params["two_step_outer_alg"] = outer_alg
-    lr_params["two_step_outer_mixing"] = float(outer.get("mixing", 1.0))
-    lr_params["two_step_outer_subsp"] = int(outer.get("max_subsp_size", 3))
-    lr_params["two_step_outer_warmup"] = int(outer.get("diis_warmup", 0))
-    lr_params["two_step_outer_min_subsp"] = int(outer.get("min_subsp_size", 2))
-    lr_params["two_step_outer_tol"] = float(two_step_outer_tol)
+    if not isinstance(precond_method, str):
+        raise TypeError("precond_method must be one of 'none', 'Hartree', 'HF', "
+                        f"'HSEX', got {precond_method!r}.")
+    lr_params["precond_method"] = precond_method
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij,

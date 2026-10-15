@@ -110,20 +110,10 @@ public:
    * `head_factor` carries that ε⁻¹(iν=0).
    */
   struct hsex_kernel_t {
-    /// Which kernel the exchange contraction installs. Named after the kernel
-    /// itself, since that is all that differs:
-    ///   V_plus_Wc0 = V + W_c(iν=0), the HSEX kernel;
-    ///   minus_Wc0  =   − W_c(iν=0), the counter-term a split run whose K_sc is
-    ///                  HSEX owes its remainder, so that the two channels sum
-    ///                  back to bare exchange.
-    enum class kernel_e { V_plus_Wc0, minus_Wc0 };
-
     /// W_c(q, iν=0), (nq, NP, NP) on utils::lr_aux_kernel_pgrid(comm.size()).
     const dArray_3D_t* Wc0_qPQ;
-    /// Scales the exchange Madelung term: ε⁻¹(iν=0) for V_plus_Wc0,
-    /// 1 − ε⁻¹(iν=0) for minus_Wc0, so the two sum to bare exchange's 1.
+    /// ε⁻¹(iν=0), the scale of the exchange Madelung term.
     double head_factor;
-    kernel_e kernel;
   };
 
   /**
@@ -186,11 +176,9 @@ public:
   /// Print one ΔF component table summed over every instance in `solvers`
   /// (nulls ignored), each line prefixed by `indent`.
   ///
-  /// A split kernel splits ΔF across two instances — the self-consistent channel
-  /// and the perturbative one — so summing them keeps one table whatever the
-  /// kernel was split into. Static rather than a member, because a run whose ΔF
-  /// lives only in the perturbative channel leaves the self-consistent instance
-  /// null and the table must still print.
+  /// A preconditioned run evaluates ΔF on two instances — the operator's and the
+  /// preconditioner's — so summing them keeps one table. Static rather than a
+  /// member, so that a null instance is simply skipped.
   static void print_subclocks_all(int level, const std::string& indent,
                                   std::initializer_list<lr_hf*> solvers) {
     auto sec = [&](const char* key) {
@@ -271,8 +259,8 @@ private:
   nda::array<ComplexType, 2> _Vxc_q_PQ;   // Vxc(q)_PQ tile at _q_ibz_idx
   bool _U_RPQ_cached = false;
   nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
-  /// The HSEX kernel _U_RPQ was built for (nullopt = bare V), checked on reuse.
-  std::optional<hsex_kernel_t::kernel_e> _U_RPQ_hsex;
+  /// _U_RPQ was built with the HSEX kernel (false = bare V), checked on reuse.
+  bool _U_RPQ_hsex = false;
 
   /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
   /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.

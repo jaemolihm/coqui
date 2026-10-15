@@ -413,8 +413,7 @@ def read_lr_results(filename: str,
                     f"{filename} carries no DeltaF_PQ_skij in the requested group. "
                     "It is written only when the run passed "
                     "params[\"output_aux_fock\"] = True with a Fock-carrying kernel, "
-                    "and it additionally requires npol = 1 and is rejected for a "
-                    "split-kernel HSEX run.")
+                    "and it additionally requires npol = 1.")
             DeltaF_PQ_skij = _as_complex(lr_grp['DeltaF_PQ_skij'])
             # Written only by the IBC path.
             F_PQ_skij = _as_complex(lr_grp.get('F_PQ_skij'))

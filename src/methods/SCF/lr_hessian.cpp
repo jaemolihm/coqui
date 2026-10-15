@@ -509,13 +509,11 @@ ComplexType lr_hessian_t::self_pairing() const {
 }
 
 
-void lr_hessian_t::print_timers(double pert_refresh_sec, int pert_refresh_calls) {
+void lr_hessian_t::print_timers() {
   app_log(2, "\n  LR hessian timers");
   app_log(2, "  -----------------");
   app_log(2, "    Store (pack + τ→ω):        {0:8.3f} sec  {1:4d} calls",
           _Timer.elapsed("LR_HESS_STORE"), _Timer.number_of_calls("LR_HESS_STORE"));
-  app_log(2, "    K_pert refresh (per mode): {0:8.3f} sec  {1:4d} calls",
-          pert_refresh_sec, pert_refresh_calls);
   app_log(2, "    Rebuild raw ΔF/ΔΣ in shm:  {0:8.3f} sec  {1:4d} calls",
           _Timer.elapsed("LR_HESS_REBUILD"), _Timer.number_of_calls("LR_HESS_REBUILD"));
   app_log(2, "    Extra Dyson (per mode):    {0:8.3f} sec  {1:4d} calls",

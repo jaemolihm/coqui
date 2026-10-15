@@ -224,16 +224,9 @@ namespace methods {
    * @param gw_mode        - [INPUT] GW self-energy mode of the kernel that was
    *   applied ("none"/"fixed_W"/"full"), written whenever non-empty. It refines
    *   include_gw_sigma, which cannot tell fixed_W from full.
-   * @param lr_two_step        - [INPUT] whether the split-kernel schedule was
-   *   used. When true the stored ΔF/ΔΣ are the sums of the two channels, with
-   *   the perturbative part evaluated at the previous stage's ΔG — NOT a
-   *   self-consistent response to the ΔG that was written — so the schedule is
-   *   persisted alongside them for downstream readers.
-   * @param two_step_stages_applied - [INPUT] K_pert evaluations made by the
-   *   schedule for this perturbation. Written for every two-step run.
-   * @param hessian_pert_refresh - [INPUT] whether the stationary hessian made
-   *   one further K_pert evaluation. The two sum to the cost of the file, which
-   *   two_step_order alone cannot give: at order 0 with lr_hessian it is 0 + 1.
+   * @param precond_method - [INPUT] static kernel that preconditioned GCR
+   *   ("Hartree"/"HF"/"HSEX"), written as "precond_method" when non-empty. It
+   *   changes the convergence rate only, not the result.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -254,14 +247,7 @@ namespace methods {
                bool save_DeltaG = true,
                std::optional<long> nbnd_save = std::nullopt,
                std::string const& gw_mode = "",
-               bool lr_two_step = false,
-               std::string const& two_step_inner_method = "",
-               int two_step_order = 0,
-               bool two_step_outer_accel = false,
-               std::string const& two_step_outer_alg = "",
-               double two_step_outer_tol = 0.0,
-               int two_step_stages_applied = 0,
-               bool hessian_pert_refresh = false,
+               std::string const& precond_method = "",
                std::optional<double> exchange_static_W_head = std::nullopt);
 
   /**

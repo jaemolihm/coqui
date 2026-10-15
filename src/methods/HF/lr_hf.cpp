@@ -507,13 +507,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // U(R)_PQ for exchange: fetch U(q), substitute the HSEX kernel and FT the
     // result q→R once, then keep it. None of the three depends on ΔDm, so all of
     // it is pure setup. `hsex` is fixed for the lifetime of one lr_hf — lr_driver
-    // gives the counter-term channel its own instance — so the cached U(R) is
-    // valid on every call.
+    // gives the preconditioner its own instance — so the cached U(R) is valid on
+    // every call.
     if (not _U_RPQ_cached) {
-      // The counter-term kernel −W_c(iν=0) replaces V outright, so that instance
-      // never fetches V.
-      const bool counter_term =
-          hsex and hsex->kernel == hsex_kernel_t::kernel_e::minus_Wc0;
       auto check_tiling = [&](auto const& dU, const char* name) {
         utils::check(dU.local_range(1).first() == P_rng.first() and
                      dU.local_range(1).size() == P_rng.size() and
@@ -526,36 +522,32 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                      "(got {} q, {} k).", name, dU.local_shape()[0], nkpts);
       };
 
-      if (not counter_term) {
-        _Timer.start("Z_FETCH");
-        auto dU_qPQ = thc.dZ({1, np_P, np_Q});
-        _Timer.stop("Z_FETCH");
-        check_tiling(dU_qPQ, "Coulomb");
-        _U_RPQ = dU_qPQ.local();
-      }
+      _Timer.start("Z_FETCH");
+      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+      _Timer.stop("Z_FETCH");
+      check_tiling(dU_qPQ, "Coulomb");
+      _U_RPQ = dU_qPQ.local();
       // HSEX, applied to this copy only, so the direct (ΔJ) channel keeps the bare
       // V(q), and before the q→R FT, so the Hadamard below contracts the substituted
       // kernel in real space. V + W_c(0) is the object GF2's get_static_W returns.
       if (hsex) {
         auto const& dWc0 = *hsex->Wc0_qPQ;
         check_tiling(dWc0, "W_c(iν=0)");
-        if (counter_term) _U_RPQ = ComplexType(-1.0) * dWc0.local();
-        else              _U_RPQ += dWc0.local();
+        _U_RPQ += dWc0.local();
       }
 
       _Timer.start("UQ_TO_UR");
       if (nkpts != 1)
         k_to_R(nda::reshape(_U_RPQ, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
       _Timer.stop("UQ_TO_UR");
-      _U_RPQ_hsex = hsex ? std::optional{hsex->kernel} : std::nullopt;
+      _U_RPQ_hsex = (hsex != nullptr);
       _U_RPQ_cached = true;
     }
     // Filled once and never refreshed, so a call asking for a different exchange
     // kernel would silently be served the cached one.
-    utils::check(_U_RPQ_hsex.has_value() == (hsex != nullptr) and
-                 (!hsex or *_U_RPQ_hsex == hsex->kernel),
+    utils::check(_U_RPQ_hsex == (hsex != nullptr),
                  "lr_hf: this solver cached U(R) for a different exchange kernel. "
-                 "Each HSEX channel needs its own lr_hf instance.");
+                 "Each exchange kernel needs its own lr_hf instance.");
     auto U_RPQ_loc = _U_RPQ();
 
     // aux_to_primary needs to be called for each {ip,iq} block.
