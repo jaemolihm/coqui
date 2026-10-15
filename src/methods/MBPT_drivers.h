@@ -35,7 +35,6 @@
 
 #include "mean_field/MF.hpp"
 #include "methods/mb_state/mb_state.hpp"
-#include "methods/SCF/lr_diis.hpp"
 #include "methods/SCF/lr_driver.hpp"
 
 namespace mpi3 = boost::mpi3;

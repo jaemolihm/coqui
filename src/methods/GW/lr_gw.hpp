@@ -33,10 +33,8 @@
 #include "utilities/Timer.hpp"
 
 #include "mean_field/MF.hpp"
-#include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/SCF/lr_ibc.hpp"
-#include "methods/GW/gw_t.h"
 
 namespace methods {
 
@@ -66,7 +64,7 @@ namespace methods {
      * and apply_div_correction_G:
      *   Term 1 (all q_pert): ΔΣ^div += -madelung * eps_inv_head * S(k+q) · ΔG · S(k)
      *   Term 2 (q_pert=0):   ΔΣ^div += -madelung * Δeps_inv_head * S(k) · G · S(k)
-     * Called by lr_driver after evaluate_sigma / evaluate_sigma_DeltaG.
+     * Applied inside the evaluate_sigma* calls when the overlap and heads are passed.
      *
      * Naming convention:
      *   q_pert = LR perturbation wavevector (constructor param).
@@ -80,9 +78,7 @@ namespace methods {
       using shape_t = std::array<long, N>;
 
     public:
-      lr_gw(const imag_axes_ft::IAFT *ft,
-            nda::array<double, 1> const& q_pert,
-            std::string div = "gygi");
+      lr_gw(nda::array<double, 1> const& q_pert, std::string div = "gygi");
 
       ~lr_gw() {}
 
@@ -210,10 +206,6 @@ namespace methods {
       app_log(level, "");
     }
 
-    /// Zero this solver's sub-clocks. lr_driver calls it per perturbation so a
-    /// batched run's timing report covers one perturbation, not the running total.
-    inline void reset_timers() { _Timer.reset(); }
-
     /// Print only this instance's component clocks, each line prefixed by `indent`.
     inline void print_subclocks(int level, const std::string& indent) {
       print_subclocks_all(level, indent, {this});
@@ -227,11 +219,9 @@ namespace methods {
     /// to the driver's "LR GW Sigma (total)". The deeper-indented block under
     /// Aux->Primary is a breakdown of it, not further terms of that sum.
     ///
-    /// Splitting the kernel splits ΔΣ across several instances (self-consistent
-    /// channel, perturbative channel, split-term second evaluator); summing them
-    /// keeps one Σ table whatever the kernel was split into. Static rather than a
-    /// member, because a run whose Σ lives only in the perturbative channel leaves
-    /// the self-consistent instance null and the table must still print.
+    /// A split-output run evaluates ΔΣ term 2 on a second instance; summing them
+    /// keeps one Σ table. Static rather than a member, so that a null instance is
+    /// simply skipped.
     static void print_subclocks_all(int level, const std::string& indent,
                                     std::initializer_list<lr_gw*> solvers) {
       auto sec = [&](const char* key) {
@@ -261,7 +251,7 @@ namespace methods {
 
     private:
       nda::array<double, 1> _q_pert;
-      gw_t _gw;                       // stores div_treatment settings (friend access)
+      std::string _div_treatment;     // "ignore_g0" or a "gygi" variant
       bool _kpq_map_initialized = false;
       nda::array<int, 1> _kpq_map;   // k → k+q_pert mapping (full BZ); identity for q_pert=0
       utils::TimerManager _Timer;

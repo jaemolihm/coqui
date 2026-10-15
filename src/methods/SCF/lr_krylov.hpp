@@ -228,7 +228,6 @@ public:
           for (size_t i = 0; i < _n; ++i) h[i] = std::real(nda::blas::dotc(_W[slot(i)], w));
           if (pass == 0) h[_n] = std::real(nda::blas::dotc(w, w));
         }
-        if (h.empty()) break;
         comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
         if (pass == 0) w0n = std::sqrt(h[_n]);
         for (size_t i = 0; i < _n; ++i) {
@@ -246,7 +245,7 @@ public:
       comm.all_reduce_in_place_n(acc, 2, std::plus<>{});
       const double wn = std::sqrt(acc[0]);
       const bool dependent = (wn <= dep_tol * w0n);
-      if (wn <= 1e-14 * w0n || wn == 0.0 || (dependent && probe_was_kick)) {
+      if (wn <= 1e-14 * w0n || (dependent && probe_was_kick)) {
         // A z lies in the span of the stored W to working precision, or nearly
         // so after a kick: this probe adds no direction, and repeating it would
         // add none either. Restart from the next probe x + r with an empty
@@ -358,15 +357,13 @@ private:
     std::vector<double> h(_n, 0.0);
     if (v.size() > 0)
       for (size_t i = 0; i < _n; ++i) h[i] = std::real(nda::blas::dotc(_W[slot(i)], v));
-    if (!h.empty()) comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
+    comm.all_reduce_in_place_n(h.data(), static_cast<long>(h.size()), std::plus<>{});
     return h;
   }
 
   template<typename Comm>
   static double norm(Comm& comm, Vec1D const& v) {
-    double n2 = (v.size() > 0) ? std::real(nda::blas::dotc(v, v)) : 0.0;
-    comm.all_reduce_in_place_n(&n2, 1, std::plus<>{});
-    return std::sqrt(n2);
+    return utils::striped_norm(comm, v, v, false).first;
   }
 };
 

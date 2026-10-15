@@ -378,7 +378,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            include_hartree=True, include_exchange=True,
            gw_mode="none",
            max_iter=50, tol=1e-8, fix_density=False, iter_alg=None,
-           include_gw_sigma=None,
            DeltaX_left=None, DeltaX_right=None,
            DeltaV_qPQ=None,
            screened_interaction_file=None,
@@ -396,9 +395,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
         ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... (iterate until convergence)
-
-    Subsumes both run_lr_dyson (one-shot, all flags false) and
-    run_lr_hf_scf (HF, no GW).
 
     Parameters
     ----------
@@ -473,9 +469,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         the kernel, a ΔΣ(τ), so the basis costs about as much as a DIIS
         history of the same depth.
         - diis_warmup : int - Warmup iterations before DIIS (default 0)
-    include_gw_sigma : bool or None, optional
-        Deprecated. Use gw_mode instead. If provided, maps True -> "fixed_W",
-        False -> "none". Overrides gw_mode if both are specified.
     DeltaX_left : np.ndarray or None, optional
         Perturbation of collocation matrix δ^q X, shape (ns, nkpts, Np, nb).
         Full BZ indexed. Required together with DeltaX_right. Required on the
@@ -612,13 +605,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         DeltaH0_skij = None
     squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
 
-    # Handle deprecated include_gw_sigma parameter
-    if include_gw_sigma is not None:
-        warnings.warn(
-            "include_gw_sigma is deprecated, use gw_mode='fixed_W' or gw_mode='full' instead",
-            DeprecationWarning, stacklevel=2)
-        gw_mode = "fixed_W" if include_gw_sigma else "none"
-
     if gw_mode not in ("none", "fixed_W", "full"):
         raise ValueError(f"Unknown gw_mode '{gw_mode}'. Must be 'none', 'fixed_W', or 'full'.")
 
@@ -638,7 +624,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     mixing = float(iter_alg.get("mixing", 1.0))
     if alg == "GCR" and mixing != 1.0:
         warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
-    # GCR: 0 lets lr_setup pick the capacity from the self-consistent kernel.
+    # GCR: 0 lets lr_setup pick the capacity from the kernel.
     max_subsp_size = int(iter_alg.get("max_subsp_size", 0 if alg == "GCR" else 10))
     diis_warmup = int(iter_alg.get("diis_warmup", 0))
 

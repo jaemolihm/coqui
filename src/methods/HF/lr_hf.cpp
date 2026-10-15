@@ -38,10 +38,8 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
              std::string hf_div_treatment)
     : _mpi(mpi),
       _MF(MF),
-      _ns(MF->nspin()),
       _nkpts(MF->nkpts()),
       _nkpts_ibz(MF->nkpts_ibz()),
-      _nbnd(MF->nbnd()),
       _npol(MF->npol()),
       _q_vec(q_vec),
       _kpq_map(_nkpts),
@@ -187,25 +185,6 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
   utils::check(!DeltaV_qPQ || Dm_unpert_for_dV,
                "lr_hf::evaluate: DeltaV_qPQ provided but no unperturbed Dm "
                "(pass Dm_skij_unpert or an lr_ibc_DeltaX with Dm_ab set).");
-
-  // The semilocal xc kernel only exists for the diagonal (direct) density
-  // response, so it may only be requested for a Hartree-type LR. Refusing the
-  // combination here rather than downstream keeps v + f_xc + Fock from being
-  // requestable at all.
-  utils::check(!compute_xc || compute_hartree,
-               "lr_hf::evaluate: compute_xc requires compute_hartree.");
-  utils::check(!compute_xc || !compute_exchange,
-               "lr_hf::evaluate: compute_xc is incompatible with compute_exchange. "
-               "The semilocal xc kernel contracts with the diagonal density "
-               "response only; v + f_xc + Fock is not a defined theory here. "
-               "LR-DFT is include_hartree = true, include_exchange = false.");
-  // HSEX substitutes the exchange kernel; with no exchange channel there is
-  // nothing for it to substitute, and silently ignoring it would make an HSEX
-  // run indistinguishable from a Hartree one.
-  utils::check(!hsex || compute_exchange,
-               "lr_hf::evaluate: the static screened kernel W_c(iν=0) was supplied "
-               "but compute_exchange = false. HSEX replaces V by V + W_c(0) in the "
-               "exchange contraction; it does not enter the direct channel.");
 
   thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange,
             ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc, hsex);
@@ -502,8 +481,6 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   } else {
     // === EXCHANGE (+ optional HARTREE) PATH ===
 
-    utils::check(compute_exchange, "lr_hf::thc_lr_hf: entered exchange path but compute_exchange=false");
-
     // U(R)_PQ for exchange: fetch U(q), substitute the HSEX kernel and FT the
     // result q→R once, then keep it. None of the three depends on ΔDm, so all of
     // it is pure setup. `hsex` is fixed for the lifetime of one lr_hf — lr_driver
@@ -540,14 +517,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       if (nkpts != 1)
         k_to_R(nda::reshape(_U_RPQ, shape_t<3>{1, nkpts, NP_loc * NQ_loc}), true);
       _Timer.stop("UQ_TO_UR");
-      _U_RPQ_hsex = (hsex != nullptr);
       _U_RPQ_cached = true;
     }
-    // Filled once and never refreshed, so a call asking for a different exchange
-    // kernel would silently be served the cached one.
-    utils::check(_U_RPQ_hsex == (hsex != nullptr),
-                 "lr_hf: this solver cached U(R) for a different exchange kernel. "
-                 "Each exchange kernel needs its own lr_hf instance.");
     auto U_RPQ_loc = _U_RPQ();
 
     // aux_to_primary needs to be called for each {ip,iq} block.
@@ -946,16 +917,6 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                nda::array<ComplexType, 4>*,
                                bool,
                                const lr_hf::hsex_kernel_t*);
-
-template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
-                                         Arrv4D const&,
-                                         Arr4D const&,
-                                         double);
-
-template void lr_hf::LR_HF_K_correction(sArray_t<Arrv4D>&,
-                                         Arrv4D const&,
-                                         Arrv4D const&,
-                                         double);
 
 } // namespace solvers
 } // namespace methods

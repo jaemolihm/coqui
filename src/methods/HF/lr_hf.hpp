@@ -163,10 +163,6 @@ public:
     app_log(level, "");
   }
 
-  /// Zero this solver's sub-clocks. lr_driver calls it per perturbation so a
-  /// batched run's timing report covers one perturbation, not the running total.
-  inline void reset_timers() { _Timer.reset(); }
-
   /// Print only the component clocks, each line prefixed by `indent`.
   /// Embedded (with deeper indent) in lr_driver's final hierarchical report.
   inline void print_subclocks(int level, const std::string& indent) {
@@ -207,19 +203,12 @@ public:
     app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, sec("MADELUNG"), cnt("MADELUNG"));
   }
 
-  // Accessors
-  const nda::array<int, 1>& kpq_map() const { return _kpq_map; }
-  const nda::array<double, 1>& q_vec() const { return _q_vec; }
-  bool is_q_gamma() const { return _is_q_gamma; }
-
 private:
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
 
-  int _ns;
   int _nkpts;
   int _nkpts_ibz;
-  int _nbnd;
   int _npol;
 
   nda::array<double, 1> _q_vec;     // Perturbation wavevector (3,)
@@ -259,8 +248,6 @@ private:
   nda::array<ComplexType, 2> _Vxc_q_PQ;   // Vxc(q)_PQ tile at _q_ibz_idx
   bool _U_RPQ_cached = false;
   nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
-  /// _U_RPQ was built with the HSEX kernel (false = bare V), checked on reuse.
-  bool _U_RPQ_hsex = false;
 
   /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
   /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.

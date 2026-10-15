@@ -69,8 +69,7 @@ namespace methods {
     nda::array_view<ComplexType, 4> DeltaX;         // δ^q X
     nda::array_view<ComplexType, 4> DeltaX_minusq;  // δ^{-q} X
 
-    // Perturbation wavevector and k→k+q mapping
-    nda::array<double, 1> q_vec;       // crystal coordinates (3,)
+    // k→k+q mapping of the perturbation
     nda::array<int, 1> kpq_map;        // k → k+q mapping, full BZ (nkpts,)
 
     // Unperturbed quantities for primary→aux on-the-fly correction (pointers, not copies)
@@ -576,7 +575,6 @@ namespace methods {
       THC_ERI auto& thc,
       nda::array_view<ComplexType, 4> DeltaX_arr,
       nda::array_view<ComplexType, 4> DeltaX_minusq_arr,
-      const nda::array<double, 1>& q_vec,
       const nda::array<int, 1>& kpq_map,
       const nda::array<ComplexType, 4>* Dm_ab,
       const lr_ibc_DeltaX::sArray_5D_t* sG_tskij,
@@ -597,7 +595,7 @@ namespace methods {
     // GW-Sigma path is active.
     lr_ibc_DeltaX ibc{
         DeltaX_arr, DeltaX_minusq_arr,
-        q_vec, kpq_map,
+        kpq_map,
         Dm_ab, sG_tskij,
         std::move(DeltaF_ibc),
         std::nullopt,
@@ -607,8 +605,6 @@ namespace methods {
     // --- Compute DeltaF_ibc from V_HF_PQ ---
     if (Dm_ab && (include_hartree || include_exchange)) {
       app_log(2, "    IBC: computing V_HF_PQ directly in aux basis...");
-
-      // Use lr_precompute_V_HF_PQ (from lr_precompute.hpp)
       auto dF_PQ = lr_precompute_V_HF_PQ(mpi, MF, thc, *Dm_ab,
                                            include_hartree, include_exchange);
 

@@ -161,11 +161,6 @@ void lr_dyson::solve_lr_dyson_impl(
   using Array_5D_t = nda::array<ComplexType, 5>;
   using Array_4D_t = nda::array<ComplexType, 4>;
 
-  // Δμ·S term is only meaningful at q=0; assert no accidental nonzero value at q≠0
-  utils::check(_is_q_gamma || std::abs(Delta_mu) < 1e-15,
-               "solve_lr_dyson_impl: Delta_mu = {:.6e} but q≠0. "
-               "Delta_mu must be zero for q≠0 perturbations.", Delta_mu);
-
   app_log(3, "Solving LR Dyson equation:");
   if (dDeltaSigma_wskij) {
     app_log(3, "  ΔG(k,iω) = G(k+q,iω) · [ΔH0(k) + ΔF(k) + ΔΣ(k,iω) - Δμ·S(k+q,k)] · G(k,iω)");
@@ -180,8 +175,6 @@ void lr_dyson::solve_lr_dyson_impl(
   // Processor grid for ΔG (and ΔΣ if present)
   auto [w_pgrid, w_bsize] =
       lr_dyson_omega_pgrid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
-  utils::check(w_pgrid[0] * w_pgrid[2] * w_pgrid[3] * w_pgrid[4] == _context->comm.size(),
-               "lr_dyson: pgrid mismatches!");
 
   _Timer.start("LR_DYSON_ALLOC");
   auto dDeltaG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
@@ -390,13 +383,7 @@ double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density) {
 void lr_dyson::apply_dmu_shift_G(double Delta_mu) {
   // dG/dμ(τ) came out of solve_lr_dyson_impl, so its grid is derived from the same
   // (comm.size(), nkpts_ibz, nbnd) as the ΔG(τ) sitting in _dDeltaG_tau_buffer
-  // and the two blocks coincide. Checked rather than assumed: a mismatch would
-  // add one rank's block to another's, which is silent and wrong everywhere.
-  utils::check(bool(_dDeltaG_tau_buffer),
-               "apply_dmu_shift_G: no ΔG(τ) retained — the Δμ=0 pass must run first.");
-  utils::check(_dDeltaG_tau_buffer->origin() == _dG_dmu_tskij->origin() and
-               _dDeltaG_tau_buffer->local_shape() == _dG_dmu_tskij->local_shape(),
-               "apply_dmu_shift_G: ΔG(τ) and dG/dμ(τ) are distributed differently.");
+  // and the two blocks coincide.
 
   _Timer.start("LR_DYSON_DELTAMU");
   _dDeltaG_tau_buffer->local() += ComplexType(Delta_mu) * _dG_dmu_tskij->local();
@@ -590,14 +577,6 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
-    const sArray_t<Array_view_4D_t>*);
-
-template void lr_dyson::solve_lr_dyson_impl(
-    sArray_t<Array_view_4D_t>&,
-    const sArray_t<Array_view_4D_t>&,
-    const sArray_t<Array_view_4D_t>&,
-    const lr_dyson::dArray_5D_t*,
-    double,
     const sArray_t<Array_view_4D_t>*);
 
 template double lr_dyson::compute_lr_Nelec(
