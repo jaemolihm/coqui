@@ -214,6 +214,10 @@ namespace methods {
                std::string const& precond_method,
                std::optional<double> exchange_static_W_head);
 
+  /// The "linear_response" group of an open checkpoint, or its "mode{imode}"
+  /// subgroup, each created if absent.
+  h5::group lr_group(h5::file& file, std::optional<long> imode = std::nullopt);
+
   /**
    * Write the qpGW analytic-continuation parameters into the SCF checkpoint
    * ("scf/qp_params"), so a later LR-qpGW run can statify ΔΣ with exactly the

@@ -46,8 +46,7 @@ namespace utils
  */
 
 /// Debug switch: force the dense-gemm k<->R path (instead of the blocked FFT)
-/// in the scGW solvers when COQUI_DEBUG_GEMM_FT is set to a non-zero value.
-/// Mirrors utils::lr_debug_gemm_ft() on the LR path.
+/// in the scGW and LR solvers when COQUI_DEBUG_GEMM_FT is set to a non-zero value.
 inline bool debug_gemm_ft() {
   static const bool flag = [] {
     const char* env = std::getenv("COQUI_DEBUG_GEMM_FT");

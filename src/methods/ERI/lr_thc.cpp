@@ -877,12 +877,8 @@ void lr_thc::build_momentum_maps(nda::array<double, 2> const& kpts_crys,
 
   // mk_map(p) and mkmQ_map(p): same wrap+tolerance convention as calculate_kpq_map.
   auto find_match = [&](long ip, double off0, double off1, double off2) {
-    double d0 = std::abs(kpts_crys(ip, 0) + off0);
-    double d1 = std::abs(kpts_crys(ip, 1) + off1);
-    double d2 = std::abs(kpts_crys(ip, 2) + off2);
-    d0 -= std::floor(d0); d1 -= std::floor(d1); d2 -= std::floor(d2);
-    d0 -= std::round(d0); d1 -= std::round(d1); d2 -= std::round(d2);
-    return d0*d0 + d1*d1 + d2*d2;
+    return utils::periodic_dist2(kpts_crys(ip, 0) + off0, kpts_crys(ip, 1) + off1,
+                                 kpts_crys(ip, 2) + off2);
   };
   double const tol2 = 1e-12;  // (1e-6)^2
 

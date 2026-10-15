@@ -616,6 +616,18 @@ template void read_qp_hamilt_components(
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
 
+h5::group lr_group(h5::file& file, std::optional<long> imode) {
+  h5::group grp(file);
+  auto lr_grp = grp.has_subgroup("linear_response") ?
+                grp.open_group("linear_response") :
+                grp.create_group("linear_response");
+  if (imode) {
+    std::string m = "mode" + std::to_string(*imode);
+    lr_grp = lr_grp.has_subgroup(m) ? lr_grp.open_group(m) : lr_grp.create_group(m);
+  }
+  return lr_grp;
+}
+
 template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
 void dump_lr(communicator_t& comm,
              std::string filename,
@@ -640,16 +652,9 @@ void dump_lr(communicator_t& comm,
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
     h5::file file(filename, 'a');
-    h5::group grp(file);
-    auto lr_grp = grp.has_subgroup("linear_response") ?
-                  grp.open_group("linear_response") :
-                  grp.create_group("linear_response");
     // A multi-perturbation run gives each one its own subgroup; a single one
     // keeps writing straight into "linear_response/", as before.
-    if (imode) {
-      std::string m = "mode" + std::to_string(*imode);
-      lr_grp = lr_grp.has_subgroup(m) ? lr_grp.open_group(m) : lr_grp.create_group(m);
-    }
+    auto lr_grp = lr_group(file, imode);
 
     // Write an imaginary-time array, trimmed to the leading nbnd_save x nbnd_save
     // band block when asked. A trimmed dataset is the protected-band block of the

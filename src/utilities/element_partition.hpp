@@ -161,6 +161,20 @@ void complete_node_slices(Comm& internode_comm, part_map const& pmap,
 }
 
 /**
+ * @brief Complete node-replicated shared arrays after every rank of mpi.comm wrote
+ *        only its own part_map slice of each. Collective on mpi.comm.
+ */
+template<typename MPI_Context_t, typename... sArr_t>
+void complete_shared_slices(MPI_Context_t& mpi, part_map const& pmap, sArr_t&... arrs) {
+  (arrs.win().fence(), ...);
+  mpi.node_comm.barrier();
+  if (mpi.node_comm.root())
+    (complete_node_slices(mpi.internode_comm, pmap, arrs.local().data(), arrs.local().size()), ...);
+  (arrs.win().fence(), ...);
+  mpi.comm.barrier();
+}
+
+/**
  * @brief Frobenius norm and successive-iterate difference norm from pre-sliced
  *        1D views, reduced over `comm`.
  *

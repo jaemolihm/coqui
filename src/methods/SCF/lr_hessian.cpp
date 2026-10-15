@@ -202,9 +202,8 @@ void lr_hessian_t::rebuild_raw_kernel(
   _Timer.start("LR_HESS_REBUILD");
   // Every rank writes its own disjoint element slice of the node-replicated
   // window, then one allgatherv among the node roots completes every replica —
-  // the same fence / barrier / complete_node_slices sequence the SCF loop's
-  // mixing epilogue uses. The slices cover the array exactly once job-wide, so
-  // nothing has to be zeroed first.
+  // the same complete_shared_slices the SCF loop's mixing epilogue uses. The
+  // slices cover the array exactly once job-wide, so nothing has to be zeroed first.
   {
     auto loc = sDeltaF_out.local();
     utils::check(loc.size() == _nF,
@@ -212,11 +211,7 @@ void lr_hessian_t::rebuild_raw_kernel(
                  "elements, expected {}.", loc.size(), _nF);
     auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
     if (_nloc > 0) flat(nda::range(_i0, _i1)) = _dF[p];
-    sDeltaF_out.win().fence();
-    _mpi->node_comm.barrier();
-    if (_mpi->node_comm.root())
-      utils::complete_node_slices(_mpi->internode_comm, _pmap, loc.data(), _nF);
-    sDeltaF_out.win().fence();
+    utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_out);
   }
 
   if (_has_sigma) {

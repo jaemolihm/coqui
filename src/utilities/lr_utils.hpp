@@ -24,9 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <functional>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -40,6 +38,18 @@
 #include "nda/blas.hpp"
 
 namespace utils {
+
+/// Squared distance of the crystal-coordinate difference (x0, x1, x2) to the
+/// nearest reciprocal lattice vector.
+inline double periodic_dist2(double x0, double x1, double x2) {
+  auto wrap = [](double d) {
+    d = std::abs(d);
+    d -= std::floor(d);
+    return d - std::round(d);
+  };
+  double d0 = wrap(x0), d1 = wrap(x1), d2 = wrap(x2);
+  return d0 * d0 + d1 * d1 + d2 * d2;
+}
 
 /**
  * @brief Compute k+q mapping for linear response calculations
@@ -71,19 +81,8 @@ inline void calculate_kpq_map(nda::ArrayOfRank<2> auto const& kpts_crys,
 
     // Find k' such that k' = k + q (mod G)
     for (long ikp = 0; ikp < nkpts; ++ikp) {
-      double d0 = std::abs(kpts_crys(ikp, 0) - kpq0);
-      double d1 = std::abs(kpts_crys(ikp, 1) - kpq1);
-      double d2 = std::abs(kpts_crys(ikp, 2) - kpq2);
-
-      // Apply periodic boundary conditions
-      d0 -= std::floor(d0);
-      d1 -= std::floor(d1);
-      d2 -= std::floor(d2);
-      d0 -= std::round(d0);
-      d1 -= std::round(d1);
-      d2 -= std::round(d2);
-
-      if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
+      if (periodic_dist2(kpts_crys(ikp, 0) - kpq0, kpts_crys(ikp, 1) - kpq1,
+                         kpts_crys(ikp, 2) - kpq2) < threshold * threshold) {
         kpq_map(ik) = ikp;
         break;
       }
@@ -104,19 +103,7 @@ inline void calculate_kpq_map(nda::ArrayOfRank<2> auto const& kpts_crys,
  * @return true if q is approximately zero, false otherwise
  */
 inline bool is_q_gamma(nda::ArrayOfRank<1> auto const& q_vec, double threshold = 1e-6) {
-  double d0 = std::abs(q_vec(0));
-  double d1 = std::abs(q_vec(1));
-  double d2 = std::abs(q_vec(2));
-
-  // Apply periodic boundary conditions
-  d0 -= std::floor(d0);
-  d1 -= std::floor(d1);
-  d2 -= std::floor(d2);
-  d0 -= std::round(d0);
-  d1 -= std::round(d1);
-  d2 -= std::round(d2);
-
-  return d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold;
+  return periodic_dist2(q_vec(0), q_vec(1), q_vec(2)) < threshold * threshold;
 }
 
 /**
@@ -141,19 +128,8 @@ inline long find_q_ibz_index(nda::ArrayOfRank<2> auto const& kpts_crys,
   utils::check(qp_to_ibz.shape(0) == nkpts, "find_q_ibz_index: qp_to_ibz size mismatch");
 
   for (long ik = 0; ik < nkpts; ++ik) {
-    double d0 = std::abs(kpts_crys(ik, 0) - q_vec(0));
-    double d1 = std::abs(kpts_crys(ik, 1) - q_vec(1));
-    double d2 = std::abs(kpts_crys(ik, 2) - q_vec(2));
-
-    // Apply periodic boundary conditions
-    d0 -= std::floor(d0);
-    d1 -= std::floor(d1);
-    d2 -= std::floor(d2);
-    d0 -= std::round(d0);
-    d1 -= std::round(d1);
-    d2 -= std::round(d2);
-
-    if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
+    if (periodic_dist2(kpts_crys(ik, 0) - q_vec(0), kpts_crys(ik, 1) - q_vec(1),
+                       kpts_crys(ik, 2) - q_vec(2)) < threshold * threshold) {
       return qp_to_ibz(ik);
     }
   }
@@ -182,19 +158,8 @@ inline long find_q_full_index(nda::ArrayOfRank<2> auto const& qpts_crys,
   utils::check(q_vec.shape(0) == 3, "find_q_full_index: q_vec.shape(0) != 3");
 
   for (long ik = 0; ik < nkpts; ++ik) {
-    double d0 = std::abs(qpts_crys(ik, 0) - q_vec(0));
-    double d1 = std::abs(qpts_crys(ik, 1) - q_vec(1));
-    double d2 = std::abs(qpts_crys(ik, 2) - q_vec(2));
-
-    // Apply periodic boundary conditions
-    d0 -= std::floor(d0);
-    d1 -= std::floor(d1);
-    d2 -= std::floor(d2);
-    d0 -= std::round(d0);
-    d1 -= std::round(d1);
-    d2 -= std::round(d2);
-
-    if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
+    if (periodic_dist2(qpts_crys(ik, 0) - q_vec(0), qpts_crys(ik, 1) - q_vec(1),
+                       qpts_crys(ik, 2) - q_vec(2)) < threshold * threshold) {
       return ik;
     }
   }
@@ -298,16 +263,6 @@ void check_W_q_local_dist(const darray_t& d, const std::string& caller) {
   check(pgrid[1] == 1,
         "{}: expected q-local dist (pgrid[1]==1), got pgrid=({},{},{},{})",
         caller, pgrid[0], pgrid[1], pgrid[2], pgrid[3]);
-}
-
-/// Debug switch: force the gemm k<->R path (instead of the blocked FFT) in the
-/// LR solvers when the env var COQUI_LR_DEBUG_GEMM_FT is set to a non-zero value.
-inline bool lr_debug_gemm_ft() {
-  static const bool flag = [] {
-    const char* env = std::getenv("COQUI_LR_DEBUG_GEMM_FT");
-    return env != nullptr && std::string_view(env) != "0";
-  }();
-  return flag;
 }
 
 /**

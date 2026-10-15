@@ -93,6 +93,14 @@ namespace methods {
     nda::array<ComplexType, 4> F_PQ_skij;                  // (ns, nk_ibz, NP, NP)
   };
 
+  /// The unperturbed G(τ_it) of the DeltaX correction, a view into ibc->sG_tskij;
+  /// empty without IBC or without a stored G.
+  inline auto unpert_G_slice(const lr_ibc_DeltaX* ibc, long it) {
+    std::optional<decltype(ibc->sG_tskij->local()(it, nda::ellipsis{}))> G;
+    if (ibc && ibc->sG_tskij) G.emplace(ibc->sG_tskij->local()(it, nda::ellipsis{}));
+    return G;
+  }
+
 
   // =========================================================================
   // IBC precomputation functions (template implementations)
@@ -133,7 +141,7 @@ namespace methods {
 
     long NP = thc.Np();
     long ns = Dm_skij.shape(0);
-    long npol = MF->npol();
+    utils::check(MF->npol() == 1, "lr_precompute_V_HF_PQ: npol = {} (spinor) is not supported.", MF->npol());
     long nkpts = MF->nkpts();
     long nkpts_ibz = MF->nkpts_ibz();
 
@@ -182,49 +190,51 @@ namespace methods {
     // Accumulate Dm_QQ for Hartree
     nda::array<ComplexType, 1> Dm_QQ(NP, ComplexType(0.0));
 
-    if (compute_hartree && !compute_exchange) {
-      // === HARTREE-ONLY PATH ===
-      for (auto ip : nda::range(npol)) {
-        solvers::thc_solver_comm::primary_to_aux(ip, ip, Dm_skij, dDm_skPQ, thc,
-                                                  MF->kp_to_ibz(), MF->kp_trev());
-
-        // FT k→R
-        if (nkpts != 1) {
-          auto f_Rk = sf_Rk.local();
-          utils::k_to_R_coefficients(mpi.comm, nda::range(nkpts), MF->kpts(), MF->lattv(), R_grid, sf_Rk);
-          auto Dm_3D = nda::reshape(dDm_skPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
-          if (buffer.shape() != std::array<long, 2>{nkpts, NP_loc * NQ_loc})
-            buffer.resize(std::array<long, 2>{nkpts, NP_loc * NQ_loc});
-          for (int s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
-            Dm_3D(s, nda::ellipsis{}) = buffer;
-          }
+    // dDm_skPQ = Dm_PQ, FT k→R
+    auto Dm_to_R = [&]() {
+      solvers::thc_solver_comm::primary_to_aux(0, 0, Dm_skij, dDm_skPQ, thc,
+                                                MF->kp_to_ibz(), MF->kp_trev());
+      if (nkpts != 1) {
+        auto f_Rk = sf_Rk.local();
+        utils::k_to_R_coefficients(mpi.comm, nda::range(nkpts), MF->kpts(), MF->lattv(), R_grid, sf_Rk);
+        auto Dm_3D = nda::reshape(dDm_skPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
+        if (buffer.shape() != std::array<long, 2>{nkpts, NP_loc * NQ_loc})
+          buffer.resize(std::array<long, 2>{nkpts, NP_loc * NQ_loc});
+        for (int s = 0; s < ns; ++s) {
+          nda::blas::gemm(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
+          Dm_3D(s, nda::ellipsis{}) = buffer;
         }
-
-        // Extract diagonal of Dm_PQ at R=0
-        double factor = (ns == 1 && npol == 1) ? 2.0 : 1.0;
-        auto Dm_sRPQ = dDm_skPQ.local();
-        for (long is = 0; is < ns; ++is) {
-          for (auto idx : diag_idx)
-            Dm_QQ(idx.first + P_origin) += factor * Dm_sRPQ(is, 0, idx.first, idx.second);
-        }
-      } // ip
-
-      // Hartree: J_PP = U_PQ * Dm_QQ
+      }
+    };
+    // Hartree: Dm_QQ += diagonal of Dm_PQ at R=0
+    auto add_Dm_diag = [&]() {
+      double factor = (ns == 1) ? 2.0 : 1.0;
+      auto Dm_sRPQ = dDm_skPQ.local();
+      for (long is = 0; is < ns; ++is) {
+        for (auto idx : diag_idx)
+          Dm_QQ(idx.first + P_origin) += factor * Dm_sRPQ(is, 0, idx.first, idx.second);
+      }
+    };
+    // Hartree: J_PP = U_PQ * Dm_QQ, added to the diagonal of F_PQ — same at all k-points
+    auto add_J = [&]() {
       dDm_skPQ.communicator()->all_reduce_in_place_n(Dm_QQ.data(), Dm_QQ.size(), std::plus<>{});
       nda::array<ComplexType, 1> J_PP(NP, ComplexType(0.0));
       nda::blas::gemv(Uq0_PQ, Dm_QQ(dU_qPQ.local_range(2)), J_PP(dU_qPQ.local_range(1)));
       dDm_skPQ.communicator()->all_reduce_in_place_n(J_PP.data(), J_PP.size(), std::plus<>{});
-
-      // Set F_PQ = diag(J_PP) — same at all k-points
       auto F_skPQ = dF_skPQ.local();
       for (long is = 0; is < ns; ++is) {
         for (long ik = 0; ik < nkpts_ibz; ++ik) {
-          for (auto idx : diag_idx) {
-            F_skPQ(is, ik, idx.first, idx.second) = J_PP(idx.first + P_origin);
-          }
+          for (auto idx : diag_idx)
+            F_skPQ(is, ik, idx.first, idx.second) += J_PP(idx.first + P_origin);
         }
       }
+    };
+
+    if (compute_hartree && !compute_exchange) {
+      // === HARTREE-ONLY PATH ===
+      Dm_to_R();
+      add_Dm_diag();
+      add_J();
 
     } else if (compute_exchange) {
       // === EXCHANGE (+ optional HARTREE) PATH ===
@@ -240,79 +250,38 @@ namespace methods {
       }
       auto& U_RPQ_loc = dU_qPQ_loc;
 
-      for (auto ip : nda::range(npol)) {
-        for (auto iq : nda::range(ip, npol)) {
-          // Forward transform
-          solvers::thc_solver_comm::primary_to_aux(ip, iq, Dm_skij, dDm_skPQ, thc,
-                                                    MF->kp_to_ibz(), MF->kp_trev());
+      Dm_to_R();
 
-          // FT k→R
-          if (nkpts != 1) {
-            auto f_Rk = sf_Rk.local();
-            utils::k_to_R_coefficients(mpi.comm, nda::range(nkpts), MF->kpts(), MF->lattv(), R_grid, sf_Rk);
-            auto Dm_3D = nda::reshape(dDm_skPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
-            if (buffer.shape() != std::array<long, 2>{nkpts, NP_loc * NQ_loc})
-              buffer.resize(std::array<long, 2>{nkpts, NP_loc * NQ_loc});
-            for (int s = 0; s < ns; ++s) {
-              nda::blas::gemm(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
-              Dm_3D(s, nda::ellipsis{}) = buffer;
-            }
-          }
+      if (compute_hartree) {
+        add_Dm_diag();
+        add_J();
+      }
 
-          // Hartree contribution (diagonal blocks only)
-          if (compute_hartree && ip == iq) {
-            double factor = (ns == 1 && npol == 1) ? 2.0 : 1.0;
-            auto Dm_sRPQ = dDm_skPQ.local();
-            for (long is = 0; is < ns; ++is) {
-              for (auto idx : diag_idx)
-                Dm_QQ(idx.first + P_origin) += factor * Dm_sRPQ(is, 0, idx.first, idx.second);
-            }
+      // Exchange: K(R) = -Dm(R) ⊙ U(R)
+      auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
+      for (long s = 0; s < ns; ++s) {
+        auto K_RPQ = dDm_skPQ.local()(s, nda::ellipsis{});
+        K_RPQ = had_prod2(K_RPQ, U_RPQ_loc);
+      }
+      auto& dK_sRPQ = dDm_skPQ;
 
-            if (npol == 1) {
-              dDm_skPQ.communicator()->all_reduce_in_place_n(Dm_QQ.data(), Dm_QQ.size(), std::plus<>{});
-              nda::array<ComplexType, 1> J_PP(NP, ComplexType(0.0));
-              nda::blas::gemv(Uq0_PQ, Dm_QQ(dU_qPQ.local_range(2)), J_PP(dU_qPQ.local_range(1)));
-              dDm_skPQ.communicator()->all_reduce_in_place_n(J_PP.data(), J_PP.size(), std::plus<>{});
-
-              auto F_skPQ = dF_skPQ.local();
-              for (long is = 0; is < ns; ++is) {
-                for (long ik = 0; ik < nkpts_ibz; ++ik) {
-                  for (auto idx : diag_idx)
-                    F_skPQ(is, ik, idx.first, idx.second) += J_PP(idx.first + P_origin);
-                }
-              }
-            }
-          }
-
-          // Exchange: K(R) = -Dm(R) ⊙ U(R)
-          auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return -1.0 * (x * y); });
-          for (long s = 0; s < ns; ++s) {
-            auto K_RPQ = dDm_skPQ.local()(s, nda::ellipsis{});
-            K_RPQ = had_prod2(K_RPQ, U_RPQ_loc);
-          }
-          auto& dK_sRPQ = dDm_skPQ;
-
-          // FT K R→k, accumulate onto F_PQ
-          if (nkpts != 1) {
-            auto f_kR = sf_Rk.local();
-            utils::R_to_k_coefficients(mpi.comm, nda::range(nkpts), MF->kpts(), MF->lattv(), R_grid, sf_Rk);
-            auto K_R_3D = nda::reshape(dK_sRPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
-            auto F_k_3D = nda::reshape(dF_skPQ.local(), std::array<long, 3>{ns, nkpts_ibz, NP_loc * NQ_loc});
-            ComplexType scl = (ip == iq) ? ComplexType(1.0) : ComplexType(2.0);
-            for (int s = 0; s < ns; ++s) {
-              nda::blas::gemm(scl, f_kR(nda::range(nkpts_ibz), nda::range::all),
-                              K_R_3D(s, nda::ellipsis{}), ComplexType(1.0), F_k_3D(s, nda::ellipsis{}));
-            }
-          } else {
-            ComplexType scl = (ip == iq) ? ComplexType(1.0) : ComplexType(2.0);
-            auto F_loc = dF_skPQ.local();
-            auto K_loc = dK_sRPQ.local();
-            for (long is = 0; is < ns; ++is)
-              for (long ik = 0; ik < nkpts_ibz; ++ik)
-                F_loc(is, ik, nda::ellipsis{}) += scl * K_loc(is, 0, nda::ellipsis{});
-          }
-        } // iq
-      } // ip
+      // FT K R→k, accumulate onto F_PQ
+      if (nkpts != 1) {
+        auto f_kR = sf_Rk.local();
+        utils::R_to_k_coefficients(mpi.comm, nda::range(nkpts), MF->kpts(), MF->lattv(), R_grid, sf_Rk);
+        auto K_R_3D = nda::reshape(dK_sRPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
+        auto F_k_3D = nda::reshape(dF_skPQ.local(), std::array<long, 3>{ns, nkpts_ibz, NP_loc * NQ_loc});
+        for (int s = 0; s < ns; ++s) {
+          nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
+                          K_R_3D(s, nda::ellipsis{}), ComplexType(1.0), F_k_3D(s, nda::ellipsis{}));
+        }
+      } else {
+        auto F_loc = dF_skPQ.local();
+        auto K_loc = dK_sRPQ.local();
+        for (long is = 0; is < ns; ++is)
+          for (long ik = 0; ik < nkpts_ibz; ++ik)
+            F_loc(is, ik, nda::ellipsis{}) += K_loc(is, 0, nda::ellipsis{});
+      }
     }
 
     dU_qPQ.reset();
