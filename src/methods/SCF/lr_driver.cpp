@@ -1005,12 +1005,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _mpi->comm.barrier();
   }
 
-  // GCR exit, converged or at max_iter: ΔF (and ΔΣ) now hold GCR's latest iterate
-  // x, a combination of its basis, while ΔDm is that of the last iteration's input.
-  // DIIS keeps that input's ΔDm, so it needs nothing here. Form ΔDm at x with the
-  // Step 1 Dyson pass (with a Σ it also materializes ΔG(τ); otherwise update_DeltaG
-  // forms it on demand).
-  if (use_gcr && !k.op.is_empty()) {
+  // Every exit, converged or at max_iter: the accelerator step of the last
+  // iteration has replaced ΔF (and ΔΣ / ΔV_QPGW) by its next iterate (a DIIS or
+  // damping mix, or GCR's x), while ΔDm is the response to that iteration's input.
+  // The Step 1 Dyson pass forms ΔDm at the returned iterate (with a Σ it also
+  // materializes ΔG(τ); otherwise update_DeltaG forms it on demand). A DIIS or
+  // damping one-shot (max_iter == 1) takes no step, so its ΔF/ΔΣ stay K of the
+  // bare response and the pass is skipped.
+  if ((use_gcr || p.max_iter > 1) && !K.empty()) {
     _Timer.start("LR_DYSON");
     dyson_pass();
     _Timer.stop("LR_DYSON");
@@ -1026,8 +1028,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (p.save_DeltaG) update_DeltaG();
 
   // Hessian: the estimator needs the returned ΔF/ΔΣ to be K of the returned
-  // ΔDm/ΔG(τ), but the loop ends on the accelerator's next iterate (a DIIS mix or
-  // GCR's x). One kernel evaluation at the returned ΔDm/ΔG(τ) makes the pair exact.
+  // ΔDm/ΔG(τ), but ΔF/ΔΣ are the accelerator's iterate and ΔDm/ΔG(τ) its Dyson
+  // response. One kernel evaluation at the returned ΔDm/ΔG(τ) makes the pair exact.
   // After update_DeltaG, whose full pass may have replaced ΔDm.
   if (p.hessian()) {
     apply_kernel(/*precond=*/false, sDeltaF_skij, pDeltaSigma,
