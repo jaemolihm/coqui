@@ -97,47 +97,6 @@ inline void calculate_kpq_map(nda::ArrayOfRank<2> auto const& kpts_crys,
 }
 
 /**
- * @brief Check if q is commensurate with the k-point grid
- *
- * @param kpts_crys   - [INPUT] k-points in crystal coordinates (nkpts, 3)
- * @param q_vec       - [INPUT] perturbation wavevector in crystal coordinates (3,)
- * @param threshold   - [INPUT] tolerance for k-point matching
- * @return true if q is commensurate, false otherwise
- */
-inline bool is_q_commensurate(nda::ArrayOfRank<2> auto const& kpts_crys,
-                              nda::ArrayOfRank<1> auto const& q_vec,
-                              double threshold = 1e-6) {
-  long nkpts = kpts_crys.shape(0);
-
-  for (long ik = 0; ik < nkpts; ++ik) {
-    double kpq0 = kpts_crys(ik, 0) + q_vec(0);
-    double kpq1 = kpts_crys(ik, 1) + q_vec(1);
-    double kpq2 = kpts_crys(ik, 2) + q_vec(2);
-
-    bool found = false;
-    for (long ikp = 0; ikp < nkpts; ++ikp) {
-      double d0 = std::abs(kpts_crys(ikp, 0) - kpq0);
-      double d1 = std::abs(kpts_crys(ikp, 1) - kpq1);
-      double d2 = std::abs(kpts_crys(ikp, 2) - kpq2);
-
-      d0 -= std::floor(d0);
-      d1 -= std::floor(d1);
-      d2 -= std::floor(d2);
-      d0 -= std::round(d0);
-      d1 -= std::round(d1);
-      d2 -= std::round(d2);
-
-      if (d0 * d0 + d1 * d1 + d2 * d2 < threshold * threshold) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) return false;
-  }
-  return true;
-}
-
-/**
  * @brief Check if q is approximately zero (Gamma point)
  *
  * @param q_vec       - [INPUT] perturbation wavevector in crystal coordinates (3,)

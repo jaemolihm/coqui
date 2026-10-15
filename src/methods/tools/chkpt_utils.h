@@ -152,40 +152,6 @@ namespace methods {
                      std::string filename, long weiss_b_iter=-1);
 
   /**
-   * Read linear response perturbation ΔH0 from HDF5 file.
-   *
-   * Expected HDF5 structure:
-   *   /linear_response/
-   *     q_vec              # (3,) perturbation wavevector in crystal coords
-   *     DeltaH0_skij       # (ns, nk, nb, nb) complex perturbation matrix
-   *
-   * @param comm           - [INPUT] MPI communicator (shared or regular)
-   * @param filename       - [INPUT] HDF5 file path
-   * @param q_vec          - [OUTPUT] perturbation wavevector
-   * @param sDeltaH0_skij  - [OUTPUT] perturbation matrix
-   * @return true if read successful, false otherwise
-   */
-  template<typename communicator_t, typename shared_array_t>
-  bool read_DeltaH0(communicator_t& comm,
-                    std::string filename,
-                    nda::array<double, 1>& q_vec,
-                    shared_array_t& sDeltaH0_skij);
-
-  /**
-   * Write linear response perturbation ΔH0 to HDF5 file.
-   *
-   * @param comm           - [INPUT] MPI communicator
-   * @param filename       - [INPUT] HDF5 file path
-   * @param q_vec          - [INPUT] perturbation wavevector
-   * @param sDeltaH0_skij  - [INPUT] perturbation matrix
-   */
-  template<typename communicator_t, typename shared_array_t>
-  void write_DeltaH0(communicator_t& comm,
-                     std::string filename,
-                     nda::array<double, 1> const& q_vec,
-                     shared_array_t const& sDeltaH0_skij);
-
-  /**
    * Write unified LR results to HDF5 checkpoint file.
    *
    * Always writes ΔG and ΔDm. Writes ΔF only if include_hartree || include_exchange.

@@ -36,7 +36,6 @@
 #include "utilities/lr_utils.hpp"
 
 #include "mean_field/MF.hpp"
-#include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/ERI/detail/concepts.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
@@ -46,11 +45,9 @@
 namespace methods {
   namespace solvers {
 
-    lr_gw::lr_gw(const imag_axes_ft::IAFT *ft,
-                 nda::array<double, 1> const& q_pert,
-                 std::string div)
+    lr_gw::lr_gw(nda::array<double, 1> const& q_pert, std::string div)
       : _q_pert(q_pert),
-        _gw(ft, div),
+        _div_treatment(std::move(div)),
         _Timer() {
 
       for (auto& v: {"EVALUATE_SIGMA_R",
@@ -626,7 +623,7 @@ namespace methods {
         const nda::array_view<ComplexType, 4>& S_skij,
         thc_reader_t& thc,
         const nda::array<ComplexType, 1>& eps_inv_head) {
-      auto div_treatment = _gw.div_treatment();
+      auto div_treatment = _div_treatment;
       app_log(3, "  LR divergence correction: {}", div_treatment);
 
       if (thc.MF()->nqpts_ibz() == 1 and div_treatment != "ignore_g0") {

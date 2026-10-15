@@ -35,8 +35,6 @@ namespace solvers {
 void lr_scr_coulomb_t::lr_Wc_to_Wfull(
     dArr4D_concrete_t& dW_c_wqPQ, THC_ERI auto& thc) {
 
-  _Timer.start("LR_W_COMPUTE_W_FULL");
-
   auto w_pgrid = dW_c_wqPQ.grid();
   auto [nw_half, nqpts, NP, NQ] = dW_c_wqPQ.global_shape();
 
@@ -88,8 +86,6 @@ void lr_scr_coulomb_t::lr_Wc_to_Wfull(
   // Eagerly build the Q≠Γ left operand _dW_full_qpQ_wqPQ = W_full(q+Q).
   // This is used for the Dyson equation for DeltaW at Q≠Γ.
   _build_W_full_qpQ(dW_c_wqPQ, thc);
-
-  _Timer.stop("LR_W_COMPUTE_W_FULL");
 }
 
 /**

@@ -37,7 +37,6 @@
 #include "mean_field/mf_utils.hpp"
 #include "methods/ERI/mb_eri_context.h"
 #include "methods/mb_state/mb_state.hpp"
-#include "methods/SCF/lr_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
 #include "methods/SCF/lr_precompute.hpp"
@@ -1129,13 +1128,12 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
  * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
- * Also used by run_lr_calc when include_gw_sigma=true.
+ * Also used by run_lr_calc (through lr_load_W_omega).
  *
  * @param mpi         - MPI context
  * @param thc         - THC ERI (provides Np())
  * @param input_file  - Path to checkpoint HDF5 file (for eps_inv_head)
  * @param input_grp   - SCF group name in checkpoint (e.g., "scf")
- * @param input_iter  - Iteration to read (-1 = final_iter)
  * @param nt          - Number of tau points (from IAFT)
  * @param screened_interaction_file - Explicit path to the W_qtPQ HDF5 file.
  *                      If empty, falls back to thc_screened_interaction.h5 in
@@ -1151,7 +1149,6 @@ auto load_W_and_eps_inv_head(
     THC_t& thc,
     const std::string& input_file,
     const std::string& input_grp,
-    long input_iter,
     long nt,
     const std::string& screened_interaction_file = "")
 {
@@ -1232,7 +1229,6 @@ auto load_W_and_eps_inv_head(
  * @param ft          - IAFT (from checkpoint)
  * @param input_file  - Path to checkpoint HDF5 file
  * @param input_grp   - SCF group name in checkpoint
- * @param input_iter  - Iteration to read (-1 = final_iter)
  * @param screened_interaction_file - Explicit path to W_qtPQ, "" = auto-derive
  * @return (dW_wqPQ, eps_inv_head, div_treatment) — W on the Matsubara axis on
  *         the q-dist distribution (utils::lr_W_tau_local_dist),
@@ -1245,12 +1241,10 @@ auto lr_load_W_omega(
     imag_axes_ft::IAFT const& ft,
     const std::string& input_file,
     const std::string& input_grp,
-    long input_iter,
     const std::string& screened_interaction_file = "")
 {
   auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
-      mpi, thc, input_file, input_grp, input_iter, ft.nt_f(),
-      screened_interaction_file);
+      mpi, thc, input_file, input_grp, ft.nt_f(), screened_interaction_file);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
   auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
@@ -1744,32 +1738,26 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "per-perturbation). Call run_lr once per mode.", nmodes);
   }
 
-  // LR state: perturbation + response quantities. sDeltaH0_skij is one rank-4
-  // shm window, refilled from the caller's rank-5 array per perturbation — no
-  // node memory scales with nmodes.
-  lr_state_t lr_state;
-  lr_state.q_vec.emplace(q_vec);
-  {
+  // Response arrays. sDeltaH0_skij is one rank-4 shm window, refilled from the
+  // caller's rank-5 array per perturbation — no node memory scales with nmodes.
+  auto sDeltaH0_skij = [&] {
     std::optional<nda::array<ComplexType, 4>> h0_first;
     if (mpi->comm.root())
       h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
-    lr_state.sDeltaH0_skij.emplace(
-        math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first));
-  }
-  lr_state.sDeltaG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
-  lr_state.sDeltaDm_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
-  lr_state.sDeltaF_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+    return math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first);
+  }();
+  auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
-  const bool dump_hartree = total_kernel.hartree;
-  const bool dump_exchange = total_kernel.exchange;
-  const bool dump_gw_sigma = total_kernel.has_sigma();
   // Only allocate ΔΣ array when GW is active
-  bool include_gw_sigma = total_kernel.has_sigma();
+  const bool include_gw_sigma = total_kernel.has_sigma();
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaSigma;
   if (include_gw_sigma) {
-    lr_state.sDeltaSigma_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+    opt_sDeltaSigma.emplace(math::shm::make_shared_array<Array_view_5D_t>(
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
   // Split-term output (one-shot G0W0): array for the G0·dW0 piece; the total
@@ -1789,7 +1777,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // hand W to lr_driver as W_c(iω) on the q-dist distribution
   // (utils::lr_W_tau_local_dist).
   using dW_type = std::tuple_element_t<0, decltype(lr_load_W_omega(
-      *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter))>;
+      *mpi, eri.corr_eri->get(), ft, input_file, input_grp))>;
   std::optional<dW_type> opt_dW;
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
   /// The same head on the ω axis; HSEX reads its ν = 0 component.
@@ -1815,7 +1803,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // The ω array is released inside lr_setup once that slice is taken.
   if (include_gw_sigma || exchange_static_W) {
     lr_init_timer.start("LR_INIT_LOAD_W");
-    bool div_from_chkpt = false;
     if (unperturbed == "mf_dft") {
       // G0W0@DFT: W0 is the RPA screened interaction built from the DFT G0.
       // The checkpoint holds no scGW W (or div_treatment), so recompute and
@@ -1825,14 +1812,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    "screened_interaction_file must not be set.");
       recompute_W = true;
       div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
-    } else if (qp_static_sigma) {
-      // The qpGW checkpoint always stores scf/div_treatment (dump_qp_params), so
-      // read it directly; W0 = RPA[G_QP].
-      div_treatment = read_div_treatment(*mpi, input_file, input_grp);
-      div_from_chkpt = true;
     } else {
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
-      div_from_chkpt = true;
     }
     if (recompute_W) {
       app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
@@ -1843,14 +1824,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       opt_eps_inv_w.emplace(std::move(eps_inv_w));
     } else {
       auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
-          *mpi, eri.corr_eri->get(), ft, input_file, input_grp, input_iter,
+          *mpi, eri.corr_eri->get(), ft, input_file, input_grp,
           screened_interaction_file);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
       opt_eps_inv_w.emplace(std::move(eps_inv_w));
       // W carries its own stash; a disagreement means the W file and the
       // checkpoint came from different runs, and Σ would mix two treatments.
-      utils::check(!div_from_chkpt or div_str == div_treatment,
+      // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
+      utils::check(div_str == div_treatment,
                    "run_lr_calc: div_treatment mismatch. The screened interaction "
                    "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
                    "must come from the same ground-state run.",
@@ -1909,9 +1891,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   // Create lr_driver and run unified SCF loop
   lr_driver driver(dyson, q_vec);
-  lr_state.kpq_map.emplace(driver.kpq_map());
   auto& thc = eri.corr_eri->get();
-  auto* pDeltaSigma = lr_state.sDeltaSigma_tskij ? &(*lr_state.sDeltaSigma_tskij) : nullptr;
+  auto* pDeltaSigma = opt_sDeltaSigma ? &(*opt_sDeltaSigma) : nullptr;
   auto* pDeltaSigma2 = opt_sDeltaSigma2 ? &(*opt_sDeltaSigma2) : nullptr;
   auto* pDeltaX_left = opt_sDeltaX_left ? &(*opt_sDeltaX_left) : nullptr;
   auto* pDeltaX_right = opt_sDeltaX_right ? &(*opt_sDeltaX_right) : nullptr;
@@ -1964,7 +1945,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.max_iter         = max_iter;
   p.tol              = tol;
   p.fix_density      = fix_density;
-  // dump_lr below writes lr_state.sDeltaG_tskij only under this flag.
+  // dump_lr below writes sDeltaG_tskij only under this flag.
   p.save_DeltaG      = save_DeltaG;
   p.iter_params      = iter_params;
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
@@ -2009,24 +1990,21 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // the result visible to every rank on every node). Mode 0 is already in the
     // window from the allocation above. Costs one 0.1 GB broadcast, no memory.
     if (m > 0) {
-      auto& sDeltaH0 = lr_state.sDeltaH0_skij.value();
       if (mpi->comm.root())
-        sDeltaH0.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
-      sDeltaH0.broadcast_to_nodes(0);
+        sDeltaH0_skij.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
+      sDeltaH0_skij.broadcast_to_nodes(0);
       mpi->comm.barrier();
     }
 
     auto [niter, Delta_mu] = driver.lr_solve_one(
-        lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-        lr_state.sDeltaF_skij.value(), pDeltaSigma,
-        sG_tskij, lr_state.sDeltaH0_skij.value(), thc, p,
+        sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+        sG_tskij, sDeltaH0_skij, thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
         output_aux_fock ? &DeltaF_PQ_skij : nullptr);
     niter_m(m) = niter;
     Delta_mu_m(m) = Delta_mu;
-    lr_state.Delta_mu.emplace(Delta_mu);
     mpi->comm.barrier();
 
     utils::memlog(fmt::format("run_lr_calc: after lr_solve_one (mode {}/{})", m + 1, nmodes));
@@ -2039,15 +2017,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     std::optional<double> hsex_head;
     if (exchange_static_W) hsex_head = driver.hsex_head_factor();
     chkpt::dump_lr(mpi->comm, output + ".mbpt.h5", q_vec,
-                   lr_state.sDeltaG_tskij.value(), lr_state.sDeltaDm_skij.value(),
-                   lr_state.sDeltaF_skij.value(),
-                   dump_gw_sigma ? pDeltaSigma : nullptr,
+                   sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
                    Delta_mu, niter,
-                   dump_hartree, dump_exchange, dump_gw_sigma,
+                   total_kernel.hartree, total_kernel.exchange, include_gw_sigma,
                    pDeltaSigma2, pDeltaVcorr,
                    nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt,
                    save_DeltaG, nbnd_save,
-                   gw_mode_str(gw_mode_of(total_kernel)),
+                   gw_mode_str(gw_mode),
                    precond_method != "none" ? precond_method : std::string(),
                    hsex_head);
     mpi->comm.barrier();
@@ -2058,10 +2034,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // taken here, before the next perturbation overwrites them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
-      opt_hessian->store_mode(m, lr_state.sDeltaDm_skij.value(),
-                           lr_state.sDeltaH0_skij.value(),
-                           lr_state.sDeltaF_skij.value(), pDeltaSigma,
-                           include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr);
+      opt_hessian->store_mode(m, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+                              pDeltaSigma, include_gw_sigma ? &sDeltaG_tskij : nullptr);
       mpi->comm.barrier();
     }
 
@@ -2112,10 +2086,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // persisted.
   if (opt_hessian) {
     auto c1 = opt_hessian->evaluate(
-        driver.dyson(), lr_state.sDeltaH0_skij.value(),
-        lr_state.sDeltaDm_skij.value(), lr_state.sDeltaF_skij.value(),
-        pDeltaSigma,
-        include_gw_sigma ? &lr_state.sDeltaG_tskij.value() : nullptr,
+        driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+        include_gw_sigma ? &sDeltaG_tskij : nullptr,
         DeltaH0_mskij_root, fix_density);
     opt_hessian->print_timers();
 
@@ -2123,7 +2095,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // mode-PAIR matrices. dump_lr rebinds its group to mode{m} for a batched run,
     // which is why the write does not go through it.
     if (mpi->comm.root()) {
-      // D7: the block spans the perturbations solved in THIS call, so its axes are
+      // The block spans the perturbations solved in THIS call, so its axes are
       // (npert, npert) and never padded to the full mode count.
       //
       // The index written here is the 0-based perturbation index WITHIN the call
@@ -2199,7 +2171,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   std::string err = std::string("lr_gw_sigma_DeltaG_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -2218,7 +2189,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
 
   // Load W and eps_inv_head using helper, in the (t,q) layout lr_precompute_W_tRPQ wants
   auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
-      *mpi, thc, input_file, input_grp, input_iter, nt);
+      *mpi, thc, input_file, input_grp, nt);
 
   // Divergence correction flag (default true)
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
@@ -2234,7 +2205,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   auto dW_tRPQ = lr_precompute_W_tRPQ(dW_tqPQ, thc);
 
   // Create lr_gw solver and compute ΔΣ
-  solvers::lr_gw lr(&ft, q_pert, div_treatment);
+  solvers::lr_gw lr(q_pert, div_treatment);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
@@ -2278,7 +2249,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   std::string err = std::string("gw_evaluate_sigma_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -2296,7 +2266,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
       *mpi, G_tskij_root);
 
   // Load W and eps_inv_head using helper
-  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, input_iter, nt);
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, nt);
 
   // Read overlap matrix from checkpoint for divergence correction
   auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -2477,7 +2447,7 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
 
     opt_ibc.emplace(lr_ibc_DeltaX{
         opt_sDeltaX_left->local(), opt_sDeltaX_right->local(),
-        q_pert, std::move(kpq_map),
+        std::move(kpq_map),
         nullptr, &sG_tskij,
         nda::array<ComplexType, 4>{}, std::nullopt
     });
@@ -2592,7 +2562,6 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   std::string err = std::string("lr_gw_W_calc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto input_iter = io::get_value_with_default<long>(pt, "input_iter", -1);
 
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
@@ -2620,7 +2589,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   // W Dyson works on.
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
   auto [dW_wqPQ, eps_inv_head, eps_inv_head_w, div_treatment] = lr_load_W_omega(
-      *mpi, thc, ft, input_file, input_grp, input_iter);
+      *mpi, thc, ft, input_file, input_grp);
   (void)div_treatment;
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
@@ -2823,7 +2792,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
   // Compute ΔΣ = -G ⊙ ΔW using lr_gw::evaluate_sigma_DeltaW
   app_log(1, "\n  lr_gw_sigma_DeltaW_calc: Computing -G ⊙ ΔW...");
-  solvers::lr_gw lr(&ft, q_pert, div_treatment);
+  solvers::lr_gw lr(q_pert, div_treatment);
 
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});

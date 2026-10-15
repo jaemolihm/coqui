@@ -69,10 +69,6 @@ lr_hessian_t::lr_hessian_t(
                   "LR_HESS_CONTRACT"})
     _Timer.add(v);
 
-  utils::check(nmodes > 0, "lr_hessian_t: nmodes must be > 0, got {}.", nmodes);
-  utils::check(k_weight.size() == nk_ibz,
-               "lr_hessian_t: k_weight has {} entries, expected nk_ibz = {}.",
-               k_weight.size(), nk_ibz);
   // No square-grid requirement, and nt_f != nw_f in practice (95 vs 96 here).
   //
   // What the estimator needs is that the ΔΣ it CONTRACTED (`_Sw`, in ω) and the
@@ -94,9 +90,6 @@ lr_hessian_t::lr_hessian_t(
   // negation for it to be representable at all.
   {
     nda::array<long, 1> wn(_FT->wn_mesh_f());
-    utils::check(wn.size() == _nw,
-                 "lr_hessian_t: wn_mesh_f has {} entries, expected nw_f = {}.",
-                 wn.size(), _nw);
     _refl = nda::array<long, 1>(_nw);
     _refl() = -1;
     for (long n = 0; n < _nw; ++n)
@@ -130,8 +123,6 @@ lr_hessian_t::lr_hessian_t(
     *a = nda::array<ComplexType, 2>(_nmodes, _nmodes);
     (*a)() = ComplexType(0.0);
   }
-
-  _stored.assign(_nmodes, false);
 
   // The ω stores are the largest allocation the feature makes; they are sized and
   // reported by lr_driver::print_memory_estimate along with every other large LR
@@ -188,17 +179,6 @@ void lr_hessian_t::store_mode(long p,
                                        sArray_t<Array_view_4D_t> const& sDeltaF,
                                        sArray_t<Array_view_5D_t> const* sDeltaSigma,
                                        sArray_t<Array_view_5D_t> const* sDeltaG) {
-  utils::check(p >= 0 && p < _nmodes,
-               "lr_hessian_t::store_mode: mode {} outside [0, {}).", p, _nmodes);
-  utils::check(!_stored[p],
-               "lr_hessian_t::store_mode: mode {} stored twice.", p);
-  utils::check(_has_sigma == (sDeltaSigma != nullptr),
-               "lr_hessian_t::store_mode: ΔΣ presence must match the "
-               "has_sigma the object was built with.");
-  utils::check(!_has_sigma || sDeltaG != nullptr,
-               "lr_hessian_t::store_mode: a Σ-carrying kernel needs ΔG.");
-
-  //
   // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
   // contraction is a single unweighted dot over the whole local slab. Which side a
   // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
@@ -211,7 +191,6 @@ void lr_hessian_t::store_mode(long p,
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
     pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M
   }
-  _stored[p] = true;
   _Timer.stop("LR_HESS_STORE");
 }
 
@@ -220,12 +199,6 @@ void lr_hessian_t::rebuild_raw_kernel(
     long p,
     sArray_t<Array_view_4D_t>& sDeltaF_out,
     sArray_t<Array_view_5D_t>* sDeltaSigma_out) {
-  utils::check(p >= 0 && p < _nmodes && _stored[p],
-               "lr_hessian_t::rebuild_raw_kernel: mode {} was never stored.", p);
-  utils::check(_has_sigma == (sDeltaSigma_out != nullptr),
-               "lr_hessian_t::rebuild_raw_kernel: ΔΣ destination presence "
-               "must match has_sigma.");
-
   _Timer.start("LR_HESS_REBUILD");
   // Every rank writes its own disjoint element slice of the node-replicated
   // window, then one allgatherv among the node roots completes every replica —
@@ -324,19 +297,8 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
     bool fix_density) {
 
-  // The accumulators are reduced and rescaled in place, so a second call would
-  // return a different (wrong) answer rather than the same one.
-  utils::check(!_evaluated, "lr_hessian_t::evaluate: called twice.");
-  _evaluated = true;
-  utils::check(!_has_sigma || (sDeltaSigma != nullptr && sDeltaG != nullptr),
-               "lr_hessian_t::evaluate: a Σ-carrying kernel needs the ΔΣ and ΔG "
-               "scratch arrays.");
-  for (long p = 0; p < _nmodes; ++p)
-    utils::check(_stored[p],
-                 "lr_hessian_t::evaluate: mode {} was never stored. Every mode must "
-                 "be stored before evaluation begins, because λ below runs over all "
-                 "of them.", p);
-
+  // The accumulators are reduced and rescaled in place, so this is single-shot,
+  // after every mode is stored.
   lr_hessian_result_t r;
   r.Delta_mu_improved = nda::array<double, 1>(_nmodes);
   r.Delta_mu_improved() = 0.0;

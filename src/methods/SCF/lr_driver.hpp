@@ -38,10 +38,11 @@
 #include "methods/GW/lr_gw.hpp"
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
-#include "methods/ERI/detail/concepts.hpp"
 #include "methods/SCF/qp_params_t.h"
 
 namespace methods {
+
+class thc_reader_t;
 
 /**
  * GW self-energy update mode for the LR SCF loop.
@@ -69,9 +70,6 @@ struct lr_kernel_spec {
   bool sigma_G_dW = false;   // Σ2 = -G  ⊙ ΔW,  label "GdW"
 
   bool has_sigma() const { return sigma_dG_W || sigma_G_dW; }
-  bool empty()     const { return !hartree && !exchange && !has_sigma(); }
-
-  bool operator==(lr_kernel_spec const&) const = default;
 
   /// Component list for logging, e.g. "H, X, dGW" ("-" when empty).
   std::string to_string() const;
@@ -290,6 +288,12 @@ public:
   using sArray_t = math::shm::shared_array<Array_base_t>;
   using Array_view_4D_t = nda::array_view<ComplexType, 4>;
   using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+  // Concrete distributed-array types of W and the cached aux-basis operands. The
+  // LR path is instantiated for THC + host mpi3 only (see lr_gw /
+  // lr_scr_coulomb_t), so naming them concretely here costs no generality.
+  using dArr_3D_t = memory::darray_t<nda::array<ComplexType, 3>, mpi3::communicator>;
+  using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+  using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
 
   /**
    * @brief Constructor
@@ -327,11 +331,10 @@ public:
    * the constructor's q, and none of them re-checks it; a batch spanning several
    * q-points would silently reuse the wrong maps.
    */
-  template<THC_ERI THC_t, typename dW_t>
   void lr_setup(
       const sArray_t<Array_view_5D_t>& sG_tskij,
-      THC_t& thc,
-      dW_t* dW_wqPQ_in,
+      thc_reader_t& thc,
+      dArr_4D_t* dW_wqPQ_in,
       const lr_params& p);
 
   /**
@@ -340,8 +343,8 @@ public:
    * `p` must be the one lr_setup was given: it selects which solvers and buffers
    * this call reads, and those were allocated by lr_setup.
    *
-   * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW, the previous iterates and
-   * the DIIS subspace) on entry, so the result depends only on ΔH0 and not on
+   * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW and the accelerator
+   * subspace) on entry, so the result depends only on ΔH0 and not on
    * whichever perturbation ran before it. No clock is reset: every timer
    * accumulates over the whole call, so the table printed after the last
    * perturbation is the cost of the entire batch and each intermediate one is a
@@ -357,7 +360,6 @@ public:
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
-  template<THC_ERI THC_t>
   std::tuple<int, double> lr_solve_one(
       sArray_t<Array_view_5D_t>& sDeltaG_tskij,
       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
@@ -365,7 +367,7 @@ public:
       sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
       const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-      THC_t& thc,
+      thc_reader_t& thc,
       const lr_params& p,
       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
       sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij = nullptr,
@@ -456,32 +458,22 @@ public:
                     solvers::lr_gw* gw_solver_term2 = nullptr);
 
   // Accessors
-  const nda::array<int, 1>& kpq_map() const { return _lr_dyson.kpq_map(); }
-  const nda::array<double, 1>& q_vec() const { return _lr_dyson.q_vec(); }
   bool is_q_gamma() const { return _lr_dyson.is_q_gamma(); }
   /// ε⁻¹(iν=0), the HSEX exchange Madelung scale. Only meaningful when
   /// exchange_static_W is set.
   double hsex_head_factor() const { return _hsex_head_factor; }
 
 private:
-  // Concrete distributed-array types of the cached aux-basis operands. The LR
-  // path is instantiated for THC + host mpi3 only (see lr_gw / lr_scr_coulomb_t),
-  // so naming them concretely here costs no generality.
-  using dArr_3D_t = memory::darray_t<nda::array<ComplexType, 3>, mpi3::communicator>;
-  using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
-  using dArr_5D_t = memory::darray_t<nda::array<ComplexType, 5>, mpi3::communicator>;
-
   /**
    * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
    * iteration: W_full(iω) for the ΔW Dyson (gw_full only) and W_c(t,R,P,Q) for
    * ΔΣ = −ΔG⊙W_c. Consumes dW_wqPQ_in. See the definition for the ordering
    * constraint between them.
    */
-  template<THC_ERI THC_t, typename dW_t>
-  void lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
+  void lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_full,
                   solvers::lr_scr_coulomb_t* lr_scr,
-                  std::optional<dW_t>& opt_dW_full_wqPQ,
-                  std::optional<dW_t>& opt_dW_tRPQ);
+                  std::optional<dArr_4D_t>& opt_dW_full_wqPQ,
+                  std::optional<dArr_4D_t>& opt_dW_tRPQ);
 
   /**
    * Apply one whole kernel — the operator's or the preconditioner's — to the
@@ -503,14 +495,13 @@ private:
    * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
    *                                   kernel.split_sigma_terms
    */
-  template<THC_ERI THC_t>
   void apply_kernel(lr_kernel const& kernel,
                     sArray_t<Array_view_4D_t>& sDeltaF_out,
                     sArray_t<Array_view_5D_t>* pDeltaSigma_out,
                     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
                     const sArray_t<Array_view_5D_t>& sG_tskij,
-                    THC_t& thc,
+                    thc_reader_t& thc,
                     const lr_params& p,
                     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
 
@@ -524,12 +515,11 @@ private:
    * concept: the static ΔF branch is one lr_hf::evaluate call with none of this
    * pipeline behind it.
    */
-  template<THC_ERI THC_t>
   void apply_kernel_gw(lr_kernel const& kernel,
                        sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                        const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
                        const sArray_t<Array_view_5D_t>& sG_tskij,
-                       THC_t& thc,
+                       thc_reader_t& thc,
                        const lr_params& p,
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
@@ -549,9 +539,8 @@ private:
    *
    * Collective on comm.
    */
-  template<THC_ERI THC_t>
   void precond_apply(nda::array<ComplexType, 1> const& r, nda::array<ComplexType, 1>& z,
-                     const sArray_t<Array_view_5D_t>& sG_tskij, THC_t& thc,
+                     const sArray_t<Array_view_5D_t>& sG_tskij, thc_reader_t& thc,
                      const lr_params& p);
   static constexpr double pc_rel_tol = 0.01;
   static constexpr int pc_max_sweeps = 10;
@@ -613,15 +602,15 @@ private:
       std::tie(i0, i1) = pmap.my_slice(n);
       prev = nda::array<ComplexType, 1>(i1 - i0);
     }
-    void zero() { prev() = ComplexType{0}; }
     /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
     auto slice(auto&& A) const {
       return nda::reshape(A, std::array<long, 1>{n_flat})(nda::range(i0, i1));
     }
   };
 
-  // --- Per-perturbation buffers: allocated once, zeroed at the top of each
-  //     lr_solve_one so mode m's solve cannot see mode m−1's state.
+  // --- Per-perturbation buffers: allocated once. Each is either zeroed at the top
+  //     of lr_solve_one or written before it is read, so mode m's solve cannot
+  //     see mode m−1's state.
   utils::part_map _pmap;
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;

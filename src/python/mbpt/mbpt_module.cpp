@@ -40,7 +40,7 @@ namespace coqui_py {
    *   ΔH0 → ΔG → ΔDm → [ΔF] → [ΔΣ] → ΔG → ... until convergence,
    * and writes results to the "linear_response" group of the output checkpoint.
    *
-   * @param lr_params         - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
+   * @param lr_params         - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, ...)
    * @param h_int             - [INPUT] THC ERI handler
    * @param q_vec             - [INPUT] Perturbation wavevector in crystal coords (3,)
    * @param DeltaH0_mskij     - [INPUT] Perturbations (nmodes, ns, nk, nb, nb);
@@ -53,7 +53,7 @@ namespace coqui_py {
    * @param max_iter          - [INPUT] Maximum SCF iterations (1 = one-shot)
    * @param tol               - [INPUT] Convergence tolerance
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
-   * @param iter_alg          - [INPUT] Iteration algorithm: "damping" or "DIIS"
+   * @param iter_alg          - [INPUT] Iteration algorithm: "damping", "DIIS" or "GCR"
    * @param mixing            - [INPUT] Damping/mixing parameter
    * @param max_subsp_size    - [INPUT] DIIS subspace size
    * @param diis_warmup       - [INPUT] DIIS warmup iterations

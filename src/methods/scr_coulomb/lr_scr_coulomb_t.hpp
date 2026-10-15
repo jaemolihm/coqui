@@ -129,8 +129,6 @@ namespace solvers {
         const dW_full_t& dW_full_wqPQ,
         const dW_full_t& dW_full_qpQ_wqPQ);
 
-    bool is_q_gamma() const { return _is_q_gamma; }
-
   /**
    * Print the LR W Dyson timer block (header + total + subclocks) at log
    * level `level` (2: standard, 3: per-step diagnostics).
@@ -142,11 +140,6 @@ namespace solvers {
     print_subclocks(level, "    ");
     app_log(level, "");
   }
-
-  /// Zero this solver's sub-clocks, including the FT engine it owns. lr_driver
-  /// calls it per perturbation so a batched run's timing report covers one
-  /// perturbation, not the running total.
-  inline void reset_timers() { _Timer.reset(); _scr_fourier.timer().reset(); }
 
   /**
    * Print only the component clocks, each line prefixed by `indent`.
@@ -166,7 +159,6 @@ namespace solvers {
   }
 
   private:
-    const imag_axes_ft::IAFT* _ft;
     utils::TimerManager _Timer;
     // Persistent FT engine: keeps the internal redistribute/gemm/leak-check
     // timers of tau_to_w / w_to_tau accumulating across solve_lr_dyson_W calls

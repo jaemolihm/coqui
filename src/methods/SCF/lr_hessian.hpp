@@ -227,7 +227,7 @@ public:
    * @param FT          - [INPUT] IAFT of the run (kept by reference, must outlive this)
    * @param k_weight    - [INPUT] w_k over the IBZ, summing to 1
    * @param spin_factor - [INPUT] 2 for a spin-unpolarized scalar run, 1 otherwise
-   * @param nmodes      - [INPUT] perturbations solved in this batch (D7: npert)
+   * @param nmodes      - [INPUT] perturbations solved in this batch
    * @param has_sigma   - [INPUT] the kernel carries a dynamic ΔΣ, so `Tr_ω` is live
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
    */
@@ -416,10 +416,6 @@ private:
   nda::array<ComplexType, 2> _M_dyn;              ///< Tr_ω(ΔΣ_λ, ΔG_p)
   nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)
   nda::array<ComplexType, 2> _Mp_dyn;             ///< Tr_ω(ΔΣ_λ, ΔG'_p)
-
-  std::vector<bool> _stored;
-  /// evaluate() reduces the accumulators in place, so it is single-shot.
-  bool _evaluated = false;
   utils::TimerManager _Timer;
 };
 

@@ -19,7 +19,6 @@
  */
 
 
-#include <cmath>
 #include <functional>
 #include <limits>
 
@@ -27,7 +26,6 @@
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
-#include "methods/HF/thc_solver_comm.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
 #include "numerics/distributed_array/nda.hpp"
 #include "utilities/check.hpp"
@@ -35,8 +33,6 @@
 #include "utilities/proc_meminfo.hpp"
 #include "methods/GW/g0_div_utils.hpp"
 #include "nda/nda.hpp"
-
-using thc_reader_t = methods::thc_reader_t;
 
 namespace methods {
 
@@ -65,7 +61,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
   for (auto& v : {"LR_SCF", "LR_DRIVER_SETUP",
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_WC0",
                   "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
-                  "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_DRIVER_SETUP_MISC",
+                  "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_RESET",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
                    "LR_ITER_ALG", "LR_PRECOND", "LR_SAVE", "LR_CONVERGENCE"}) {
@@ -152,11 +148,10 @@ lr_kernels make_kernels(lr_params const& p) {
  * Out-params rather than a return value because the two operands are owned by
  * the caller's scope, and each is absent on the paths that do not need it.
  */
-template<THC_ERI THC_t, typename dW_t>
-void lr_driver::lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
+void lr_driver::lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_full,
                            solvers::lr_scr_coulomb_t* lr_scr,
-                           std::optional<dW_t>& opt_dW_full_wqPQ,
-                           std::optional<dW_t>& opt_dW_tRPQ) {
+                           std::optional<dArr_4D_t>& opt_dW_full_wqPQ,
+                           std::optional<dArr_4D_t>& opt_dW_tRPQ) {
   // The canonical LR q-local (t,q,P,Q) tiling every τ-side operand shares, and
   // the target of the ω→τ transform below. The fused ΔΣ loop pairs the P/Q tile
   // of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the G^R cache, both
@@ -186,25 +181,14 @@ void lr_driver::lr_setup_W(dW_t* dW_wqPQ_in, THC_t& thc, bool gw_full,
   _Timer.stop("LR_DRIVER_SETUP_W_TRPQ");
 }
 
-template<THC_ERI THC_t, typename dW_t>
 void lr_driver::lr_setup(
     const sArray_t<Array_view_5D_t>& sG_tskij,
-    THC_t& thc,
-    dW_t* dW_wqPQ_in,
+    thc_reader_t& thc,
+    dArr_4D_t* dW_wqPQ_in,
     const lr_params& p) {
 
   _kernels = make_kernels(p);
   lr_kernels& k = _kernels;
-
-  // qp mode statifies the operator's Σ, so it needs one.
-  if (k.op.is_qp()) {
-    utils::check(k.op.has_Sigma(),
-                 "lr_driver::lr_setup: qp_static mode requires a GW self-energy.");
-    utils::check(!p.split_sigma_terms,
-                 "lr_driver::lr_setup: qp_static mode is incompatible with split ΔΣ terms.");
-    utils::check(p.qp_static->sMO_skia != nullptr && p.qp_static->sE_ska != nullptr,
-                 "lr_driver::lr_setup: qp_static mode requires sMO_skia and sE_ska.");
-  }
 
   utils::check(p.iter_params.alg == "damping" || p.iter_params.alg == "DIIS" ||
                p.iter_params.alg == "GCR",
@@ -218,32 +202,11 @@ void lr_driver::lr_setup(
                "mode: the Padé statification of ΔΣ is not additive, so the map "
                "is not affine.");
 
-  if (k.op.has_Sigma()) {
-    utils::check(dW_wqPQ_in != nullptr && p.eps_inv_head != nullptr,
-                 "lr_driver::lr_setup: a GW self-energy is active but dW or "
-                 "eps_inv_head is null.");
-  }
-  if (p.include_xc) {
-    utils::check(p.include_hartree,
-                 "lr_driver::lr_setup: include_xc = true requires include_hartree = true.");
-    utils::check(!p.include_exchange,
-                 "lr_driver::lr_setup: include_xc = true is incompatible with "
-                 "include_exchange = true. The semilocal xc kernel contracts with the "
-                 "diagonal density response only; LR-DFT is include_hartree = true, "
-                 "include_exchange = false.");
-    utils::check(!p.total_kernel().has_sigma(),
-                 "lr_driver::lr_setup: include_xc = true is incompatible with a GW "
-                 "self-energy (gw_mode != none): f_xc and ΔΣ_GW both carry the "
-                 "correlation response, so the two together double-count it. "
-                 "include_xc works only in the Hartree mode.");
-  }
   // The SCF loop must run at least once: every output downstream, ΔG(τ)
   // included, is produced by the solve inside it.
   utils::check(p.max_iter >= 1,
                "lr_driver::lr_setup: max_iter must be >= 1, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
-    utils::check(k.needs_dW(),
-                 "lr_driver::lr_setup: split ΔΣ terms require the Σ2 (-G⊙ΔW) component.");
     utils::check(p.max_iter == 1,
                  "lr_driver::lr_setup: split ΔΣ terms are only meaningful for a "
                  "one-shot solve (max_iter=1), got max_iter={}.", p.max_iter);
@@ -252,21 +215,6 @@ void lr_driver::lr_setup(
                  "correction (term 2 has no IBC path).");
   }
   if (p.exchange_static_W) {
-    utils::check(p.include_exchange,
-                 "lr_driver::lr_setup: exchange_static_W = true requires "
-                 "include_exchange = true. HSEX substitutes V -> V + W_c(iν=0) in "
-                 "the exchange contraction; there is nothing to substitute without "
-                 "an exchange channel.");
-    utils::check(dW_wqPQ_in != nullptr,
-                 "lr_driver::lr_setup: exchange_static_W = true needs W_c(iω); "
-                 "dW is null.");
-    utils::check(!k.op.has_Sigma(),
-                 "lr_driver::lr_setup: exchange_static_W puts W_c(iν=0) in the "
-                 "exchange kernel, and the kernel also carries "
-                 "Σ ({}), whose W_c(τ) contains the same ν=0 plane. That "
-                 "double-counts the static screening. Use HSEX as a standalone "
-                 "kernel, or as the GCR preconditioner (precond_method).",
-                 k.op.terms.to_string());
     // The IBC ΔX correction is built against the bare V_HF in the aux basis
     // (build_lr_ibc's exchange branch); pairing it with a screened exchange
     // kernel would mix two different interactions in one ΔF.
@@ -334,22 +282,16 @@ void lr_driver::lr_setup(
   // steps it.
   if (p.iter_params.alg == "GCR") {
     // GCR
+    // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
+    // every pair costs a ΔΣ, as one DIIS depth unit does.
     if (!k.op.is_empty()) {
-      // The kernel has something to iterate.
-      // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
-      // every pair costs a ΔΣ, as one DIIS depth unit does.
       size_t cap = p.iter_params.max_subsp_size;
       if (cap == 0) cap = (k.op.has_Sigma() && !k.op.is_qp()) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
-    } else {
-      // Empty kernel: no accelerator
-      _lr_gcr.reset();
     }
-    _lr_diis.reset();
   } else {
     // DIIS, damping or undamped Picard
     _lr_diis = std::make_unique<lr_diis>(p.iter_params);
-    _lr_gcr.reset();
   }
   // The preconditioner's inner GCR iterates ΔF alone, so its pairs are tiny.
   if (!k.pc.is_empty()) _pc_gcr = std::make_unique<lr_gcr>(50);
@@ -386,22 +328,22 @@ void lr_driver::lr_setup(
 
   // Solvers. Each latches the perturbation q at construction and caches a
   // workspace, so they are built once here and reused by every lr_solve_one.
-  if (k.op.has_F() && !_lr_hf) {
+  if (k.op.has_F()) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   // The preconditioner gets its own lr_hf: lr_hf caches U(R) keyed on the
   // exchange kernel it was first built with, and an HSEX preconditioner contracts
   // V + W_c(0) where the operator contracts V.
-  if (k.pc.has_F() && !_lr_hf_pc) {
+  if (k.pc.has_F()) {
     _lr_hf_pc = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
   if (k.op.has_Sigma()) {
-    _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
+    _lr_gw = std::make_unique<solvers::lr_gw>(_lr_dyson.q_vec(), p.div_treatment);
   }
   // Split-term mode (one-shot G0W0) needs a second lr_gw for term 2: each solver
   // caches a workspace keyed on its (term1,term2) usage.
   if (p.split_sigma_terms) {
-    _lr_gw2 = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
+    _lr_gw2 = std::make_unique<solvers::lr_gw>(_lr_dyson.q_vec(), p.div_treatment);
   }
   if (k.needs_dW()) {
     _lr_pi = std::make_unique<solvers::lr_rpa_pi>(_lr_dyson.q_vec());
@@ -416,14 +358,9 @@ void lr_driver::lr_setup(
   // Z(q) to the ω array in place, which would double-count the bare V here.
   if (p.exchange_static_W || p.precond_hsex) {
     _Timer.start("LR_DRIVER_SETUP_WC0");
-    utils::check(dW_wqPQ_in != nullptr,
-                 "lr_driver::lr_setup: the HSEX kernel needs W_c(iω); dW is null.");
     _opt_dWc0_qPQ.emplace(lr_precompute_Wc_static(*dW_wqPQ_in));
     // eps_inv_head_w holds ε⁻¹ - 1, q→0 extrapolated, on the PH-symmetric ω
     // half-axis whose index 0 is ν = 0.
-    utils::check(p.eps_inv_head_w != nullptr,
-                 "lr_driver::lr_setup: the HSEX kernel needs eps_inv_head_w; "
-                 "it is null.");
     _hsex_head_factor = 1.0 + (*p.eps_inv_head_w)(0).real();
     app_log(1, "  HSEX ε⁻¹(iν=0) = {:.6f}", _hsex_head_factor);
     _Timer.stop("LR_DRIVER_SETUP_WC0");
@@ -527,7 +464,7 @@ void lr_driver::lr_setup(
     _opt_ibc.emplace(build_lr_ibc(
         *_mpi, _MF, thc,
         p.sDeltaX_left->local(), p.sDeltaX_right->local(),
-        _lr_dyson.q_vec(), _lr_dyson.kpq_map(),
+        _lr_dyson.kpq_map(),
         p.Dm_ab, &sG_tskij,
         _opt_dW_tRPQ ? &(*_opt_dW_tRPQ) : nullptr,
         k.op.terms.hartree, k.op.terms.exchange, k.op.has_Sigma(),
@@ -545,13 +482,12 @@ void lr_driver::lr_setup(
 }
 
 
-template<THC_ERI THC_t>
 void lr_driver::apply_kernel_gw(
     lr_kernel const& kernel,
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
-    THC_t& thc,
+    thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
@@ -560,15 +496,7 @@ void lr_driver::apply_kernel_gw(
   // Only the operator carries the IBC correction.
   const lr_ibc_DeltaX* ibc_ptr =
       (kernel.static_inputs && _opt_ibc) ? &(*_opt_ibc) : nullptr;
-  utils::check(!kernel.split_sigma_terms || sDeltaSigma_term2_tskij != nullptr,
-               "lr_driver::apply_kernel_gw: the kernel asks for split ΔΣ terms "
-               "but no term-2 destination was given.");
   auto& sS_skij = _dyson.sS_skij();
-  utils::check(spec.has_sigma(),
-               "lr_driver::apply_kernel_gw: called with a Σ-free "
-               "kernel ({}).", spec.to_string());
-  utils::check(!spec.sigma_G_dW || spec.sigma_dG_W,
-               "apply_kernel_gw: Σ2 without Σ1 is not a valid kernel");
   if (!spec.sigma_G_dW) {
     // Term 1 only: ΔΣ = -ΔG ⊙ W_c
     _Timer.start("LR_GW_SIGMA");
@@ -656,7 +584,6 @@ std::optional<solvers::lr_hf::hsex_kernel_t> lr_driver::hsex_kernel() {
 }
 
 
-template<THC_ERI THC_t>
 void lr_driver::apply_kernel(
     lr_kernel const& kernel,
     sArray_t<Array_view_4D_t>& sDeltaF_out,
@@ -664,18 +591,12 @@ void lr_driver::apply_kernel(
     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
-    THC_t& thc,
+    thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
 
   if (kernel.has_F()) {
-    utils::check(kernel.hf != nullptr,
-                 "lr_driver::apply_kernel: the kernel evaluates ΔF but carries no "
-                 "lr_hf instance.");
     auto hsex = kernel.exchange_static_W ? hsex_kernel() : std::nullopt;
-    utils::check(!kernel.exchange_static_W || hsex.has_value(),
-                 "lr_driver::apply_kernel: the kernel is HSEX but W_c(iν=0) was "
-                 "never precomputed.");
     _Timer.start("LR_HF");
     kernel.hf->evaluate(sDeltaF_out, sDeltaDm_skij, thc, _dyson.sS_skij().local(),
                     kernel.terms.hartree, kernel.terms.exchange,
@@ -690,20 +611,16 @@ void lr_driver::apply_kernel(
   }
 
   if (kernel.has_Sigma()) {
-    utils::check(pDeltaSigma_out != nullptr,
-                 "lr_driver::apply_kernel: the kernel evaluates ΔΣ but no "
-                 "destination was given.");
     apply_kernel_gw(kernel, *pDeltaSigma_out, sDeltaG_tskij, sG_tskij, thc, p,
                     sDeltaSigma_term2_tskij);
   }
 }
 
 
-template<THC_ERI THC_t>
 void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               nda::array<ComplexType, 1>& z,
                               const sArray_t<Array_view_5D_t>& sG_tskij,
-                              THC_t& thc, const lr_params& p) {
+                              thc_reader_t& thc, const lr_params& p) {
   const lr_kernel& kpc = _kernels.pc;
   auto& r_F = *_sDeltaF_pc_r;
   auto& r_S = *_sDeltaSigma_r;
@@ -772,13 +689,11 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   }
 
   // z = (r_F + y_F, r_Σ)
-  if (z.size() != r.size()) z = nda::array<ComplexType, 1>(r.size());
   z(rF) = r(rF) + _DeltaF.slice(y_F.local());
   z(rS) = r(rS);
 }
 
 
-template<THC_ERI THC_t>
 std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     sArray_t<Array_view_4D_t>& sDeltaDm_skij,
@@ -786,7 +701,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
     const sArray_t<Array_view_5D_t>& sG_tskij,
     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-    THC_t& thc,
+    thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
     sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij,
@@ -801,15 +716,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto& opt_ibc            = _opt_ibc;
   auto& sS_skij            = _dyson.sS_skij();
 
-  if (k.op.has_Sigma()) {
-    utils::check(sDeltaSigma_tskij != nullptr,
-                 "lr_driver::lr_solve_one: a GW self-energy is active but "
-                 "sDeltaSigma_tskij is null.");
-  }
-  utils::check((sDeltaSigma_term2_tskij != nullptr) == p.split_sigma_terms,
-               "lr_driver::lr_solve_one: sDeltaSigma_term2_tskij presence must match "
-               "the p.split_sigma_terms lr_setup was given.");
-
   // The ΔΣ the kernel writes and the Dyson RHS reads; qp mode replaces it in the
   // RHS by ΔV_QPGW.
   sArray_t<Array_view_5D_t>* pDeltaSigma = k.op.has_Sigma() ? sDeltaSigma_tskij : nullptr;
@@ -817,18 +723,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   // Reset every quantity carried across SCF iterations, so this solve cannot see
   // the previous perturbation's state. set_zero ends with fence + node_sync.
-  _Timer.start("LR_DRIVER_SETUP_MISC");
+  // The previous iterates need no reset: every read of them follows a save in the
+  // same solve (iter > 1, or any iteration under GCR).
+  _Timer.start("LR_RESET");
   sDeltaF_skij.set_zero();
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
-  // ΔΣ term 2 is zeroed by lr_gw::evaluate_sigma_DeltaW before it accumulates,
-  // but do not rely on that from here.
-  if (sDeltaSigma_term2_tskij) sDeltaSigma_term2_tskij->set_zero();
   if (k.op.is_qp()) sDeltaVcorr_skij.set_zero();
-  sDeltaDm_prev_skij.set_zero();
-  // Not strictly required — every read of these follows a save in the same solve
-  // (iter > 1, or any iteration under GCR) — but it makes a solve depend on
-  // nothing but its own ΔH0.
-  _DeltaF.zero(); _DeltaSigma.zero(); _DeltaVcorr.zero();
   if (_lr_diis) _lr_diis->reset();
   if (_lr_gcr) _lr_gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
@@ -838,7 +738,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // therefore a running total, and one perturbation's cost is the difference
   // between consecutive tables.
   _mpi->comm.barrier();
-  _Timer.stop("LR_DRIVER_SETUP_MISC");
+  _Timer.stop("LR_RESET");
 
   // dst <- src on the node-replicated shared window.
   auto copy_shm = [&](auto& dst, auto& src) {
@@ -946,7 +846,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
-    // Compute norms for logging. lr_distributed_norm stripes the (s,k) blocks
+    // Compute norms for logging. lr_distributed_norm splits the element range
     // over node_comm ranks and reduces within the node; the shared array is
     // node-replicated, so the trailing broadcast from global rank 0 preserves
     // exact global agreement.
@@ -1320,10 +1220,10 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
 
   // --- Persistent, distributed, band basis ---
   // ΔG(τ) as lr_dyson hands it over: distributed, and alive from the end of the
-  // solve until the first consumer replicates it. It overlaps neither transient
-  // peak in practice — the next solve drops it before allocating anything, and a
-  // consumer replicates it at the top of apply_kernel_gw, ahead of any ΔΠ/ΔW
-  // — so counting it as persistent is a deliberate over-estimate.
+  // solve until it is replicated into shared memory. It overlaps neither
+  // transient peak in practice — the next solve drops it before allocating
+  // anything, and the Dyson pass replicates it (materialize_DeltaG_tau) ahead of
+  // any ΔΠ/ΔW — so counting it as persistent is a deliberate over-estimate.
   arrays.push_back({"ΔG(τ) pending (lr_dyson)", shp5b(nt), band5(nt), true, PERSIST});
 
   // dG/dμ(τ) = ∂ΔG(τ)/∂Δμ and the matching ΔDm response. ΔG is affine in Δμ, so
@@ -1497,8 +1397,7 @@ void lr_driver::print_setup_timers() {
   app_log(2, "      - G^R pair precompute:    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_R"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_R"));
   app_log(2, "      - Δμ response precompute: {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DELTAMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DELTAMU"));
   app_log(2, "      - Alloc:                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_ALLOC"), _Timer.number_of_calls("LR_DRIVER_SETUP_ALLOC"));
-  app_log(2, "      - Build IBC (DeltaX):     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_IBC"), _Timer.number_of_calls("LR_DRIVER_SETUP_IBC"));
-  app_log(2, "      - Misc:                   {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DRIVER_SETUP_MISC"), _Timer.number_of_calls("LR_DRIVER_SETUP_MISC"));
+  app_log(2, "      - Build IBC (DeltaX):     {0:8.3f} sec  {1:4d} calls\n", _Timer.elapsed("LR_DRIVER_SETUP_IBC"), _Timer.number_of_calls("LR_DRIVER_SETUP_IBC"));
 }
 
 
@@ -1518,11 +1417,11 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   const std::string sub_indent = "        ";
   app_log(2, "\n  LR_DRIVER timers");
   app_log(2, "  -----------------");
-  // The setup is a sibling of the SCF loop, not a part of it: its clock is
-  // never reset, so it reads the same once-paid cost in every perturbation's
-  // report, while "Total LR SCF" and its subclocks below cover this
-  // perturbation only.
+  // The setup is a sibling of the SCF loop, not a part of it, paid once for all
+  // perturbations; every other clock accumulates over the perturbations solved
+  // so far.
   app_log(2, "    LR Driver Setup (once):     {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP"), _Timer.number_of_calls("LR_DRIVER_SETUP"));
+  app_log(2, "    LR reset (per solve):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_RESET"), _Timer.number_of_calls("LR_RESET"));
   app_log(2, "    Total LR SCF:               {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_SCF"), _Timer.number_of_calls("LR_SCF"));
   app_log(2, "      - LR Dyson (total):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DYSON"), _Timer.number_of_calls("LR_DYSON"));
   _lr_dyson.print_subclocks(2, sub_indent);
@@ -1551,32 +1450,6 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "");
   // The hessian clocks are reported by lr_hessian_t::print_timers.
 }
-
-
-// Template instantiations
-// dW type: distributed_array<nda::array<ComplexType, 4>, mpi3::communicator>
-using dW_concrete_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
-
-template void lr_driver::lr_setup(
-    const sArray_t<Array_view_5D_t>&,
-    thc_reader_t&,
-    dW_concrete_t*,
-    const lr_params&);
-
-template std::tuple<int, double> lr_driver::lr_solve_one(
-    sArray_t<Array_view_5D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_4D_t>&,
-    sArray_t<Array_view_5D_t>*,
-    const sArray_t<Array_view_5D_t>&,
-    const sArray_t<Array_view_4D_t>&,
-    thc_reader_t&,
-    const lr_params&,
-    sArray_t<Array_view_5D_t>*,
-    sArray_t<Array_view_4D_t>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*,
-    nda::array<ComplexType, 4>*);
 
 
 } // namespace methods

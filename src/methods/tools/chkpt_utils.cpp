@@ -616,62 +616,6 @@ template void read_qp_hamilt_components(
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
 
-template<typename communicator_t, typename shared_array_t>
-bool read_DeltaH0(communicator_t& comm,
-                  std::string filename,
-                  nda::array<double, 1>& q_vec,
-                  shared_array_t& sDeltaH0_skij) {
-  bool success = false;
-  if (comm.root()) {
-    try {
-      h5::file file(filename, 'r');
-      auto root_grp = h5::group(file);
-
-      if (root_grp.has_subgroup("linear_response")) {
-        auto lr_grp = root_grp.open_group("linear_response");
-
-        if (lr_grp.has_dataset("q_vec") && lr_grp.has_dataset("DeltaH0_skij")) {
-          nda::h5_read(lr_grp, "q_vec", q_vec);
-          auto DeltaH0_loc = sDeltaH0_skij.local();
-          nda::h5_read(lr_grp, "DeltaH0_skij", DeltaH0_loc);
-          success = true;
-        }
-      }
-    } catch (const std::exception& e) {
-      app_warning("read_DeltaH0: Failed to read from {}: {}", filename, e.what());
-      success = false;
-    }
-  }
-  comm.broadcast_n(&success, 1, 0);
-  if (success) {
-    if (!comm.root()) q_vec.resize(3);
-    comm.broadcast_n(q_vec.data(), 3, 0);
-  }
-  comm.barrier();
-  return success;
-}
-
-template<typename communicator_t, typename shared_array_t>
-void write_DeltaH0(communicator_t& comm,
-                   std::string filename,
-                   nda::array<double, 1> const& q_vec,
-                   shared_array_t const& sDeltaH0_skij) {
-  if (comm.root()) {
-    utils::check(std::filesystem::exists(filename),
-                 "write_DeltaH0: File {} does not exist. Cannot append.", filename);
-    h5::file file(filename, 'a');
-    h5::group grp(file);
-    auto lr_grp = grp.has_subgroup("linear_response") ?
-                  grp.open_group("linear_response") :
-                  grp.create_group("linear_response");
-
-    nda::h5_write(lr_grp, "q_vec", q_vec, false);
-    auto DeltaH0_loc = sDeltaH0_skij.local();
-    nda::h5_write(lr_grp, "DeltaH0_skij", DeltaH0_loc, false);
-  }
-  comm.barrier();
-}
-
 template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
 void dump_lr(communicator_t& comm,
              std::string filename,
@@ -867,9 +811,6 @@ bool read_qp_params(communicator_t& comm, std::string filename,
 }
 
 // LR template instantiations
-template bool read_DeltaH0(mpi3::shared_communicator&, std::string,
-                           nda::array<double, 1>&, sArray_t<Array_view_4D_t>&);
-
 template void dump_qp_params(mpi3::communicator&, std::string,
                              std::string const&, double, std::string const&, int,
                              std::string const&);
@@ -880,10 +821,6 @@ template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::strin
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,
                           std::string, std::string, long);
-
-template void write_DeltaH0(mpi3::communicator&, std::string,
-                            nda::array<double, 1> const&,
-                            sArray_t<Array_view_4D_t> const&);
 
 template void dump_lr(mpi3::communicator&, std::string,
                       nda::array<double, 1> const&,

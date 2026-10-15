@@ -716,7 +716,7 @@ and writes results to the "linear_response" group of the output checkpoint.
 Parameters
 ----------
 lr_params : {par_0}
-   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, div_corr)
+   - [INPUT] JSON string with params (prefix, output, input_type, input_iter, h0_source, ...)
 h_int : {par_1}
    - [INPUT] THC ERI handler
 q_vec : {par_2}
@@ -739,7 +739,7 @@ tol : {par_8}
 fix_density : {par_9}
    - [INPUT] If true, compute Δμ to enforce ΔN=0
 iter_alg : {par_10}
-   - [INPUT] Iteration algorithm: "damping" or "DIIS"
+   - [INPUT] Iteration algorithm: "damping", "DIIS" or "GCR"
 mixing : {par_11}
    - [INPUT] Damping/mixing parameter
 max_subsp_size : {par_12}

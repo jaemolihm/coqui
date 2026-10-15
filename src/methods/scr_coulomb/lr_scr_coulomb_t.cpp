@@ -26,7 +26,7 @@ namespace solvers {
 
   lr_scr_coulomb_t::lr_scr_coulomb_t(const imag_axes_ft::IAFT* ft,
                                      nda::array<double, 1> q_pert)
-    : _ft(ft), _Timer(), _scr_fourier(ft), _q_pert(std::move(q_pert)) {
+    : _Timer(), _scr_fourier(ft), _q_pert(std::move(q_pert)) {
 
     utils::check(_q_pert.size() == 3,
                  "lr_scr_coulomb_t: q_pert must have size 3, got {}",
@@ -35,7 +35,7 @@ namespace solvers {
 
     for (auto& v: {"SOLVE_LR_DYSON_W", "EVALUATE_LR_W",
                     "LR_W_FT_TAU_TO_W", "LR_W_FT_W_TO_TAU",
-                    "LR_W_COMPUTE_W_FULL", "LR_W_COMM_QPQ"}) {
+                    "LR_W_COMM_QPQ"}) {
       _Timer.add(v);
     }
   }
