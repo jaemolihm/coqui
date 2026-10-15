@@ -259,6 +259,9 @@ void lr_driver::lr_setup(
   utils::check(p.pert_order == 0 || !p.pert_kernel.empty(),
                "lr_driver::lr_setup: pert_order = {} >= 1 requires a non-empty "
                "perturbative kernel.", p.pert_order);
+  utils::check(p.pert_kernel.empty() || !k.sc.has_Sigma(),
+               "lr_driver::lr_setup: a split-kernel run cannot carry a Σ in K_sc ({}).",
+               k.sc.terms.to_string());
   if (k.do_pert()) {
     utils::check(!k.sc.terms.overlaps(k.pert.terms),
                  "lr_driver::lr_setup: the self-consistent ({}) and perturbative "
@@ -448,14 +451,6 @@ void lr_driver::lr_setup(
     }
   }
 
-  // ΔΣ-sized shared arrays on top of the total ΔΣ the base estimate already
-  // lists.
-  std::vector<std::string> extra_sigma;
-  if (k.both_have_Sigma()) {
-    extra_sigma.push_back("sDeltaSigma (sc channel)");
-    extra_sigma.push_back("sDeltaSigma (pert channel)");
-  }
-
   // ΔΣ-sized striped previous iterates: the inner loop's tracked ΔΣ, plus the
   // outer accelerator's previous source when it mixes one.
   const long n_sigma_prev = ((k.sc.has_Sigma() && !k.sc.is_qp()) ? 1 : 0)
@@ -527,8 +522,8 @@ void lr_driver::lr_setup(
 
   // Estimate the persistent large-array memory footprint for this path, then
   // summarize the MPI distribution patterns the large arrays use.
-  print_memory_estimate(thc.Np(), k.any_Sigma(), k.needs_dW(), extra_sigma,
-                        n_sigma_prev, inner_hist, outer_hist,
+  print_memory_estimate(thc.Np(), k.any_Sigma(), k.needs_dW(), n_sigma_prev,
+                        inner_hist, outer_hist,
                         p.fix_density && _lr_dyson.is_q_gamma(), p.exchange_static_W,
                         p.hessian_nmodes);
   print_distribution_summary(thc.Np(), k.any_Sigma(), k.needs_dW());
@@ -540,20 +535,16 @@ void lr_driver::lr_setup(
   if (k.any_F() && !_lr_hf) {
     _lr_hf = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
-  // The perturbative channel gets its own lr_hf for the same reason lr_gw does:
-  // lr_hf caches U(R) keyed on the exchange kernel it was first built with, and an
-  // HSEX split run contracts V + W_c(0) in K_sc but -W_c(0) in K_pert.
+  // The perturbative channel gets its own lr_hf: lr_hf caches U(R) keyed on the
+  // exchange kernel it was first built with, and an HSEX split run contracts
+  // V + W_c(0) in K_sc but -W_c(0) in K_pert.
   if (k.pert.has_F() && !_lr_hf_pert) {
     _lr_hf_pert = std::make_unique<solvers::lr_hf>(_mpi, _MF, _lr_dyson.q_vec(), p.hf_div_treatment);
   }
-  if (k.sc.has_Sigma()) {
+  // One lr_gw serves both channels: at most one of them carries a Σ, so its
+  // workspace, keyed on the (term1, term2) usage, sees a single usage.
+  if (k.any_Sigma()) {
     _lr_gw = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
-  }
-  // The perturbative channel gets its own lr_gw: the cached workspace is keyed
-  // on the (term1, term2) combination it was first used with, and the two
-  // channels generally run different combinations (e.g. Σ1 in K_sc, Σ2 in K_pert).
-  if (k.pert.has_Sigma()) {
-    _lr_gw_pert = std::make_unique<solvers::lr_gw>(_dyson.FT(), _lr_dyson.q_vec(), p.div_treatment);
   }
   // Split-term mode (one-shot G0W0) needs a second lr_gw for term 2: each solver
   // caches a workspace keyed on its (term1,term2) usage.
@@ -567,7 +558,7 @@ void lr_driver::lr_setup(
   k.sc.hf   = _lr_hf.get();
   k.sc.gw   = _lr_gw.get();
   k.pert.hf = _lr_hf_pert.get();
-  k.pert.gw = _lr_gw_pert.get();
+  k.pert.gw = _lr_gw.get();
 
   // HSEX kernel, taken BEFORE lr_setup_W: that call consumes dW_wqPQ_in (it is
   // either moved into W_full or released by the ω→τ transform), and it also adds
@@ -659,19 +650,12 @@ void lr_driver::lr_setup(
   // Per-channel buffers. sDeltaF_skij / sDeltaSigma_tskij always hold the TOTAL
   // (sc + pert) quantities that the Dyson RHS and the checkpoint dump consume.
   // ΔF (nb²·nk, small) always has one buffer per channel, and its total is
-  // rebuilt every inner iteration. ΔΣ (nt times larger) has per-channel buffers
-  // only when both channels carry a Σ; otherwise the sole Σ channel writes the
-  // caller's array directly.
+  // rebuilt every inner iteration. ΔΣ is carried by at most one channel and
+  // written into the caller's array directly.
   _sDeltaF_sc.emplace(math::shm::make_shared_array<Array_view_4D_t>(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
   _sDeltaF_pert.emplace(math::shm::make_shared_array<Array_view_4D_t>(
       *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-  if (k.both_have_Sigma()) {
-    _sDeltaSigma_sc.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-        *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
-    _sDeltaSigma_pert.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-        *_mpi, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}));
-  }
 
   // Outer-loop buffers. The previous-source pair exists only for the
   // accelerator (it is what the extrapolation and its residual are measured
@@ -748,6 +732,8 @@ void lr_driver::apply_kernel_gw(
   utils::check(spec.has_sigma(),
                "lr_driver::apply_kernel_gw: called with a Σ-free "
                "kernel ({}).", spec.to_string());
+  utils::check(!spec.sigma_G_dW || spec.sigma_dG_W,
+               "apply_kernel_gw: Σ2 without Σ1 is not a valid kernel");
   if (!spec.sigma_G_dW) {
     // Term 1 only: ΔΣ = -ΔG ⊙ W_c
     _Timer.start("LR_GW_SIGMA");
@@ -814,23 +800,14 @@ void lr_driver::apply_kernel_gw(
       sSigma_tskij_out.local() += sDeltaSigma_term2_tskij->local();
     sSigma_tskij_out.win().fence();
     _mpi->comm.barrier();
-  } else if (spec.sigma_dG_W) {
-    // BOTH terms: term 2 is already known present (the !sigma_G_dW case returned
-    // at the top), so this tests whether term 1 is there as well. Fused
-    // ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW in a single R-space pass.
+  } else {
+    // Both terms, fused: ΔΣ = -ΔG ⊙ W_c - G ⊙ ΔW in a single R-space pass.
     auto S_loc = sS_skij.local();
     gw_solver.evaluate_sigma(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ,
         sG_tskij.local(), dDeltaW_tqPQ, thc,
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
         &S_loc, p.eps_inv_head, &delta_eps_inv_head);
-  } else {
-    // Term 2 only: ΔΣ = -G ⊙ ΔW. Reached only from the perturbative channel
-    // of a split-kernel run whose K_sc already resums Σ1.
-    auto S_loc = sS_skij.local();
-    gw_solver.evaluate_sigma_DeltaW(
-        sSigma_tskij_out, sG_tskij.local(), dDeltaW_tqPQ, thc,
-        *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, &S_loc, &delta_eps_inv_head);
   }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_SIGMA");
@@ -931,8 +908,7 @@ void lr_driver::rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t* pert_part) {
 
 
 void lr_driver::rebuild_split_totals(lr_kernel_split const& k,
-                                     sArray_t<Array_view_4D_t>& sDeltaF_skij,
-                                     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij) {
+                                     sArray_t<Array_view_4D_t>& sDeltaF_skij) {
   _Timer.start("LR_TOTALS");
   // A channel carrying no ΔF leaves its buffer identically zero, and it is
   // copied past rather than added: +0.0 would flip the sign of the other
@@ -944,9 +920,6 @@ void lr_driver::rebuild_split_totals(lr_kernel_split const& k,
     rebuild_total(sDeltaF_skij, *_sDeltaF_pert, no_F);
   else
     rebuild_total(sDeltaF_skij, *_sDeltaF_sc, no_F);
-  // both_have_Sigma() guarantees the ΔΣ optionals are engaged.
-  if (k.both_have_Sigma())
-    rebuild_total(*sDeltaSigma_tskij, *_sDeltaSigma_sc, &(*_sDeltaSigma_pert));
   _mpi->comm.barrier();
   _Timer.stop("LR_TOTALS");
 }
@@ -958,10 +931,8 @@ lr_driver::lr_channel_targets lr_driver::channel_targets(
   lr_channel_targets t;
   t.F_sc   = &(*_sDeltaF_sc);
   t.F_pert = &(*_sDeltaF_pert);
-  t.S_sc   = !k.sc.has_Sigma()   ? nullptr
-           : (k.both_have_Sigma() ? &(*_sDeltaSigma_sc) : sDeltaSigma_tskij);
-  t.S_pert = !k.pert.has_Sigma() ? nullptr
-           : (k.both_have_Sigma() ? &(*_sDeltaSigma_pert) : sDeltaSigma_tskij);
+  t.S_sc   = k.sc.has_Sigma()   ? sDeltaSigma_tskij : nullptr;
+  t.S_pert = k.pert.has_Sigma() ? sDeltaSigma_tskij : nullptr;
   return t;
 }
 
@@ -1025,8 +996,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (k.sc.is_qp()) sDeltaVcorr_skij.set_zero();
   if (_sDeltaF_sc)       _sDeltaF_sc->set_zero();
   if (_sDeltaF_pert)     _sDeltaF_pert->set_zero();
-  if (_sDeltaSigma_sc)   _sDeltaSigma_sc->set_zero();
-  if (_sDeltaSigma_pert) _sDeltaSigma_pert->set_zero();
   // The outer sequence starts from S_0 = 0, which is a genuine iterate: the
   // first inner solve is exactly the one with no source. So the first outer
   // residual S_1 - 0 needs no special casing — the histories start zeroed.
@@ -1092,7 +1061,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   bool converged = false;
   // Split-kernel stage state. `stage_iter` is the iteration index within the
   // current stage: DIIS keys its warmup off it and it gates the prev-array save,
-  // so a stage boundary looks like a fresh start even though ΔF_sc/ΔΣ_sc are
+  // so a stage boundary looks like a fresh start even though ΔF_sc is
   // deliberately carried over (warm start) into the next stage. GCR instead steps
   // on every iteration, the first of a stage opening the new right-hand side.
   int n_applied = 0;
@@ -1425,7 +1394,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Step 1 Dyson pass (with a Σ in K_sc it also materializes ΔG(τ); otherwise
     // update_DeltaG forms it on demand).
     if (use_gcr && inner_converged) {
-      rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+      rebuild_split_totals(k, sDeltaF_skij);
       _Timer.start("LR_DYSON");
       dyson_pass(false);
       _Timer.stop("LR_DYSON");
@@ -1535,7 +1504,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         }
         // The next stage solves a different fixed point: the DIIS history from
         // this one is invalid and its warmup keys off the stage-local iteration
-        // index. ΔF_sc/ΔΣ_sc are deliberately kept as the warm start for the
+        // index. ΔF_sc is deliberately kept as the warm start for the
         // next stage.
         if (_lr_gcr) _lr_gcr->reset_rhs();  // keep the Krylov basis: only the RHS changes
         if (_lr_diis) _lr_diis->reset();
@@ -1546,10 +1515,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       }
     }
 
-    // Refresh the totals for the next Dyson solve and the checkpoint: ΔF always,
-    // ΔΣ when both channels carry one (a one-channel ΔΣ is already the caller's
-    // array).
-    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    // Refresh the totals for the next Dyson solve and the checkpoint: ΔF; ΔΣ is
+    // already the caller's array.
+    rebuild_split_totals(k, sDeltaF_skij);
 
     // Step 5: Check convergence (all active quantities must converge, and the
     // perturbative expansion must have been applied to the requested order).
@@ -1588,7 +1556,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     apply_kernel(k.sc, sDeltaF_sc_skij, pDeltaSigma_sc,
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
-    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    rebuild_split_totals(k, sDeltaF_skij);
   }
 
   // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
@@ -1677,8 +1645,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   // Hierarchical timer report for this perturbation (verbosity >= 2). Per-step
   // solver prints inside the loop are gated to verbosity >= 3.
-  print_timers(_lr_pi.get(), _lr_scr.get(), _lr_gw.get(),
-               _lr_gw_pert.get(), _lr_gw2.get());
+  print_timers(_lr_pi.get(), _lr_scr.get(), _lr_gw.get(), _lr_gw2.get());
 
   return std::make_tuple(iter, Delta_mu);
 }
@@ -1718,14 +1685,13 @@ void lr_driver::get_full_kernel_result(
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p);
     // The totals the caller reads must see the new source; the sc channel is
     // untouched, so this is the same rebuild the SCF loop does every iteration.
-    rebuild_split_totals(k, sDeltaF_skij, sDeltaSigma_tskij);
+    rebuild_split_totals(k, sDeltaF_skij);
     _Timer.stop("LR_HESS_PERT_REFRESH");
   }
 }
 
 
 void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
-                                      std::vector<std::string> const& extra_sigma,
                                       long n_sigma_prev,
                                       lr_diis_hist_t inner_hist,
                                       lr_diis_hist_t outer_hist,
@@ -1787,11 +1753,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                     fmt::format("2x({},{},{},{})", ns, nki, nb, nb),
                     2.0 * band5(1), false, PERSIST});
   if (any_Sigma) {
-    arrays.push_back({"sDeltaSigma_tskij",      shp5b(nt), band5(nt), false, PERSIST});
-    // Split-kernel per-channel ΔΣ buffers and the outer accelerator's previous
-    // source, on top of the total ΔΣ.
-    for (auto const& name : extra_sigma)
-      arrays.push_back({name, shp5b(nt), band5(nt), false, PERSIST});
+    arrays.push_back({"sDeltaSigma_tskij", shp5b(nt), band5(nt), false, PERSIST});
   }
 
   // --- Persistent, striped over the global comm (each rank keeps one element
@@ -2023,7 +1985,6 @@ void lr_driver::print_setup_timers() {
 void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
                              solvers::lr_scr_coulomb_t* scr_solver,
                              solvers::lr_gw* gw_solver,
-                             solvers::lr_gw* gw_solver_pert,
                              solvers::lr_gw* gw_solver_term2) {
   // Driver totals in execution order, each followed by the corresponding
   // solver's subclocks (deeper indent). Solver pointers may be null when the
@@ -2060,12 +2021,9 @@ void lr_driver::print_timers(solvers::lr_rpa_pi* pi_solver,
   app_log(2, "      - LR GW W (total):        {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_W"), _Timer.number_of_calls("LR_GW_W"));
   if (scr_solver) scr_solver->print_subclocks(2, sub_indent);
   app_log(2, "      - LR GW Sigma (total):    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_GW_SIGMA"), _Timer.number_of_calls("LR_GW_SIGMA"));
-  // Summed over all three Σ evaluators, and gated on any of them existing rather
-  // than on the self-consistent one: a kernel whose Σ sits entirely in the
-  // perturbative channel (pGW0 over a Hartree K_sc) never builds gw_solver.
-  if (gw_solver or gw_solver_pert or gw_solver_term2)
-    solvers::lr_gw::print_subclocks_all(2, sub_indent,
-                                        {gw_solver, gw_solver_pert, gw_solver_term2});
+  // Summed over both Σ evaluators.
+  if (gw_solver or gw_solver_term2)
+    solvers::lr_gw::print_subclocks_all(2, sub_indent, {gw_solver, gw_solver_term2});
   app_log(2, "      - LR qpGW static (total): {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_QPGW_STATIC"), _Timer.number_of_calls("LR_QPGW_STATIC"));
   app_log(2, "      - LR Iter Alg (total):    {0:8.3f} sec  {1:4d} calls", sec("LR_ITER_ALG", "LR_OUTER_ITER_ALG"), cnt("LR_ITER_ALG", "LR_OUTER_ITER_ALG"));
   app_log(2, "      - LR Totals (ΔF/ΔΣ):      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_TOTALS"), _Timer.number_of_calls("LR_TOTALS"));

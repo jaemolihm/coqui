@@ -226,6 +226,7 @@ struct lr_params {
   // --- Split-kernel (two-step) schedule ---
   /// Kernel components resummed self-consistently by the inner SCF loop. Left
   /// empty it is filled from the active terms above, i.e. the single-kernel path.
+  /// Σ-free whenever pert_kernel is non-empty.
   lr_kernel_spec sc_kernel{};
   /// Kernel components applied perturbatively, K_pert = kernel(total) \ sc_kernel.
   /// Empty for a plain single-kernel run.
@@ -371,10 +372,6 @@ struct lr_kernel_split {
   bool any_Sigma()   const { return sc.has_Sigma() || pert.has_Sigma(); }
   /// Σ2 = -G⊙ΔW anywhere, hence the ΔW Dyson.
   bool needs_dW()    const { return sc.terms.sigma_G_dW || pert.terms.sigma_G_dW; }
-  /// Both channels contribute a ΔΣ. It is the only case with per-channel ΔΣ
-  /// buffers and a ΔΣ total rebuilt every inner iteration; a ΔΣ carried by one
-  /// channel is written straight into the caller's array.
-  bool both_have_Sigma() const { return sc.has_Sigma() && pert.has_Sigma(); }
 };
 
 /**
@@ -534,9 +531,6 @@ public:
    * per-iteration transients. Called once at the top of lr_setup so the layout
    * can be inspected before the arrays allocate.
    *
-   * `extra_sigma` names the additional ΔΣ-sized shared arrays a split-kernel
-   * run allocates on top of the total ΔΣ: the per-channel buffers.
-   *
    * `n_sigma_prev` counts the ΔΣ-sized striped previous iterates — the inner
    * loop's tracked ΔΣ and the outer accelerator's previous source.
    *
@@ -558,7 +552,6 @@ public:
    * reported separately by lr_hessian_t.
    */
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
-                             std::vector<std::string> const& extra_sigma = {},
                              long n_sigma_prev = 0,
                              lr_diis_hist_t inner_hist = {},
                              lr_diis_hist_t outer_hist = {},
@@ -581,16 +574,14 @@ public:
    * subclocks (indented). The Pi/W/Sigma solvers are passed in as pointers
    * (null = solver not used, subclocks skipped).
    *
-   * The report has the same lines for every kernel. A split kernel evaluates ΔΣ
-   * on several lr_gw instances (`gw_solver_pert` for the perturbative channel,
-   * `gw_solver_term2` for a split G·ΔW term) against their own clock keys; all
-   * of them are summed into the single Σ line and Σ table, so a split run's
-   * report stays comparable line by line with a one-step run's.
+   * The report has the same lines for every kernel. Split-output mode evaluates
+   * the G·ΔW term on its own lr_gw (`gw_solver_term2`) against its own clock keys;
+   * both are summed into the single Σ line and Σ table, so the report stays
+   * comparable line by line with a fused run's.
    */
   void print_timers(solvers::lr_rpa_pi* pi_solver = nullptr,
                     solvers::lr_scr_coulomb_t* scr_solver = nullptr,
                     solvers::lr_gw* gw_solver = nullptr,
-                    solvers::lr_gw* gw_solver_pert = nullptr,
                     solvers::lr_gw* gw_solver_term2 = nullptr);
 
   // Accessors
@@ -622,9 +613,8 @@ private:
                   std::optional<dW_t>& opt_dW_tRPQ);
 
   /// The per-channel write targets of the caller's total ΔF / ΔΣ. ΔF always has
-  /// a buffer per channel. ΔΣ has one only when both channels carry a Σ;
-  /// otherwise the sole Σ channel writes the caller's array, and a channel
-  /// carrying no ΔΣ gets a null target.
+  /// a buffer per channel. ΔΣ is carried by at most one channel, which writes
+  /// the caller's array directly; a channel carrying no ΔΣ gets a null target.
   struct lr_channel_targets {
     sArray_t<Array_view_4D_t>* F_sc;
     sArray_t<Array_view_4D_t>* F_pert;
@@ -686,16 +676,15 @@ private:
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
-   * ΔF (always) and a two-channel ΔΣ are evaluated per channel (K_sc every inner
-   * iteration, K_pert only at a stage boundary) into separate buffers, so the
-   * total the Dyson solve and the checkpoint consume has to be rebuilt from them:
-   * total <- sc + pert, or total <- sc when `pert_part` is null.
+   * ΔF is evaluated per channel (K_sc every inner iteration, K_pert only at a
+   * stage boundary) into separate buffers, so the total the Dyson solve and the
+   * checkpoint consume has to be rebuilt from them: total <- sc + pert, or
+   * total <- sc when `pert_part` is null.
    *
    * Striped over node_comm: every node rank owns a contiguous element slice of the
    * shared window and writes only that slice. The result is bit-identical to a
    * serial sum — this is an element-wise map with no reduction — but it runs at
-   * 1/nrank of the cost, which matters because a split ΔΣ is rebuilt on EVERY
-   * inner iteration (a ΔΣ array is nk·nt·nb², i.e. GBs at production sizes).
+   * 1/nrank of the cost.
    *
    * Fences every window itself: the sources are node-replicated shared memory
    * and every rank reads slices written by others, so barriers alone are
@@ -705,12 +694,10 @@ private:
   template<typename Arr_t>
   void rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t* pert_part);
 
-  /// Rebuild the total ΔF from the channel buffers, and the total ΔΣ when both
-  /// channels carry one. A ΔΣ carried by one channel needs nothing — that
-  /// channel wrote the caller's array.
+  /// Rebuild the total ΔF from the channel buffers. ΔΣ needs nothing: the one
+  /// channel carrying it wrote the caller's array.
   void rebuild_split_totals(lr_kernel_split const& k,
-                            sArray_t<Array_view_4D_t>& sDeltaF_skij,
-                            sArray_t<Array_view_5D_t>* sDeltaSigma_tskij);
+                            sArray_t<Array_view_4D_t>& sDeltaF_skij);
 
   /**
    * The HSEX kernel lr_hf contracts: V + W_c(iν=0) for the self-consistent
@@ -728,14 +715,14 @@ private:
 
   // --- Solvers, built once by lr_setup and reused by every lr_solve_one. Each
   //     latches the perturbation q and a cache keyed on its usage — the exchange
-  //     kernel for lr_hf, the (term1, term2) combination for lr_gw — which is why
-  //     the split-kernel path needs two of each.
+  //     kernel for lr_hf, the (term1, term2) combination for lr_gw. The split-kernel
+  //     path needs two lr_hf (an HSEX split contracts V + W_c(0) in K_sc but
+  //     −W_c(0) in K_pert); lr_gw is used by at most one channel.
   //     Declared before the arrays below: darray_t stores a raw communicator_t*,
   //     so communicator-owning objects must outlive the arrays built on them.
   std::unique_ptr<solvers::lr_hf> _lr_hf;        // ΔF of K_sc, and the total ΔF_PQ output
   std::unique_ptr<solvers::lr_hf> _lr_hf_pert;   // ΔF of K_pert, split-kernel path only
-  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of K_sc (fused, or term 1 when split)
-  std::unique_ptr<solvers::lr_gw> _lr_gw_pert;   // ΔΣ of K_pert, split-kernel path only
+  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of the channel carrying Σ (term 1 in split-output mode)
   std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
@@ -789,11 +776,10 @@ private:
   lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
 
   // --- Per-channel buffers. sDeltaF_skij / sDeltaSigma_tskij always hold the
-  //     TOTAL (sc + pert) quantities. ΔF always has a buffer per channel; ΔΣ has
-  //     them only when BOTH channels carry a Σ, otherwise the sole Σ channel
-  //     writes the caller's array directly.
+  //     TOTAL (sc + pert) quantities. ΔF always has a buffer per channel; ΔΣ is
+  //     carried by at most one channel and written into the caller's array
+  //     directly.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_sc, _sDeltaF_pert;
-  std::optional<sArray_t<Array_view_5D_t>> _sDeltaSigma_sc, _sDeltaSigma_pert;
   /// Previous perturbative source, for the outer accelerator's extrapolation
   /// and its residual. Striped exactly like the inner loop's iterates.
   lr_iterate_history _DeltaF_pert, _DeltaSigma_pert;
