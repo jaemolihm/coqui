@@ -553,7 +553,7 @@ private:
   void precond_apply(nda::array<ComplexType, 1> const& r, nda::array<ComplexType, 1>& z,
                      const sArray_t<Array_view_5D_t>& sG_tskij, THC_t& thc,
                      const lr_params& p);
-  static constexpr double pc_rel_tol = 0.1;
+  static constexpr double pc_rel_tol = 0.01;
   static constexpr int pc_max_sweeps = 10;
 
   /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or
