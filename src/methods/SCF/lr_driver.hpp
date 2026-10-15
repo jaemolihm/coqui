@@ -59,11 +59,8 @@ enum class lr_gw_update_mode { none, fixed_W, full };
  *
  *   none ⊂ Hartree {H} ⊂ HF {H,X} ⊂ GW0 {H,X,Σ1} ⊂ GW {H,X,Σ1,Σ2}
  *
- * with Σ1 = -ΔG⊙W_c (label "dGW") and Σ2 = -G⊙ΔW (label "GdW"). A two-step run
- * splits K into a part resummed to all orders (K_sc) and a remainder expanded
- * to finite order (K_pert = kernel(total) \ kernel(sc)), and the remainder has
- * no method name of its own — hence the component mask rather than a method
- * enum.
+ * with Σ1 = -ΔG⊙W_c (label "dGW") and Σ2 = -G⊙ΔW (label "GdW"). Both the
+ * operator's kernel and the GCR preconditioner's are masks on this ladder.
  */
 struct lr_kernel_spec {
   bool hartree = false;
@@ -76,18 +73,6 @@ struct lr_kernel_spec {
 
   bool operator==(lr_kernel_spec const&) const = default;
 
-  /// True if every component of `sub` is also in *this.
-  bool contains(lr_kernel_spec const& sub) const {
-    return (hartree    || !sub.hartree)    && (exchange   || !sub.exchange) &&
-           (sigma_dG_W || !sub.sigma_dG_W) && (sigma_G_dW || !sub.sigma_G_dW);
-  }
-
-  /// True if any component appears in both masks.
-  bool overlaps(lr_kernel_spec const& o) const {
-    return (hartree && o.hartree) || (exchange && o.exchange) ||
-           (sigma_dG_W && o.sigma_dG_W) || (sigma_G_dW && o.sigma_G_dW);
-  }
-
   /// Component list for logging, e.g. "H, X, dGW" ("-" when empty).
   std::string to_string() const;
 };
@@ -95,12 +80,9 @@ struct lr_kernel_spec {
 /**
  * Expand a method name on the ladder ("none", "Hartree", "HF", "GW0", "GW")
  * into its component mask. Single source of truth for the `method` and
- * `two_step_inner_method` inputs.
+ * `precond_method` inputs.
  */
 lr_kernel_spec kernel_spec_from_method(std::string const& name);
-
-/// K_pert = total \ sc, requiring sc ⊆ total.
-lr_kernel_spec kernel_diff(lr_kernel_spec const& total, lr_kernel_spec const& sc);
 
 /**
  * LR-qpGW static-map inputs. When passed to lr_setup (non-null), the driver runs
@@ -116,55 +98,13 @@ struct lr_qp_static_params {
   double mu = 0.0;
 };
 
-/**
- * Acceleration of the OUTER (perturbative-source) iteration of a split-kernel
- * run. The outer sequence is a Picard iteration on an affine map,
- *
- *   S_0 = 0,   S_{m+1} = K_pert[ (1 - χ₀K_sc)⁻¹ χ₀ (ΔH0 + S_m) ],
- *
- * so the same accelerator the inner SCF uses applies to it verbatim. The outer
- * accelerator is a separate object with its own subspace, history and warmup —
- * nothing is shared with the inner `lr_diis`.
- *
- * With the defaults (alg "damping", tol = 0) nothing is allocated and no new
- * code runs: the outer loop is a plain Neumann series and `two_step_order`
- * counts truncation orders.
- *
- * With acceleration on, ORDER COUNTING IS ABANDONED: the source is a
- * combination of previous sources, so the result is an accelerated iterate
- * toward the FULL `method` fixed point and `two_step_order` is an
- * iteration cap, not a truncation order.
- */
-struct lr_outer_accel_params {
-  /// alg, subspace depth and warmup of the OUTER accelerator. "damping" means
-  /// no acceleration; `mixing` only damps the accelerator's own warmup steps.
-  /// For outer iteration, default to plain iteration: damping, mixing 1.0,
-  /// history 1 (the depth lr_diis forces under damping, lr_diis.hpp:105).
-  lr_iter_params iter{.alg = "damping", .mixing = 1.0,
-                      .max_subsp_size = 1, .diis_warmup = 0};
-  /// > 0 switches the outer loop from "run exactly pert_order stages" to
-  /// "iterate until the stage-to-stage ‖ΔDm‖ change is below tol, capped at
-  /// pert_order stages".
-  double tol = 0.0;
-  /// History vectors required before the outer DIIS extrapolates (see lr_diis).
-  /// 2 puts the first extrapolation at the second outer step.
-  size_t min_subsp = 2;
-
-  /// True when the outer loop is accelerated or tolerance-driven, i.e. when the
-  /// run is no longer an order-`pert_order` truncation. Single source of truth
-  /// for the buffers, the logging and the checkpoint provenance fields.
-  bool active() const { return iter.alg == "DIIS" || tol > 0.0; }
-};
-
-/// Per-node footprint of one lr_diis history: 2 vectors (trial + residual) per
-/// subspace entry, of the quantities the accelerator actually stores.
+/// Per-node footprint of the accelerator's history (lr_diis ring or lr_gcr basis):
+/// n_vec vectors of the quantities the accelerator actually stores.
 struct lr_diis_hist_t {
-  long depth = 0;     ///< max_subsp_size; 0 = no history (accelerator off)
-  long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities stored per entry
-  long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per entry
-  /// Residuals are stored only by a configuration that can extrapolate, so a
-  /// damping ring holds trials alone: one vector per entry, not two.
-  bool with_residuals = true;
+  long depth = 0;     ///< subspace depth / basis capacity; 0 = accelerator off
+  long n_vec = 0;     ///< stored vectors, each of n_F ΔF + n_Sigma ΔΣ
+  long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities per vector
+  long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per vector
 };
 
 /**
@@ -199,12 +139,8 @@ struct lr_params {
   /// pair per iteration exactly as bare-exchange LR-HF has. Requires
   /// include_exchange and a W_c on the ω axis handed to lr_setup.
   ///
-  /// Deliberately a flag on the exchange channel rather than a component of
-  /// lr_kernel_spec: X_sex is not on the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder, so
-  /// kernel_diff() cannot express the remainder K_GW \ K_HSEX (it would give
-  /// {Σ1, Σ2} and silently drop the static counter-term ΔDm ⊙ W_c(0)). Keeping
-  /// it off lr_kernel_spec makes that composition unrepresentable rather than
-  /// wrong.
+  /// A flag on the exchange channel rather than a component of lr_kernel_spec:
+  /// X_sex is not on the none ⊂ H ⊂ HF ⊂ GW0 ⊂ GW ladder.
   /// The aux-basis arrays carry no G=0 component, so the head of the contracted
   /// kernel enters as a Madelung term; W(iν=0)'s is -madelung·ε⁻¹(iν=0) against
   /// bare exchange's -madelung·1. It is taken from eps_inv_head_w, the same
@@ -214,8 +150,8 @@ struct lr_params {
   // --- SCF control ---
   int max_iter = 1;               ///< 1 = one-shot
   /// DIIS/damping: on the successive-iterate differences of ΔDm, ΔF, ΔΣ.
-  /// GCR: on the residual ||g(x) - x|| of the self-consistent channel's
-  /// iterate, the concatenation (ΔF, ΔΣ) (ΔF alone for a Σ-free K_sc).
+  /// GCR: on the residual ||g(x) - x|| of the iterate, the concatenation
+  /// (ΔF, ΔΣ) (ΔF alone for a Σ-free kernel).
   double tol = 1e-8;
   bool fix_density = false;       ///< compute Δμ to enforce ΔN = 0
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
@@ -223,35 +159,14 @@ struct lr_params {
   bool save_DeltaG = true;
   lr_iter_params iter_params{};   ///< damping / DIIS
 
-  // --- Split-kernel (two-step) schedule ---
-  /// Kernel components resummed self-consistently by the inner SCF loop. Left
-  /// empty it is filled from the active terms above, i.e. the single-kernel path.
-  /// Σ-free whenever pert_kernel is non-empty.
-  lr_kernel_spec sc_kernel{};
-  /// Kernel components applied perturbatively, K_pert = kernel(total) \ sc_kernel.
-  /// Empty for a plain single-kernel run.
-  lr_kernel_spec pert_kernel{};
-  /// Truncation order n of the K_pert expansion. 0 (or an empty pert_kernel)
-  /// runs the sc kernel alone. Costs n K_pert evaluations, each on a converged
-  /// inner K_sc solve; max_iter counts total inner iterations across all n+1
-  /// stages. With outer_accel active this is an iteration cap, not an order.
-  /// 0 with hessian() still costs one evaluation, made by the refresh rather
-  /// than by the schedule — see has_pert_kernel().
-  int pert_order = 0;
-  /// Acceleration of the outer (perturbative-source) iteration. Default-valued
-  /// leaves the plain Neumann series untouched. Requires a split-kernel run.
-  lr_outer_accel_params outer_accel{};
-
-  /// The schedule has outer stages, i.e. there is an outer sequence at all.
-  /// Its one use is gating the outer accelerator.
-  bool two_step() const { return !pert_kernel.empty() && pert_order > 0; }
-
-  /// K_pert is evaluated at least once — by the schedule, or at pert_order = 0
-  /// by the hessian's consistency refresh alone. Governs the kernel split, the
-  /// per-channel buffers, the W load and get_full_kernel_result.
-  bool has_pert_kernel() const {
-    return !pert_kernel.empty() && (pert_order > 0 || hessian());
-  }
+  // --- GCR preconditioner ---
+  /// Σ-free kernel K_pc whose resolvent z = (I - K_pc Pχ)⁻¹ r preconditions GCR
+  /// on the full equation; empty = no preconditioner. Changes the convergence
+  /// rate, not the answer. Requires iter_params.alg == "GCR" and a Σ kernel.
+  lr_kernel_spec precond_kernel{};
+  /// K_pc's exchange contracts V + W_c(iν=0) (HSEX), as exchange_static_W does
+  /// for the operator.
+  bool precond_hsex = false;
 
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when gw_mode != none.
@@ -282,14 +197,13 @@ struct lr_params {
   /// Evaluate the free-energy hessian through the variationally-stationary
   /// (quadratic-error) functional as well as the plain contraction, for a batch of
   /// this many perturbations; 0 leaves it off. Opt-in: it costs one extra Dyson
-  /// solve and one K_sc evaluation per perturbation, plus two striped ω stores.
+  /// solve and one kernel evaluation per perturbation, plus two striped ω stores.
   ///
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
 
-  /// The kernel the active-term flags name, i.e. the TOTAL K (K_sc ∪ K_pert on a
-  /// split run).
+  /// The kernel the active-term flags name.
   lr_kernel_spec total_kernel() const {
     return lr_kernel_spec{include_hartree, include_exchange,
                           gw_mode != lr_gw_update_mode::none,
@@ -302,76 +216,60 @@ struct lr_params {
 };
 
 /**
- * ONE of the two kernels a run splits K into — K_sc or K_pert — fully described:
- * everything that differs between them, resolved once by make_kernel_split().
+ * One kernel the driver evaluates — the operator's or the preconditioner's —
+ * fully described, resolved once by make_kernels().
  *
  * The three layers in this header:
  *   lr_kernel_spec  - WHICH components (Hartree, exchange, the two Σ terms) a
  *                     kernel contains. A component mask, nothing more.
- *   lr_kernel       - one channel, ready to evaluate: its terms, the privileges of
- *                     the self-consistent or the perturbative channel it holds,
- *                     and the lr_hf/lr_gw instances to drive. Everything else
- *                     about it is derived from those by the accessors.
- *   lr_kernel_split - the pair of channels (sc, pert) a run executes, and the
- *                     predicates over the pair.
+ *   lr_kernel       - one kernel, ready to evaluate: its terms, the inputs it
+ *                     owns, and the lr_hf/lr_gw instances to drive.
+ *   lr_kernels - the operator kernel and the preconditioner kernel.
  *
  * This is what makes apply_kernel agnostic about which of the two it is handed.
- * Timing is per function rather than per kernel, so the clocks are named inside
- * apply_kernel and both kernels bill the same regions.
  */
 struct lr_kernel {
-  /// The components this channel evaluates: which of Hartree, exchange,
+  /// The components this kernel evaluates: which of Hartree, exchange,
   /// Σ1 = -ΔG⊙W and Σ2 = -G⊙ΔW.
   lr_kernel_spec terms{};
 
-  /// Contract -W_c(iν=0) as the static counter-term instead of V + W_c(iν=0). Only
-  /// a split run's remainder owes it. See lr_params::exchange_static_W.
-  bool sex_counterterm = false;
+  /// The exchange contracts V + W_c(iν=0) instead of V (HSEX). See
+  /// lr_params::exchange_static_W.
+  bool exchange_static_W = false;
   /// Forward the static inputs (ΔV_qPQ, the unperturbed Dm, include_xc) and the
-  /// DeltaX IBC correction. The self-consistent channel owns those; the
-  /// perturbative one has never used them.
+  /// DeltaX IBC correction. The operator owns those; the preconditioner must be
+  /// linear in the residual, so it never takes them.
   bool static_inputs = false;
   /// Write ΔΣ term 2 to its own array as well as into the total. A one-shot G0W0
-  /// feature, incompatible with a split kernel, hence sc-channel only.
+  /// feature of the operator.
   bool split_sigma_terms = false;
-  /// Non-null: this channel's dynamic ΔΣ(iω) is statified into the static
+  /// Non-null: this kernel's dynamic ΔΣ(iω) is statified into the static
   /// ΔV_QPGW(k), which enters the Dyson RHS in its place and is the quantity
-  /// mixed and tracked (LR-qpGW). sc channel only.
+  /// mixed and tracked (LR-qpGW). Operator only.
   const lr_qp_static_params* qp = nullptr;
 
   solvers::lr_hf* hf = nullptr;   ///< evaluator instances, owned by lr_driver
   solvers::lr_gw* gw = nullptr;
 
   /// This kernel evaluates ΔF at all.
-  bool has_F() const { return terms.hartree || terms.exchange || sex_counterterm; }
-  /// The exchange switch lr_hf is given. The counter-term IS an exchange
-  /// contraction, just with the kernel -W_c(0), so it turns the exchange branch on
-  /// even when `terms` leaves exchange wholly in K_sc.
-  bool has_exchange() const { return terms.exchange || sex_counterterm; }
+  bool has_F() const { return terms.hartree || terms.exchange; }
   /// This kernel evaluates ΔΣ at all.
   bool has_Sigma() const { return terms.has_sigma(); }
-  /// LR-qpGW: this channel's ΔΣ is statified into ΔV_QPGW (see `qp`).
+  /// LR-qpGW: this kernel's ΔΣ is statified into ΔV_QPGW (see `qp`).
   bool is_qp() const { return qp != nullptr; }
   bool is_empty() const { return !has_F() && !has_Sigma(); }
 };
 
 /**
- * The kernel split a run executes: the channel the inner SCF loop resums (K_sc)
- * and the one applied perturbatively (K_pert), plus the unions on which every
- * solver, buffer and W-operand decision is taken. Built from lr_params alone by
- * make_kernel_split, once, in lr_setup.
+ * The kernels a run evaluates: the operator's K_total, applied every iteration,
+ * and the Σ-free preconditioner kernel K_pc, empty unless GCR is preconditioned.
+ * Built from lr_params alone by make_kernels, once, in lr_setup.
  */
-struct lr_kernel_split {
-  lr_kernel sc{}, pert{};
+struct lr_kernels {
+  lr_kernel op{}, pc{};
 
-  /// A perturbative pass actually runs. At pert_order = 0 the only one is
-  /// get_full_kernel_result's refresh; the split, the buffers and the W
-  /// operands are the same either way.
-  bool do_pert()     const { return !pert.is_empty(); }
-  bool any_F()       const { return sc.has_F()     || pert.has_F(); }
-  bool any_Sigma()   const { return sc.has_Sigma() || pert.has_Sigma(); }
-  /// Σ2 = -G⊙ΔW anywhere, hence the ΔW Dyson.
-  bool needs_dW()    const { return sc.terms.sigma_G_dW || pert.terms.sigma_G_dW; }
+  /// Σ2 = -G⊙ΔW, hence the ΔW Dyson.
+  bool needs_dW()    const { return op.terms.sigma_G_dW; }
 };
 
 /**
@@ -473,28 +371,7 @@ public:
       sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      int* n_pert_applied_out = nullptr);
-
-  /**
-   * @brief Re-evaluate K_pert on the ΔG the last lr_solve_one returned, so the
-   *        stationary hessian functional is handed ΔV' = ΔH0 + K(ΔG').
-   *
-   * With the hessian on, lr_solve_one already returns K_sc evaluated at ΔG'. On a
-   * split-kernel run the perturbative source is still frozen at K_pert(ΔG at stage
-   * start), so this evaluates K_pert at ΔG' and rebuilds the totals; otherwise the
-   * functional loses its second-order property. Nothing to do without a K_pert.
-   *
-   * Collective on comm.
-   */
-  template<THC_ERI THC_t>
-  void get_full_kernel_result(sArray_t<Array_view_4D_t>& sDeltaF_skij,
-                              sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-                              const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-                              const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                              const sArray_t<Array_view_5D_t>& sG_tskij,
-                              THC_t& thc,
-                              const lr_params& p);
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
 
   /**
    * @brief The run's LR Dyson solver.
@@ -516,13 +393,6 @@ public:
     return _lr_dyson;
   }
 
-  /// The one hessian clock lr_driver owns: the K_pert refresh inside
-  /// get_full_kernel_result. Reported by lr_hessian_t::print_timers, which holds
-  /// the rest of the table — this is not in print_timers() because that runs at the
-  /// end of every lr_solve_one, before the refresh of that same solve.
-  double hessian_refresh_sec() { return _Timer.elapsed("LR_HESS_PERT_REFRESH"); }
-  int hessian_refresh_calls() { return _Timer.number_of_calls("LR_HESS_PERT_REFRESH"); }
-
   /**
    * Estimate and report (verbosity 1 summary, verbosity 2 breakdown) the
    * per-node memory footprint of the large LR arrays: the node-replicated
@@ -531,15 +401,16 @@ public:
    * per-iteration transients. Called once at the top of lr_setup so the layout
    * can be inspected before the arrays allocate.
    *
-   * `n_sigma_prev` counts the ΔΣ-sized striped previous iterates — the inner
-   * loop's tracked ΔΣ and the outer accelerator's previous source.
+   * `n_sigma_prev` counts the ΔΣ-sized striped previous iterates.
    *
-   * `inner_hist` / `outer_hist` are the DIIS histories of the inner SCF and of
-   * the outer (split-kernel source) loop. Each subspace entry holds a trial AND
-   * a residual vector, so a depth-d history is 2d arrays striped over the
-   * global comm — at the default inner depth this dominates every other LR
-   * array at production sizes, which is why it is listed rather than left
-   * implicit.
+   * `inner_hist` is the DIIS history (or GCR basis) of the SCF loop. Each
+   * subspace entry holds a trial AND a residual vector, so a depth-d history is
+   * 2d arrays striped over the global comm — at the default depth this dominates
+   * every other LR array at production sizes, which is why it is listed rather
+   * than left implicit.
+   *
+   * `precond` marks a preconditioned GCR run, which keeps one more ΔΣ-sized
+   * shared array (the gathered residual's ΔΣ part).
    *
    * `need_Delta_mu` marks the fix_density, q=Γ path — the only one that allocates
    * lr_dyson's Δμ response dG/dμ(τ), a second ΔG(τ)-sized distributed array.
@@ -554,7 +425,7 @@ public:
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                              long n_sigma_prev = 0,
                              lr_diis_hist_t inner_hist = {},
-                             lr_diis_hist_t outer_hist = {},
+                             bool precond = false,
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
                              long hessian_nmodes = 0);
@@ -612,33 +483,20 @@ private:
                   std::optional<dW_t>& opt_dW_full_wqPQ,
                   std::optional<dW_t>& opt_dW_tRPQ);
 
-  /// The per-channel write targets of the caller's total ΔF / ΔΣ. ΔF always has
-  /// a buffer per channel. ΔΣ is carried by at most one channel, which writes
-  /// the caller's array directly; a channel carrying no ΔΣ gets a null target.
-  struct lr_channel_targets {
-    sArray_t<Array_view_4D_t>* F_sc;
-    sArray_t<Array_view_4D_t>* F_pert;
-    sArray_t<Array_view_5D_t>* S_sc;
-    sArray_t<Array_view_5D_t>* S_pert;
-  };
-  lr_channel_targets channel_targets(lr_kernel_split const& k,
-                                     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij);
-
   /**
-   * Apply one whole kernel — K_sc or K_pert — to the supplied ΔDm / ΔG.
+   * Apply one whole kernel — the operator's or the preconditioner's — to the
+   * supplied ΔDm / ΔG.
    *
-   * Channel-agnostic: `kernel` says which components, which evaluators, which clocks
-   * and which privileges, so K_sc and K_pert are the same code with different
-   * data. Both branches are optional — a channel carrying only ΔF does no Σ work,
-   * and vice versa.
+   * `kernel` says which components, which evaluators and which inputs, so both
+   * kernels are the same code with different data. Both branches are optional —
+   * a kernel carrying only ΔF does no Σ work, and vice versa.
    *
-   * @param kernel              - [INPUT]  one channel of the split, _split.sc or _split.pert
+   * @param kernel          - [INPUT]  _kernels.op or _kernels.pc
    * @param sDeltaF_out     - [OUTPUT] this kernel's ΔF, OVERWRITTEN (not
-   *                                   accumulated): the ΔG it is applied to
-   *                                   already carries every lower order. Untouched
-   *                                   when the channel carries no ΔF.
+   *                                   accumulated). Untouched when the kernel
+   *                                   carries no ΔF.
    * @param pDeltaSigma_out - [OUTPUT] this kernel's ΔΣ, overwritten; may be null
-   *                                   exactly when the channel carries no ΔΣ.
+   *                                   exactly when the kernel carries no ΔΣ.
    * @param sDeltaDm_skij   - [INPUT]  ΔDm the ΔF branch contracts
    * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
    * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
@@ -657,7 +515,7 @@ private:
                     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
 
   /**
-   * The GW self-energy branch of apply_kernel: ΔΠ -> ΔW -> ΔΣ for one channel,
+   * The GW self-energy branch of apply_kernel: ΔΠ -> ΔW -> ΔΣ,
    * into `sSigma_tskij_out`, overwriting it. Each divergence correction is applied
    * by the evaluator that owns the term it corrects, so passing the overlap and
    * the heads is all this has to do.
@@ -676,36 +534,31 @@ private:
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
-   * ΔF is evaluated per channel (K_sc every inner iteration, K_pert only at a
-   * stage boundary) into separate buffers, so the total the Dyson solve and the
-   * checkpoint consume has to be rebuilt from them: total <- sc + pert, or
-   * total <- sc when `pert_part` is null.
+   * The GCR preconditioner z = P_c⁻¹ r. `r` and `z` are this rank's slices of
+   * the concatenated (ΔF, ΔΣ) residual and direction, as lr_gcr holds them.
    *
-   * Striped over node_comm: every node rank owns a contiguous element slice of the
-   * shared window and writes only that slice. The result is bit-identical to a
-   * serial sum — this is an element-wise map with no reduction — but it runs at
-   * 1/nrank of the cost.
+   * Solves z_F = r_F + K_pc[Pχ(z_F, r_Σ)] for the ΔF part and passes ΔΣ through,
+   * z_Σ = r_Σ: one full Dyson pass gives the ΔDm of r_Σ, then each sweep is a
+   * ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation and one step of the
+   * ΔF-only _pc_gcr on y_F = z_F - r_F. The sweeps stop at
+   * ‖r_in‖ ≤ pc_rel_tol·‖r_in,0‖ or after pc_max_sweeps; the outer GCR is
+   * flexible, so the inner accuracy changes the rate only. The _pc_gcr basis is
+   * recycled across applies (reset_rhs): its operator I - K_pc Pχ is the same
+   * on every call. K_pc runs without the static inputs, so the inner problem has
+   * no constant term.
    *
-   * Fences every window itself: the sources are node-replicated shared memory
-   * and every rank reads slices written by others, so barriers alone are
-   * insufficient under the MPI-3 separate shared-memory model. That is why the
-   * operands are non-const — shared_array::win() is.
+   * Collective on comm.
    */
-  template<typename Arr_t>
-  void rebuild_total(Arr_t& total, Arr_t& sc_part, Arr_t* pert_part);
+  template<THC_ERI THC_t>
+  void precond_apply(nda::array<ComplexType, 1> const& r, nda::array<ComplexType, 1>& z,
+                     const sArray_t<Array_view_5D_t>& sG_tskij, THC_t& thc,
+                     const lr_params& p);
+  static constexpr double pc_rel_tol = 0.1;
+  static constexpr int pc_max_sweeps = 10;
 
-  /// Rebuild the total ΔF from the channel buffers. ΔΣ needs nothing: the one
-  /// channel carrying it wrote the caller's array.
-  void rebuild_split_totals(lr_kernel_split const& k,
-                            sArray_t<Array_view_4D_t>& sDeltaF_skij);
-
-  /**
-   * The HSEX kernel lr_hf contracts: V + W_c(iν=0) for the self-consistent
-   * channel, −W_c(iν=0) for the counter-term a split run's remainder owes. Their
-   * heads ε⁻¹(0) and 1 − ε⁻¹(0) sum back to bare exchange's 1. Empty unless the
-   * run is HSEX.
-   */
-  std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel(bool counter_term);
+  /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or
+  /// the preconditioner is HSEX.
+  std::optional<solvers::lr_hf::hsex_kernel_t> hsex_kernel();
 
   simple_dyson& _dyson;
   std::shared_ptr<mpi_context_t> _mpi;
@@ -715,24 +568,23 @@ private:
 
   // --- Solvers, built once by lr_setup and reused by every lr_solve_one. Each
   //     latches the perturbation q and a cache keyed on its usage — the exchange
-  //     kernel for lr_hf, the (term1, term2) combination for lr_gw. The split-kernel
-  //     path needs two lr_hf (an HSEX split contracts V + W_c(0) in K_sc but
-  //     −W_c(0) in K_pert); lr_gw is used by at most one channel.
+  //     kernel for lr_hf, the (term1, term2) combination for lr_gw. The
+  //     preconditioner has its own lr_hf, since its exchange kernel may differ
+  //     from the operator's.
   //     Declared before the arrays below: darray_t stores a raw communicator_t*,
   //     so communicator-owning objects must outlive the arrays built on them.
-  std::unique_ptr<solvers::lr_hf> _lr_hf;        // ΔF of K_sc, and the total ΔF_PQ output
-  std::unique_ptr<solvers::lr_hf> _lr_hf_pert;   // ΔF of K_pert, split-kernel path only
-  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ of the channel carrying Σ (term 1 in split-output mode)
+  std::unique_ptr<solvers::lr_hf> _lr_hf;        // ΔF of the operator, and the ΔF_PQ output
+  std::unique_ptr<solvers::lr_hf> _lr_hf_pc;     // ΔF of the preconditioner kernel
+  std::unique_ptr<solvers::lr_gw> _lr_gw;        // ΔΣ (term 1 in split-output mode)
   std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
   std::unique_ptr<lr_diis> _lr_diis;
-  /// Accelerator of the outer (perturbative-source) iteration. Its own subspace,
-  /// history and warmup: the inner one restarts at every stage boundary while
-  /// this one is keyed on the outer step index, so the two share nothing.
-  std::unique_ptr<lr_diis> _outer_diis;
-  /// GCR in place of _lr_diis when iter_params.alg == "GCR" and K_sc is not empty.
+  /// GCR in place of _lr_diis when iter_params.alg == "GCR" and the kernel is
+  /// not empty.
   std::unique_ptr<lr_gcr> _lr_gcr;
+  /// The preconditioner's ΔF-only inner GCR, preconditioned runs only.
+  std::unique_ptr<lr_gcr> _pc_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
   // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
@@ -775,28 +627,21 @@ private:
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;
   lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
 
-  // --- Per-channel buffers. sDeltaF_skij / sDeltaSigma_tskij always hold the
-  //     TOTAL (sc + pert) quantities. ΔF always has a buffer per channel; ΔΣ is
-  //     carried by at most one channel and written into the caller's array
-  //     directly.
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_sc, _sDeltaF_pert;
-  /// Previous perturbative source, for the outer accelerator's extrapolation
-  /// and its residual. Striped exactly like the inner loop's iterates.
-  lr_iterate_history _DeltaF_pert, _DeltaSigma_pert;
-  /// ΔDm at the previous stage boundary, whose change is the outer termination
-  /// criterion. Kept whole: its norm is taken on the node_comm path.
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_stage_prev;
+  /// The kernels, built once by lr_setup; they hold the evaluator instances above.
+  lr_kernels _kernels;
 
-  /// The kernel split, built once by lr_setup; its channels hold the evaluator
-  /// instances above.
-  lr_kernel_split _split;
-
-  // --- ΔDm-only Dyson pass (K_sc without a Σ).
-  /// ΔDm(Δμ=0) of the frozen perturbative ΔΣ, rebuilt once per stage.
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pert_Sigma;
+  // --- ΔDm-only Dyson pass (Σ-free operator kernel).
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
+
+  // --- Preconditioner buffers (preconditioned runs only): the gathered residual
+  //     (r_F, r_Σ), the ΔDm of r_Σ, the inner iterate y_F and its ΔDm.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_pc_r, _sDeltaF_pc_y;
+  std::optional<sArray_t<Array_view_5D_t>> _sDeltaSigma_r;
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pc, _sDeltaDm_pc_y;
+  /// Sweeps made by the last precond_apply, for the iteration log.
+  int _pc_sweeps = 0;
 
   bool _setup_done = false;
 

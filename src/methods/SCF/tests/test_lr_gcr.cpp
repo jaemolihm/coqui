@@ -21,6 +21,7 @@
 #undef NDEBUG
 
 #include <cmath>
+#include <functional>
 
 #include "catch2/catch.hpp"
 
@@ -72,12 +73,14 @@ struct affine_problem {
   }
 };
 
+using precond_t = std::function<void(methods::lr_gcr::Vec1D const&, methods::lr_gcr::Vec1D&)>;
+
 // Solve g(x) = x from y = 0 with `gcr`; returns the number of steps taken and
 // leaves the solution in x.
 template<typename FArr, typename SArr>
 int solve(mpi3::communicator& comm, utils::part_map const& pmap, methods::lr_gcr& gcr,
           affine_problem const& P, FArr& F, SArr& S, nda::array<ComplexType, 1>& x,
-          double tol, int max_steps) {
+          double tol, int max_steps, precond_t const* precond = nullptr) {
   const long nF = P.nF, nS = P.nS;
   auto [f0, f1] = pmap.my_slice(nF);
   long s0 = 0, s1 = 0;
@@ -96,7 +99,7 @@ int solve(mpi3::communicator& comm, utils::part_map const& pmap, methods::lr_gcr
       Sp = y(nda::range(nF + s0, nF + s1));
     }
     bool conv = false;
-    gcr.step(comm, pmap, F(), Fp, S(), Sp, tol, conv);
+    gcr.step(comm, pmap, F(), Fp, S(), Sp, tol, conv, precond);
     // Reassemble the full probe (or x) from every rank's slice.
     nda::array<ComplexType, 1> ynew(nF + nS);
     ynew() = 0;
@@ -115,6 +118,52 @@ double affine_residual(affine_problem const& P, nda::array<ComplexType, 1> const
   auto g = P.apply(x);
   g -= x;
   return std::sqrt(std::real(nda::blas::dotc(g, g)));
+}
+
+// Dense inverse by Gauss-Jordan with partial pivoting.
+nda::array<ComplexType, 2> inverse(nda::array<ComplexType, 2> A) {
+  const long n = A.extent(0);
+  nda::array<ComplexType, 2> X(n, n);
+  X() = 0;
+  for (long i = 0; i < n; ++i) X(i, i) = 1.0;
+  for (long c = 0; c < n; ++c) {
+    long piv = c;
+    for (long i = c + 1; i < n; ++i)
+      if (std::abs(A(i, c)) > std::abs(A(piv, c))) piv = i;
+    for (long j = 0; j < n; ++j) { std::swap(A(c, j), A(piv, j)); std::swap(X(c, j), X(piv, j)); }
+    const ComplexType d = A(c, c);
+    for (long j = 0; j < n; ++j) { A(c, j) /= d; X(c, j) /= d; }
+    for (long i = 0; i < n; ++i) {
+      if (i == c) continue;
+      const ComplexType f = A(i, c);
+      for (long j = 0; j < n; ++j) { A(i, j) -= f * A(c, j); X(i, j) -= f * X(c, j); }
+    }
+  }
+  return X;
+}
+
+// z = Minv r on this rank's slices of the concatenation [F; S], as lr_gcr hands
+// them over: gather the full r, apply the dense Minv, keep this rank's slices.
+precond_t dense_precond(mpi3::communicator& comm, utils::part_map const& pmap,
+                        long nF, long nS, nda::array<ComplexType, 2> const& Minv) {
+  return [&comm, &pmap, nF, nS, Minv](methods::lr_gcr::Vec1D const& r,
+                                      methods::lr_gcr::Vec1D& z) {
+    auto [f0, f1] = pmap.my_slice(nF);
+    long s0 = 0, s1 = 0;
+    if (nS > 0) std::tie(s0, s1) = pmap.my_slice(nS);
+    const long mF = f1 - f0;
+    nda::array<ComplexType, 1> rf(nF + nS);
+    rf() = 0;
+    rf(nda::range(f0, f1)) = r(nda::range(0, mF));
+    if (nS > 0) rf(nda::range(nF + s0, nF + s1)) = r(nda::range(mF, mF + s1 - s0));
+    comm.all_reduce_in_place_n(rf.data(), rf.size(), std::plus<>{});
+    nda::array<ComplexType, 1> zf(nF + nS);
+    zf() = 0;
+    for (long i = 0; i < nF + nS; ++i)
+      for (long j = 0; j < nF + nS; ++j) zf(i) += Minv(i, j) * rf(j);
+    z(nda::range(0, mF)) = zf(nda::range(f0, f1));
+    if (nS > 0) z(nda::range(mF, mF + s1 - s0)) = zf(nda::range(nF + s0, nF + s1));
+  };
 }
 
 } // namespace
@@ -139,8 +188,8 @@ TEST_CASE("lr_gcr_two_slot_recycling", "[methods_scf]") {
   REQUIRE(affine_residual(P1, x1) < 10 * tol);
 
   // A new right-hand side on the same operator, mostly inside the Krylov space
-  // of the first (as a later stage's is): the recycled pairs stay valid, so the
-  // projection removes most of r0 and fewer steps are needed.
+  // of the first (as a later apply of the preconditioner's is): the recycled pairs
+  // stay valid, so the projection removes most of r0 and fewer steps are needed.
   REQUIRE(gcr.basis_size() > 0);
   gcr.reset_rhs();
   affine_problem P2 = P1;
@@ -161,6 +210,64 @@ TEST_CASE("lr_gcr_two_slot_recycling", "[methods_scf]") {
   const int nf = solve(world, pmap, gcr_f, PF, F, S_empty, xf, tol, 200);
   REQUIRE(nf <= 200);
   REQUIRE(affine_residual(PF, xf) < 10 * tol);
+}
+
+// Preconditioned (flexible) GCR on a nonsymmetric A = I − M: the next probe is
+// x + Minv r. With Minv = A⁻¹ the first direction is the exact solution; with
+// the inexact diagonal Minv the iteration converges to the same x.
+TEST_CASE("lr_gcr_preconditioned", "[methods_scf]") {
+  auto world = mpi3::environment::get_world_instance();
+  utils::part_map pmap;
+  pmap.nparts = world.size();
+  pmap.part_idx = world.rank();
+  const long nF = 12, nS = 30, n = nF + nS;
+  const double tol = 1e-11;
+
+  // A strongly varying diagonal, so the diagonal preconditioner does real work.
+  affine_problem P(nF, nS, 0.2);
+  for (long i = 0; i < n; ++i) P.M(i, i) += 0.8 * std::cos(0.37 * double(i));
+  nda::array<ComplexType, 2> A(n, n);
+  for (long i = 0; i < n; ++i)
+    for (long j = 0; j < n; ++j) A(i, j) = (i == j ? 1.0 : 0.0) - P.M(i, j);
+
+  nda::array<ComplexType, 4> F(shape_t<4>{1, 1, 2, 6});
+  nda::array<ComplexType, 5> S(shape_t<5>{5, 1, 1, 2, 3});
+
+  methods::lr_gcr gcr0(100);
+  nda::array<ComplexType, 1> x0;
+  const int n0 = solve(world, pmap, gcr0, P, F, S, x0, tol, 300);
+  REQUIRE(n0 <= 300);
+  REQUIRE(affine_residual(P, x0) < 10 * tol);
+  const double x0n = std::sqrt(std::real(nda::blas::dotc(x0, x0)));
+
+  // Exact inverse: the probe after the first step is x itself.
+  {
+    auto pc = dense_precond(world, pmap, nF, nS, inverse(A));
+    methods::lr_gcr gcr(100);
+    nda::array<ComplexType, 1> x;
+    const int ns = solve(world, pmap, gcr, P, F, S, x, tol, 300, &pc);
+    REQUIRE(ns == 2);
+    REQUIRE(affine_residual(P, x) < 10 * tol);
+    nda::array<ComplexType, 1> d = x - x0;
+    REQUIRE(std::sqrt(std::real(nda::blas::dotc(d, d))) < 1e-9 * x0n);
+  }
+
+  // Inexact: Jacobi, Minv = diag(A)⁻¹.
+  {
+    nda::array<ComplexType, 2> D(n, n);
+    D() = 0;
+    for (long i = 0; i < n; ++i) D(i, i) = 1.0 / A(i, i);
+    auto pc = dense_precond(world, pmap, nF, nS, D);
+    methods::lr_gcr gcr(100);
+    nda::array<ComplexType, 1> x;
+    const int ns = solve(world, pmap, gcr, P, F, S, x, tol, 300, &pc);
+    REQUIRE(ns <= 300);
+    REQUIRE(affine_residual(P, x) < 10 * tol);
+    nda::array<ComplexType, 1> d = x - x0;
+    REQUIRE(std::sqrt(std::real(nda::blas::dotc(d, d))) < 1e-9 * x0n);
+    if (world.root())
+      app_log(1, "lr_gcr_preconditioned: plain {} steps, Jacobi {} steps", n0, ns);
+  }
 }
 
 // g(x) = (I − A) x + b for a real A with xᵀ A x = 0 for every real x: each step

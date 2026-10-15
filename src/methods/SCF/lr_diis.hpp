@@ -98,18 +98,13 @@ public:
    *                    warmup. "damping" collapses the subspace to depth 1 and the
    *                    warmup to 0, which is what puts a damping run on the damping
    *                    write for good (see is_simple_mixing).
-   * @param min_subsp - history vectors required before extrapolating, counted
-   *                    AFTER the current step is stored. 3 (the default) puts the
-   *                    first extrapolation on the third call; 2 enables a two-term
-   *                    (secant / Aitken) step at the second call.
    */
-  explicit lr_diis(lr_iter_params const& params, size_t min_subsp = 3)
+  explicit lr_diis(lr_iter_params const& params)
       : _max_subsp_size(params.use_diis() ? params.max_subsp_size : 1),
         _warmup_iter(params.use_diis() ? params.diis_warmup : 0),
         _mixing(params.mixing),
-        _min_subsp(min_subsp),
         _B(0, 0) {
-    // A DIIS run whose max_subsp_size is below min_subsp gets the permanent
+    // A DIIS run whose max_subsp_size is below _min_subsp gets the permanent
     // warmup gate is_simple_mixing() describes, and silently degrades to plain
     // damping — which would otherwise show up only as "DIIS converges exactly
     // like mixing".
@@ -287,10 +282,12 @@ private:
    */
   bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
 
+  /// History vectors required before extrapolating, counted AFTER the current
+  /// step is stored: the first extrapolation lands on the third call.
+  static constexpr size_t _min_subsp = 3;
   size_t _max_subsp_size;
   size_t _warmup_iter;
   double _mixing;
-  size_t _min_subsp;
   // History stores only THIS rank's contiguous element-slice of each flattened
   // trial / residual vector (striped across comm), not the full arrays. The four
   // vectors are a fixed-capacity ring: `_n` entries live, chronological entry i

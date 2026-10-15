@@ -77,9 +77,8 @@ struct lr_hessian_result_t {
  *
  *   (ΔF, ΔΣ) = K(ΔDm, ΔG)                                        [holds]
  *
- * because lr_solve_one evaluates K_sc once more at the returned ΔDm/ΔG and
- * get_full_kernel_result does the same for K_pert. What it does NOT satisfy is the
- * Dyson equation,
+ * because lr_solve_one evaluates K once more at the returned ΔDm/ΔG. What it
+ * does NOT satisfy is the Dyson equation,
  *
  *   (ΔDm, ΔG) = D[ΔH0 + ΔF + ΔΣ]                                 [fails by the
  *                                                                 truncation error]
@@ -252,7 +251,7 @@ public:
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
    * @param sDeltaH0   - [INPUT] ΔH0_p
-   * @param sDeltaF    - [INPUT] raw ΔF_p (get_full_kernel_result must have run)
+   * @param sDeltaF    - [INPUT] raw ΔF_p
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel (never read then)
    */
@@ -310,11 +309,8 @@ public:
       bool fix_density);
 
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
-  /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail. The
-  /// K_pert refresh is the one clock this object does not own — it is billed inside
-  /// lr_driver::get_full_kernel_result — so it is passed in from
-  /// lr_driver::hessian_refresh_sec() rather than reported separately.
-  void print_timers(double pert_refresh_sec, int pert_refresh_calls);
+  /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail.
+  void print_timers();
 
 private:
   /**
