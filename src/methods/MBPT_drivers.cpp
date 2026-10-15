@@ -1550,6 +1550,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "statification, so the functional's raw-ΔΣ algebra does not hold.");
   }
 
+  // IBC (DeltaX) for spinors: lr_precompute_V_HF_PQ has no npol > 1 Hartree term.
+  if (mf->npol() > 1) {
+    int has_deltax_pol = 0;
+    if (mpi->comm.root())
+      has_deltax_pol = (DeltaX_left_root.has_value() && DeltaX_right_root.has_value()) ? 1 : 0;
+    mpi->comm.broadcast_n(&has_deltax_pol, 1, 0);
+    utils::check(!has_deltax_pol,
+                 "run_lr_calc: the DeltaX (IBC) correction is not supported for "
+                 "npol = {} (spinor) mean fields: the unperturbed aux-basis V_HF "
+                 "it builds has no npol > 1 Hartree term.", mf->npol());
+  }
+
   // GCR preconditioner: a static kernel, applied only to map the residual to the
   // next search direction. All its preconditions are checked here, before the
   // ERI and W are loaded.
