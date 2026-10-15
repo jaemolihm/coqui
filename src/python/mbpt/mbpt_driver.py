@@ -590,13 +590,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
             K_sc   = kernel(two_step_inner_method)
             K_pert = kernel(method) \\ kernel(two_step_inner_method)
 
-        The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW, so K_sc must be a
-        proper subset of the total kernel. Costs two_step_order evaluations of
-        K_pert instead of one per SCF iteration.
+        The nested ladder is none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW. K_sc must be a
+        proper subset of the total kernel and Σ-free, so the whole Σ is in
+        K_pert. Costs two_step_order evaluations of K_pert instead of one per
+        SCF iteration.
     two_step_inner_method : str or None, optional
-        Method whose kernel is resummed self-consistently. Required with
-        lr_two_step. The total kernel comes from method / include_hartree /
-        include_exchange / gw_mode, and K_pert is the difference.
+        Method whose kernel is resummed self-consistently: one of "none",
+        "Hartree", "HF" or "HSEX". Required with lr_two_step. The total kernel
+        comes from method / include_hartree / include_exchange / gw_mode, and
+        K_pert is the difference.
     two_step_order : int, optional
         Truncation order n of the K_pert expansion (default 1). n = 0 solves
         with the self-consistent kernel alone, and rejects the

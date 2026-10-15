@@ -1380,7 +1380,8 @@ auto recompute_W_and_eps_inv_head(
  *                          Names the TOTAL kernel, for two-step runs as well.
  *   lr_two_step            enable the split-kernel schedule (default false)
  *   two_step_inner_method  method whose kernel is resummed self-consistently; the
- *                          perturbative kernel is the total minus this one
+ *                          perturbative kernel is the total minus this one.
+ *                          Σ-free: none, Hartree, HF or HSEX.
  *   two_step_order         truncation order n of the K_pert expansion (default 1)
  *
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
@@ -1437,9 +1438,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // "lr_two_step" splits the kernel into a part resummed by the SCF loop
   // (two_step_inner_method) and a remainder applied `two_step_order` times
   //   K_pert = kernel(method) \ kernel(two_step_inner_method).
-  // "method" is the TOTAL kernel here too; the remainder ({Σ2} for
-  // GW-on-top-of-GW0, say) has no name on the ladder and can only be expressed
-  // as a difference.
+  // "method" is the TOTAL kernel here too. The inner kernel is static, so the
+  // remainder always contains the whole Σ; it has no name on the ladder and can
+  // only be expressed as a difference.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto lr_two_step = io::get_value_with_default<bool>(pt, "lr_two_step", false);
   auto two_step_inner_method =
@@ -1617,6 +1618,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "lr_two_step, or name a smaller self-consistent kernel.",
                  two_step_inner_method, total_kernel.to_string());
     pert_kernel = kernel_diff(total_kernel, sc_kernel);
+    utils::check(!sc_kernel.has_sigma(),
+                 "run_lr_calc: two_step_inner_method = '{}' carries a self-energy ({}). "
+                 "The self-consistent kernel of a split run must be static (none, Hartree, "
+                 "HF or HSEX); Σ belongs in K_pert.",
+                 two_step_inner_method_in, sc_kernel.to_string());
     utils::check(two_step_order >= 0,
                  "run_lr_calc: two_step_order must be >= 0, got {}.", two_step_order);
     utils::check(!split_sigma_terms,
