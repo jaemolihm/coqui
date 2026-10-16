@@ -258,3 +258,152 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
                                  -1 if nbnd_mf is None else int(nbnd_mf),
                                  float(smearing_deltapsi), float(epstol),
                                  float(dtau_step))
+
+
+def _model_spectrum(H0, nelec, kpoint_weights):
+    """
+    T = 0 mean-field spectrum of ``H0`` in an orthonormal basis: ``(eigval, occ, efermi)``.
+
+    Each state holds ``kpoint_weights[k] * spin_factor`` electrons when full (``spin_factor = 2``
+    for ``ns = 1``, else 1) and ``nelec`` electrons are filled from the bottom. Levels within
+    ``1e-10 * max(1, |e|)`` of the lowest level of a shell form that shell and share one fractional
+    occupation. ``efermi`` is the midpoint between the highest occupied shell and the lowest not
+    fully occupied one (the shell energy if one is partially occupied).
+    """
+    import numpy as np
+
+    ns, nk, nb, _ = H0.shape
+    eigval = np.linalg.eigvalsh(H0)
+    cap = np.broadcast_to(kpoint_weights[None, :, None] * (2.0 if ns == 1 else 1.0), eigval.shape).ravel()
+    order = np.argsort(eigval, axis=None, kind="stable")
+    e = eigval.ravel()[order]
+    occ = np.zeros(e.size)
+    ne, e_homo, e_lumo = float(nelec), e[0], None
+    i = 0
+    while i < e.size and (e_lumo is None or ne > 1e-12):
+        j = i + np.searchsorted(e[i:] - e[i], 1e-10 * max(1.0, abs(e[i])), side="right")
+        c = cap[order[i:j]].sum()
+        f = min(1.0, ne / c) if ne > 1e-12 else 0.0
+        occ[order[i:j]] = f
+        ne -= f * c
+        if f > 0.0:
+            e_homo = e[i]
+        if f < 1.0 and e_lumo is None:
+            e_lumo = e[i]
+        i = j
+    efermi = e_homo if e_lumo is None else 0.5 * (e_homo + e_lumo)
+    return eigval, occ.reshape(eigval.shape), efermi
+
+
+def write_model_h5(filename, H0, nelec, kpts_crys, latt=None,
+                   kpoint_weights=None, fock=None, density_matrix=None,
+                   madelung=0.0, nuclear_energy=0.0, fermi_energy=None, mpi=None):
+    """
+    Write a model mean-field HDF5 file, read by ``make_mf(mpi, {"prefix": p, "outdir": d}, "model")``
+    from ``d/p.h5``.
+
+    It checks shapes and writes datasets and attributes. ``H0(k)``, the k-point list and every
+    other array come from the caller; the only quantities computed here are the T = 0 mean-field
+    spectrum ``eigval``/``occ`` and ``fermi_energy`` of ``H0``, which the C++ reader takes from the
+    file.
+
+    The file format (every dataset and attribute, required / optional / rejected) is documented
+    once, at the reader: ``model_system::initialize_from_h5`` in
+    ``src/mean_field/model_hamiltonian/model_system.hpp``. This function writes, in group ``/System``:
+
+    - attributes ``number_of_spins`` (``H0.shape[0]``), ``number_of_polarizations`` (1),
+      ``number_of_bands`` (``H0.shape[2]``), ``number_of_elec``, ``madelung_constant``,
+      ``nuclear_energy`` and ``fermi_energy`` (computed from ``H0`` unless given);
+    - ``lattice_vectors``, ``kpoints_crystal``, ``H0``, ``fock_matrix`` (``H0`` unless given),
+      ``eigval`` and ``occ`` (T = 0 filling of ``H0``);
+    - ``kpoint_weights`` and ``density_matrix`` only when given; never ``overlap`` (the basis is
+      orthonormal) or ``/System/BZ`` (the reader builds the BZ from the k list).
+
+    k-points are in crystal coordinates on a full regular grid, **Gamma first**; the k index of every
+    array follows ``kpts_crys``.
+
+    Parameters
+    ----------
+    filename : str
+        Output file, e.g. ``"./hubbard.h5"`` for prefix ``"hubbard"`` and outdir ``"./"``.
+    H0 : array, complex, shape ``(ns, nk, nb, nb)``
+        One-body Hamiltonian ``H0(k)`` in an orthonormal basis. ``ns = 1`` is paramagnetic.
+    nelec : float
+        Electrons per cell, both spins (a half-filled single band has ``nelec = 1``).
+    kpts_crys : array, shape ``(nk, 3)``
+        k-points in crystal coordinates; ``kpts_crys[0]`` must be Gamma.
+    latt : array, shape ``(3, 3)``, optional
+        Lattice vectors (rows), Bohr. Default: identity. Only ``k.R`` enters a model.
+    kpoint_weights : array, shape ``(nk,)``, optional
+        Must sum to 1.
+    fock, density_matrix : array, complex, shape of ``H0``, optional
+        ``fock`` is the full mean-field Hamiltonian including ``H0``; default ``H0``.
+        ``density_matrix`` is not written when not given.
+    madelung : float
+        Weight of the q->0 head of the kernel. A model's V(q) is finite and Z[q=0] already holds it,
+        so leave 0. Every q->0 correction is proportional to it, so ``div_treatment`` inputs then have
+        no effect. A nonzero value adds ``-madelung * S D S`` to the HF exchange
+        (``hf_div_treatment="gygi"``) while the GW head stays unscreened: the THC file has no q->0 heads.
+    nuclear_energy : float
+    fermi_energy : float, optional
+        Overrides the Fermi energy computed from ``H0``.
+    mpi : MpiHandler, optional
+        If given, only the root rank writes, followed by a barrier.
+    """
+    import numpy as np
+    import h5py
+    from coqui.utils.h5_utils import write_complex_dataset
+
+    H0 = np.asarray(H0)
+    if H0.ndim != 4 or H0.shape[2] != H0.shape[3] or H0.shape[0] not in (1, 2):
+        raise ValueError(f"write_model_h5: H0 must be [ns,nk,nb,nb] with ns in (1,2), got {H0.shape}")
+    # eigvalsh reads one triangle only, so a non-Hermitian H0 would get a spectrum that is not the C++ H0's
+    if np.abs(H0 - H0.conj().swapaxes(-1, -2)).max() > 1e-10 * np.abs(H0).max():
+        raise ValueError("write_model_h5: H0(k) must be Hermitian")
+    ns, nk, nb, _ = H0.shape
+    kpts_crys = np.asarray(kpts_crys, dtype=np.float64)
+    if kpts_crys.shape != (nk, 3):
+        raise ValueError(f"write_model_h5: kpts_crys must be ({nk}, 3), got {kpts_crys.shape}")
+    if np.abs(kpts_crys[0]).max() > 1e-12:
+        raise ValueError("write_model_h5: the first k-point must be Gamma")
+    latt = np.eye(3) if latt is None else np.asarray(latt, dtype=np.float64)
+    if latt.shape != (3, 3):
+        raise ValueError(f"write_model_h5: latt must be (3, 3), got {latt.shape}")
+    if kpoint_weights is not None:
+        kpoint_weights = np.asarray(kpoint_weights, dtype=np.float64)
+        if kpoint_weights.shape != (nk,):
+            raise ValueError(f"write_model_h5: kpoint_weights must be ({nk},), got {kpoint_weights.shape}")
+        if abs(kpoint_weights.sum() - 1.0) > 1e-6:
+            raise ValueError(f"write_model_h5: kpoint_weights must sum to 1, got {kpoint_weights.sum()}")
+    fock = H0 if fock is None else fock
+    mats = {"fock_matrix": fock, "density_matrix": density_matrix}
+    for name, a in mats.items():
+        if a is not None and np.shape(a) != H0.shape:
+            raise ValueError(f"write_model_h5: {name} must have the shape of H0 {H0.shape}")
+
+    if mpi is None or mpi.root():
+        weights = np.full(nk, 1.0 / nk) if kpoint_weights is None else kpoint_weights
+        eigval, occ, efermi = _model_spectrum(H0, nelec, weights)
+        if fermi_energy is not None:
+            efermi = fermi_energy
+        with h5py.File(filename, "w") as f:
+            g = f.create_group("System")
+            g.attrs["number_of_spins"] = np.int32(ns)
+            g.attrs["number_of_polarizations"] = np.int32(1)
+            g.attrs["number_of_bands"] = np.int32(nb)
+            g.attrs["number_of_elec"] = np.float64(nelec)
+            g.attrs["madelung_constant"] = np.float64(madelung)
+            g.attrs["nuclear_energy"] = np.float64(nuclear_energy)
+            g.attrs["fermi_energy"] = np.float64(efermi)
+            g.create_dataset("lattice_vectors", data=latt)
+            g.create_dataset("kpoints_crystal", data=kpts_crys)
+            if kpoint_weights is not None:
+                g.create_dataset("kpoint_weights", data=kpoint_weights)
+            write_complex_dataset(g, "H0", H0)
+            g.create_dataset("eigval", data=eigval)
+            g.create_dataset("occ", data=occ)
+            for name, a in mats.items():
+                if a is not None:
+                    write_complex_dataset(g, name, a)
+    if mpi is not None:
+        mpi.barrier()
