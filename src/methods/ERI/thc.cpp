@@ -28,6 +28,7 @@
 #include "configuration.hpp"
 #include "IO/ptree/ptree_utilities.hpp"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "utilities/freemem.h"
 #include "utilities/proc_grid_partition.hpp"

@@ -53,9 +53,9 @@ namespace {
 
     // processor grid for Dyson equation
     std::array<long, 5> w_pgrid;
-    std::array<long, 5> w_bsize;
+    std::array<long, 5> w_tcount;
     {
-      std::tie(w_pgrid, w_bsize) =
+      std::tie(w_pgrid, w_tcount) =
           dyson_omega_proc_grid(_context->comm.size(), _nw, _nkpts_ibz, _nbnd);
 
       utils::check(w_pgrid[0]*w_pgrid[2]*w_pgrid[3]*w_pgrid[4] == _context->comm.size(),
@@ -65,7 +65,7 @@ namespace {
       app_log(2, "  - processor grid for G/Self-energy: (w, k, i, j) = ({}, {}, {}, {})",
               w_pgrid[0], w_pgrid[2], w_pgrid[3], w_pgrid[4]);
       app_log(2, "  - block size: (w, k, i, j) = ({}, {}, {}, {})",
-              w_bsize[0], w_bsize[2], w_bsize[3], w_bsize[4]);
+              w_tcount[0], w_tcount[2], w_tcount[3], w_tcount[4]);
     }
 
     _Timer.start("SIGMA_TAU_TO_W");
@@ -73,11 +73,11 @@ namespace {
     // exactly zero, so a zero-initialized array replaces the tau->w transform.
     auto dSigma_wskij = sigma_is_zero(*_context, _Sigma_shm.local())
         ? make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
-                                             {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize)
-        : distributed_tau_to_w(_context->comm, _Sigma_shm, *_FT, w_pgrid, w_bsize);
+                                             {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_tcount)
+        : distributed_tau_to_w(_context->comm, _Sigma_shm, *_FT, w_pgrid, w_tcount);
     _Timer.stop("SIGMA_TAU_TO_W");
     auto dG_wskij = make_distributed_array<Array_5D_t>(_context->comm, w_pgrid,
-                                                       {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_bsize);
+                                                       {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, w_tcount);
     auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dSigma_wskij.local_shape();
     auto [w_org, s_org, k_org, i_org, j_org] = dSigma_wskij.origin();
     auto i_rng = dSigma_wskij.local_range(3);
@@ -89,7 +89,7 @@ namespace {
     mpi3::communicator wk_intra_comm = _context->comm.split(color, key);
     utils::check(wk_intra_comm.size() == w_pgrid[3]*w_pgrid[4], "wk_intra_comm.size() != pgrid[3]*pgrid[4]");
     auto dX = make_distributed_array<nda::array<ComplexType, 2>>(wk_intra_comm, {w_pgrid[3],w_pgrid[4]},
-        {_nbnd,_nbnd}, {w_bsize[3],w_bsize[4]});
+        {_nbnd,_nbnd}, {w_tcount[3],w_tcount[4]});
 
     auto S  = _sS_skij.local();
     auto H0 = _sH0_skij.local();

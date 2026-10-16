@@ -232,12 +232,12 @@ namespace methods {
       /**
        * Allocate D_4D intermediate for THC-GF2 exchange term
        * @param B_pgrid      - [INPUT] processor grid used for B_4D and C_4D intermediates
-       * @param B_bsize      - [INPUT] block sizes used for B_4D and C_4D intermediates
+       * @param B_tcount      - [INPUT] tile counts used for B_4D and C_4D intermediates
        * @param comm         - [INPUT] B_4D subcommunicator
        * @param thc          - [INPUT] THC ERI object
        */
       template<typename Array>
-      auto allocate_D(Array B_pgrid, Array B_bsize, mpi3::communicator& comm,
+      auto allocate_D(Array B_pgrid, Array B_tcount, mpi3::communicator& comm,
                       THC_ERI auto &thc)
       -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>; 
 
@@ -522,7 +522,7 @@ namespace methods {
       template<nda::MemoryArray local_Array_t, typename communicator_t>
       auto tau_to_w_full(memory::darray_t<local_Array_t, communicator_t> &dA_tx,
                          std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_pgrid_out,
-                         std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_bsize_out,
+                         std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> w_tcount_out,
                          std::string name, bool reset_input)
       -> memory::darray_t<local_Array_t, mpi3::communicator>;
 
@@ -534,7 +534,7 @@ namespace methods {
       template<nda::MemoryArray local_Array_t, typename communicator_t>
       auto w_to_tau_full(memory::darray_t<local_Array_t, communicator_t> &dA_wx,
                         std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_pgrid_out,
-                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_bsize_out,
+                        std::array<long, ::nda::get_rank<std::decay_t<local_Array_t>>> t_tcount_out,
                         std::string name,
                         bool reset_input)
       -> memory::darray_t<local_Array_t, mpi3::communicator>;

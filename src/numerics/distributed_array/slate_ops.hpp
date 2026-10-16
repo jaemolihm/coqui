@@ -31,6 +31,7 @@
 #include <string_view>
 
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "nda/nda.hpp"
 #include "nda/tensor.hpp"
 #include "numerics/distributed_array/ops.hpp"
@@ -288,6 +289,38 @@ long least_squares_solve(DistributedMatrix auto&& A, DistributedMatrix auto&& B)
 
 #if defined(ENABLE_SLATE)
 
+  // slate's QR needs every tile at or below the diagonal to be at least as tall as
+  // the diagonal one: geqrf -> tpqrt accumulates a panel's k x k triangular factor in
+  // a tile i >= j of tile column j and hands lapack that tile's height as `lda` while
+  // asking for k = the panel width. utils::tile_offset orders the ragged partition
+  // with its larger tiles LAST, so it holds for every (N,t) by construction as long
+  // as the two axes carry the SAME count. A is square here (checked above), but its
+  // two counts need not agree: tiled {N,1} it has one-element row tiles against one
+  // N-element column tile, and tpqrt gets lda = 1 against k = N. Hence the check.
+  {
+    // slate is handed A^T/A^H for a C-order array, so its row axis is CoQui's axis 1.
+    constexpr int r_ax = dA_t::is_stride_order_C() ? 1 : 0, c_ax = 1 - r_ax;
+    const long m = A.global_shape()[r_ax], tm = A.tile_count()[r_ax];
+    const long n = A.global_shape()[c_ax], tn = A.tile_count()[c_ax];
+    // Panel j needs mb(i) >= nb(j) for every tile row i >= j that can hold its
+    // triangular factor. Row extents are non-decreasing, so the smallest such row
+    // tile is mb(j) itself and one comparison per panel settles it. Note this is
+    // NOT "shortest row tile >= widest column tile": with the two counts equal the
+    // partitions are identical, so mb(i) = nb(i) >= nb(j) holds for i >= j even
+    // though the axis mixes a and a+1 element tiles. Panels run to min(tm,tn).
+    for (long j = 0; j < std::min(tm,tn); ++j) {
+      const long mb = utils::tile_extent(m,tm,j), nb = utils::tile_extent(n,tn,j);
+      utils::check(mb >= nb,
+          "least_squares_solve: A's row tile {} is {} elements against a {}-element "
+          "column tile, so slate's tpqrt gets lda < the panel width. The two axes "
+          "carry {} and {} tiles; give the row axis at least as coarse a partition.",
+          j, mb, nb, tm, tn);
+    }
+    utils::check(B.tile_count()[0] == tm,
+        "least_squares_solve: B's row tile count ({}) must match A's ({}).",
+        B.tile_count()[0], tm);
+  }
+
   auto slate_ls = [&](auto &a, auto &b) {
    if constexpr (_dev_) {
       slate::least_squares_solve(a,b, {
@@ -340,6 +373,16 @@ void inverse(DistributedMatrix auto&& A)
   static_assert(local_Array_t::layout_t::is_stride_order_C() or
                 local_Array_t::layout_t::is_stride_order_Fortran(),
                 "Layout mismatch" );
+
+  // getri asserts A.mt() == A.nt() (slate/src/getri.cc), which needs the same
+  // extent AND the same tile count on both axes -- the tile boundaries are a
+  // function of (extent, tile count) alone. Nothing else checks it.
+  utils::check(A.global_shape()[0] == A.global_shape()[1],
+      "inverse: matrix is not square: ({}, {}).",
+      A.global_shape()[0], A.global_shape()[1]);
+  utils::check(A.tile_count()[0] == A.tile_count()[1],
+      "inverse: row and column tile counts differ: ({}, {}).",
+      A.tile_count()[0], A.tile_count()[1]);
 
   if (A.communicator()->size() == 1) {
     auto Aloc = A.local();
@@ -414,8 +457,8 @@ namespace detail
 {
 
 /*
- * Parity of the row interchange getrf applied to global row `i_glob`: -1 if the
- * row moved, +1 if it did not.
+ * Parity of the row interchange getrf applied to global row `i_glob` of an axis of
+ * extent `nrow` cut into `t_row` tiles: -1 if the row moved, +1 if it did not.
  *
  * slate::Pivots is indexed by the GLOBAL panel (tile row) index and is replicated
  * on every rank, while each Pivot is relative to its own panel -- slate documents
@@ -436,10 +479,10 @@ namespace detail
  * grids and blockings against serial LAPACK's determinant -- it caught this
  * function's original miscount, and would catch a convention change the same way.
  */
-inline int pivot_parity(slate::Pivots const& pivots, long i_glob, long rows_per_tile)
+inline int pivot_parity(slate::Pivots const& pivots, long i_glob, long nrow, long t_row)
 {
-  long ib = i_glob/rows_per_tile;   // global panel index
-  long ia = i_glob%rows_per_tile;   // row offset within the panel
+  long ib = utils::tile_of(nrow,t_row,i_glob);            // global panel index
+  long ia = i_glob - utils::tile_offset(nrow,t_row,ib);   // row offset within the panel
   utils::check(ib < long(pivots.size()) and ia < long(pivots[ib].size()),
       "pivot_parity: pivot index out of range: ({},{}) for {} panels.",
       ib, ia, pivots.size());
@@ -468,9 +511,9 @@ auto determinant(DistributedMatrix auto&&A) {
   utils::check(A.global_shape()[0] == A.global_shape()[1],
       "determinant: matrix is not square: ({}, {}).",
       A.global_shape()[0], A.global_shape()[1]);
-  utils::check(A.block_size()[0] == A.block_size()[1],
-      "determinant: row and column blockings differ: ({}, {}).",
-      A.block_size()[0], A.block_size()[1]);
+  utils::check(A.tile_count()[0] == A.tile_count()[1],
+      "determinant: row and column tile counts differ: ({}, {}).",
+      A.tile_count()[0], A.tile_count()[1]);
 
   if constexpr (::nda::mem::on_host<local_Array_t>) {
     if (A.communicator()->size() == 1) {
@@ -492,7 +535,8 @@ auto determinant(DistributedMatrix auto&&A) {
     // agree (checked above), every global row is on exactly one rank's diagonal,
     // so the product all-reduce below accumulates one factor of -1 per row
     // interchange over the whole matrix -- each panel's parity counted once.
-    long rows_per_tile = A.block_size()[0];
+    const long nrow = A.global_shape()[0];
+    const long t_row = A.tile_count()[0];
     auto [i_origin, j_origin] = A.origin();
     auto [ni_loc, nj_loc] = A.local_shape();
     long ndiag = 0;
@@ -500,7 +544,7 @@ auto determinant(DistributedMatrix auto&&A) {
       long jj = ii + i_origin - j_origin;
       if (jj < 0 or jj >= nj_loc) continue;
       det_A *= A_loc(ii,jj);
-      if (detail::pivot_parity(pivots,ii+i_origin,rows_per_tile) < 0) det_A *= -1;
+      if (detail::pivot_parity(pivots,ii+i_origin,nrow,t_row) < 0) det_A *= -1;
       ++ndiag;
     }
     // The local diagonals must tile the global one, or a row's parity is counted
@@ -768,8 +812,8 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
         // otherwise it will need communication to check
         utils::check(dA.grid()[r]==dB.grid()[r] and
                      dA.grid()[r]==C.grid()[r],"Grid mismatch"); 
-        utils::check(dA.block_size()[r]==dB.block_size()[r] and
-                     dA.block_size()[r]==C.block_size()[r],"Grid mismatch"); 
+        utils::check(dA.tile_count()[r]==dB.tile_count()[r] and
+                     dA.tile_count()[r]==C.tile_count()[r],"Grid mismatch"); 
         color += px*C.origin()[r]; 
         px *= C.global_shape()[r];
       }
@@ -786,13 +830,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
           auto C2d = C.local()(ia,all,all);
           auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
           auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
           auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                get_arr(C.origin()),get_arr(C.tile_count()),C2d);
           detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                              b_v,C_);
         }
@@ -804,13 +848,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
             auto C2d = C.local()(ia,ib,all,all);
             auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                  get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                  get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
             auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                  get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                  get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
             auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                  get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                  get_arr(C.origin()),get_arr(C.tile_count()),C2d);
             detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                                  b_v,C_);
           }
@@ -823,13 +867,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
               auto C2d = C.local()(ia,ib,ic,all,all);
               auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                    get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                    get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
               auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                    get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                    get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
               auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                    get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                    get_arr(C.origin()),get_arr(C.tile_count()),C2d);
               detail::multiply_impl(a_v, math::detail::add_tags<Atr,Acg>(A_),
                                  math::detail::add_tags<Btr,Bcg>(B_),
                                  b_v,C_);
@@ -855,8 +899,8 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
         // otherwise it will need communication to check
         utils::check(dA.grid()[r]==dB.grid()[r] and
                      dA.grid()[r]==C.grid()[r],"Grid mismatch");               
-        utils::check(dA.block_size()[r]==dB.block_size()[r] and
-                     dA.block_size()[r]==C.block_size()[r],"Grid mismatch");
+        utils::check(dA.tile_count()[r]==dB.tile_count()[r] and
+                     dA.tile_count()[r]==C.tile_count()[r],"Grid mismatch");
         color += px*C.origin()[r]; 
         px *= C.global_shape()[r];
       }
@@ -873,13 +917,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
           auto C2d = C.local()(all,all,ia);
           auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
           auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
           auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                 std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                get_arr(C.origin()),get_arr(C.tile_count()),C2d);
           detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
 	  			                b_v,C_);
         }
@@ -891,13 +935,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
             auto C2d = C.local()(all,all,ia,ib);
             auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                  get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                  get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
             auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                  get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                  get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
             auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                   std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                  get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                  get_arr(C.origin()),get_arr(C.tile_count()),C2d);
             detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),math::detail::add_tags<Btr,Bcg>(B_),
                                   b_v,C_);
           }
@@ -910,13 +954,13 @@ auto multiply(T a_v, A_t&& A, B_t&& B, T b_v, C_t&& C)
               auto C2d = C.local()(all,all,ia,ib,ic);
               auto A_ = distributed_array_view<decltype(A2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dA.grid()),get_arr(dA.global_shape()),
-                    get_arr(dA.origin()),get_arr(dA.block_size()),A2d);
+                    get_arr(dA.origin()),get_arr(dA.tile_count()),A2d);
               auto B_ = distributed_array_view<decltype(B2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(dB.grid()),get_arr(dB.global_shape()),
-                    get_arr(dB.origin()),get_arr(dB.block_size()),B2d);
+                    get_arr(dB.origin()),get_arr(dB.tile_count()),B2d);
               auto C_ = distributed_array_view<decltype(C2d),decltype(new_comm)>(
                     std::addressof(new_comm),get_arr(C.grid()),get_arr(C.global_shape()),
-                    get_arr(C.origin()),get_arr(C.block_size()),C2d);
+                    get_arr(C.origin()),get_arr(C.tile_count()),C2d);
               detail::multiply_impl(a_v,math::detail::add_tags<Atr,Acg>(A_),
                                     math::detail::add_tags<Btr,Bcg>(B_),
                                     b_v,C_);

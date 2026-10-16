@@ -34,6 +34,7 @@
 #include "utilities/mpi_context.h"
 
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 #include "utilities/Timer.hpp"
 #include "IO/AppAbort.hpp"
 #include "IO/app_loggers.h"
@@ -202,13 +203,18 @@ int main(int argc, char* argv[])
     auto s = tags[i];
     deri_all.emplace_back(std::vector<dArray_t>{});    
     auto& deri = deri_all.back();
+    // square (ab,ab) tile count: the ERI matrix is square, so both axes need the
+    // same count for slate to see mt == nt
+    const long nab = nspins*nkpts*nbnd*nbnd;
+    const long eri_tiles = utils::balanced_tile_count(nab, q_comm.size(), nbnd);
 
     if( s == "chol" or s == "cholkk" ) {
 
       for( auto [iq,q] : itertools::enumerate(itertools::range(qbounds.first,qbounds.second)) ) {
         // setup new deri
         deri.emplace_back( math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,{q_comm.size(),1},
-                             {nspins*nkpts*nbnd*nbnd,nspins*nkpts*nbnd*nbnd},{nbnd,nbnd}) );
+                             {nspins*nkpts*nbnd*nbnd,nspins*nkpts*nbnd*nbnd},
+                             {eri_tiles,eri_tiles}) );
 
         utils::check(deri.back().local_shape()[0] == nspins*nk_per_grp*nbnd*nbnd,
                    " Error: Logic error, should not happen.");
@@ -242,7 +248,7 @@ int main(int argc, char* argv[])
         auto Lloc2d = nda::reshape(Lloc,std::array<long,2>{Lloc.shape(0),Lloc.size()/Lloc.shape(0)});
         auto dL = math::nda::make_distributed_array_view(q_comm,{1,q_comm.size()},
 						    {L.global_shape()[0],nspins*nkpts*nbnd*nbnd},
-						    {L.global_shape()[0], dERIs.block_size()[0]}, Lloc2d); 
+						    {1, dERIs.tile_count()[0]}, Lloc2d); 
         // you need L^T conj(T), so conjugate to turn it into dagger(L) * :
         Lloc = nda::conj(Lloc);
 
@@ -262,7 +268,8 @@ int main(int argc, char* argv[])
       for( auto [iq,q] : itertools::enumerate(itertools::range(qbounds.first,qbounds.second)) ) {
 
         deri.emplace_back( math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,{q_comm.size(),1},
-                             {nspins*nkpts*nbnd*nbnd,nspins*nkpts*nbnd*nbnd},{nbnd,nbnd}) );
+                             {nspins*nkpts*nbnd*nbnd,nspins*nkpts*nbnd*nbnd},
+                             {eri_tiles,eri_tiles}) );
 
         nda::array<ComplexType,2> Vt(nIpts,nIpts);
         Vt()=ComplexType(0.0);
@@ -275,8 +282,9 @@ int main(int argc, char* argv[])
           }
         q_comm.all_reduce_in_place_n(Vt.data(),Vt.size(),std::plus<>{});
 
+        long uv_tiles = utils::balanced_tile_count(nIpts, q_comm.size(), 512);
         auto Vuv{math::nda::make_distributed_array<nda::array<ComplexType,2>>(q_comm,
-                          {q_comm.size(),1},{nIpts,nIpts},{512,512},true)};
+                          {q_comm.size(),1},{nIpts,nIpts},{uv_tiles,uv_tiles})};
         auto Vloc = Vuv.local();
         for(auto [iu,u] : itertools::enumerate(Vuv.local_range(0)) ) 
           for(auto [iv,v] : itertools::enumerate(Vuv.local_range(1)) ) 
@@ -416,11 +424,11 @@ void get_thc_eri(MF_obj& mf,
   auto k_to_k2 = mf.qk_to_k2()(iq,all);
   int nIpts = ri.shape(0);
   app_log(0,"Number of interpolating points in cholesky-based thc decomposition: {} ",nIpts);
-  long bab = eri.block_size()[0];
+  long bab = eri.tile_count()[0];
 
   // distributed along rows...
-  long bu = Vuv.block_size()[0]; 
-  utils::check(Vuv.block_size()[1] == bu,"Error: Vuv must have squared blocks");
+  long bu = Vuv.tile_count()[0]; 
+  utils::check(Vuv.tile_count()[1] == bu,"Error: Vuv must have equal tile counts on both axes");
 
   // A(k,a,b,u) = conj(Pa(k,a,u)) * Pb(qk,b,u)
   // B(u,k,a,b) = Vuv * conj(A(k,a,b,v))

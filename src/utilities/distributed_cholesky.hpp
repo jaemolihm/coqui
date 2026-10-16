@@ -30,6 +30,7 @@
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/tile_partition.hpp"
 
 #include "mpi3/communicator.hpp"
 #include "mpi3/shared_communicator.hpp"

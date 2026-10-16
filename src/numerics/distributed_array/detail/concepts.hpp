@@ -44,7 +44,7 @@ concept DistributedArray = requires(A const& a) {
   { a.local() };
   { a.local_shape() } -> ::nda::StdArrayOfLong;
   { a.global_shape() } -> ::nda::StdArrayOfLong;
-  { a.block_size() } -> ::nda::StdArrayOfLong;
+  { a.tile_count() } -> ::nda::StdArrayOfLong;
   { a.origin() } -> ::nda::StdArrayOfLong;
 };
 

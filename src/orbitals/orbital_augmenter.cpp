@@ -43,6 +43,7 @@
 #include "nda/blas.hpp"
 #include "nda/linalg.hpp"
 #include "numerics/nda_functions.hpp"
+#include "utilities/tile_partition.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/nda_utils.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -272,7 +273,8 @@ auto orthonormalize_augmentation(
   long nbnd_tot = nbnd + n_aug_max;
   auto psi_out = math::nda::make_distributed_array<larray>(*comm, psi_orig.grid(),
       {nspin_tot, nkpts_tot, nbnd_tot, ngm},
-      {psi_orig.block_size()[0], psi_orig.block_size()[1], nbnd_tot, psi_orig.block_size()[3]});
+      {psi_orig.tile_count()[0], psi_orig.tile_count()[1], psi_orig.grid()[2],
+       psi_orig.tile_count()[3]});
   auto out_all = psi_out.local();
 
   nda::array<ComplexType,2> R(n_aug_max, n_raw);
@@ -500,13 +502,13 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
     pgrid = {1,pk,1,sz/pk};
   }
   long gblk = std::max(1L, (ngm + pgrid[3] - 1)/pgrid[3]);
-  std::array<long,4> bs_orig = {1,1,nbnd,gblk};
-  std::array<long,4> bs_base = {1,1,nbnd_aug,gblk};
-  std::array<long,4> bs_raw  = {1,1,n_raw,gblk};
+  std::array<long,4> cap_orig = {1,1,nbnd,gblk};
+  std::array<long,4> cap_base = {1,1,nbnd_aug,gblk};
+  std::array<long,4> cap_raw  = {1,1,n_raw,gblk};
 
   // originals (kept, orthonormal)
   auto psi_orig = mf::read_distributed_orbital_set<larray>(mf,mpi.comm,'w',pgrid,
-                    {0,nspin},{0,nkpts_ibz},{0,nbnd},bs_orig);
+                    {0,nspin},{0,nkpts_ibz},{0,nbnd},cap_orig);
 
   if(nbnd_aug == 0) {
     // No augmentation states: emit the original orbitals in the augmented bdft
@@ -524,12 +526,13 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 
   // base block used to generate the raw augmentation states
   auto psi_base = mf::read_distributed_orbital_set<larray>(mf,mpi.comm,'w',pgrid,
-                    {0,nspin},{0,nkpts_ibz},{0,nbnd_aug},bs_base);
+                    {0,nspin},{0,nkpts_ibz},{0,nbnd_aug},cap_base);
   utils::check(psi_orig.local_range(3) == psi_base.local_range(3), "add_augmentation: G-range mismatch.");
 
   // raw (non-orthonormal) augmentation states, same grid/G-distribution
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,n_raw,ngm},bs_raw);
+                    {nspin,nkpts_ibz,n_raw,ngm},
+                    utils::max_tile_sizes<4>{cap_raw});
   {
     long g0 = psi_base.local_range(3).first();
     auto base_loc = psi_base.local();
@@ -736,18 +739,19 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     pgrid = {1,pk,1,sz/pk};
   }
   long gblk = std::max(1L, (ngm + pgrid[3] - 1)/pgrid[3]);
-  std::array<long,4> bs_all  = {1,1,N,gblk};
-  std::array<long,4> bs_orig = {1,1,M,gblk};
-  std::array<long,4> bs_raw  = {1,1,n_raw,gblk};
+  std::array<long,4> cap_all  = {1,1,N,gblk};
+  std::array<long,4> cap_orig = {1,1,M,gblk};
+  std::array<long,4> cap_raw  = {1,1,n_raw,gblk};
 
   // Read all N h5/nscf bands: [0,M) are the kept originals, [M,N) supply the
   // buffer ψ(m,k+q). (Bands are not distributed, so band-axis slicing is local.)
   auto psi_all = mf::read_distributed_orbital_set<larray>(mf,mpi.comm,'w',pgrid,
-                    {0,nspin},{0,nkpts_ibz},{0,N},bs_all);
+                    {0,nspin},{0,nkpts_ibz},{0,N},cap_all);
 
   // psi_orig = first M bands (the kept originals) as its own distributed array.
   auto psi_orig = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,M,ngm},bs_orig);
+                    {nspin,nkpts_ibz,M,ngm},
+                    utils::max_tile_sizes<4>{cap_orig});
   psi_orig.local() = psi_all.local()(all,all,nda::range(0,M),all);
 
   if(R == 0) {
@@ -775,7 +779,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // raw (non-orthonormal) augmentation states on the 'w' grid, zeroed
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
-                    {nspin,nkpts_ibz,n_raw,ngm},bs_raw);
+                    {nspin,nkpts_ibz,n_raw,ngm},
+                    utils::max_tile_sizes<4>{cap_raw});
   raw_aug.local() = ComplexType(0.0);
 
   utils::check(psi_all.local_range(1) == raw_aug.local_range(1),
