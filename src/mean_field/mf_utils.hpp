@@ -253,6 +253,19 @@ inline void log_spectrum_vs_wmax(const MF& mf, double max_abs_E, std::string_vie
             max_abs_E, wmax);
 }
 
+/*
+ * Default wmax for imag_axes_ft::IAFT(pt, ..., wmax_default): the user's wmax when the
+ * ptree provides one (read the same way as the IAFT constructor: "iaft.wmax" if an "iaft"
+ * block exists, otherwise "iaft_wmax"); wmax_from_mf(mf) is evaluated only otherwise.
+ */
+inline double iaft_wmax_default(ptree const& pt, const MF& mf)
+{
+  auto iaft_pt = pt.get_child_optional("iaft");
+  auto w = iaft_pt ? iaft_pt.get().get_optional<double>("wmax")
+                   : pt.get_optional<double>("iaft_wmax");
+  return w ? *w : wmax_from_mf(mf);
+}
+
 } // mf
 
 #endif

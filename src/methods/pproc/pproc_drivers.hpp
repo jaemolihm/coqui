@@ -130,7 +130,7 @@ namespace methods {
         auto psp = hamilt::make_pseudopot(*mf);
         // For band interpolation, the only relevant parameter is ``beta`` which will be used to 
         // determine the Fermi level in ``write_mf_data``. 
-        imag_axes_ft::IAFT ft(pt, true, mf::wmax_from_mf(*mf));
+        imag_axes_ft::IAFT ft(pt, true, mf::iaft_wmax_default(pt, *mf));
         write_mf_data(*mf, ft, *psp.get(), scf_output);
       }
 
@@ -239,7 +239,7 @@ namespace methods {
 
         // dump mf data to "scf_output".mbpt.h5
         // 
-        imag_axes_ft::IAFT ft(pt, true, mf::wmax_from_mf(*mf));
+        imag_axes_ft::IAFT ft(pt, true, mf::iaft_wmax_default(pt, *mf));
         write_mf_data(*mf, ft, *psp.get(), scf_output);
       }
 

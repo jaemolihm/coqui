@@ -103,6 +103,12 @@ class MF
     mf_source_e mf_type() const 
     { return std::visit( [&](auto&& v) { return v.get_mf_source(); }, var); }
 
+    /* model system of a model_source MF object, nullptr for the other backends */
+    model::model_system const* model_sys() const {
+      auto p = std::get_if<model::model_readonly>(&var);
+      return (p == nullptr) ? nullptr : std::addressof(p->get_sys());
+    }
+
     auto outdir() const
     { return std::visit( [&](auto&& v) { return v.get_sys().outdir; }, var); }
     auto prefix() const
