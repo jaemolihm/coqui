@@ -22,6 +22,7 @@
 #ifndef UTILITIES_KPOINT_UTILS_HPP
 #define UTILITIES_KPOINT_UTILS_HPP
 
+#include <cmath>
 #include <type_traits>
 #include <cstdlib>
 #include <string_view>
@@ -53,6 +54,36 @@ inline bool debug_gemm_ft() {
     return env != nullptr && std::string_view(env) != "0";
   }();
   return flag;
+}
+
+/// Squared L2 norm of the crystal-coordinate vector (x0, x1, x2) after wrapping
+/// each component to [-0.5, 0.5), i.e. its squared distance to the nearest
+/// reciprocal lattice vector.
+inline double wrapped_norm2(double x0, double x1, double x2) {
+  auto wrap = [](double d) {
+    d = std::abs(d);
+    d -= std::floor(d);
+    return d - std::round(d);
+  };
+  double d0 = wrap(x0), d1 = wrap(x1), d2 = wrap(x2);
+  return d0 * d0 + d1 * d1 + d2 * d2;
+}
+
+/**
+ * @brief Index of the k-point equal to (k0, k1, k2) modulo a reciprocal lattice vector
+ *
+ * @param kpts_crys   - [INPUT] k-points in crystal coordinates (nkpts, 3)
+ * @param k0, k1, k2  - [INPUT] target k-point in crystal coordinates
+ * @param threshold   - [INPUT] tolerance on the wrapped distance
+ * @return index of the first match, or -1 if there is none
+ */
+inline long find_kpoint(nda::ArrayOfRank<2> auto const& kpts_crys,
+                        double k0, double k1, double k2, double threshold = 1e-6) {
+  for (long ik = 0; ik < kpts_crys.shape(0); ++ik)
+    if (wrapped_norm2(kpts_crys(ik, 0) - k0, kpts_crys(ik, 1) - k1,
+                      kpts_crys(ik, 2) - k2) < threshold * threshold)
+      return ik;
+  return -1;
 }
 
 /*
