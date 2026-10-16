@@ -1130,7 +1130,8 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
 /**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
- * Shared by lr_gw_sigma_DeltaG_calc and run_lr_calc (through lr_load_W_omega).
+ * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
+ * Also used by run_lr_calc (through lr_load_W_omega).
  *
  * @param mpi         - MPI context
  * @param thc         - THC ERI (provides Np())
@@ -2274,6 +2275,63 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
 
 
 /**
+ * Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
+ *
+ * Uses the standard gw_t code path (thc_solver_comm, not lr_thc_comm).
+ * Used for finite-difference testing of LR-GW.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    bool div_corr) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("gw_evaluate_sigma_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "gw_evaluate_sigma_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long ns = mf->nspin();
+  long nkpts_ibz = mf->nkpts_ibz();
+  long nbnd = mf->nbnd();
+  long nt = ft.nt_f();
+
+  auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
+      *mpi, G_tskij_root);
+
+  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, nt);
+
+  // Read overlap matrix from checkpoint for divergence correction
+  auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {ns, nkpts_ibz, nbnd, nbnd});
+  chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
+
+  solvers::gw_t gw(&ft, div_treatment);
+
+  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {nt, ns, nkpts_ibz, nbnd, nbnd});
+
+  gw.eval_Sigma_all(sG_tskij.local(), dW_tqPQ, sSigma_tskij, thc, "R");
+  if (div_corr) {
+    gw.Sigma_div_correction(sSigma_tskij, sG_tskij.local(), sS_skij.local(), thc, eps_inv_head);
+  }
+  mpi->comm.barrier();
+
+  return shm_to_root(*mpi, sSigma_tskij);
+}
+
+
+/**
  * Band-basis perturbation from a local potential given in the THC aux basis.
  *
  * Runs the aux→primary map of the diagonal Hartree channel
@@ -2719,6 +2777,62 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
 
 
 /**
+ * Compute eps_inv_head from screened interaction W_c(t,q,P,Q).
+ *
+ * Extracts the G=0,G'=0 component of (ε⁻¹ - 1) from W_c in the THC product
+ * basis, and extrapolates to q→0. This matches the convention used by the
+ * SCF loop and Sigma_div_correction (which stores/uses ε⁻¹-1, not ε⁻¹).
+ *
+ * @param W_c_tqPQ - [INPUT] W_c in (nt_half, nkpts, NP, NP) layout
+ * @return eps_inv_head at q=0, shape (nt_half,)
+ */
+template<typename eri_t>
+nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    eri_t &eri, ptree const& pt,
+    std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root) {
+
+  auto& thc = eri.corr_eri->get();
+  auto mf = thc.MF();
+  auto& mpi = thc.mpi();
+
+  std::string err = std::string("compute_eps_inv_head_calc - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+
+  std::string input_file = prefix + ".mbpt.h5";
+  utils::check(std::filesystem::exists(input_file),
+               "compute_eps_inv_head_calc: Input checkpoint {} does not exist!", input_file);
+
+  // Same div_treatment as the scGW run (consistent head extrapolation)
+  auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+
+  // Read IAFT from checkpoint
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
+
+  long nkpts_ibz = mf->nkpts_ibz();
+  long NP = thc.Np();
+  long nt = ft.nt_f();
+  long nt_half_w = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+
+  auto sW_c_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
+      *mpi, std::array<long, 4>{nt_half_w, nkpts_ibz, NP, NP}, W_c_tqPQ_root);
+
+  using local_Array_4D_t = nda::array<ComplexType, 4>;
+  auto pgrid = compute_proc_grid_4D(mpi->comm.size(),
+      {nt_half_w, nkpts_ibz, NP, NP}, {false, false, false, false});
+  auto dW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
+      mpi->comm, pgrid, {nt_half_w, nkpts_ibz, NP, NP});
+  scatter_from_shm(*mpi, sW_c_tqPQ_in.local(), dW_tqPQ);
+
+  auto [eps_inv_head_q, eps_inv_head] =
+      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+  mpi->comm.barrier();
+
+  return eps_inv_head;
+}
+
+
+/**
  * Evaluate GW self-energy with provided W and G (FD helper).
  *
  * Computes Σ = -G ⊙ W_c [+ div_corr] using provided G and W_c arrays.
@@ -2804,6 +2918,13 @@ template nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     nda::array<double, 1> const&,
     std::optional<nda::array<ComplexType, 5>> const&);
 
+// gw_evaluate_sigma_calc instantiations (THC only)
+template nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    bool);
+
 // lr_DeltaH0_from_thc_aux_calc instantiations (THC only — the aux basis is THC's)
 template nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
@@ -2844,6 +2965,12 @@ template nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
     ptree const&,
     nda::array<double, 1> const&,
     std::optional<nda::array<ComplexType, 5>> const&,
+    std::optional<nda::array<ComplexType, 4>> const&);
+
+// compute_eps_inv_head_calc instantiations (THC only)
+template nda::array<ComplexType, 1> compute_eps_inv_head_calc(
+    mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
+    ptree const&,
     std::optional<nda::array<ComplexType, 4>> const&);
 
 // gw_evaluate_sigma_with_W_calc instantiations (THC only)

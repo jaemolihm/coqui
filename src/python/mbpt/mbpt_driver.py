@@ -877,6 +877,62 @@ def run_lr_hf(h_int, q_vec, DeltaDm_skij, S_skij=None, compute_hartree=True, com
     return lr_hf_cpp(h_int, q_vec, DeltaDm_skij, S_skij, compute_hartree, compute_exchange)
 
 
+def lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia, E_ska, mu,
+                 kpq_map, q_is_gamma, off_diag_mode="qp_energy",
+                 ac_alg="pade", Nfit=18, eta=1e-3):
+    """
+    Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (LR-qpGW map).
+
+    Thin wrapper over the C++ methods::lr_qp_approx (see the C++ docstring). The
+    IAFT grid is read from the qpGW checkpoint {prefix}.mbpt.h5; the frozen QP
+    eigenbasis (MO_skia, E_ska), μ, k→k+q map, and AC parameters are provided by
+    the caller. Intended for testing the static map from Python.
+
+    Parameters
+    ----------
+    h_int : ThcCoulomb
+        THC ERI handler (source of MPI + mean field).
+    prefix : str
+        Checkpoint prefix; the IAFT is read from {prefix}.mbpt.h5.
+    DeltaSigma_tskij : np.ndarray
+        Dynamic ΔΣ_k(τ), shape (nt, ns, nk, nb, nb), complex.
+    MO_skia : np.ndarray
+        Frozen QP MO coefficients C, shape (ns, nk, nb, nb), complex.
+    E_ska : np.ndarray
+        Frozen QP energies ε, shape (ns, nk, nb), complex.
+    mu : float
+        Frozen chemical potential.
+    kpq_map : np.ndarray
+        k → k+q index map, shape (nk,), int. Build via coqui.mbpt.calculate_kpq_map.
+    q_is_gamma : bool
+        Whether q ≈ 0 (enables the q=0 Hermitization branch).
+    off_diag_mode : str, optional
+        "qp_energy" (default) or "fermi". Match the qpGW run.
+    ac_alg : str, optional
+        Analytic-continuation algorithm (default "pade").
+    Nfit : int, optional
+        Number of AC fit parameters (default 18).
+    eta : float, optional
+        AC broadening (default 1e-3). Pass the value the qpGW run used (π/β).
+
+    Returns
+    -------
+    np.ndarray
+        Static ΔV_QPGW(k) in the primary basis, shape (ns, nk, nb, nb).
+    """
+    import numpy as np
+    from coqui._lib.mbpt_module import lr_qp_approx as lr_qp_approx_cpp
+
+    DeltaSigma_tskij = np.asarray(DeltaSigma_tskij, dtype=np.complex128)
+    MO_skia = np.asarray(MO_skia, dtype=np.complex128)
+    E_ska = np.asarray(E_ska, dtype=np.complex128)
+    kpq_map = np.asarray(kpq_map, dtype=np.int64)
+
+    return lr_qp_approx_cpp(h_int, str(prefix), DeltaSigma_tskij, MO_skia, E_ska,
+                            float(mu), kpq_map, bool(q_is_gamma),
+                            str(off_diag_mode), str(ac_alg), int(Nfit), float(eta))
+
+
 def hf_evaluate(h_int, Dm_skij, S_skij, compute_hartree=True, compute_exchange=True):
     """
     Compute HF self-energy (Fock matrix) from density matrix.
@@ -1054,6 +1110,46 @@ def gw_evaluate_Pi(params, h_int, G_tskij):
     arr = gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
     return arr if arr.size else None
 
+def gw_evaluate_sigma(params, h_int, G_tskij, div_corr=True):
+    """
+    Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file.
+
+    Same R-space computation as lr_gw_sigma_DeltaG but for a full Green's function.
+    Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG.
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
+    h_int : ThcCoulomb
+        THC ERI handler
+    G_tskij : np.ndarray or None
+        Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
+        global root; ignored on non-root ranks.
+    div_corr : bool, optional
+        Whether to apply divergence correction (default True).
+        Set to False for FD testing of LR code (which has no div_corr).
+
+    Returns
+    -------
+    np.ndarray on rank 0, shape (nt, ns, nk, nb, nb)
+    None on non-root ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import gw_evaluate_sigma as gw_evaluate_sigma_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if G_tskij is None:
+            raise ValueError("gw_evaluate_sigma: G_tskij must be provided on the MPI root rank")
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    else:
+        G_tskij = None
+
+    arr = gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij, bool(div_corr))
+    return arr if arr.size else None
+
 def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
     """
     Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
@@ -1181,6 +1277,43 @@ def run_lr_gw_sigma_DeltaW(params, h_int, q_pert, G_tskij, DeltaW_qtPQ, div_corr
 
     arr = lr_gw_sigma_DeltaW_cpp(json.dumps(params_with_div), h_int, q_pert, G_tskij, DeltaW_qtPQ)
     return arr if arr.size else None
+
+def compute_eps_inv_head(params, h_int, W_c_tqPQ):
+    """
+    Compute eps_inv_head from correlation screened interaction W_c in THC product basis.
+
+    Extracts the G=0,G'=0 component of (ε⁻¹ - 1) and extrapolates to q→0
+    using Gygi extrapolation. This matches the convention used by
+    Sigma_div_correction (which uses ε⁻¹-1, not ε⁻¹).
+
+    Parameters
+    ----------
+    params : dict
+        Parameters including:
+        - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5 for IAFT)
+    h_int : ThcCoulomb
+        THC ERI handler
+    W_c_tqPQ : np.ndarray or None
+        Correlation screened interaction W_c = W - V, shape (nt_half, nkpts, NP, NP).
+        NOT the full W. Required on the MPI global root; ignored on non-root ranks.
+
+    Returns
+    -------
+    np.ndarray
+        (ε⁻¹ - 1) head at q=0, shape (nt_half,) — replicated on all ranks
+    """
+    import numpy as np
+    from mpi4py import MPI
+    from coqui._lib.mbpt_module import compute_eps_inv_head as compute_eps_inv_head_cpp
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        if W_c_tqPQ is None:
+            raise ValueError("compute_eps_inv_head: W_c_tqPQ must be provided on the MPI root rank")
+        W_c_tqPQ = np.asarray(W_c_tqPQ, dtype=np.complex128)
+    else:
+        W_c_tqPQ = None
+
+    return compute_eps_inv_head_cpp(json.dumps(params), h_int, W_c_tqPQ)
 
 def gw_evaluate_sigma_with_W(params, h_int, G_tskij, W_c_qtPQ, eps_inv_head, div_corr=True):
     """
