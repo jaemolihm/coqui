@@ -123,13 +123,8 @@ namespace solvers {
       long nq = gshape[1];
       b_pgrid[1] = utils::find_proc_grid_max_npools(np, nq, 0.2);
       long np_PQ = np / b_pgrid[1];
-      if (gshape[2] * gshape[3] >= np_PQ) {
-        b_pgrid[2] = utils::find_proc_grid_min_diff(np_PQ, gshape[2], gshape[3]);
-        b_pgrid[3] = np_PQ / b_pgrid[2];
-      } else {
-        utils::check(np_PQ == 1,
-            "scr_coulomb_fourier_t::ft_buffer_dist: PQ too small for proc count (NP*NQ < np_PQ)");
-      }
+      b_pgrid[2] = utils::find_proc_grid_min_diff(np_PQ, gshape[2], gshape[3]);
+      b_pgrid[3] = np_PQ / b_pgrid[2];
       // Square block size, the same formula as scr_coulomb_t::W_omega_proc_grid:
       // make sure block sizes produce at least one full block per task. Square is
       // required because the W Dyson runs slate_ops::multiply on this
