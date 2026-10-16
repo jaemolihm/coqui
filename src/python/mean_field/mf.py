@@ -258,3 +258,144 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
                                  -1 if nbnd_mf is None else int(nbnd_mf),
                                  float(smearing_deltapsi), float(epstol),
                                  float(dtau_step))
+
+
+def _write_complex(grp, name, a):
+    """Write a complex array in the TRIQS/nda layout: float64 with a trailing (re, im) dimension
+    and a ``__complex__`` attribute."""
+    import numpy as np
+    a = np.ascontiguousarray(a, dtype=np.complex128)
+    ds = grp.create_dataset(name, data=a.view(np.float64).reshape(a.shape + (2,)))
+    ds.attrs["__complex__"] = np.int8(1)
+
+
+def write_model_h5(filename, H0, nelec, latt=None, kpts_crys=None, kp_grid=None,
+                   kpoint_weights=None, fock=None, overlap=None, density_matrix=None,
+                   madelung=0.0, nuclear_energy=0.0, fermi_energy=None, div_treatment=None, mpi=None):
+    """
+    Write a model mean-field HDF5 file, read by ``make_mf(mpi, {"prefix": p, "outdir": d}, "model")``
+    from ``d/p.h5``.
+
+    This is pure I/O: it checks shapes and writes datasets and attributes. ``H0(k)``, the k-point
+    list and every other array come from the caller. Entries that are not given are not written;
+    the C++ reader then uses its defaults.
+
+    File layout (group ``/System``; "attr" = HDF5 attribute of ``/System``):
+
+    ============================== ============== ============== ============================
+    entry                          kind           shape          absent ->
+    ============================== ============== ============== ============================
+    number_of_spins                attr int                      required (``H0.shape[0]``)
+    number_of_polarizations        attr int                      required (always 1)
+    number_of_bands                attr int                      required (``H0.shape[2]``)
+    number_of_elec                 attr float                    required (``nelec``)
+    madelung_constant              attr float                    required (``madelung``)
+    nuclear_energy                 attr float                    required (``nuclear_energy``)
+    fermi_energy                   attr float                    computed from ``H0``
+    div_treatment                  attr str                      ``"ignore_g0"``
+    lattice_vectors                float64        [3,3]          required (identity if None)
+    kpoints_crystal                float64        [nk,3]         generated from ``kp_grid``
+    kp_grid                        int64          [3]            derived from ``kpoints_crystal``
+    kpoint_weights                 float64        [nk]           ``1/nk``
+    H0                             complex        [ns,nk,nb,nb]  required
+    fock_matrix                    complex        [ns,nk,nb,nb]  ``H0``
+    overlap                        complex        [ns,nk,nb,nb]  identity (only identity allowed)
+    density_matrix                 complex        [ns,nk,nb,nb]  0
+    ============================== ============== ============== ============================
+
+    Conventions: Hartree, Bohr; ``k`` in crystal coordinates on a full regular Gamma-containing
+    grid without symmetry, **Gamma first**. The k index of every array follows the k-list. The
+    default list (only ``kp_grid`` given) is ``k = (i/N1, j/N2, l/N3)`` with index
+    ``(i*N2 + j)*N3 + l``. Complex arrays use the TRIQS/nda layout (float64 with a trailing
+    (re, im) dimension and a ``__complex__`` attribute). The BZ maps are built by the reader.
+
+    Parameters
+    ----------
+    filename : str
+        Output file, e.g. ``"./hubbard.h5"`` for prefix ``"hubbard"`` and outdir ``"./"``.
+    H0 : array, complex, shape ``(ns, nk, nb, nb)``
+        One-body Hamiltonian ``H0(k)`` in an orthonormal basis. ``ns = 1`` is paramagnetic.
+    nelec : float
+        Electrons per cell, both spins (a half-filled single band has ``nelec = 1``).
+    latt : array, shape ``(3, 3)``, optional
+        Lattice vectors (rows), Bohr. Default: identity. Only ``k.R`` enters a model.
+    kpts_crys : array, shape ``(nk, 3)``, optional
+        k-points in crystal coordinates; ``kpts_crys[0]`` must be Gamma.
+    kp_grid : sequence of 3 int, optional
+        Monkhorst-Pack mesh, e.g. ``(N, N, 1)``. At least one of ``kpts_crys``/``kp_grid``.
+    kpoint_weights : array, shape ``(nk,)``, optional
+        Must sum to 1.
+    fock, overlap, density_matrix : array, complex, shape of ``H0``, optional
+        ``fock`` is the full mean-field Hamiltonian including ``H0``.
+    madelung, nuclear_energy : float
+    fermi_energy : float, optional
+        Written only if given; the reader keeps it.
+    div_treatment : str, optional
+        q->0 treatment of the Coulomb kernel, imposed on every MBPT driver over its input. Only the HF
+        exchange of HF-type solvers supports a value other than ``"ignore_g0"`` (e.g. ``"gygi"`` with
+        ``madelung``); GW, RPA and the downfolding drivers abort otherwise, since a model interaction file
+        has no THC q->0 heads.
+    mpi : MpiHandler, optional
+        If given, only the root rank writes, followed by a barrier.
+    """
+    import numpy as np
+    import h5py
+
+    H0 = np.asarray(H0)
+    if H0.ndim != 4 or H0.shape[2] != H0.shape[3] or H0.shape[0] not in (1, 2):
+        raise ValueError(f"write_model_h5: H0 must be [ns,nk,nb,nb] with ns in (1,2), got {H0.shape}")
+    ns, nk, nb, _ = H0.shape
+    if kpts_crys is None and kp_grid is None:
+        raise ValueError("write_model_h5: give kpts_crys and/or kp_grid")
+    if kpts_crys is not None:
+        kpts_crys = np.asarray(kpts_crys, dtype=np.float64)
+        if kpts_crys.shape != (nk, 3):
+            raise ValueError(f"write_model_h5: kpts_crys must be ({nk}, 3), got {kpts_crys.shape}")
+        if np.abs(kpts_crys[0]).max() > 1e-12:
+            raise ValueError("write_model_h5: the first k-point must be Gamma")
+    if kp_grid is not None:
+        kp_grid = np.asarray(kp_grid, dtype=np.int64)
+        if kp_grid.shape != (3,) or np.prod(kp_grid) != nk:
+            raise ValueError(f"write_model_h5: kp_grid must have 3 entries with product {nk}, got {kp_grid}")
+    latt = np.eye(3) if latt is None else np.asarray(latt, dtype=np.float64)
+    if latt.shape != (3, 3):
+        raise ValueError(f"write_model_h5: latt must be (3, 3), got {latt.shape}")
+    if kpoint_weights is not None:
+        kpoint_weights = np.asarray(kpoint_weights, dtype=np.float64)
+        if kpoint_weights.shape != (nk,):
+            raise ValueError(f"write_model_h5: kpoint_weights must be ({nk},), got {kpoint_weights.shape}")
+        if abs(kpoint_weights.sum() - 1.0) > 1e-6:
+            raise ValueError(f"write_model_h5: kpoint_weights must sum to 1, got {kpoint_weights.sum()}")
+    mats = {"fock_matrix": fock, "overlap": overlap, "density_matrix": density_matrix}
+    for name, a in mats.items():
+        if a is not None and np.shape(a) != H0.shape:
+            raise ValueError(f"write_model_h5: {name} must have the shape of H0 {H0.shape}")
+    if overlap is not None and np.abs(np.asarray(overlap) - np.eye(nb)).max() > 1e-10:
+        raise ValueError("write_model_h5: overlap must be the identity (the C++ reader aborts otherwise)")
+
+    if mpi is None or mpi.root():
+        with h5py.File(filename, "w") as f:
+            g = f.create_group("System")
+            g.attrs["number_of_spins"] = np.int32(ns)
+            g.attrs["number_of_polarizations"] = np.int32(1)
+            g.attrs["number_of_bands"] = np.int32(nb)
+            g.attrs["number_of_elec"] = np.float64(nelec)
+            g.attrs["madelung_constant"] = np.float64(madelung)
+            g.attrs["nuclear_energy"] = np.float64(nuclear_energy)
+            if fermi_energy is not None:
+                g.attrs["fermi_energy"] = np.float64(fermi_energy)
+            if div_treatment is not None:
+                g.attrs["div_treatment"] = np.bytes_(div_treatment)
+            g.create_dataset("lattice_vectors", data=latt)
+            if kpts_crys is not None:
+                g.create_dataset("kpoints_crystal", data=kpts_crys)
+            if kp_grid is not None:
+                g.create_dataset("kp_grid", data=kp_grid)
+            if kpoint_weights is not None:
+                g.create_dataset("kpoint_weights", data=kpoint_weights)
+            _write_complex(g, "H0", H0)
+            for name, a in mats.items():
+                if a is not None:
+                    _write_complex(g, name, a)
+    if mpi is not None:
+        mpi.barrier()

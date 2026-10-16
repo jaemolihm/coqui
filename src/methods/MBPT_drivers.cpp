@@ -155,6 +155,24 @@ inline std::array<long, 4> compute_proc_grid_4D(long nproc, std::array<long, 4> 
   return grid;
 }
 
+// A model Hamiltonian takes the q->0 treatment from its model file (attr div_treatment, default "ignore_g0"),
+// overriding the input. Model interaction files carry no THC q->0 heads, so a treatment that needs them
+// (needs_thc_head: screened W, or the bare kernel in embed_eri_t) must be "ignore_g0".
+inline void model_div_treatment(std::shared_ptr<mf::MF> const& mf, std::string const& name, std::string& value,
+                                bool needs_thc_head) {
+  if (mf->mf_type() != mf::model_source) return;
+  std::string const& model_value = mf->model_sys()->div_treatment;
+  if (value != model_value) {
+    if (mf->mpi()->comm.root())
+      app_warning("Model Hamiltonian: {}=\"{}\" is overridden by \"{}\" from the model file.", name, value, model_value);
+    value = model_value;
+  }
+  utils::check(not needs_thc_head or value == "ignore_g0",
+               "Model Hamiltonian: {}=\"{}\" needs the THC q->0 heads, which model interaction files do not "
+               "provide. Only the HF exchange (hf_div_treatment in HF-type solvers) supports another treatment.",
+               name, value);
+}
+
 // Helper function to prepare checkpoint file for downfold_coulomb
 inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& output, 
                               std::string const& greens_func_source, ptree const& pt) {
@@ -172,7 +190,7 @@ inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& out
 
   } else if (greens_func_source == "mf" and not std::filesystem::exists(output+".mbpt.h5")) {
     
-    imag_axes_ft::IAFT ft(pt, false, mf::wmax_from_mf(*mf));
+    imag_axes_ft::IAFT ft(pt, false, mf::iaft_wmax_default(pt, *mf));
     hamilt::pseudopot psp(*mf);
     write_mf_data(*mf, ft, psp, output);
   
@@ -221,6 +239,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto hf_div_treatment = io::get_value_with_default<std::string>(pt, "hf_div_treatment", "gygi");
   io::tolower(div_treatment);
   io::tolower(hf_div_treatment);
+  model_div_treatment(mf, "div_treatment", div_treatment, solver_type != "hf" and solver_type != "qphf");
+  model_div_treatment(mf, "hf_div_treatment", hf_div_treatment, false);
 
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
@@ -267,7 +287,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   }
 
   imag_axes_ft::IAFT ft(
-    !restart ? imag_axes_ft::IAFT(pt, false, mf::wmax_from_mf(*mf))
+    !restart ? imag_axes_ft::IAFT(pt, false, mf::iaft_wmax_default(pt, *mf))
              : imag_axes_ft::read_iaft(output+".mbpt.h5", false)
   );
 
@@ -479,6 +499,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto hf_div_treatment = io::get_value_with_default<std::string>(pt, "hf_div_treatment", "gygi");
   io::tolower(div_treatment);
   io::tolower(hf_div_treatment);
+  model_div_treatment(mf, "div_treatment", div_treatment, true);
+  model_div_treatment(mf, "hf_div_treatment", hf_div_treatment, false);
 
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
@@ -526,7 +548,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto trans_home_cell = io::get_value_with_default<bool>(pt,"translate_home_cell",false);
 
   imag_axes_ft::IAFT ft(
-    !restart ? imag_axes_ft::IAFT(pt, false, mf::wmax_from_mf(*mf))
+    !restart ? imag_axes_ft::IAFT(pt, false, mf::iaft_wmax_default(pt, *mf))
              : imag_axes_ft::read_iaft(output+".mbpt.h5", false)
   );
 
@@ -656,6 +678,8 @@ downfold_coulomb_impl(eri_t &eri, MBState&& mb_state, ptree const& pt,
   if (q_dependent_output) write_to_hdf5 = true;
 
   auto mf = eri.MF();
+  model_div_treatment(mf, "div_treatment", div_treatment, true);
+  model_div_treatment(mf, "bare_div_treatment", bare_div_treatment, true);
 
   // set local polarizabilities if provided
   if (local_polarizabilities) {
@@ -748,6 +772,8 @@ void downfolding_2e(eri_t &eri, ptree const& pt,
   auto bare_div_treatment = io::tolower_copy(io::get_value_with_default<std::string>(pt, "bare_div_treatment", "gygi"));
 
   auto mf = eri.MF();
+  model_div_treatment(mf, "div_treatment", div_treatment, true);
+  model_div_treatment(mf, "bare_div_treatment", bare_div_treatment, true);
   std::string output = outdir + "/" + prefix;
   
   ensure_checkpoint(mf, output, greens_func_source, pt);
@@ -814,12 +840,13 @@ void hf_downfold(eri_t &eri, ptree const& pt) {
                 " downfold_2e: Invalid factorization_type: {}", factorization_type);
 
   auto mf = eri.MF();
+  model_div_treatment(mf, "hf_div_treatment", hf_div_treatment, true);
 
   // mbpt and model outputs
   std::string output = outdir + "/" + prefix;
 
   // initialize
-  imag_axes_ft::IAFT ft(pt, true, mf::wmax_from_mf(*mf));
+  imag_axes_ft::IAFT ft(pt, true, mf::iaft_wmax_default(pt, *mf));
   hamilt::pseudopot psp(*mf);
   write_mf_data(*mf, ft, psp, output);
   MBState mb_state(ft, output, mf, wannier_file, trans_home_cell, false);
@@ -887,6 +914,8 @@ void gw_downfold(eri_t &eri, ptree &pt) {
                 " downfold_2e: Invalid factorization_type: {}", factorization_type);
 
   auto mf = eri.MF();
+  model_div_treatment(mf, "div_treatment", div_treatment, true);
+  model_div_treatment(mf, "hf_div_treatment", hf_div_treatment, true);
 
   // mbpt and model output
   std::string output = outdir + "/" + prefix;

@@ -168,6 +168,11 @@ def make_thc_coulomb(mf, params):
         from coqui.interaction import make_thc_coulomb
 
         thc = make_thc_coulomb(mf, {"save": "svo_isdf.h5", "storage": "incore"})
+
+    A model Hamiltonian (``mf_type="model"``) has no orbitals, so its THC integrals cannot be
+    built: write the file with ``write_thc_h5`` and read it (``nIpts``/``thresh`` are not needed)::
+
+        thc = make_thc_coulomb(mf, {"save": "hubbard_thc.h5", "storage": "incore"})
     """
     return ThcCoulomb(mf, json.dumps(params))
 
@@ -219,6 +224,85 @@ def make_thc_pivots(mf, params):
         thc = make_thc_coulomb(mf_aug, {"thresh": 1e-4, "pivot_file": "pivots.h5"})
     """
     make_thc_pivots_cxx(mf, json.dumps(params))
+
+
+def write_thc_h5(filename, X, Z, mpi=None):
+    """
+    Write a THC interaction file read by ``make_thc_coulomb(mf, {"save": filename, "storage": "incore"})``.
+
+    This is pure I/O for model Hamiltonians: it checks shapes and writes the arrays given.
+
+    A one-orbital density-density interaction ``V(q)`` is exactly rank-1 THC:
+    ``Np = 1``, ``X = 1``, ``Z[q] = V(q)``
+    (Hubbard: ``Z[q] = U``; extended Hubbard: ``U + 2V(cos 2pi q1 + cos 2pi q2)``, q crystal).
+
+    File layout (file root):
+
+    ============================== ========= ===================== =============================
+    entry                          dtype     shape                 content
+    ============================== ========= ===================== =============================
+    Np                             int32     scalar                ``Np``
+    X_orbital_range                int32     [2]                   ``[0, nb]``
+    Y_orbital_range                int32     [2]                   ``[0, nb]``
+    collocation_matrix             complex   [ns*npol, nk, Np, nb] ``X``
+    coulomb_matrix                 complex   [nq, Np, Np]          ``Z``
+    interpolating_points           int64     [Np]                  dummy zeros (see below)
+    interpolating_vectors_G0       complex   [nq, Np]              dummy zeros (see below)
+    dual_interpolating_vectors_G0  complex   [nq, Np]              dummy zeros (see below)
+    ============================== ========= ===================== =============================
+
+    ``Z[q]`` is the per-cell ``V(q)``, **not** scaled by the number of k-points or by the cell
+    volume. q runs over the full k-list of the model file (no q symmetry, ``nq = nk``), in the same
+    order, so ``Z[iq] = V(q = kpts_crys[iq])``; the first entry is q = Gamma.
+
+    The last three datasets are a workaround: they belong to ISDF (interpolating-point grid
+    indices and the q->0 heads) and mean nothing for a model, but ``thc_reader_t::read()`` reads
+    ``interpolating_points``, ``interpolating_vectors_G0`` and ``dual_interpolating_vectors_G0``
+    unconditionally and checks the length of ``interpolating_points`` against ``Np``. Their values
+    are never used with ``div_treatment="ignore_g0"``, which a model run forces.
+
+    Parameters
+    ----------
+    filename : str
+        Output HDF5 file.
+    X : array, complex, shape ``(ns*npol, nk, Np, nb)``
+        Collocation matrix.
+    Z : array, complex, shape ``(nq, Np, Np)``
+        Coulomb matrix per unit cell; Hermitian in ``(P, Q)`` for every q.
+    mpi : MpiHandler, optional
+        If given, only the root rank writes, followed by a barrier.
+    """
+    import numpy as np
+    import h5py
+
+    X = np.ascontiguousarray(X, dtype=np.complex128)
+    Z = np.ascontiguousarray(Z, dtype=np.complex128)
+    if X.ndim != 4:
+        raise ValueError(f"write_thc_h5: X must be [ns*npol, nk, Np, nb], got {X.shape}")
+    nb, Np = X.shape[3], X.shape[2]
+    if Z.ndim != 3 or Z.shape[1:] != (Np, Np):
+        raise ValueError(f"write_thc_h5: Z must be [nq, {Np}, {Np}], got {Z.shape}")
+    if not np.allclose(Z, np.conj(Z.transpose(0, 2, 1))):
+        raise ValueError("write_thc_h5: Z[q] must be Hermitian")
+    nq = Z.shape[0]
+
+    def write_complex(f, name, a):
+        ds = f.create_dataset(name, data=a.view(np.float64).reshape(a.shape + (2,)))
+        ds.attrs["__complex__"] = np.int8(1)
+
+    if mpi is None or mpi.root():
+        with h5py.File(filename, "w") as f:
+            f.create_dataset("Np", data=np.int32(Np))
+            f.create_dataset("X_orbital_range", data=np.array([0, nb], dtype=np.int32))
+            f.create_dataset("Y_orbital_range", data=np.array([0, nb], dtype=np.int32))
+            write_complex(f, "collocation_matrix", X)
+            write_complex(f, "coulomb_matrix", Z)
+            # Dummies, required by thc_reader_t::read(); unused for a model.
+            f.create_dataset("interpolating_points", data=np.zeros(Np, dtype=np.int64))
+            write_complex(f, "interpolating_vectors_G0", np.zeros((nq, Np), dtype=np.complex128))
+            write_complex(f, "dual_interpolating_vectors_G0", np.zeros((nq, Np), dtype=np.complex128))
+    if mpi is not None:
+        mpi.barrier()
 
 
 def run_isdf(mf, params):
