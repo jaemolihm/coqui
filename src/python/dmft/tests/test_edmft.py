@@ -147,3 +147,30 @@ def test_causal_projection_boson_with_real_downfold_coulomb(downfold_inputs):
     assert wloc_fit_iw.shape == wloc_dd_iw.shape
     assert np.allclose(wloc_fit_iw.imag, 0.0, atol=1e-12)
 
+
+def _random_complex(rng, *shape):
+    return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+
+
+def _hermitian_part(a):
+    return 0.5 * (a + np.swapaxes(a, -1, -2).conj())
+
+
+@pytest.mark.parametrize("basis", ["ir", "dlr"])
+def test_extract_h0_and_delta_hermitian(basis):
+    """G0(iω) = [iω - h]⁻¹ with non-Hermitian h: h0 is h, or exactly Hermitian ½(h + h†)."""
+    if basis == "dlr":
+        pytest.importorskip("coqui._lib.iaft_module")
+    rng = np.random.default_rng(3)
+    h = 0.3 * _random_complex(rng, 2, 3, 3)
+    iaft = IAFT(beta=10.0, wmax=10.0, prec="high", basis=basis)
+    iw = 1j * iaft.wn_mesh('f') * np.pi / iaft.beta
+    g_iw = np.linalg.inv(iw[:, None, None, None] * np.eye(3) - h)
+
+    h0, delta = extract_h0_and_delta(g_iw, iaft, make_hermitian=False)
+    assert np.linalg.norm(h0 - h) / np.linalg.norm(h) < 1e-5
+    assert np.linalg.norm(delta) / np.linalg.norm(h) < 1e-5
+
+    h0, _ = extract_h0_and_delta(g_iw, iaft, make_hermitian=True)
+    assert np.array_equal(h0, np.swapaxes(h0, -1, -2).conj())
+    assert np.linalg.norm(h0 - _hermitian_part(h)) / np.linalg.norm(h) < 1e-5
