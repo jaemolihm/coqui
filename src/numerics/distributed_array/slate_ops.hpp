@@ -27,6 +27,8 @@
  */ 
 
 #include <functional>
+#include <string>
+#include <string_view>
 
 #include "utilities/check.hpp"
 #include "nda/nda.hpp"
@@ -565,6 +567,50 @@ void cholesky(DistributedMatrix auto&& A, char UPLO = "L")
 }
 */
 
+namespace detail
+{
+
+/// One gemm operand as slate sees it: global extents and tile counts, after any
+/// transpose/conjugate op and after the row/column swap of a C-order array.
+struct gemm_operand { long m, n, mt, nt; };
+
+/**
+ * The conformability `X*Y = Z` needs and `slate::gemm` never checks: the three shared
+ * axes must agree in EXTENT and in TILE COUNT. Returns an empty string when the three
+ * operands conform, otherwise the reason, naming them `xname`, `yname`, `zname`.
+ *
+ * slate's `src/gemm.cc` contains no asserts at all, and a wrong tile count is silently
+ * wrong: `gemmC.cc` loops `for(k = 1; k < A.nt(); ++k)` and indexes
+ * `B.sub(k, k, 0, B.nt()-1)`, so `Y.mt > X.nt` drops the tail of the contraction and
+ * returns a plausible wrong number, while `Y.mt < X.nt` indexes a tile that does not
+ * exist. Equal counts with mismatched BOUNDARIES is caught, but only down in
+ * `Tile_blas.hh` (`A.nb() == B.mb()`), thrown from inside slate by whichever ranks
+ * happen to own the offending tile pair, in the middle of a collective.
+ *
+ * Kept a predicate rather than inlined checks so it can be tested directly:
+ * utils::check aborts the process, so the failing configurations have no other way
+ * into the test suite. See TEST_CASE("gemm_tile_conformability").
+ */
+inline std::string gemm_tile_mismatch(gemm_operand X, gemm_operand Y, gemm_operand Z,
+                                      std::string_view xname = "A",
+                                      std::string_view yname = "B",
+                                      std::string_view zname = "C")
+{
+  auto show = [](std::string_view name, gemm_operand const& O) {
+    return std::string(name) + " is " + std::to_string(O.m) + "x" + std::to_string(O.n)
+         + " (" + std::to_string(O.mt) + "x" + std::to_string(O.nt) + " tiles)";
+  };
+  if (X.n != Y.m or X.nt != Y.mt)
+    return "contracted axis mismatch: " + show(xname,X) + ", " + show(yname,Y) + ".";
+  if (X.m != Z.m or X.mt != Z.mt)
+    return "row axis mismatch: " + show(xname,X) + ", " + show(zname,Z) + ".";
+  if (Y.n != Z.n or Y.nt != Z.nt)
+    return "column axis mismatch: " + show(yname,Y) + ", " + show(zname,Z) + ".";
+  return {};
+}
+
+} // namespace detail
+
 /***************************************************************************/
 /*  				Blas	  				   */
 /***************************************************************************/
@@ -609,6 +655,31 @@ auto multiply_impl(T a, A_t&& A, B_t&& B, T b, C_t&& C)
   auto As = detail::to_slate_view<dA_t::is_stride_order_C()>(A);
   auto Bs = detail::to_slate_view<dB_t::is_stride_order_C()>(B);
   auto Cs = detail::to_slate_view<dC_t::is_stride_order_C()>(C);
+
+  // slate::gemm asserts none of its own conformability -- see gemm_tile_mismatch.
+  // mt()/nt()/m()/n() already account for the transpose/conjugate-transpose op, so
+  // these are the operands slate will receive. But to_slate_view hands slate the
+  // TRANSPOSE of a C-order array, so for that layout every field is swapped relative
+  // to what the caller declared: reporting them as they come would print C's shape
+  // reversed and call a column axis "row". Swap them back, uniformly -- all three
+  // operands share a stride order (static_assert below) -- and the message names the
+  // axis and the shape the caller wrote.
+  //
+  // One call covers both layouts because the three conditions are frame-invariant:
+  // transposing all of X, Y, Z maps the set {X.n==Y.m, X.m==Z.m, Y.n==Z.n} onto
+  // itself, permuting the first with nothing and the last two with each other.
+  constexpr bool row_col_swapped = dA_t::is_stride_order_C();
+  auto as_operand = [](auto const& S) {
+    if constexpr (row_col_swapped)
+      return detail::gemm_operand{long(S.n()), long(S.m()), long(S.nt()), long(S.mt())};
+    else
+      return detail::gemm_operand{long(S.m()), long(S.n()), long(S.mt()), long(S.nt())};
+  };
+  {
+    auto why = detail::gemm_tile_mismatch(as_operand(As),as_operand(Bs),as_operand(Cs),
+                                          "A","B","C");
+    utils::check(why.empty(), "multiply: {}", why);
+  }
 
   if constexpr (dA_t::is_stride_order_Fortran()) {
     static_assert(dB_t::is_stride_order_Fortran(),"Stride order mismatch.");
