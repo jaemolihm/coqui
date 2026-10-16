@@ -62,6 +62,25 @@ namespace math::detail {
     }
   }
 
+  /**
+   * The same guard for nda::blas::gemv(a,x,y) / gemv(alpha,a,x,beta,y), see
+   * skip_empty_blas_call (host memory only).
+   */
+  template<typename... Args>
+  void gemv_guarded(Args&&... args) {
+    constexpr std::size_t nargs = sizeof...(Args);
+    static_assert(nargs == 3 or nargs == 5, "gemv_guarded: gemv(a,x,y) or gemv(alpha,a,x,beta,y).");
+    auto targs = std::tie(args...);
+    if (skip_empty_blas_call<nargs>(targs)) return;
+    if constexpr (nargs == 5) {
+      ::nda::blas::gemv(std::forward<Args>(args)...);
+    } else {
+      auto& y = std::get<2>(targs);
+      using value_t = ::nda::get_value_t<std::decay_t<decltype(y)>>;
+      ::nda::blas::gemv(value_t(1), std::get<0>(targs), std::get<1>(targs), value_t(0), y);
+    }
+  }
+
 }
 
 #endif // COQUI_NUMERICS_GEMM_GUARD_HPP

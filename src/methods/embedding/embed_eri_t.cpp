@@ -27,6 +27,7 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/nda_functions.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "utilities/proc_grid_partition.hpp"
 
 #include "methods/ERI/chol_reader_t.hpp"
@@ -72,7 +73,7 @@ namespace methods {
         for (size_t I=0; I<nImps; ++I) {
           if (isym==0) {
             // TskI_Pa = conj(Ck_bj) * X_Pj(k)
-            nda::blas::gemm(thc.X(is, 0, ik)(u_rng, W_rng[I]),
+            math::detail::gemm_guarded(thc.X(is, 0, ik)(u_rng, W_rng[I]),
                             nda::dagger(C_skIai(is, ik, I, nda::ellipsis{})),
                             T_skIPa(isym, is, ik, I, nda::ellipsis{}));
           } else {
@@ -89,7 +90,7 @@ namespace methods {
             }
             // X_Pi * tmp_ib = TskI_aP
             auto ikR = _MF->ks_to_k(isym, ik);
-            nda::blas::gemm(thc.X(is, 0, ikR)(u_rng, all), tmp_ib, T_skIPa(isym, is,ik,I,nda::ellipsis{}));
+            math::detail::gemm_guarded(thc.X(is, 0, ikR)(u_rng, all), tmp_ib, T_skIPa(isym, is,ik,I,nda::ellipsis{}));
           }
         }
       }
@@ -1573,11 +1574,11 @@ namespace methods {
         Wfull() = W_ab_cd(w, nda::ellipsis{}) + V_ab_cd;
         tmp() = ComplexType(1.0);
         // tmp = I + Pi*W
-        nda::blas::gemm(ComplexType(1.0), Pi_ab_cd(w, nda::ellipsis{}), Wfull, ComplexType(1.0), tmp);
+        math::detail::gemm_guarded(ComplexType(1.0), Pi_ab_cd(w, nda::ellipsis{}), Wfull, ComplexType(1.0), tmp);
         // tmp = [I + Pi*W]^{-1}
         tmp = nda::inverse(tmp);
         // u = W[I + Pi*W]^{-1}
-        nda::blas::gemm(Wfull, tmp, Pi_ab_cd(w, nda::ellipsis{}));
+        math::detail::gemm_guarded(Wfull, tmp, Pi_ab_cd(w, nda::ellipsis{}));
         // u -= v
         Pi_ab_cd(w, nda::ellipsis{}) -= V_ab_cd;
       }
@@ -1629,17 +1630,17 @@ namespace methods {
                                    shape_t<2>{NQ_loc, nImpOrbs*nImpOrbs});
         if (_MF->qp_trev(iq_full)) {
           V_PQ_loc = nda::conj( dV_qPQ.local()(iq_loc, nda::ellipsis{}) );
-          nda::blas::gemm(V_PQ_loc, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(V_PQ_loc, B_Q_ab, T_P_ab);
         } else {
           V_PQ_loc = dV_qPQ.local()(iq_loc, nda::ellipsis{});
-          nda::blas::gemm(V_PQ_loc, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(V_PQ_loc, B_Q_ab, T_P_ab);
         }
 
         for (size_t P = 0; P < NP_loc; ++P) {
           auto B_dc = B_qIPab(iq_full, 0, P_origin+P, nda::ellipsis{});
           B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
         }
-        nda::blas::gemm(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), V_cd_ab);
+        math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), V_cd_ab);
       }
     }
     comm.all_reduce_in_place_n(V_cdab.data(), V_cdab.size(), std::plus<>{});
@@ -1694,10 +1695,10 @@ namespace methods {
                                    shape_t<2>{NQ_loc, nImpOrbs*nImpOrbs});
         if (_MF->qp_trev(iq_full)) {
           V_PQ_loc = nda::conj( dV_qPQ.local()(iq_loc, nda::ellipsis{}) );
-          nda::blas::gemm(V_PQ_loc, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(V_PQ_loc, B_Q_ab, T_P_ab);
         } else {
           V_PQ_loc = dV_qPQ.local()(iq_loc, nda::ellipsis{});
-          nda::blas::gemm(V_PQ_loc, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(V_PQ_loc, B_Q_ab, T_P_ab);
         }
 
         for (size_t P = 0; P < NP_loc; ++P) {
@@ -1705,7 +1706,7 @@ namespace methods {
           B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
         }
         auto Vq_2D = nda::reshape(V_qcdab(iq_full, nda::ellipsis{}), shape_t<2>{nImpOrbs*nImpOrbs, nImpOrbs*nImpOrbs});
-        nda::blas::gemm(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), Vq_2D);
+        math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), Vq_2D);
       }
     }
     comm.all_reduce_in_place_n(V_qcdab.data(), V_qcdab.size(), std::plus<>{});
@@ -1811,11 +1812,11 @@ namespace methods {
           //} 
 
           if (_MF->qp_trev(iq_full)) {
-            nda::blas::gemm(value_type(1.0), nda::transpose(Bq),
+            math::detail::gemm_guarded(value_type(1.0), nda::transpose(Bq),
                                              nda::dagger(Vloc(iq, nda::ellipsis{})),
                             value_type(0.0), T);
           } else {
-            nda::blas::gemm(value_type(1.0), nda::transpose(Bq),
+            math::detail::gemm_guarded(value_type(1.0), nda::transpose(Bq),
                                              nda::transpose(Vloc(iq, nda::ellipsis{})),
                             value_type(0.0), T);
           }
@@ -1910,18 +1911,18 @@ namespace methods {
             for( auto [in,n] : itertools::enumerate(index) )
               B(in,Q_rng) = Bq(all,n);
             mpi->comm.all_reduce_in_place_n(B.data(),B.size(),std::plus<>{});
-            nda::blas::gemm(value_type(1.0), B, Vloc(iq, nda::ellipsis{}),
+            math::detail::gemm_guarded(value_type(1.0), B, Vloc(iq, nda::ellipsis{}),
                             value_type(0.0), T);
             T = nda::conj(T);
-            nda::blas::gemm(norm, T, Bq, value_type(1.0), D);
+            math::detail::gemm_guarded(norm, T, Bq, value_type(1.0), D);
           } else {
             B() = ComplexType(0.0);
             for( auto [in,n] : itertools::enumerate(index) )
               B(in,Q_rng) = nda::conj(Bq(all,n));
             mpi->comm.all_reduce_in_place_n(B.data(),B.size(),std::plus<>{});
-            nda::blas::gemm(value_type(1.0), B, Vloc(iq, nda::ellipsis{}),
+            math::detail::gemm_guarded(value_type(1.0), B, Vloc(iq, nda::ellipsis{}),
                             value_type(0.0), T);
-            nda::blas::gemm(norm, T, Bq, value_type(1.0), D);
+            math::detail::gemm_guarded(norm, T, Bq, value_type(1.0), D);
           }
         }
       }
@@ -2002,11 +2003,11 @@ namespace methods {
           if (_MF->qp_to_ibz(iq_full)!=iq) continue;
           if (_MF->qp_trev(iq_full)) {
             // postponing conjugation to dotc
-            nda::blas::gemm(value_type(1.0), nda::transpose(B_4D(iq_full,0,P_rng,all)), Vloc(iq_loc, nda::ellipsis{}), value_type(0.0), T);
+            math::detail::gemm_guarded(value_type(1.0), nda::transpose(B_4D(iq_full,0,P_rng,all)), Vloc(iq_loc, nda::ellipsis{}), value_type(0.0), T);
             for( long ab=0; ab<nImpOrbs*nImpOrbs; ++ab )
               D(ab) += norm * nda::blas::dotc(T(ab,all), B_4D(iq_full,0,Q_rng,ab));
           } else {
-            nda::blas::gemm(value_type(1.0), nda::dagger(B_4D(iq_full,0,P_rng,all)), Vloc(iq_loc, nda::ellipsis{}), value_type(0.0), T);
+            math::detail::gemm_guarded(value_type(1.0), nda::dagger(B_4D(iq_full,0,P_rng,all)), Vloc(iq_loc, nda::ellipsis{}), value_type(0.0), T);
             for( long ab=0; ab<nImpOrbs*nImpOrbs; ++ab )
               D(ab) += norm * nda::blas::dot(T(ab,all), B_4D(iq_full,0,Q_rng,ab));
           }
@@ -2059,17 +2060,17 @@ namespace methods {
           if (_MF->qp_trev(iq_full)) {
             for( auto [in,n] : itertools::enumerate(index) )
               B(in,all) = B_4D(iq_full,0,P_rng,n);
-            nda::blas::gemm(value_type(1.0), B, Vloc(iq_loc, nda::ellipsis{}),
+            math::detail::gemm_guarded(value_type(1.0), B, Vloc(iq_loc, nda::ellipsis{}),
                             value_type(0.0), T);
             T = nda::conj(T);
-            nda::blas::gemm(norm, T, B_4D(iq_full,0,Q_rng,all),
+            math::detail::gemm_guarded(norm, T, B_4D(iq_full,0,Q_rng,all),
                             value_type(1.0), D);
           } else {
             for( auto [in,n] : itertools::enumerate(index) )
               B(in,all) = nda::conj(B_4D(iq_full,0,P_rng,n));
-            nda::blas::gemm(value_type(1.0), B, Vloc(iq_loc, nda::ellipsis{}),
+            math::detail::gemm_guarded(value_type(1.0), B, Vloc(iq_loc, nda::ellipsis{}),
                             value_type(0.0), T);
-            nda::blas::gemm(norm, T, B_4D(iq_full,0,Q_rng,all),
+            math::detail::gemm_guarded(norm, T, B_4D(iq_full,0,Q_rng,all),
                             value_type(1.0), D);
           }
         }
@@ -2132,13 +2133,13 @@ namespace methods {
             W_PQ = nda::conj( W_loc(iw_loc, iq_loc, nda::ellipsis()) );
           else
             W_PQ = W_loc(iw_loc, iq_loc, nda::ellipsis{});
-          nda::blas::gemm(W_PQ, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(W_PQ, B_Q_ab, T_P_ab);
 
           for (size_t P = 0; P < NP_loc; ++P) {
             auto B_dc = B_qIPab(iq_full, 0, P_origin+P, nda::ellipsis{});
             B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
           }
-          nda::blas::gemm(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_cd_ab);
+          math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_cd_ab);
         }
       }
     }
@@ -2187,14 +2188,14 @@ namespace methods {
             W_PQ = nda::conj( W_loc(iw_loc, iq_loc, nda::ellipsis()) );
           else
             W_PQ = W_loc(iw_loc, iq_loc, nda::ellipsis{});
-          nda::blas::gemm(W_PQ, B_Q_ab, T_P_ab);
+          math::detail::gemm_guarded(W_PQ, B_Q_ab, T_P_ab);
 
           for (size_t P = 0; P < NP_loc; ++P) {
             auto B_dc = B_qIPab(iq_full, 0, P_origin+P, nda::ellipsis{});
             B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
           }
           auto W_wq_2D = nda::reshape(W_wqcdab(iw, iq_full, nda::ellipsis{}), shape_t<2>{nImpOrbs*nImpOrbs, nImpOrbs*nImpOrbs});
-          nda::blas::gemm(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_wq_2D);
+          math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_wq_2D);
         }
       }
     }

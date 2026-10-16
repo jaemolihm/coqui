@@ -7,6 +7,7 @@
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/nda_functions.hpp"
+#include "numerics/gemm_guard.hpp"
 
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
@@ -72,10 +73,10 @@ namespace solvers {
 
       // X[t,q,ab,Q] = Pi_imp[t,ab,cd] * conj(B[q,0,Q,cd])
       B_cd_Q_conj = nda::transpose(nda::conj(B_loc(iq+q_origin,Q_rng,all)));
-      nda::blas::gemm(ComplexType(1.0),Pi_imp(it+t_origin,nda::ellipsis{}), B_cd_Q_conj, ComplexType(0.0), X);
+      math::detail::gemm_guarded(ComplexType(1.0),Pi_imp(it+t_origin,nda::ellipsis{}), B_cd_Q_conj, ComplexType(0.0), X);
 
       // Pi[t,q,P,Q] = B[q,0,P,ab] * X[t,q,ab,Q]
-      nda::blas::gemm(B_loc(iq+q_origin,P_rng,all), X, Pi_loc(it,iq,nda::ellipsis{}));
+      math::detail::gemm_guarded(B_loc(iq+q_origin,P_rng,all), X, Pi_loc(it,iq,nda::ellipsis{}));
     }
 
     return dPi_tqPQ;
