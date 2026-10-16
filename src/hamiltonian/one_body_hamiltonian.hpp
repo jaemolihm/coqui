@@ -43,6 +43,7 @@
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "hamiltonian/gen_one_body_hamiltonian.icc"
 #include "hamiltonian/pyscf_one_body_hamiltonian.icc"
+#include "hamiltonian/model_one_body_hamiltonian.icc"
 
 namespace hamilt
 {
@@ -108,6 +109,8 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_range,b_range,psi,p3,p4);
+  } else if (mf.mf_type() == mf::model_source) {
+    return detail::model_1B<MEM>(mf,"H0",comm,k_range,b_range,pgrid,bz);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismacth");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
@@ -261,6 +264,8 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
       comm.barrier();
       return Fij;
     }
+  } else if (mf.mf_type() == mf::model_source) {
+    return detail::model_1B<MEM>(mf,"Fock",comm,k_range,b_range,pgrid,bz);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
@@ -535,6 +540,8 @@ auto ovlp(mf::MF& mf, boost::mpi3::communicator& comm,
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
                                nda::range(-1,-1), k_range, b_range, bz); 
     return detail::gen_ovlp<MEM,false>(comm,psi);
+  } else if (mf.mf_type() == mf::model_source) {
+    return detail::model_1B<MEM>(mf,"ovlp",comm,k_range,b_range,pgrid,bz);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
@@ -560,6 +567,8 @@ auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm,
              {pgrid[0],pgrid[1],pgrid[2],1},nda::range(-1,-1), k_range, b_range,
              {bz[0],bz[1],bz[2],2048});
     return detail::gen_ovlp<MEM,true>(comm,psi);
+  } else if (mf.mf_type() == mf::model_source) {
+    return detail::model_diag_1B<MEM>(mf,"ovlp",comm,k_range,b_range,pgrid,bz);
   } else {
     utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");

@@ -66,15 +66,13 @@ public:
   const model_system& get_sys() const {return sys; }
   bool has_wfc_grid() const { return false; }
   auto const& bz() const { return sys.bz(); }
+  // a model has no real-space grid: empty FFT mesh
+  int fft_grid_size() const { return 0; }
+  int nnr() const { return 0; }
+  decltype(auto) lattice() const { return sys.latt(); }
+  decltype(auto) recv() const { return sys.recv(); }
+  decltype(auto) fft_grid_dim() const { return fft_mesh(); }
   // should not be called
-  int fft_grid_size() const { _abort_("fft_grid_size"); return 0; }
-  int nnr() const { _abort_("nnr"); return 0; }
-  decltype(auto) lattice() const { _abort_("lattice"); return sys.latt(); }
-  decltype(auto) recv() const { _abort_("recv"); return sys.recv(); }
-  decltype(auto) fft_grid_dim() const {
-    _abort_("fft_grid_dim");
-    return fft_mesh();
-  }
   decltype(auto) wfc_truncated_grid() const {
     _abort_("wfc_truncated_grid");
     return std::addressof(wfc_g);
@@ -97,7 +95,8 @@ public:
 
   model_readonly(model_readonly const& other):
     sys(other.sys),
-    dmat( other.dmat ) {}
+    dmat( other.dmat ),
+    psp( other.psp ) {}
 
   template<utils::Communicator comm_t>
   model_readonly(model_system&& model_sys): sys(std::move(model_sys) )
@@ -107,7 +106,8 @@ public:
 
   model_readonly(model_readonly&& other):
       sys(std::move(other.sys) ),
-      dmat( std::move(other.dmat) ) 
+      dmat( std::move(other.dmat) ),
+      psp( std::move(other.psp) )
   {}
 
   ~model_readonly() = default; 
@@ -115,12 +115,14 @@ public:
   model_readonly& operator=(const model_readonly& other) {
     this->sys = other.sys;
     this->dmat = other.dmat;
+    this->psp = other.psp;
     return *this;
   }
 
   model_readonly& operator=(model_readonly&& other) {
     this->sys = std::move(other.sys);
     this->dmat = std::move(other.dmat);
+    this->psp = std::move(other.psp);
     return *this;
   }
 
@@ -134,13 +136,9 @@ public:
     return std::make_tuple(false,  std::addressof(dmat.at(0)));
   }
 
-  void set_pseudopot([[maybe_unused]] std::shared_ptr<hamilt::pseudopot> const& psp_) 
-  { _abort_("set_pseudopot"); } 
-  std::shared_ptr<hamilt::pseudopot> get_pseudopot() 
-  {  
-    _abort_("get_pseudopot"); 
-    return std::shared_ptr<hamilt::pseudopot>{nullptr};
-  }
+  // the pseudopot of a model is an empty placeholder (see hamilt::pseudopot constructor)
+  void set_pseudopot(std::shared_ptr<hamilt::pseudopot> const& psp_) { psp = psp_; }
+  std::shared_ptr<hamilt::pseudopot> get_pseudopot() { return psp; }
 
   void close() {}
 
@@ -156,6 +154,8 @@ public:
   // matrices that define symmetry relations between wavefunctions at different k-points
   nda::array<int,2> sk_to_n;  
   std::vector< math::sparse::csr_matrix<ComplexType,HOST_MEMORY,int,int> > dmat;
+
+  std::shared_ptr<hamilt::pseudopot> psp;
 
   void print_output_info() const {
     app_log(1, "  COQUI Model Hamiltonian reader");

@@ -313,6 +313,7 @@ TEST_CASE("model_mf", "[mean_field]")
 
       auto h = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
       auto s = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
+      for(int a=0; a<nb; ++a) s(0,0,a,a) = ComplexType(1.0);
       auto d = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
       auto f = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
 
