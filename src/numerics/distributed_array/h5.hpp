@@ -159,6 +159,8 @@ void h5_read(h5::group& g, std::string name, DistributedArray auto & A)
 {
   using dArray_t = std::decay_t<decltype(A)>;
   constexpr int rank = math::nda::get_rank<dArray_t>;
+  // empty local block: nothing to read
+  if (A.local().size() == 0) return;
   auto rng = utils::default_array_of_ranges<rank>();
   auto origin = A.origin();
   auto shape = A.local().shape();

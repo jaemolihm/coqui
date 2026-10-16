@@ -332,4 +332,31 @@ namespace bdft_tests {
     }
   }
 
+  // Every transform accepts an empty local block (trailing extent 0), as handed
+  // to ranks beyond the extent of an oversized processor-grid factor.
+  TEST_CASE("iaft_empty_block", "[iaft][ir]") {
+    imag_axes_ft::IAFT iaft(1000.0, 12.0, imag_axes_ft::ir_basis, "high");
+    long ntf = iaft.nt_f(), nwf = iaft.nw_f(), ntb = iaft.nt_b(), nwb = iaft.nw_b();
+    long nth = (ntb%2==0)? ntb/2 : ntb/2+1, nwh = (nwb%2==0)? nwb/2 : nwb/2+1;
+    using arr3 = nda::array<ComplexType, 3>;
+    using arr2 = nda::array<ComplexType, 2>;
+    arr3 X_tf(ntf, 2, 0), X_wf(nwf, 2, 0), X_tb(ntb, 2, 0), X_wb(nwb, 2, 0);
+    arr3 X_th(nth, 2, 0), X_wh(nwh, 2, 0);
+    arr2 X_i(2, 0);
+    iaft.tau_to_w(X_tf, X_wf, imag_axes_ft::fermion);
+    iaft.tau_to_w(X_tb, X_wb, imag_axes_ft::boson);
+    iaft.tau_to_w(X_tf, X_i, imag_axes_ft::fermion, 0);
+    iaft.w_to_tau(X_wf, X_tf, imag_axes_ft::fermion);
+    iaft.w_to_tau(X_wb, X_tb, imag_axes_ft::boson);
+    iaft.w_to_tau(X_wf, imag_axes_ft::fermion, X_tb, imag_axes_ft::boson);
+    iaft.tau_to_w_PHsym(X_th, X_wh);
+    iaft.w_to_tau_PHsym(X_wh, X_th);
+    iaft.w_to_tau_partial(X_i, X_tf, imag_axes_ft::fermion, 0);
+    iaft.tau_to_tau(X_tf, imag_axes_ft::fermion, X_tb);
+    iaft.tau_to_tau(X_tf, imag_axes_ft::fermion, X_i, 0);
+    iaft.tau_to_beta(X_tf, X_i);
+    iaft.tau_to_zero(X_tf, X_i);
+    REQUIRE(X_wf.size() == 0);
+  }
+
 } // bdft_tests

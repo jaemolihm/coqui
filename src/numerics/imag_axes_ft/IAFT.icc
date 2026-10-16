@@ -16,6 +16,7 @@ void IAFT::tau_to_w(ndaArray_A &&X_ti, ndaArray_B &&X_wi, stats_e stats) const {
   utils::check(X_wi.shape(0) == nw, "iaft::tau_to_w: incorrect dimension of nw = {} for X_wi; stats = {}", X_wi.shape(0), int(stats));
 
   long dim1 = std::accumulate(X_ti.shape().begin()+1, X_ti.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
   auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
   auto X_wi_2D = nda::reshape(X_wi, shape_t<2>{nw, dim1});
   if (stats == fermion) {
@@ -33,6 +34,7 @@ void IAFT::tau_to_w(ndaArray_A &&X_ti, ndaArray_B &&Xw_i, stats_e stats, size_t 
   long dim1 = std::accumulate(X_ti.shape().begin()+1, X_ti.shape().end(), 1, std::multiplies<>{});
   utils::check(X_ti.shape(0) == nt, "iaft::tau_to_w: incorrect dimension of nt for X_ti; stats = {}", int(stats));
   utils::check(Xw_i.size() == dim1, "iaft::tau_to_w: incorrect dimension for X_wi");
+  if (dim1 == 0) return;  // empty local block
 
   auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
   auto Xw_1i_2D = nda::reshape(Xw_i, shape_t<2>{1, dim1});
@@ -56,6 +58,7 @@ void IAFT::tau_to_w_PHsym(Array_tau_t &&X_ti_pos, Array_w_t &&X_wi_pos) const {
   utils::check(X_wi_pos.shape(0) == nw_half, "iaft::tau_to_w_PHsym: incorrect dimension of nw for X_wi.");
 
   long dim1 = std::accumulate(X_ti_pos.shape().begin()+1, X_ti_pos.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
   auto X_ti_2D  = nda::reshape(X_ti_pos, shape_t<2>{nt_half, dim1});
   auto X_wi_2D  = nda::reshape(X_wi_pos, shape_t<2>{nw_half, dim1});
 
@@ -88,6 +91,7 @@ void IAFT::w_to_tau(ndaArray_A &&X_wi, ndaArray_B &&X_ti, stats_e stats) const {
   utils::check(X_wi.shape(0) == nw, "iaft::w_to_tau: incorrect dimension of nw for X_w; stats = {}", int(stats));
 
   long dim1 = std::accumulate(X_wi.shape().begin()+1, X_wi.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
   auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
   auto X_wi_2D = nda::reshape(X_wi, shape_t<2>{nw, dim1});
   if (stats == fermion) {
@@ -111,6 +115,7 @@ void IAFT::w_to_tau_PHsym(Array_w_t &&X_wi_pos, Array_tau_t &&X_ti_pos) const {
   utils::check(X_wi_pos.shape(0) == nw_half, "iaft::w_to_tau_PHsym: incorrect dimension of nw for X_wi.");
 
   long dim1 = std::accumulate(X_ti_pos.shape().begin()+1, X_ti_pos.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
   auto X_ti_2D  = nda::reshape(X_ti_pos, shape_t<2>{nt_half, dim1});
   auto X_wi_2D  = nda::reshape(X_wi_pos, shape_t<2>{nw_half, dim1});
 
@@ -141,6 +146,7 @@ void IAFT::w_to_tau(ndaArray_A_t &&X_wi, stats_e stats_A, ndaArray_B_t &&X_ti, s
     utils::check(X_ti.shape(0) == nt, "iaft::w_to_tau: incorrect dimension of nw for X_t; stats = {}", int(stats_B));
 
     long dim1 = std::accumulate(X_wi.shape().begin()+1, X_wi.shape().end(), 1, std::multiplies<>{});
+    if (dim1 == 0) return;  // empty local block
     auto X_wi_2D = nda::reshape(X_wi, shape_t<2>{nw, dim1});
     auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
 
@@ -168,6 +174,7 @@ void IAFT::w_to_tau_partial(ndaArray_A&& Xw_i, ndaArray_B&& X_ti, stats_e stats,
   const long dim1 = std::accumulate(X_ti.shape().begin()+1, X_ti.shape().end(), 1, std::multiplies<>{});
   utils::check(X_ti.shape(0) == nt, "iaft::w_to_tau_partial: incorrect dimension of nt for X_t; stats = {}", int(stats));
   utils::check(Xw_i.size() == dim1, "iaft::w_to_tau_partial: incorrect dimension for X_w");
+  if (dim1 == 0) return;  // empty local block
 
   // (nt, dim1) += (nt) x (dim1)
   auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
@@ -194,6 +201,7 @@ void IAFT::tau_to_tau(ndaArray_A &&A_ti, stats_e A_stats, ndaArray_B &&B_ti) con
   utils::check(A_ti.shape(0) == nt_A, "iaft::tau_to_tau: incorrect dimension of nt for A_ti; stats = {}", int(A_stats));
 
   long dim1 = std::accumulate(A_ti.shape().begin()+1, A_ti.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
   nda::matrix_const_view<ComplexType> A_ti_2D({nt_A, dim1}, A_ti.data());
   nda::matrix_view<ComplexType> B_ti_2D({nt_B, dim1}, B_ti.data());
 
@@ -208,6 +216,7 @@ void IAFT::tau_to_tau(ndaArray_A &&A_ti, stats_e A_stats, ndaArray_B &&Bt_i, siz
   long dim1 = std::accumulate(A_ti.shape().begin()+1, A_ti.shape().end(), 1, std::multiplies<>{});
   utils::check(A_ti.shape(0) == nt_A, "iaft::tau_to_tau: incorrect dimension of nt for A_ti; stats = {}", int(A_stats));
   utils::check(Bt_i.size() == dim1, "iaft::tau_to_tau: incorrect dimension for Bt_i");
+  if (dim1 == 0) return;  // empty local block
 
   nda::matrix_const_view<ComplexType> A_ti_2D({nt_A, dim1}, A_ti.data());
   // Bt_i = A_ti * T_t
@@ -229,6 +238,7 @@ void IAFT::tau_to_beta(ndaArray_A &&A_ti, ndaArray_B &&A_beta_i) const {
   utils::check(A_ti.shape(0) == nt_f(), "iaft::tau_to_beta: incorrect dimension of nt for A_ti.");
   long dim1 = std::accumulate(A_ti.shape().begin()+1, A_ti.shape().end(), 1, std::multiplies<>{});
   utils::check(A_beta_i.size() == dim1, "iaft::tau_to_beta: incorrect dimension for A_beta_i");
+  if (dim1 == 0) return;  // empty local block
 
   auto A_beta_i_1D = nda::reshape(A_beta_i, shape_t<1>{dim1});
   nda::matrix_const_view<ComplexType> A_ti_2D({nt_f(), dim1}, A_ti.data() );
@@ -250,6 +260,7 @@ void IAFT::tau_to_zero(ndaArray_A &&A_ti, ndaArray_B &&A_zero_i)  const {
   utils::check(A_ti.shape(0) == nt_f(), "iaft::tau_to_zero: incorrect dimension of nt for A_ti.");
   long dim1 = std::accumulate(A_ti.shape().begin()+1, A_ti.shape().end(), 1, std::multiplies<>{});
   utils::check(A_zero_i.size() == dim1, "iaft::tau_to_zero: incorrect dimension for A_zero_i");
+  if (dim1 == 0) return;  // empty local block
 
   auto A_zero_i_1D = nda::reshape(A_zero_i, shape_t<1>{dim1});
   nda::matrix_const_view<ComplexType> A_ti_2D({nt_f(), dim1}, A_ti.data() );
@@ -275,16 +286,15 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
   auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
-  {
+  // an empty local block contributes nothing
+  if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
     nda::array<ComplexType, 1> Ac0_i(dim1);
     auto Tc0_t = T_ct(0, nda::range::all);
     nda::blas::gemv(nda::transpose(A_ti_2D), Tc0_t, Ac0_i);
     Ac0_i_abs = Abs(Ac0_i);
     coeff_first = nda::max_element(Ac0_i_abs);
-  }
 
-  {
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
     auto nIR = T_ct.shape(0);
@@ -325,7 +335,8 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
   auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
-  {
+  // an empty local block contributes nothing
+  if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
     nda::array<ComplexType, 1> Ac0_i(dim1);
     nda::array<ComplexType, 1> Tc0_t_pos(nt_half);
@@ -336,9 +347,7 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
     nda::blas::gemv(nda::transpose(A_ti_2D), Tc0_t_pos, Ac0_i);
     Ac0_i_abs = Abs(Ac0_i);
     coeff_first = nda::max_element(Ac0_i_abs);
-  }
 
-  {
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
     auto nIR = T_ct.shape(0);
