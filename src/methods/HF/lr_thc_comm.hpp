@@ -81,10 +81,10 @@ namespace methods {
        * @param kp_trev    - [INPUT] time-reversal flag per full BZ k-point (nkpts,)
        * @param kpq_map    - [INPUT] full BZ k → full BZ k+q mapping (nkpts,)
        * @param ibc        - [INPUT] optional IBC correction data (DeltaX arrays + unperturbed quantities)
-       * @param O_unpert   - [INPUT] optional unperturbed quantity in primary basis (ns, nk_ibz, nb, nb),
-       *                     required when ibc is non-null
+       * @param O_unpert   - [INPUT] optional unperturbed quantity in primary basis (ns, nk_ibz, nb, nb)
        *
-       * When ibc is provided, adds correction terms:
+       * When ibc and O_unpert are both non-null, adds correction terms (either one null
+       * skips them):
        *   O_PQ += δ^q X(k) · A(k) · X(k)† + X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t,
@@ -98,24 +98,8 @@ namespace methods {
                                  nda::ArrayOfRank<1> auto const& kpq_map,
                                  const lr_ibc_DeltaX* ibc = nullptr,
                                  const O_unpert_4D_t* O_unpert = nullptr) {
-        static_assert(nda::get_rank<Array_primary_t> == 4,
-                      "lr_thc_comm::primary_to_aux: rank must be 4");
-
-        // Extract DeltaX pointers from ibc (null when no correction)
-        const nda::array_view<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
-        const nda::array_view<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
-
-        auto P_offset = O_IPQ.origin()[2];
-        auto Q_offset = O_IPQ.origin()[3];
-
-        auto O_IPQ_loc = O_IPQ.local();
-        utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
-                     "lr_thc_comm::primary_to_aux: Does not support mpi distributed along k-axis.");
-
-        _primary_to_aux_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
-                             kp_to_ibz, kp_trev, kpq_map,
-                             P_offset, Q_offset,
-                             DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
+        _primary_to_aux_impl<false>(ip, iq, O_Iab, O_IPQ, thc, kp_to_ibz, kp_trev, kpq_map,
+                                    ibc, O_unpert);
       }
 
       /**
@@ -355,12 +339,6 @@ namespace methods {
        *
        * Uses the identity: [O_PQ]^T = conj( X_R @ O^H @ X_L^H )
        * where X_L = X(k+q) and X_R = X(k) in the standard transform.
-       *
-       * Internally computes O^H = dagger(O), swaps left/right X matrices,
-       * and conjugates the output. Cannot reuse _primary_to_aux_impl because
-       * both the X assignment and the input/output transformations differ.
-       *
-       * Only rank-4 is supported; rank-5 support can be added if needed.
        * Caller passes the original O (not O^H). Returns [O_PQ]^T directly.
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t,
@@ -374,25 +352,8 @@ namespace methods {
                                  nda::ArrayOfRank<1> auto const& kpq_map,
                                  const lr_ibc_DeltaX* ibc = nullptr,
                                  const O_unpert_4D_t* O_unpert = nullptr) {
-        constexpr int rank = nda::get_rank<Array_primary_t>;
-        static_assert(rank == 4,
-                      "lr_thc_comm::primary_to_aux_transposed: only rank-4 supported");
-
-        // Extract DeltaX pointers from ibc (null when no correction)
-        const nda::array_view<ComplexType, 4>* DeltaX_ptr = ibc ? &ibc->DeltaX : nullptr;
-        const nda::array_view<ComplexType, 4>* DeltaX_mq_ptr = ibc ? &ibc->DeltaX_minusq : nullptr;
-
-        auto P_offset = O_IPQ.origin()[2];
-        auto Q_offset = O_IPQ.origin()[3];
-
-        auto O_IPQ_loc = O_IPQ.local();
-        utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
-                     "lr_thc_comm::primary_to_aux_transposed: Does not support mpi distributed along k-axis.");
-
-        _primary_to_aux_transposed_impl(ip, iq, O_Iab, O_IPQ_loc, thc,
-                             kp_to_ibz, kp_trev, kpq_map,
-                             P_offset, Q_offset,
-                             DeltaX_ptr, DeltaX_mq_ptr, O_unpert);
+        _primary_to_aux_impl<true>(ip, iq, O_Iab, O_IPQ, thc, kp_to_ibz, kp_trev, kpq_map,
+                                   ibc, O_unpert);
       }
 
     private:
@@ -403,219 +364,112 @@ namespace methods {
        *   - Right X uses X(k) (unchanged)
        * Serial over the caller's local PQ tile (thc_solver_comm's P-batching
        * is dropped: every LR caller runs one rank per tile).
+       *
+       * `transposed` computes [O_PQ]^T = conj( X(k) @ O^H @ X(k+q)^H ) instead:
+       * swapped X, O^H formed per (s,k) slice, and the output conjugated.
+       *
+       * The DeltaX correction (ibc and O_unpert both non-null) adds
+       *   δ^q X(k) · A(k) · X(k)†  +  X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†,
+       * or, transposed and before the conjugation,
+       *   X(k) · A(k)^H · [δ^q X(k)]†  +  δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†.
        */
-      template<nda::Array Array_primary_t, nda::Array Array_aux_t, typename O_unpert_t = nda::array<ComplexType, 4>>
+      template<bool transposed, typename Array_primary_t, typename Array_aux_t,
+               typename communicator_t, typename O_unpert_4D_t>
       static void _primary_to_aux_impl(int ip, int iq,
-                                       const Array_primary_t& O_tskab,
-                                       Array_aux_t& O_tskPQ,
+                                       const Array_primary_t& O_skab,
+                                       memory::darray_t<Array_aux_t, communicator_t>& O_IPQ,
                                        THC_ERI auto& thc,
                                        nda::ArrayOfRank<1> auto const& kp_map,
                                        nda::ArrayOfRank<1> auto const& kp_trev,
                                        nda::ArrayOfRank<1> auto const& kpq_map,
-                                       long P_offset = 0, long Q_offset = 0,
-                                       const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
-                                       const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
-                                       const O_unpert_t* O_unpert = nullptr) {
-        static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
-                      "lr_thc_comm::_primary_to_aux_impl: Rank mismatch");
-        static_assert(nda::get_rank<Array_primary_t> >= 4,
-                      "lr_thc_comm::_primary_to_aux_impl: Rank < 4");
-
-        bool has_deltax = DeltaX_left && DeltaX_right && O_unpert;
+                                       const lr_ibc_DeltaX* ibc,
+                                       const O_unpert_4D_t* O_unpert) {
+        static_assert(nda::get_rank<Array_primary_t> == 4,
+                      "lr_thc_comm::primary_to_aux: rank must be 4");
+        constexpr const char* fn = transposed ? "primary_to_aux_transposed" : "primary_to_aux";
+        utils::check(O_IPQ.global_shape()[1] == O_IPQ.local_shape()[1],
+                     "lr_thc_comm::{}: Does not support mpi distributed along k-axis.", fn);
 
         decltype(nda::range::all) all;
-        constexpr int N = nda::get_rank<Array_primary_t>;
-        size_t ns         = O_tskab.shape(N-4);
-        size_t nkpts_ibz  = O_tskab.shape(N-3);
-        size_t nbnd       = O_tskab.shape(N-2);
-        size_t nkpts      = O_tskPQ.shape(N-3);
-        size_t NP_loc     = O_tskPQ.shape(N-2);
-        size_t NQ_loc     = O_tskPQ.shape(N-1);
-        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_impl: NP_loc+P_offset > thc.Np()");
-        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_impl: NQ_loc+Q_offset > thc.Np()");
+        auto O_skPQ = O_IPQ.local();
+        long P_offset  = O_IPQ.origin()[2];
+        long Q_offset  = O_IPQ.origin()[3];
+        long ns        = O_skab.shape(0);
+        long nkpts_ibz = O_skab.shape(1);
+        long nbnd      = O_skab.shape(2);
+        long nkpts     = O_skPQ.shape(1);
+        long NP_loc    = O_skPQ.shape(2);
+        long NQ_loc    = O_skPQ.shape(3);
+        utils::check(O_skPQ.shape(0) == ns, "lr_thc_comm::{}: spin extent mismatched", fn);
+        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::{}: NP_loc+P_offset > thc.Np()", fn);
+        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::{}: NQ_loc+Q_offset > thc.Np()", fn);
+        bool has_deltax = ibc && O_unpert;
         if (has_deltax) {
           utils::check(nkpts_ibz == nkpts,
-                       "lr_thc_comm::_primary_to_aux_impl: DeltaX correction requires full BZ grid (nkpts_ibz={} != nkpts={})",
-                       nkpts_ibz, nkpts);
+                       "lr_thc_comm::{}: DeltaX correction requires full BZ grid (nkpts_ibz={} != nkpts={})",
+                       fn, nkpts_ibz, nkpts);
         }
-
-        // dim_i = (t, s) or (s)
-        size_t dim_i = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-3, (size_t)1, std::multiplies<>{});
-        utils::check(dim_i == std::accumulate(O_tskab.shape().begin(), O_tskab.shape().end()-3, (size_t)1, std::multiplies<>{}),
-                     "lr_thc_comm::_primary_to_aux_impl: dim_i mismatched");
-
-        auto O_ikPQ_4D = nda::reshape(O_tskPQ, shape_t<4>{dim_i, nkpts, NP_loc, NQ_loc});
-        auto O_ikab_4D = nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd});
 
         nda::array<ComplexType, 2> Ask_Pb(NP_loc, nbnd);
-
-        // DeltaX correction buffers (allocated only when needed)
-        nda::matrix<ComplexType> U_ab_buf;
-        if (has_deltax) {
-          U_ab_buf.resize(nbnd, nbnd);
-        }
+        // O^H slice (transposed), then the unperturbed slice of the DeltaX terms
+        nda::matrix<ComplexType> O_buf(nbnd, nbnd);
 
         nda::range X_P_rng(P_offset, P_offset + NP_loc);
-        nda::range O_P_rng(0, NP_loc);
         nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
-        for (size_t ik = 0; ik < dim_i*nkpts; ++ik) {
-          size_t i = ik / nkpts;
-          size_t s = i % ns; // i = it * ns + is
-          size_t k = ik % nkpts;
+        for (long s = 0; s < ns; ++s) {
+          for (long k = 0; k < nkpts; ++k) {
+            // Standard: left X at k+q, right X at k. Transposed: swapped.
+            auto Xsk_Pa_l = thc.X(s, ip, transposed ? long(k) : long(kpq_map(k)));
+            auto Xsk_Pa_r = thc.X(s, iq, transposed ? long(kpq_map(k)) : long(k));
+            auto O_PQ = O_skPQ(s, k, all, all);
 
-          // === LR change: left X uses k+q, right X uses k ===
-          auto Xsk_Pa_l = thc.X(s, ip, kpq_map(k));
-          auto Xsk_Pa_r = thc.X(s, iq, k);
+            auto left_times = [&](auto const& O_ab) {
+              if (kp_trev(k)) {
+                nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ab), Ask_Pb);
+              } else {
+                nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_ab, Ask_Pb);
+              }
+            };
+            if constexpr (transposed) {
+              O_buf = nda::dagger(O_skab(s, kp_map(k), all, all));
+              left_times(O_buf);
+            } else {
+              left_times(O_skab(s, kp_map(k), all, all));
+            }
 
-          if(kp_trev(k)) {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ikab_4D(i, kp_map(k), all, all)), Ask_Pb);
-          } else {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_ikab_4D(i, kp_map(k), all, all), Ask_Pb);
-          }
+            // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
+            nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_PQ);
 
-          // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
-          nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
+            if (has_deltax) {
+              auto DX_q  = ibc->DeltaX(s, k, all, all);         // δ^q X(k), stored at index k
+              // DeltaX_minusq[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) where
+              // k is the outer loop index, so read at index k — NOT kpq_map(k).
+              auto DX_mq = ibc->DeltaX_minusq(s, k, all, all);  // δ^{-q} X(k+q)
 
-          // DeltaX correction:
-          //   δ^q X(k) · A(k) · X(k)†  +  X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
-          if (has_deltax) {
-            auto DX_L = (*DeltaX_left)(s, k, all, all);  // δ^q X(k), stored at index k
-            // DeltaX_right[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) where
-            // k is the outer loop index, so read at index k — NOT kpq_map(k).
-            auto DX_R = (*DeltaX_right)(s, k, all, all);  // δ^{-q} X(k+q)
+              // O_buf = A(kk), or A(kk)^H when transposed
+              auto load_unpert = [&](long kk) {
+                if constexpr (transposed) O_buf = nda::dagger((*O_unpert)(s, kk, all, all));
+                else                      O_buf = (*O_unpert)(s, kk, all, all);
+              };
+              // O_PQ += L_P · O_buf · R_Q†
+              auto add_term = [&](auto const& L, auto const& R) {
+                nda::blas::gemm(L(X_P_rng, all), O_buf, Ask_Pb);
+                nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(R(O_Q_rng, all)),
+                                ComplexType(1.0), O_PQ);
+              };
 
-            // Term 2: δ^q X(k) · A(k) · X(k)†
-            U_ab_buf = (*O_unpert)(i, k, all, all);
-            nda::blas::gemm(DX_L(X_P_rng, all), U_ab_buf, Ask_Pb);
-            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)),
-                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
-
-            // Term 3: X(k+q) · A(k+q) · [δ^{-q} X(k+q)]†
-            U_ab_buf = (*O_unpert)(i, kpq_map(k), all, all);
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), U_ab_buf, Ask_Pb);
-            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(DX_R(O_Q_rng, all)),
-                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
-          }
-        }
-      }
-
-      /**
-       * LR primary→aux transposed impl.
-       * Computes [O_PQ]^T = conj( X_R @ O^H @ X_L^H ) by:
-       *   1. Using swapped X: left=X(k), right=X(k+q), with O^H computed on-the-fly
-       *   2. Conjugating the output
-       */
-      template<nda::Array Array_primary_t, nda::Array Array_aux_t, typename O_unpert_t = nda::array<ComplexType, 4>>
-      static void _primary_to_aux_transposed_impl(int ip, int iq,
-                                       const Array_primary_t& O_tskab,
-                                       Array_aux_t& O_tskPQ,
-                                       THC_ERI auto& thc,
-                                       nda::ArrayOfRank<1> auto const& kp_map,
-                                       nda::ArrayOfRank<1> auto const& kp_trev,
-                                       nda::ArrayOfRank<1> auto const& kpq_map,
-                                       long P_offset = 0, long Q_offset = 0,
-                                       const nda::array_view<ComplexType, 4>* DeltaX_left = nullptr,
-                                       const nda::array_view<ComplexType, 4>* DeltaX_right = nullptr,
-                                       const O_unpert_t* O_unpert = nullptr) {
-        static_assert(nda::get_rank<Array_primary_t> == nda::get_rank<Array_aux_t>,
-                      "lr_thc_comm::_primary_to_aux_transposed_impl: Rank mismatch");
-        static_assert(nda::get_rank<Array_primary_t> >= 4,
-                      "lr_thc_comm::_primary_to_aux_transposed_impl: Rank < 4");
-
-        // Transposed: [O_PQ]^T = conj( X(k) @ O^H @ X(k+q)^H )
-        // DeltaX correction (before final conjugation):
-        //   pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
-        //   pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
-
-        bool has_deltax = DeltaX_left && DeltaX_right && O_unpert;
-
-        decltype(nda::range::all) all;
-        constexpr int N = nda::get_rank<Array_primary_t>;
-        size_t ns         = O_tskab.shape(N-4);
-        size_t nkpts_ibz  = O_tskab.shape(N-3);
-        size_t nbnd       = O_tskab.shape(N-2);
-        size_t nkpts      = O_tskPQ.shape(N-3);
-        size_t NP_loc     = O_tskPQ.shape(N-2);
-        size_t NQ_loc     = O_tskPQ.shape(N-1);
-        utils::check(NP_loc+P_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NP_loc+P_offset > thc.Np()");
-        utils::check(NQ_loc+Q_offset <= thc.Np(), "lr_thc_comm::_primary_to_aux_transposed_impl: NQ_loc+Q_offset > thc.Np()");
-        if (has_deltax) {
-          utils::check(nkpts_ibz == nkpts,
-                       "lr_thc_comm::_primary_to_aux_transposed_impl: DeltaX correction requires full BZ grid (nkpts_ibz={} != nkpts={})",
-                       nkpts_ibz, nkpts);
-        }
-
-        // dim_i = (t, s) or (s)
-        size_t dim_i = std::accumulate(O_tskPQ.shape().begin(), O_tskPQ.shape().end()-3, (size_t)1, std::multiplies<>{});
-        utils::check(dim_i == std::accumulate(O_tskab.shape().begin(), O_tskab.shape().end()-3, (size_t)1, std::multiplies<>{}),
-                     "lr_thc_comm::_primary_to_aux_transposed_impl: dim_i mismatched");
-
-        auto O_ikPQ_4D = nda::reshape(O_tskPQ, shape_t<4>{dim_i, nkpts, NP_loc, NQ_loc});
-        auto O_ikab_4D = nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd});
-
-        nda::array<ComplexType, 2> Ask_Pb(NP_loc, nbnd);
-        nda::matrix<ComplexType> O_H_slice(nbnd, nbnd);
-
-        // DeltaX: reshape unperturbed quantity once
-        using reshape_4D_t = decltype(nda::reshape(O_tskab, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd}));
-        std::optional<reshape_4D_t> U_ikab_4D_opt;
-        nda::matrix<ComplexType> U_H_buf;
-        if (has_deltax) {
-          U_ikab_4D_opt.emplace(nda::reshape(*O_unpert, shape_t<4>{dim_i, nkpts_ibz, nbnd, nbnd}));
-          U_H_buf.resize(nbnd, nbnd);
-        }
-
-        // Transform with swapped X: left=X(k), right=X(k+q), input=O^H
-        nda::range X_P_rng(P_offset, P_offset + NP_loc);
-        nda::range O_P_rng(0, NP_loc);
-        nda::range O_Q_rng(Q_offset, Q_offset + NQ_loc);
-        for (size_t ik = 0; ik < dim_i*nkpts; ++ik) {
-          size_t i = ik / nkpts;
-          size_t s = i % ns;
-          size_t k = ik % nkpts;
-
-          // === Swapped X: left=X(k), right=X(k+q) ===
-          auto Xsk_Pa_l = thc.X(s, ip, k);
-          auto Xsk_Pa_r = thc.X(s, iq, kpq_map(k));
-
-          // Compute O^H = dagger(O) on-the-fly for this (i, k) slice
-          O_H_slice = nda::dagger(O_ikab_4D(i, kp_map(k), all, all));
-
-          if(kp_trev(k)) {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_H_slice), Ask_Pb);
-          } else {
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_H_slice, Ask_Pb);
-          }
-
-          nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_ikPQ_4D(i, k, O_P_rng, all));
-
-          // DeltaX correction (before final conjugation)
-          // Transpose of eq terms:
-          //   pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
-          //   pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
-          if (has_deltax) {
-            auto& U_ikab_4D = *U_ikab_4D_opt;
-            auto DX_q_at_k   = (*DeltaX_left)(s, k, all, all);  // δ^q X(k), stored at index k
-            // DeltaX_right[ik] stores δ^{-q} X(k_ik + q). We want δ^{-q} X(k+q) for outer
-            // loop index k, so read at index k — NOT kpq_map(k).
-            auto DX_mq_at_kpq = (*DeltaX_right)(s, k, all, all);  // δ^{-q} X(k+q)
-
-            // Pre-conj term 2: X(k) · A(k)^H · [δ^q X(k)]†
-            U_H_buf = nda::dagger(U_ikab_4D(i, k, all, all));
-            nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), U_H_buf, Ask_Pb);
-            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(DX_q_at_k(O_Q_rng, all)),
-                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
-
-            // Pre-conj term 3: δ^{-q} X(k+q) · A(k+q)^H · X(k+q)†
-            U_H_buf = nda::dagger(U_ikab_4D(i, kpq_map(k), all, all));
-            nda::blas::gemm(DX_mq_at_kpq(X_P_rng, all), U_H_buf, Ask_Pb);
-            nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)),
-                            ComplexType(1.0), O_ikPQ_4D(i, k, O_P_rng, all));
+              load_unpert(k);
+              if constexpr (transposed) add_term(Xsk_Pa_l, DX_q);
+              else                      add_term(DX_q, Xsk_Pa_r);
+              load_unpert(kpq_map(k));
+              if constexpr (transposed) add_term(DX_mq, Xsk_Pa_r);
+              else                      add_term(Xsk_Pa_l, DX_mq);
+            }
           }
         }
 
         // Conjugate output (applies to both standard and DeltaX terms)
-        O_ikPQ_4D = nda::conj(O_ikPQ_4D);
+        if constexpr (transposed) O_skPQ = nda::conj(O_skPQ);
       }
 
       /**

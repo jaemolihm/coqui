@@ -404,11 +404,6 @@ void lr_driver::lr_setup(
   _DeltaSigma.alloc(_pmap, (K.has_sigma() && !qp) ? _nts * nF : 0);
   _DeltaVcorr.alloc(_pmap, qp ? nF : 0);
 
-  // Static ΔV_QPGW tracked in qp mode.
-  _sDeltaVcorr_skij.emplace(qp
-      ? math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd})
-      : math::shm::make_shared_array<Array_view_4D_t>(*_mpi, {1, 1, 1, 1}));
-
   if (!K.has_sigma()) {
     // ΔDm-only Dyson pass (Σ-free kernel)
     _sDeltaF_dyson_in.emplace(math::shm::make_shared_array<Array_view_4D_t>(
@@ -562,7 +557,8 @@ void lr_driver::apply_kernel(
     const sArray_t<Array_view_5D_t>& sG_tskij,
     thc_reader_t& thc,
     const lr_params& p,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
+    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
+    nda::array<ComplexType, 4>* DeltaF_PQ_out) {
 
   // The operator alone takes the static inputs and the IBC correction.
   const lr_kernel_spec& terms = precond ? p.precond_kernel : p.kernel;
@@ -575,7 +571,7 @@ void lr_driver::apply_kernel(
         !precond && _opt_ibc ? &(*_opt_ibc) : nullptr,
         precond ? nullptr : p.DeltaV_qPQ,
         precond ? nullptr : p.Dm_ab,
-        nullptr,
+        DeltaF_PQ_out,
         !precond && p.include_xc,
         hsex ? &(*hsex) : nullptr);
     _Timer.stop("LR_HF");
@@ -583,7 +579,7 @@ void lr_driver::apply_kernel(
   }
 
   // K_pc is Σ-free.
-  if (terms.has_sigma()) {
+  if (terms.has_sigma() && pDeltaSigma_out) {
     apply_kernel_gw(*pDeltaSigma_out, sDeltaG_tskij, sG_tskij, thc, p,
                     sDeltaSigma_term2_tskij);
   }
@@ -602,23 +598,12 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   auto rF = nda::range(0, mF);
   auto rS = nda::range(mF, mF + mS);
 
-  // Complete the node replicas of arrays whose `_pmap` slices each rank wrote.
-  auto sync_slices = [&](auto&... arrs) {
-    (arrs.win().fence(), ...);
-    _mpi->node_comm.barrier();
-    if (_mpi->node_comm.root())
-      (utils::complete_node_slices(_mpi->internode_comm, _pmap,
-                                   arrs.local().data(), arrs.local().size()), ...);
-    (arrs.win().fence(), ...);
-    _mpi->comm.barrier();
-  };
-
   // Gather r = (r_F, r_Σ) into shared memory.
   r_F.win().fence();
   r_S.win().fence();
   _DeltaF.slice(r_F.local()) = r(rF);
   _DeltaSigma.slice(r_S.local()) = r(rS);
-  sync_slices(r_F, r_S);
+  utils::complete_shared_slices(*_mpi, _pmap, r_F, r_S);
 
   // ΔDm of r_Σ alone, at Δμ = 0: the sweeps' ΔDm-only passes apply the
   // fix_density shift to the sum. y_F = 0 serves as both the zero ΔH0 and ΔF
@@ -656,7 +641,7 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
     bool conv = false;
     _pc_gcr->step(_mpi->comm, _pmap, y_F.local(), y_prev, empty_sigma, empty_prev,
                   tol_s, conv);
-    sync_slices(y_F);
+    utils::complete_shared_slices(*_mpi, _pmap, y_F);
     _pc_sweeps = sweep;
     if (conv) break;
   }
@@ -677,7 +662,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
-    sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij,
+    sArray_t<Array_view_4D_t>* sDeltaVcorr_skij,
     nda::array<ComplexType, 4>* DeltaF_ibc_out,
     nda::array<ComplexType, 4>* F_PQ_out,
     nda::array<ComplexType, 4>* DeltaF_PQ_out) {
@@ -686,9 +671,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
   auto& sDeltaDm_prev_skij = *_sDeltaDm_prev_skij;
-  auto& sDeltaVcorr_skij   = *_sDeltaVcorr_skij;
   auto& opt_ibc            = _opt_ibc;
-  auto& sS_skij            = _dyson.sS_skij();
+  utils::check(!qp || sDeltaVcorr_skij, "lr_driver::lr_solve_one: qp mode needs a ΔV_QPGW array.");
+  utils::check(!K.has_sigma() || sDeltaSigma_tskij,
+               "lr_driver::lr_solve_one: a kernel with a Σ needs a ΔΣ array.");
 
   // The ΔΣ the kernel writes and the Dyson RHS reads; qp mode replaces it in the
   // RHS by ΔV_QPGW.
@@ -702,7 +688,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   _Timer.start("LR_RESET");
   sDeltaF_skij.set_zero();
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
-  if (qp) sDeltaVcorr_skij.set_zero();
+  if (qp) sDeltaVcorr_skij->set_zero();
   if (_lr_diis) _lr_diis->reset();
   if (_lr_gcr) _lr_gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
@@ -763,12 +749,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   auto dyson_pass = [&]() {
     if (K.has_sigma()) {
       // Kernel with a Σ: full pass, ΔG(τ) materialized
-      const sArray_t<Array_view_4D_t>* dyson_vcorr =
-          qp ? &sDeltaVcorr_skij : nullptr;
       Delta_mu = _lr_dyson.solve_lr_dyson(
           sDeltaDm_skij, sDeltaH0_skij,
           sDeltaF_skij, track_sigma ? sDeltaSigma_tskij : nullptr,
-          p.fix_density, dyson_vcorr);
+          p.fix_density, qp ? sDeltaVcorr_skij : nullptr);
       // The kernel evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
       _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
       DeltaG_in_shm = true;
@@ -809,7 +793,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (_mpi->node_comm.root())
         sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
       if (qp)
-        _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij.local());
+        _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij->local());
     }
     _mpi->comm.barrier();
     _Timer.stop("LR_SAVE");
@@ -847,10 +831,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
           *sDeltaSigma_tskij, *p.qp_static->sMO_skia, *p.qp_static->sE_ska,
           p.qp_static->mu, _lr_dyson.kpq_map(), is_q_gamma(),
           *_dyson.FT(), p.qp_static->qp_params);
-      sDeltaVcorr_skij.win().fence();
-      if (_mpi->node_comm.root())
-        sDeltaVcorr_skij.local() = sVcorr.local();
-      sDeltaVcorr_skij.win().fence();
+      copy_shm(*sDeltaVcorr_skij, sVcorr);
       _mpi->comm.barrier();
       _Timer.stop("LR_QPGW_STATIC");
     }
@@ -883,7 +864,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (qp) {
         // qp mode: (ΔF, ΔV_QPGW)
         step(sDeltaF_skij.local(), _DeltaF.prev,
-             sDeltaVcorr_skij.local(), _DeltaVcorr.prev);
+             sDeltaVcorr_skij->local(), _DeltaVcorr.prev);
       } else if (track_sigma) {
         // Kernel with a Σ: (ΔF, ΔΣ)
         step(sDeltaF_skij.local(), _DeltaF.prev,
@@ -895,32 +876,15 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         step(sDeltaF_skij.local(), _DeltaF.prev, empty_sigma, empty_prev);
       }
       // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
-      // place with no trailing collective. Fence + barrier make every slice
-      // visible to node root before it gathers below (barrier alone is
-      // insufficient under the MPI-3 separate shared-memory model).
-      sDeltaF_skij.win().fence();
-      if (qp) sDeltaVcorr_skij.win().fence();
-      else if (track_sigma) sDeltaSigma_tskij->win().fence();
-      _mpi->node_comm.barrier();
-      // Each node now holds a valid copy of its own contiguous element run
-      // only; one allgatherv among the node roots completes every replica. With
-      // the striping global, each element is mixed exactly once in the whole job.
-      if (_mpi->node_comm.root()) {
-        utils::complete_node_slices(_mpi->internode_comm, _pmap,
-                                       sDeltaF_skij.local().data(), _DeltaF.n_flat);
-        if (qp) {
-          utils::complete_node_slices(_mpi->internode_comm, _pmap,
-                                         sDeltaVcorr_skij.local().data(), _DeltaVcorr.n_flat);
-        } else if (track_sigma) {
-          utils::complete_node_slices(_mpi->internode_comm, _pmap,
-                                         sDeltaSigma_tskij->local().data(), _DeltaSigma.n_flat);
-        }
-      }
-      // Make node root's overwrite visible to its node peers
-      sDeltaF_skij.win().fence();
-      if (qp) sDeltaVcorr_skij.win().fence();
-      else if (track_sigma) sDeltaSigma_tskij->win().fence();
-      _mpi->comm.barrier();
+      // place with no trailing collective; each node then holds a valid copy of
+      // its own contiguous element run only. With the striping global, each
+      // element is mixed exactly once in the whole job.
+      if (qp)
+        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaVcorr_skij);
+      else if (track_sigma)
+        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaSigma_tskij);
+      else
+        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij);
     }
     _Timer.stop("LR_ITER_ALG");
 
@@ -939,7 +903,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     double norm_DeltaSigma_diff = 0.0;
     if (qp) {
       auto norms_V = utils::striped_norm(
-          _mpi->comm, _DeltaVcorr.slice(sDeltaVcorr_skij.local()), _DeltaVcorr.prev,
+          _mpi->comm, _DeltaVcorr.slice(sDeltaVcorr_skij->local()), _DeltaVcorr.prev,
           iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
@@ -1037,15 +1001,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                  sDeltaSigma_term2_tskij);
   }
 
-  // Copy the converged static ΔV_QPGW into the caller's output array (qp mode).
-  if (qp && sDeltaVcorr_out_skij != nullptr) {
-    sDeltaVcorr_out_skij->win().fence();
-    if (_mpi->node_comm.root())
-      sDeltaVcorr_out_skij->local() = sDeltaVcorr_skij.local();
-    sDeltaVcorr_out_skij->win().fence();
-    _mpi->comm.barrier();
-  }
-
   // Report results
   if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
@@ -1073,21 +1028,15 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     *F_PQ_out = std::move(opt_ibc->F_PQ_skij);
   }
   if (DeltaF_PQ_out && K.has_F()) {
-    // One extra lr_hf::evaluate on the converged ΔDm just to capture ΔF_PQ. It writes
+    // One extra ΔF evaluation on the converged ΔDm just to capture ΔF_PQ. It writes
     // into a scratch ΔF rather than sDeltaF_skij: the converged sDeltaF_skij is the
     // mixed (DIIS/damped) iterate the caller persists, and re-evaluating from ΔDm
     // would replace it with a different matrix, so an output-only flag would change
     // the DeltaF_skij dataset.
     auto sDeltaF_scratch = math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-    const lr_ibc_DeltaX* ibc_ptr = opt_ibc ? &(*opt_ibc) : nullptr;
-    // Not through apply_kernel: it writes a scratch array, and is the only caller
-    // that wants DeltaF_PQ_out.
-    auto hsex = p.exchange_static_W ? hsex_kernel() : std::nullopt;
-    _lr_hf->evaluate(sDeltaF_scratch, sDeltaDm_skij, thc, sS_skij.local(),
-                     K.hartree, K.exchange, ibc_ptr,
-                     p.DeltaV_qPQ, p.Dm_ab,
-                     DeltaF_PQ_out, p.include_xc, hsex ? &(*hsex) : nullptr);
+    apply_kernel(/*precond=*/false, sDeltaF_scratch, nullptr, sDeltaDm_skij,
+                 sDeltaG_tskij, sG_tskij, thc, p, nullptr, DeltaF_PQ_out);
   }
 
   // Hierarchical timer report for this perturbation (verbosity >= 2). Per-step
@@ -1338,20 +1287,10 @@ void lr_driver::print_distribution_summary(long NP, bool any_Sigma, bool needs_d
             fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]));
   }
 
-  // Band-basis Dyson grids — the ω-side comes from the same helper
-  // solve_lr_dyson_impl allocates with; the τ redistribute target mirrors the
-  // inline proc-grid math there.
+  // Band-basis Dyson grids, from the helpers solve_lr_dyson_impl allocates with.
   auto [dyw_pg, dyw_bs] = lr_dyson_omega_pgrid(nproc, nw, nki, _nbnd);
   (void)dyw_bs;
-  std::array<long,5> dyt_pg;
-  {
-    long np = nproc;
-    long nkpools = utils::find_proc_grid_max_npools(np, nki, 0.2);
-    np /= nkpools;
-    long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-    long np_j = np / np_i;
-    dyt_pg = {1, 1, nkpools, np_i, np_j};
-  }
+  auto dyt_pg = lr_dyson_tau_pgrid(nproc, nki);
   app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(ω)",
           pg5(dyw_pg, "(w,s,k,i,j)"),
           any_Sigma ? "ΔG(iω), ΔΣ(iω)" : "ΔG(iω)");

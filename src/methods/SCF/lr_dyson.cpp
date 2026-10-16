@@ -256,15 +256,12 @@ void lr_dyson::solve_lr_dyson_impl(
 
   // Convert ΔG(w) -> ΔG(tau)
   {
-    int np = _context->comm.size();
-    long nkpools = utils::find_proc_grid_max_npools(np, _nkpts_ibz, 0.2);
-    np /= nkpools;
-    long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-    long np_j = np / np_i;
+    auto t_pgrid = lr_dyson_tau_pgrid(_context->comm.size(), _nkpts_ibz);
+    long nkpools = t_pgrid[2], np_i = t_pgrid[3], np_j = t_pgrid[4];
 
     _Timer.start("LR_DYSON_ALLOC");
     auto dDeltaG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm,
-        {1, 1, nkpools, np_i, np_j}, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
+        t_pgrid, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
     _Timer.stop("LR_DYSON_ALLOC");
 
     _Timer.start("LR_DYSON_REDIST");
@@ -277,7 +274,7 @@ void lr_dyson::solve_lr_dyson_impl(
 
     _Timer.start("LR_DYSON_ALLOC");
     auto dDeltaG_tskij = make_distributed_array<Array_5D_t>(_context->comm,
-        {1, 1, nkpools, np_i, np_j}, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
+        t_pgrid, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
     _Timer.stop("LR_DYSON_ALLOC");
 
     auto DeltaGt_loc = dDeltaG_tskij.local();

@@ -282,7 +282,7 @@ public:
    * setup being paid once for all perturbations.
    *
    * The output arrays may be the same ones on every call — they are fully
-   * overwritten.
+   * overwritten. qp mode requires sDeltaVcorr_skij: ΔV_QPGW is iterated in it.
    *
    * sDeltaG_tskij is the one exception: it holds the ΔG(τ) of the returned ΔDm
    * only if p.save_DeltaG is set or p.hessian() and the kernel has a Σ (the
@@ -300,7 +300,7 @@ public:
       thc_reader_t& thc,
       const lr_params& p,
       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
-      sArray_t<Array_view_4D_t>* sDeltaVcorr_out_skij = nullptr,
+      sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
       nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
@@ -415,13 +415,15 @@ private:
    * @param sDeltaF_out     - [OUTPUT] this kernel's ΔF, OVERWRITTEN (not
    *                                   accumulated). Untouched when the kernel
    *                                   carries no ΔF.
-   * @param pDeltaSigma_out - [OUTPUT] this kernel's ΔΣ, overwritten; may be null
-   *                                   exactly when the kernel carries no ΔΣ.
+   * @param pDeltaSigma_out - [OUTPUT] this kernel's ΔΣ, overwritten; null
+   *                                   evaluates the ΔF branch alone.
    * @param sDeltaDm_skij   - [INPUT]  ΔDm the ΔF branch contracts
    * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
    * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
    * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
    *                                   p.split_sigma_terms
+   * @param DeltaF_PQ_out   - [OUTPUT] optional root-only aux-basis ΔF_PQ
+   *                                   (see lr_hf::evaluate)
    */
   void apply_kernel(bool precond,
                     sArray_t<Array_view_4D_t>& sDeltaF_out,
@@ -431,7 +433,8 @@ private:
                     const sArray_t<Array_view_5D_t>& sG_tskij,
                     thc_reader_t& thc,
                     const lr_params& p,
-                    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr);
+                    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
+                    nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
 
   /**
    * The GW self-energy branch of apply_kernel, operator only: ΔΠ -> ΔW -> ΔΣ,
@@ -540,7 +543,6 @@ private:
   //     see mode m−1's state.
   utils::part_map _pmap;
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaVcorr_skij;
   lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).

@@ -161,6 +161,32 @@ void complete_node_slices(Comm& internode_comm, part_map const& pmap,
 }
 
 /**
+ * @brief Complete node-replicated shared arrays after every rank of mpi.comm wrote
+ *        only its own part_map slice of each. Collective on mpi.comm.
+ *
+ * The LR solver stripes its element-wise updates of the shared ΔF/ΔΣ/ΔV_QPGW
+ * arrays over all ranks: each rank writes only its part_map slice, directly into
+ * the node's shared-memory window. Afterwards each node's copy is valid only on
+ * the slices of that node's own ranks, while the next step (Dyson solve, kernel
+ * apply) reads the whole array on every rank. This wraps complete_node_slices
+ * with the window synchronization it needs: fence + node barrier so the node root
+ * sees its peers' writes, the allgatherv over node roots, then fence + barrier so
+ * the peers see the root's.
+ *
+ * Used by lr_driver (mixing epilogue, preconditioner input and inner GCR
+ * iterate) and lr_hessian_t::rebuild_raw_kernel.
+ */
+template<typename MPI_Context_t, typename... sArr_t>
+void complete_shared_slices(MPI_Context_t& mpi, part_map const& pmap, sArr_t&... arrs) {
+  (arrs.win().fence(), ...);
+  mpi.node_comm.barrier();
+  if (mpi.node_comm.root())
+    (complete_node_slices(mpi.internode_comm, pmap, arrs.local().data(), arrs.local().size()), ...);
+  (arrs.win().fence(), ...);
+  mpi.comm.barrier();
+}
+
+/**
  * @brief Frobenius norm and successive-iterate difference norm from pre-sliced
  *        1D views, reduced over `comm`.
  *

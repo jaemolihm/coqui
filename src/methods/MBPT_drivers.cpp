@@ -2058,16 +2058,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                              F_PQ_skij.size() > 0 ||
                              DeltaF_PQ_skij.size() > 0)) {
       h5::file file(output + ".mbpt.h5", 'a');
-      h5::group grp(file);
-      auto lr_grp = grp.has_subgroup("linear_response") ?
-                    grp.open_group("linear_response") :
-                    grp.create_group("linear_response");
-      std::string where = "linear_response/";
-      if (nmodes > 1) {
-        std::string mg = "mode" + std::to_string(m + 1);
-        lr_grp = lr_grp.has_subgroup(mg) ? lr_grp.open_group(mg) : lr_grp.create_group(mg);
-        where += mg + "/";
-      }
+      auto lr_grp = chkpt::lr_group(file, nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt);
+      std::string where = nmodes > 1 ? fmt::format("linear_response/mode{}/", m + 1)
+                                     : std::string("linear_response/");
       if (DeltaF_ibc_skij.size() > 0) {
         nda::h5_write(lr_grp, "DeltaF_ibc_skij", DeltaF_ibc_skij, false);
         app_log(2, "  - DeltaF_ibc_skij written to \"{}\"", where);
@@ -2114,10 +2107,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       for (long m = 0; m < nmodes; ++m) hessian_call_index(m) = m;
 
       h5::file file(output + ".mbpt.h5", 'a');
-      h5::group grp(file);
-      auto lr_grp = grp.has_subgroup("linear_response") ?
-                    grp.open_group("linear_response") :
-                    grp.create_group("linear_response");
+      auto lr_grp = chkpt::lr_group(file);
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
       nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
       nda::h5_write(lr_grp, "hessian_M", c1.M, false);

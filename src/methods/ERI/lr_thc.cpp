@@ -856,8 +856,7 @@ void lr_thc::print_timers()
 
 // ----------------------------------------------------------------------------
 // Populate _kqpoint_maps: kpQ_map / kmQ_map via utils::calculate_kpq_map (with
-// ±Q); mk_map, mkmQ_map via a small scan with the same wrap convention as
-// calculate_kpq_map.
+// ±Q); mk_map, mkmQ_map via utils::find_kpoint.
 // ----------------------------------------------------------------------------
 void lr_thc::build_momentum_maps(nda::array<double, 2> const& kpts_crys,
                                      nda::stack_array<double, 3> const& Q_cryst,
@@ -875,32 +874,14 @@ void lr_thc::build_momentum_maps(nda::array<double, 2> const& kpts_crys,
   _kqpoint_maps.kmQ_map.resize(nk);
   utils::calculate_kpq_map(kpts_crys, Q_neg_cryst, _kqpoint_maps.kmQ_map);
 
-  // mk_map(p) and mkmQ_map(p): same wrap+tolerance convention as calculate_kpq_map.
-  auto find_match = [&](long ip, double off0, double off1, double off2) {
-    double d0 = std::abs(kpts_crys(ip, 0) + off0);
-    double d1 = std::abs(kpts_crys(ip, 1) + off1);
-    double d2 = std::abs(kpts_crys(ip, 2) + off2);
-    d0 -= std::floor(d0); d1 -= std::floor(d1); d2 -= std::floor(d2);
-    d0 -= std::round(d0); d1 -= std::round(d1); d2 -= std::round(d2);
-    return d0*d0 + d1*d1 + d2*d2;
-  };
-  double const tol2 = 1e-12;  // (1e-6)^2
-
   _kqpoint_maps.mk_map.resize(nk);
   _kqpoint_maps.mkmQ_map.resize(nk);
   for (long ip = 0; ip < nk; ++ip) {
-    int found_mk = -1, found_mkmQ = -1;
-    for (long iq = 0; iq < nk; ++iq) {
-      if (found_mk   < 0 && find_match(iq, kpts_crys(ip, 0),
-                                           kpts_crys(ip, 1),
-                                           kpts_crys(ip, 2)) < tol2)
-        found_mk = (int)iq;
-      if (found_mkmQ < 0 && find_match(iq, kpts_crys(ip, 0) + Q_cryst(0),
-                                           kpts_crys(ip, 1) + Q_cryst(1),
-                                           kpts_crys(ip, 2) + Q_cryst(2)) < tol2)
-        found_mkmQ = (int)iq;
-      if (found_mk >= 0 && found_mkmQ >= 0) break;
-    }
+    long const found_mk = utils::find_kpoint(kpts_crys, -kpts_crys(ip, 0), -kpts_crys(ip, 1),
+                                             -kpts_crys(ip, 2));
+    long const found_mkmQ = utils::find_kpoint(kpts_crys, -kpts_crys(ip, 0) - Q_cryst(0),
+                                               -kpts_crys(ip, 1) - Q_cryst(1),
+                                               -kpts_crys(ip, 2) - Q_cryst(2));
     utils::check(found_mk   >= 0, "lr_thc::build_momentum_maps: -k not found on grid for ip={}.", ip);
     utils::check(found_mkmQ >= 0, "lr_thc::build_momentum_maps: -k-Q not found on grid for ip={}.", ip);
     _kqpoint_maps.mk_map  (ip) = found_mk;

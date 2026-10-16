@@ -222,7 +222,7 @@ private:
   std::string _hf_div_treatment;    // "gygi" or "ignore_g0"; gates the Madelung K correction
 
   // Blocked-FFT k<->R transforms over kpts / Qpts; empty on the gemm path
-  // (COQUI_LR_DEBUG_GEMM_FT) and at a single k-point. Members because each
+  // (COQUI_DEBUG_GEMM_FT) and at a single k-point. Members because each
   // caches its FFTW_MEASURE plans across calls.
   std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
   // k<->R transforms by FFT (_fft_k/_fft_q) rather than by gemm.

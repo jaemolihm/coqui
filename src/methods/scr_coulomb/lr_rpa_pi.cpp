@@ -83,9 +83,9 @@ namespace methods {
       auto tau_bsize = dDeltaPi_tqPQ.block_size();
       long np_P = tau_pgrid[2], np_Q = tau_pgrid[3];
 
-      // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
+      // k<->R transforms: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1
       // selects the gemm path with explicit FT coefficients (kept for testing).
-      const bool use_gemm_ft = utils::lr_debug_gemm_ft();
+      const bool use_gemm_ft = utils::debug_gemm_ft();
       if (nkpts != 1 && use_gemm_ft) {
         _sf_Rk.emplace(*mpi, std::array<long, 2>{nkpts, nkpts});
         utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), *_sf_Rk);
@@ -99,7 +99,7 @@ namespace methods {
         _fft_q.emplace(MF->Qpts_ibz(), MF->lattv(), MF->kp_grid());
       }
       if (nkpts != 1)
-        app_log(3, "    k<->R transform: {}", use_gemm_ft ? "gemm (COQUI_LR_DEBUG_GEMM_FT)" : "FFT");
+        app_log(3, "    k<->R transform: {}", use_gemm_ft ? "gemm (COQUI_DEBUG_GEMM_FT)" : "FFT");
 
       // phase_ipR(iR) = e^{ip·R} where p = _q_pert (crystal coords), R = integer lattice indices
       // p·R = 2π(p[0]*a + p[1]*b + p[2]*c) by biorthogonality of direct/reciprocal lattice
@@ -259,17 +259,11 @@ namespace methods {
         // === Step 1: ΔG^k_{mn}(τ) → ΔG^k_{PQ}(τ)  [lr_thc_comm::primary_to_aux] ===
         //     Input: DeltaG_tskij(τ), Output: dDeltaG_skPQ
         _Timer.start("PI_LR_PRIM_TO_AUX");
-        if (ibc && ibc->sG_tskij) {
-          auto G_tau_view = ibc->sG_tskij->local()(it_global, nda::ellipsis{});
-          lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
-                                       dDeltaG_skPQ, thc,
-                                       MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
-                                       ibc, &G_tau_view);
-        } else {
-          lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
-                                       dDeltaG_skPQ, thc,
-                                       MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
-        }
+        auto G_tau = unpert_G_slice(ibc, it_global);
+        lr_thc_comm::primary_to_aux(0, 0, DeltaG_tskij(it_global, nda::ellipsis{}),
+                                     dDeltaG_skPQ, thc,
+                                     MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                     ibc, G_tau ? &*G_tau : nullptr);
         _Timer.stop("PI_LR_PRIM_TO_AUX");
 
         // === Steps 3+4 fused: k→R FT of ΔG + Hadamard with cached G^R(β-τ) ===
@@ -309,17 +303,11 @@ namespace methods {
         //     Uses identity: [O_PQ]^T = conj(X_R @ O^H @ X_L^H)
         //     Dagger and output conjugation are handled inside primary_to_aux_transposed.
         _Timer.start("PI_LR_PRIM_TO_AUX");
-        if (ibc && ibc->sG_tskij) {
-          auto G_beta_view = ibc->sG_tskij->local()(it_beta_minus, nda::ellipsis{});
-          lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
-                                                  dDeltaG_skPQ, thc,
-                                                  MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
-                                                  ibc, &G_beta_view);
-        } else {
-          lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
-                                                  dDeltaG_skPQ, thc,
-                                                  MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
-        }
+        auto G_beta = unpert_G_slice(ibc, it_beta_minus);
+        lr_thc_comm::primary_to_aux_transposed(0, 0, DeltaG_tskij(it_beta_minus, nda::ellipsis{}),
+                                                dDeltaG_skPQ, thc,
+                                                MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                                ibc, G_beta ? &*G_beta : nullptr);
         _Timer.stop("PI_LR_PRIM_TO_AUX");
 
         // === Steps 7+8+9 fused: k→(-R) FT of ΔG + phase + Hadamard with cached G^R(τ) ===
@@ -347,15 +335,7 @@ namespace methods {
             _Timer.stop("PI_LR_HADPROD");
           }
         } else {
-          // nkpts == 1: phase multiply in-place, then Hadamard
-          _Timer.start("PI_LR_TREV_PHASE");
-          for (long is = 0; is < ns; ++is) {
-            for (long iR = 0; iR < nkpts; ++iR) {
-              DeltaG_skPQ_loc(is, iR, nda::ellipsis{}) *= phase_ipR(iR);
-            }
-          }
-          _Timer.stop("PI_LR_TREV_PHASE");
-
+          // nkpts == 1: R = 0 only, where e^{ip·R} = 1
           _Timer.start("PI_LR_HADPROD");
           auto G_skPQ_cached = dG_tsRPQ.local()(it, nda::ellipsis{});
           for (long s = 0; s < ns; ++s) {

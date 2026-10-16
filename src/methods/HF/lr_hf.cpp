@@ -86,16 +86,16 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
   app_log(2, "  - q is Gamma point: {}", _is_q_gamma ? "yes" : "no");
   app_log(2, "  - q IBZ index: {}", _q_ibz_idx);
 
-  // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1 selects
+  // k<->R transforms: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1 selects
   // the gemm path with explicit FT coefficients (kept for testing). fft_kR_t
   // aborts on a shifted / non-Monkhorst-Pack mesh and in a build without FFTW.
-  _use_fft = (_nkpts != 1 and not utils::lr_debug_gemm_ft());
+  _use_fft = (_nkpts != 1 and not utils::debug_gemm_ft());
   if (_use_fft) {
     _fft_k.emplace(MF->kpts(), MF->lattv(), MF->kp_grid());
     _fft_q.emplace(MF->Qpts(), MF->lattv(), MF->kp_grid());
   }
   if (_nkpts != 1)
-    app_log(2, "  - k<->R transform: {}", _use_fft ? "FFT" : "gemm (COQUI_LR_DEBUG_GEMM_FT)");
+    app_log(2, "  - k<->R transform: {}", _use_fft ? "FFT" : "gemm (COQUI_DEBUG_GEMM_FT)");
 
   // Every clock print_subclocks_all reads, including the Aux->Primary sub-clocks
   // that only the dense path starts: elapsed() aborts on an unregistered name.
@@ -407,6 +407,40 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   }
   // --- end DeltaV correction setup ---
 
+  // Hartree: n_Q += diag_Q ΔDm(R = 0), the spin sum of one polarization block,
+  // read from dDeltaDm_skPQ once it holds R = 0 in row 0.
+  auto add_DeltaDm_diag = [&]() {
+    double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
+    auto DeltaDm_sRPQ_loc = dDeltaDm_skPQ.local();
+    for (long is = 0; is < ns; ++is) {
+      for (auto idx : diag_idx)
+        DeltaDm_QQ(idx.first + P_origin) += factor * DeltaDm_sRPQ_loc(is, 0, idx.first, idx.second);
+    }
+  };
+  // Hartree: ΔJ_P = Σ_Q U_PQ n_Q (+ δV^{q=Γ}_PQ · Dm_QQ_unpert), added to the
+  // diagonal of dDeltaF_skPQ at every (s, k).
+  auto add_DeltaJ = [&]() {
+    // MAM: communication not optimized
+    dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
+    nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
+    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
+    if (DeltaV_qPQ) {
+      nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
+                      Dm_QQ_unpert(Q_rng),
+                      ComplexType(1.0), DeltaJ_PP(P_rng));
+    }
+    dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
+
+    auto DeltaF_skPQ = dDeltaF_skPQ.local();
+    for (long is = 0; is < ns; ++is) {
+      for (long ik = 0; ik < nkpts_ibz; ++ik) {
+        for (auto idx : diag_idx) {
+          DeltaF_skPQ(is, ik, idx.first, idx.second) += DeltaJ_PP(idx.first + P_origin);
+        }
+      }
+    }
+  };
+
   if (compute_hartree and not compute_exchange) {
     // === HARTREE-ONLY PATH ===
 
@@ -429,41 +463,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
           R0 *= 1.0 / double(nkpts);
         }
       }
-      auto& dDeltaDm_sRPQ = dDeltaDm_skPQ;
-
-      // Accumulate DeltaDm_QQ diagonal
-      double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
-      auto DeltaDm_sRPQ_loc = dDeltaDm_sRPQ.local();
-      for (long is = 0; is < ns; ++is) {
-        for (auto idx : diag_idx)
-          DeltaDm_QQ(idx.first + P_origin) += factor * DeltaDm_sRPQ_loc(is, 0, idx.first, idx.second);
-      }
+      add_DeltaDm_diag();
       _Timer.stop("COULOMB");
 
     } // ip
 
     _Timer.start("COULOMB");
-    // MAM: communication not optimized
-    dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
-    nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
-    // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ
-    if (DeltaV_qPQ) {
-      nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
-                      Dm_QQ_unpert(Q_rng),
-                      ComplexType(1.0), DeltaJ_PP(P_rng));
-    }
-    dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
-
-    auto DeltaF_skPQ = dDeltaF_skPQ.local();
-    DeltaF_skPQ() = ComplexType(0.0);
-    for (long is = 0; is < ns; ++is) {
-      for (long ik = 0; ik < nkpts_ibz; ++ik) {
-        for (auto idx : diag_idx) {
-          DeltaF_skPQ(is, ik, idx.first, idx.second) += DeltaJ_PP(idx.first + P_origin);
-        }
-      }
-    }
+    dDeltaF_skPQ.local() = ComplexType(0.0);
+    add_DeltaJ();
     _Timer.stop("COULOMB");
 
     _Timer.start("AUX_TO_PRIM");
@@ -547,35 +554,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // Hartree contribution (diagonal blocks only)
         if (compute_hartree and ip == iq) {
           _Timer.start("COULOMB");
-          double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
-          auto DeltaDm_sRPQ_loc = dDeltaDm_sRPQ.local();
-          for (long is = 0; is < ns; ++is) {
-            for (auto idx : diag_idx)
-              DeltaDm_QQ(idx.first + P_origin) += factor * DeltaDm_sRPQ_loc(is, 0, idx.first, idx.second);
-          }
-
-          if (npol == 1) {
-            // if npol==1, add Coulomb contribution to F_skPQ here
-            dDeltaDm_sRPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
-            nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-            nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
-            // DeltaV correction: DeltaJ_PP += δV^{q=Γ}_PQ · Dm_QQ_unpert
-            if (DeltaV_qPQ) {
-              nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
-                              Dm_QQ_unpert(Q_rng),
-                              ComplexType(1.0), DeltaJ_PP(P_rng));
-            }
-            dDeltaDm_sRPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
-
-            auto DeltaF_skPQ = dDeltaF_skPQ.local();
-            for (long is = 0; is < ns; ++is) {
-              for (long ik = 0; ik < nkpts_ibz; ++ik) {
-                for (auto idx : diag_idx) {
-                  DeltaF_skPQ(is, ik, idx.first, idx.second) += DeltaJ_PP(idx.first + P_origin);
-                }
-              }
-            }
-          }
+          add_DeltaDm_diag();
+          // if npol==1, add Coulomb contribution to F_skPQ here
+          if (npol == 1) add_DeltaJ();
           _Timer.stop("COULOMB");
         }
 
@@ -645,20 +626,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // add Coulomb contribution, Dm_QQ has local contribution of diagonal of Dm summed
         // over spin and polarization
         _Timer.start("COULOMB");
-        dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
-        nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-        nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
-        dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
-
         dDeltaF_skPQ.local() = ComplexType(0.0);
-        auto DeltaF_skPQ = dDeltaF_skPQ.local();
-        for (long is = 0; is < ns; ++is) {
-          for (long ik = 0; ik < nkpts_ibz; ++ik) {
-            for (auto idx : diag_idx) {
-              DeltaF_skPQ(is, ik, idx.first, idx.second) += DeltaJ_PP(idx.first + P_origin);
-            }
-          }
-        }
+        add_DeltaJ();
         _Timer.stop("COULOMB");
 
         _Timer.start("AUX_TO_PRIM");

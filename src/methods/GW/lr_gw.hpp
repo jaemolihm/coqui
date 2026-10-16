@@ -276,7 +276,7 @@ namespace methods {
       std::optional<utils::mpi_context_t<mpi3::communicator>> _tau_mpi;
       std::optional<dArr_loc_4D_t> _dG_skPQ, _dSigma_skPQ;
       std::optional<sArr_2D_t> _sf_Rk, _sf_kR, _sf_qR;
-      // Blocked-FFT k<->R transforms; COQUI_LR_DEBUG_GEMM_FT=1 leaves these
+      // Blocked-FFT k<->R transforms; COQUI_DEBUG_GEMM_FT=1 leaves these
       // empty and uses the gemm path (coefficient matrices above) instead.
       std::optional<math::fft::fft_kR_t> _fft_k, _fft_q;
       nda::matrix<ComplexType> _ft_buffer;

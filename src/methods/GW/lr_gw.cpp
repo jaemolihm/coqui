@@ -290,10 +290,10 @@ namespace methods {
       // Aux→Primary partial: one (nbnd, nbnd) block per (s,k).
       _A2P_buf_iab.resize(ns * nkpts, MF->nbnd(), MF->nbnd());
 
-      // k<->R transforms: blocked FFT by default; COQUI_LR_DEBUG_GEMM_FT=1
+      // k<->R transforms: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1
       // selects the gemm path with explicit FT coefficients (kept for testing).
       _Timer.start("SIGMA_FT_COEFF");
-      const bool use_gemm_ft = utils::lr_debug_gemm_ft();
+      const bool use_gemm_ft = utils::debug_gemm_ft();
       if (nkpts != 1 && use_gemm_ft) {
         _ft_buffer.resize(nkpts, NP_loc * NQ_loc);
         _sf_Rk.emplace(*_tau_mpi, std::array<long, 2>{nkpts, nkpts});
@@ -315,7 +315,7 @@ namespace methods {
       }
       if (nkpts != 1)
         app_log(3, "    Sigma k<->R transform: {}",
-                use_gemm_ft ? "gemm (COQUI_LR_DEBUG_GEMM_FT)" : "FFT");
+                use_gemm_ft ? "gemm (COQUI_DEBUG_GEMM_FT)" : "FFT");
       _Timer.stop("SIGMA_FT_COEFF");
 
       _setup_term1 = do_term1;
@@ -492,16 +492,11 @@ namespace methods {
             // all of Q, so the whole local block is assigned before it is read.
             _Timer.start("SIGMA_PRIM_TO_AUX");
             auto DeltaG_slice = (*DeltaG_tskij)(it_g, nda::ellipsis{});
-            if (ibc && ibc->sG_tskij) {
-              // DeltaX correction: pass unperturbed G(τ) view as O_unpert (no copy)
-              auto G_tau_view = ibc->sG_tskij->local()(it_g, nda::ellipsis{});
-              lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
-                                          MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
-                                          ibc, &G_tau_view);
-            } else {
-              lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
-                                          MF->kp_to_ibz(), MF->kp_trev(), _kpq_map);
-            }
+            // DeltaX correction: the unperturbed G(τ) view is O_unpert (no copy)
+            auto G_tau = unpert_G_slice(ibc, it_g);
+            lr_thc_comm::primary_to_aux(0, 0, DeltaG_slice, dG_skPQ, thc,
+                                        MF->kp_to_ibz(), MF->kp_trev(), _kpq_map,
+                                        ibc, G_tau ? &*G_tau : nullptr);
             _Timer.stop("SIGMA_PRIM_TO_AUX");
 
             if (nkpts != 1) {
