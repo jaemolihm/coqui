@@ -23,6 +23,7 @@
 #define COQUI_LR_PRECOMPUTE_HPP
 
 #include <functional>
+#include <optional>
 
 #include "IO/app_loggers.h"
 #include "nda/blas.hpp"
@@ -169,25 +170,28 @@ auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_tqPQ_
  * shape, which a single-ω target has not. So it goes one q at a time through a
  * replicated (NP, NQ) buffer — setup-time, and one aux-basis matrix.
  *
- * @param dW_wqPQ - [INPUT] W_c on the PH-symmetric ω half-axis, (nw, nq, NP, NQ)
- * @return W_c(iν=0) as (nq, NP, NQ) on utils::lr_aux_kernel_pgrid, the tiling
- *         lr_hf's exchange path fetches its Coulomb kernel on
+ * @param dW_wqPQ  - [INPUT] W_c on the PH-symmetric ω half-axis, (nw, nq, NP, NQ)
+ * @param out_comm - [INPUT] communicator of the output, lr_hf::aux_kernel_comm
+ * @param pgrid    - [INPUT] processor grid of the output, lr_hf::aux_kernel_pgrid
+ * @return W_c(iν=0) as (nq, NP, NQ) on the tiling lr_hf's exchange path fetches
+ *         its Coulomb kernel on. When that tiling is replicated over groups of
+ *         ranks, every group gets its own copy.
  */
 template<nda::MemoryArray Array_4D_t, typename communicator_t>
-auto lr_precompute_Wc_static(memory::darray_t<Array_4D_t, communicator_t> const& dW_wqPQ) {
+auto lr_precompute_Wc_static(memory::darray_t<Array_4D_t, communicator_t> const& dW_wqPQ,
+                             mpi3::communicator& out_comm, std::array<long, 3> pgrid) {
   using local_Array_3D_t = nda::array<ComplexType, 3>;
   decltype(nda::range::all) all;
 
   auto* comm = dW_wqPQ.communicator();
   auto [nw, nq, NP, NQ] = dW_wqPQ.global_shape();
   (void)nw;
-  auto pgrid = utils::lr_aux_kernel_pgrid(comm->size());
 
   app_log(2, "lr_precompute_Wc_static: extracting W_c(iν=0) ({}, {}, {})",
           nq, NP, NQ);
 
   auto dWc0_qPQ = math::nda::make_distributed_array<local_Array_3D_t>(
-      *comm, pgrid, {nq, NP, NQ});
+      out_comm, pgrid, {nq, NP, NQ});
 
   // The ν = 0 plane sits on the ranks whose ω tile starts at 0. Between them
   // they tile (q, P, Q) exactly once, so summing their blocks into a zeroed
@@ -222,7 +226,7 @@ auto lr_precompute_Wc_static(memory::darray_t<Array_4D_t, communicator_t> const&
  * G is constant during the LR SCF loop, and evaluate_lr_Pi needs it. This caches
  *   G^R_{PQ}(τ_it)        → dG_tsRPQ  (it, s, R, P, Q)
  *   G^R_{PQ}(β − τ_it)    → dG_mtau_tsRPQ (it, s, R, P, Q)
- * for it in the local τ range of the LR τ-dist (lr_W_q_local_dist), which is
+ * for it in the local τ range of the LR τ-dist (lr_W_q_local_dist_fit), which is
  * the distribution shared by Π, dW_tRPQ and ΔW in the gw_full pipeline.
  * The pair covers all G accesses: Π term 1 uses conj(G^R(β−τ)), Π term 2 uses
  * G^R(τ), Σ term 2 uses G^R(τ) (forward pass) and G^R(β−τ) (backward pass).
@@ -256,31 +260,41 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
   long Np = thc.Np();
   long nt_half = (nt_f % 2 == 0) ? nt_f / 2 : nt_f / 2 + 1;
 
-  auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
+  auto [g, tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist_fit(mpi->comm.size(), nt_half, Np);
   auto [tpools, q_dummy, np_P, np_Q] = tau_pgrid;
+  const bool active = (mpi->comm.rank() < g);
 
   app_log(2, "lr_precompute_G_R_pair: caching G^R(τ) / G^R(β−τ) in aux basis");
   app_log(2, "  global: ({}, {}, {}, {}, {}) x2, pgrid: ({}, 1, 1, {}, {})",
           nt_half, ns, nkpts, Np, Np, tpools, np_P, np_Q);
+  if (g < mpi->comm.size())
+    app_log(2, "  on the first {} of {} ranks", g, mpi->comm.size());
 
-  auto dG_tsRPQ = make_distributed_array<local_Array_5D_t>(
+  // On the first g ranks; the others hold no τ point (empty along axis 0).
+  using math::nda::make_distributed_array_on_first_ranks;
+  auto dG_tsRPQ = make_distributed_array_on_first_ranks<local_Array_5D_t>(
       mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
-      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
-  auto dG_mtau_tsRPQ = make_distributed_array<local_Array_5D_t>(
+      {1, 1, 1, tau_bsize[2], tau_bsize[3]}, 0);
+  auto dG_mtau_tsRPQ = make_distributed_array_on_first_ranks<local_Array_5D_t>(
       mpi->comm, {tpools, 1, 1, np_P, np_Q}, {nt_half, ns, nkpts, Np, Np},
-      {1, 1, 1, tau_bsize[2], tau_bsize[3]});
+      {1, 1, 1, tau_bsize[2], tau_bsize[3]}, 0);
 
   long t_origin = dG_tsRPQ.origin()[0];
   auto [nt_loc, ns_loc, nk_loc, NP_loc, NQ_loc] = dG_tsRPQ.local_shape();
 
-  // Work buffer in the same PQ tiling, built on the t-intra subgroup
-  mpi3::communicator t_intra_comm = mpi->comm.split(t_origin, mpi->comm.rank());
-  utils::check(t_intra_comm.size() == np_P * np_Q,
-               "lr_precompute_G_R_pair: t_intra_comm.size() = {} != np_P*np_Q",
-               t_intra_comm.size());
-  auto dG_skPQ = make_distributed_array<local_Array_4D_t>(
-      t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
-      {1, 1, tau_bsize[2], tau_bsize[3]});
+  // Work buffer in the same PQ tiling, built on the t-intra subgroup. Ranks
+  // holding no τ point form a group of their own and get no buffer.
+  mpi3::communicator t_intra_comm = mpi->comm.split(
+      utils::lr_tau_colour(mpi->comm.rank(), g, t_origin, nt_half), mpi->comm.rank());
+  std::optional<memory::darray_t<local_Array_4D_t, mpi3::communicator>> opt_dG_skPQ;
+  if (active) {
+    utils::check(t_intra_comm.size() == np_P * np_Q,
+                 "lr_precompute_G_R_pair: t_intra_comm.size() = {} != np_P*np_Q",
+                 t_intra_comm.size());
+    opt_dG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
+        t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
+        {1, 1, tau_bsize[2], tau_bsize[3]}));
+  }
 
   // f_Rk (same transform as Π's term factors and Σ term 2)
   math::shm::shared_array<nda::array_view<ComplexType, 2>> sf_Rk(*mpi, {nkpts, nkpts});
@@ -288,9 +302,10 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
     utils::k_to_R_coefficients(mpi->comm, nda::range(nkpts), MF->kpts(), MF->lattv(), MF->kp_grid(), sf_Rk);
   auto f_Rk = sf_Rk.local();
 
-  nda::matrix<ComplexType> ft_out(nkpts, NP_loc * NQ_loc);
+  nda::matrix<ComplexType> ft_out(active ? nkpts : 0, NP_loc * NQ_loc);
 
   for (long it = 0; it < nt_loc; ++it) {
+    auto& dG_skPQ = *opt_dG_skPQ;
     long it_g = t_origin + it;
     for (int pass = 0; pass < 2; ++pass) {
       long idx = (pass == 0) ? it_g : nt_f - 1 - it_g;

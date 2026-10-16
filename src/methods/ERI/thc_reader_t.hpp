@@ -759,7 +759,9 @@ namespace methods {
       }
 
       if (read_Vxc) {
-        _Vxc = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, q_pgrid, {_nqpts_ibz, _Np, _Np});
+        auto vxc_grid = utils::find_proc_grid_fit_or_abort<3>(_mpi->comm.size(), {_nqpts_ibz, _Np, _Np},
+                                                              q_pgrid, "thc_reader_t: Vxc");
+        _Vxc = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, vxc_grid, {_nqpts_ibz, _Np, _Np});
         math::nda::h5_read(grp, "Vxc", _Vxc.value());
         if (grp.has_dataset("Vxc_source")) {
           h5::h5_read(grp, "Vxc_source", _vxc_source);
@@ -1276,7 +1278,8 @@ namespace methods {
     // Declared before _dZ, which holds a pointer to it, so that it is destroyed after _dZ.
     std::shared_ptr<mpi3::communicator> _Z_comm;
     dArray_t<HOST_MEMORY,3> _dZ;
-    // Semilocal xc-kernel matrix Vxc(q,P,Q), same shape and distribution as _dZ.
+    // Semilocal xc-kernel matrix Vxc(q,P,Q), same shape as _dZ, always distributed over all of _mpi->comm
+    // (_dZ may instead be replicated over groups of ranks, see _Z_comm).
     // Present only when the THC was built with Vxc_file, or read from a THC
     // checkpoint that carries the "Vxc" dataset. Deliberately NOT merged into
     // _dZ: Vxc is only defined in the direct (Hartree) channel, and dZ() feeds

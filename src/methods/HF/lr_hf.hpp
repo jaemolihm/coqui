@@ -110,7 +110,7 @@ public:
    * `head_factor` carries that ε⁻¹(iν=0).
    */
   struct hsex_kernel_t {
-    /// W_c(q, iν=0), (nq, NP, NP) on utils::lr_aux_kernel_pgrid(comm.size()).
+    /// W_c(q, iν=0), (nq, NP, NP) on lr_hf::aux_kernel_pgrid / aux_kernel_comm.
     const dArray_3D_t* Wc0_qPQ;
     /// ε⁻¹(iν=0), the scale of the exchange Madelung term.
     double head_factor;
@@ -203,6 +203,15 @@ public:
     app_log(level, "{0}  - Madelung correction:        {1:8.3f} sec  {2:4d} calls", indent, sec("MADELUNG"), cnt("MADELUNG"));
   }
 
+  /// The (P,Q) kernel distribution every aux-basis array of this solver lives on
+  /// (utils::lr_aux_kernel_dist): the processor grid {1, np_P, np_Q} and the
+  /// communicator holding it — the whole communicator, or this rank's group of g
+  /// ranks when no (P,Q) grid of all ranks fits (NP, NP). Any kernel meant to be
+  /// added to the Coulomb tile (the HSEX W_c(iν=0)) has to be built on the same.
+  /// The first call is collective.
+  mpi3::communicator& aux_kernel_comm(long NP);
+  std::array<long, 3> aux_kernel_pgrid(long NP);
+
 private:
   std::shared_ptr<mpi_context_t> _mpi;
   const mf::MF* _MF;
@@ -229,6 +238,15 @@ private:
   bool _use_fft = false;
 
   utils::TimerManager _Timer;
+
+  // (P,Q) kernel distribution, set on the first aux_kernel_comm/_pgrid call.
+  // _pq_group_comm is engaged only when the grid does not fit all ranks (_pq_g < np);
+  // then only the first group (ranks < _pq_g) adds its result to ΔF.
+  long _pq_NP = -1;
+  long _pq_g = 0;
+  std::array<long, 3> _pq_pgrid = {1, 1, 1};
+  std::optional<mpi3::communicator> _pq_group_comm;
+  void _init_aux_kernel_dist(long NP);
 
   // --- Data cached across evaluate() calls ---------------------------------
   // lr_hf is constructed per (q, THC handler) and lives for the whole LR SCF, so

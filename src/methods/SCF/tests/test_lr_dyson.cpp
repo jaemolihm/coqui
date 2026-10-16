@@ -598,6 +598,83 @@ namespace lr_dyson_tests {
     CHECK(pgrid2[3] * pgrid2[4] == 1);
   }
 
+  TEST_CASE("lr_proc_grid_fit", "[methods_scf]")
+  {
+    // The LR grid helpers (utils::lr_*_fit): unchanged grids for ab initio shapes,
+    // fitting ones for a one-orbital model (Np = 1).
+    using g4 = std::array<long,4>;
+    using g3 = std::array<long,3>;
+    auto grid_size = [](auto const& g) { long p = 1; for (auto n : g) p *= n; return p; };
+
+    // ab initio shapes: every _fit helper returns the old grid unchanged
+    {
+      long NP = 300, nt_half = 28, nw_half = 30, nq = 64;
+      for(long np=1; np<=96; ++np) {
+        auto [pg, bs] = utils::lr_W_q_local_dist(np, nt_half, NP);
+        auto [g, pgf, bsf] = utils::lr_W_q_local_dist_fit(np, nt_half, NP);
+        REQUIRE( g == np );
+        REQUIRE( pgf == pg );
+        REQUIRE( bsf == bs );
+
+        auto [wpg, wbs] = utils::lr_W_tau_local_dist(np, nw_half, nq, NP);
+        auto [wpgf, wbsf, fused] = utils::lr_W_tau_local_dist_fit(np, nw_half, nq, NP);
+        REQUIRE( fused );
+        REQUIRE( wpgf == wpg );
+        REQUIRE( wbsf == wbs );
+
+        auto [ga, pqa] = utils::lr_aux_kernel_dist(np, NP);
+        REQUIRE( ga == np );
+        REQUIRE( pqa == utils::lr_aux_kernel_pgrid(np) );
+      }
+    }
+
+    // NP = 1 (one-orbital model): a grid that fits, on all ranks or on the first g
+    for(long nt_half : {3l, 28l})
+      for(long nq : {1l, 16l, 1024l})
+        for(long np=1; np<=96; ++np) {
+          g4 t_ext{nt_half, 1, 1, 1};
+          auto [g, pg, bs] = utils::lr_W_q_local_dist_fit(np, nt_half, 1);
+          REQUIRE( g <= np );
+          REQUIRE( grid_size(pg) == g );
+          REQUIRE( utils::proc_grid_fits(pg, t_ext) );
+          REQUIRE( bs == g4{1,1,1,1} );
+          REQUIRE( (g == np) == (np <= nt_half) );
+
+          long nw_half = 30;
+          g4 w_ext{nw_half, nq, 1, 1};
+          if(utils::find_proc_grid_fit<4>(np, w_ext).has_value()) {
+            auto [wpg, wbs, fused] = utils::lr_W_tau_local_dist_fit(np, nw_half, nq, 1);
+            REQUIRE( grid_size(wpg) == np );
+            REQUIRE( utils::proc_grid_fits(wpg, w_ext) );
+            if(fused) REQUIRE( wpg == utils::lr_W_tau_local_dist(np, nw_half, nq, 1).first );
+          }
+
+          auto [ga, pqa] = utils::lr_aux_kernel_dist(np, 1);
+          REQUIRE( ga == 1 );
+          REQUIRE( pqa == g3{1,1,1} );
+        }
+
+    // tier 2: the preferred grid does not fit, a grid of all ranks with q undivided does
+    {
+      auto [g, pg, bs] = utils::lr_W_q_local_dist_fit(8, 28, 1);
+      REQUIRE( g == 8 );
+      REQUIRE( pg == g4{8,1,1,1} );
+    }
+    // tier 3: no grid of all ranks exists
+    {
+      auto [g, pg, bs] = utils::lr_W_q_local_dist_fit(32, 28, 1);
+      REQUIRE( g == 28 );
+      REQUIRE( pg == g4{28,1,1,1} );
+    }
+    // ω side: the q pools leave ranks the (P, Q) axes cannot take, ω is split
+    {
+      auto [wpg, wbs, fused] = utils::lr_W_tau_local_dist_fit(32, 30, 16, 1);
+      REQUIRE( not fused );
+      REQUIRE( grid_size(wpg) == 32 );
+      REQUIRE( wbs == g4{1,1,1,1} );
+    }
+  }
+
   TEST_CASE("lr_dyson_dN_dmu_q0", "[methods_scf]") {
     /**
      * dN/dmu is taken from the Delta_mu response of the LR solution:

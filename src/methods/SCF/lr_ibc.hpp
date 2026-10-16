@@ -146,8 +146,11 @@ namespace methods {
     long nkpts_ibz = MF->nkpts_ibz();
 
     int np = mpi.comm.size();
-    int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
-    int np_Q = np / np_P;
+    long np_P0 = utils::find_proc_grid_min_diff(np, 1, 1);
+    auto pq_grid = utils::find_proc_grid_fit_or_abort<2>(
+        np, {NP, NP}, std::array<long, 2>{np_P0, np / np_P0}, "lr_precompute_V_HF_PQ (DeltaX)");
+    int np_P = pq_grid[0];
+    int np_Q = pq_grid[1];
     nda::array<long, 1> R_grid = MF->kp_grid();
 
     app_log(2, "lr_precompute_V_HF_PQ: computing V_HF directly in PQ space");
@@ -430,8 +433,11 @@ namespace methods {
 
     // Determine PQ grid for rank-4 buffers: all processes, no tau distribution.
     int np = mpi.comm.size();
-    int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
-    int np_Q = np / np_P;
+    long np_P0 = utils::find_proc_grid_min_diff(np, 1, 1);
+    auto pq_grid = utils::find_proc_grid_fit_or_abort<2>(
+        np, {NP, NP}, std::array<long, 2>{np_P0, np / np_P0}, "lr_ibc DeltaX Σ precompute");
+    int np_P = pq_grid[0];
+    int np_Q = pq_grid[1];
 
     // Gather W into a local array with pgrid (1,1,np_P,np_Q) so all ranks
     // own all τ-points. This is a one-time cost for IBC precomputation.
