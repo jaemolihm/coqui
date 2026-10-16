@@ -233,7 +233,7 @@ void lr_driver::lr_setup(
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.iter_params.mixing);
-  if (p.iter_params.use_diis()) {
+  if (p.iter_params.alg == "DIIS") {
     app_log(1, "  max_subsp_size = {}", p.iter_params.max_subsp_size);
     app_log(1, "  diis_warmup = {}", p.iter_params.diis_warmup);
   }
@@ -255,7 +255,7 @@ void lr_driver::lr_setup(
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
     }
-  } else if (p.iter_params.use_diis() && !K.empty()) {
+  } else if (p.iter_params.alg == "DIIS" && !K.empty()) {
     // DIIS
     _lr_diis = std::make_unique<lr_diis>(p.iter_params);
   }

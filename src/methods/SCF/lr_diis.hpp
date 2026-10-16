@@ -49,9 +49,6 @@ struct lr_iter_params {
   /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
   size_t max_subsp_size = 10;
   size_t diis_warmup = 0;
-
-  /// Single source of the string comparison, so no caller repeats the literal.
-  bool use_diis() const { return alg == "DIIS"; }
 };
 
 
@@ -100,7 +97,7 @@ public:
         _warmup_iter(params.diis_warmup),
         _mixing(params.mixing),
         _B(0, 0) {
-    utils::check(params.use_diis(), "lr_diis: built from a non-DIIS iter_alg '{}'.", params.alg);
+    utils::check(params.alg == "DIIS", "lr_diis: built from a non-DIIS iter_alg '{}'.", params.alg);
     // A subspace capped below _min_subsp keeps the warmup gate on forever, so DIIS
     // would silently degrade to plain damping — which would otherwise show up only
     // as "DIIS converges exactly like mixing".
@@ -342,6 +339,7 @@ private:
    */
   void purge_oldest() {
     size_t n = _B.shape()[0];
+    utils::check(n > 0 && _n > 0, "lr_diis::purge_oldest: history is empty.");
     nda::matrix<ComplexType> Bnew(n - 1, n - 1);
     for (size_t i = 0; i < n - 1; ++i) {
       for (size_t j = 0; j < n - 1; ++j) {
