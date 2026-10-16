@@ -444,7 +444,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - "fixed_W": ΔΣ = -ΔG⊙W (W frozen)
         - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
     max_iter : int, optional
-        Maximum number of SCF iterations (default 50). Use 1 for one-shot.
+        Maximum number of SCF iterations (default 50). Use 1 for one-shot: one
+        kernel evaluation, then the Dyson pass at its output.
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
@@ -502,7 +503,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     split_sigma_terms : bool, optional
         If True, store the two one-shot ΔΣ terms separately (default False):
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
-        (G0·dW0). Requires gw_mode="full" and max_iter=1. See run_lr_g0w0.
+        (G0·dW0). Requires gw_mode="full", max_iter=1 and mixing >= 1. See
+        run_lr_g0w0.
     div_treatment : str or None, optional
         Divergence treatment for the ε⁻¹ head. Accepted only for
         unperturbed="mf_dft"; a hard error otherwise, since the LR run must reuse
@@ -696,8 +698,12 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
         DeltaSigma_tskij     = total correlation ΔΣ = dG0·W_c0 + G0·dW0
         DeltaSigma_GdW_tskij = the G0·dW0 piece, broken out separately
         DeltaF_skij          = exchange ΔK (= -dG0·v, the v part of dG0·W0)
+        DeltaG_tskij         = G0·(ΔH0 + ΔF + ΔΣ)·G0, the Dyson response to the
+                               one-shot ΔF/ΔΣ (save_DeltaG=True); DeltaDm_skij
+                               is its density matrix
     so dG0·W_c0 = DeltaSigma_tskij - DeltaSigma_GdW_tskij, and the full
-    dG0·W0 = DeltaF_skij + (DeltaSigma_tskij - DeltaSigma_GdW_tskij).
+    dG0·W0 = DeltaF_skij + (DeltaSigma_tskij - DeltaSigma_GdW_tskij). No output
+    holds dG0 = G0·ΔH0·G0 itself.
 
     Parameters
     ----------
@@ -732,7 +738,7 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
     Returns
     -------
     tuple[int, float]
-        (niter, Delta_mu). One-shot performs a single LR iteration.
+        (niter, Delta_mu). The one-shot loop does not converge, so niter = 2.
     """
     return run_lr(params, h_int, q_vec, DeltaH0_skij,
                   include_hartree=False, include_exchange=True,
