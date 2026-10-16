@@ -245,19 +245,18 @@ void lr_driver::lr_setup(
   // once no matter how many perturbations follow. Built here, ahead of the memory
   // report below, which reads its shape off the object. Damping and undamped
   // Picard keep no history: lr_solve_one mixes them elementwise. Neither
-  // accelerator is built for an empty kernel, which never steps one.
-  if (p.iter_params.alg == "GCR") {
-    // GCR
-    // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
-    // every pair costs a ΔΣ, as one DIIS depth unit does.
-    if (!K.empty()) {
+  // accelerator is built for an empty kernel: GCR would otherwise step on a zero
+  // residual at iteration 1, before the convergence test ends the loop.
+  if (!K.empty()) {
+    if (p.iter_params.alg == "GCR") {
+      // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
+      // every pair costs a ΔΣ, as one DIIS depth unit does.
       size_t cap = p.iter_params.max_subsp_size;
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
+    } else if (p.iter_params.alg == "DIIS") {
+      _lr_diis = std::make_unique<lr_diis>(p.iter_params);
     }
-  } else if (p.iter_params.alg == "DIIS" && !K.empty()) {
-    // DIIS
-    _lr_diis = std::make_unique<lr_diis>(p.iter_params);
   }
   // The preconditioner's inner GCR iterates ΔF alone, so its pairs are tiny.
   if (!p.precond_kernel.empty()) _pc_gcr = std::make_unique<lr_gcr>(50);
@@ -696,6 +695,11 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   double Delta_mu = 0.0;
   int iter = 0;
   bool converged = false;
+  // Whether the loop ran the iteration-algorithm step (GCR, DIIS, damping or
+  // undamped Picard), which replaces ΔF/ΔΣ without updating ΔDm. Once it runs,
+  // every later iteration runs it too, so at exit this says whether the last
+  // iteration did.
+  bool stepped = false;
 
   const bool use_gcr = (_lr_gcr != nullptr);
   // The GCR direction map z = P_c⁻¹ r, preconditioned runs only.
@@ -817,7 +821,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     double gcr_rnorm = -1.0;
     bool gcr_converged = false;
     _pc_sweeps = 0;
-    if ((iter > 1 || use_gcr) && !K.empty()) {
+    if (iter > 1 || use_gcr) {
+      stepped = true;
       // Striped: every rank of the global comm participates, each operating on its
       // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
       // back in place. Pass .local() views directly (in/out); the "prev" arguments
@@ -915,7 +920,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     bool f_converged = !K.has_F() || norm_DeltaF_diff < p.tol;
     bool sigma_converged = !K.has_sigma() || norm_DeltaSigma_diff < p.tol;
     bool conv_std = (iter > 1) && dm_converged && f_converged && sigma_converged;
-    bool iter_converged = use_gcr ? gcr_converged : conv_std;
+    // An empty kernel has no feedback: the first Dyson solve is the answer.
+    bool iter_converged = K.empty() || (use_gcr ? gcr_converged : conv_std);
 
     // Log iteration
     _Timer.start("LR_CONVERGENCE");
@@ -961,14 +967,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _mpi->comm.barrier();
   }
 
-  // Every exit, converged or at max_iter: the accelerator step of the last
-  // iteration has replaced ΔF (and ΔΣ / ΔV_QPGW) by its next iterate (a DIIS or
-  // damping mix, or GCR's x), while ΔDm is the response to that iteration's input.
-  // The Step 1 Dyson pass forms ΔDm at the returned iterate (with a Σ it also
-  // materializes ΔG(τ); otherwise update_DeltaG forms it on demand). A DIIS or
-  // damping one-shot (max_iter == 1) takes no step, so its ΔF/ΔΣ stay K of the
-  // bare response and the pass is skipped.
-  if ((use_gcr || p.max_iter > 1) && !K.empty()) {
+  // Every exit after an iteration-algorithm step, converged or at max_iter: the
+  // step of the last iteration has replaced ΔF (and ΔΣ / ΔV_QPGW) by its next
+  // iterate (a DIIS or damping mix, or GCR's x), while ΔDm is the response to
+  // that iteration's input. The Step 1 Dyson pass forms ΔDm at the returned
+  // iterate (with a Σ it also materializes ΔG(τ); otherwise update_DeltaG forms
+  // it on demand). A DIIS or damping one-shot (max_iter == 1) and an empty
+  // kernel take no step, so the pass is skipped.
+  if (stepped) {
     _Timer.start("LR_DYSON");
     dyson_pass();
     _Timer.stop("LR_DYSON");
