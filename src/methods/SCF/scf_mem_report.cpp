@@ -230,15 +230,17 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     // block of either endpoint, exactly as nda_utils.hpp computes it.
     const std::array<long, 4> t_gshape = {p.nth, p.nqi, p.NP, p.NP};
     const std::array<long, 4> w_gshape = {p.nwh, p.nqi, p.NP, p.NP};
-    std::tie(ftb_pgrid, ftb_bsize) =
-        solvers::scr_coulomb_fourier_t::ft_buffer_dist(nproc, t_gshape);
+    // the FT buffers may live on the first ftb_np < nproc ranks only (ft_buffer_dist_fit)
+    long ftb_np = nproc;
+    std::tie(ftb_np, ftb_pgrid, ftb_bsize) =
+        solvers::scr_coulomb_fourier_t::ft_buffer_dist_fit(nproc, t_gshape);
     std::tie(wo_pgrid, wo_bsize) =
         solvers::scr_coulomb_t::W_omega_proc_grid(nproc, p.nqi, p.nw_b, p.NP);
     // When the W(iw) distribution is already the FT buffer distribution, both
     // Fourier calls take their fast branch: tau_to_w transforms straight into
     // W(iw) and w_to_tau straight out of it, so there is no omega-side staging
     // buffer and one redistribute each instead of two.
-    const bool w_ft_fast = (wo_pgrid == ftb_pgrid and wo_bsize == ftb_bsize);
+    const bool w_ft_fast = (ftb_np == nproc and wo_pgrid == ftb_pgrid and wo_bsize == ftb_bsize);
     auto max_local = [&](std::array<long, 4> const& gs, std::array<long, 4> const& pg) {
       double n = 1.0;
       for (int i = 0; i < 4; ++i) n *= double(ceil_div(gs[i], std::max(1L, pg[i])));

@@ -611,6 +611,9 @@ namespace methods {
               factorization_type == "cholesky_high_memory" )  {
 
       _Timer.start("DF_DOWNFOLD");
+      // downfold_cholesky distributes V over Q only
+      utils::find_proc_grid_fit_or_abort<1>(mpi->comm.size(), {long(eri.Np())}, std::nullopt,
+                                            "embed_eri_t::downfold_bare, cholesky (Q)");
       auto dV_qPQ = eri.dZ({1, 1, mpi->comm.size()});
       app_log(1, "Treatment of long-wavelength divergence in V (bare): {}", _bare_div_treatment);
       auto div_factor = ( _bare_div_treatment == "ignore_g0") ? ComplexType(0.0) : ComplexType(1.0);
@@ -1520,6 +1523,9 @@ namespace methods {
     scr_coulomb.dyson_W_in_place(dW_wqPQ, thc);
     auto [eps_inv_head_wq, eps_inv_head_w] = solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *_MF, _div_treatment);
 
+    // downfold_cholesky distributes V over Q only
+    utils::find_proc_grid_fit_or_abort<1>(mpi->comm.size(), {long(thc.Np())}, std::nullopt,
+                                          "embed_eri_t::rpa_chol_eri_impl (Q)");
     auto dV_qPQ = thc.dZ({1, 1, mpi->comm.size()});
     // dV_qPQ = dV_qPQ + dW_wqPQ[0,...]
     {
@@ -1602,8 +1608,15 @@ namespace methods {
     utils::check(nqpools > 0 and nqpools <= nqpts_ibz,
                  "embed_eri_t::downfold_V: nqpools <= 0 or nqpools > nqpts_ibz. nqpools = {}", nqpools);
     utils::check(comm.size() % nqpools == 0, "embed_eri_t::downfold_V: gcomm.size() % nqpools != 0");
+    // (nqpools, np_P, np_Q) is kept whenever it fits in (nqpts_ibz, Np, Np). Otherwise the ranks are
+    // split into groups of g ranks, each holding all of V on its own grid; only the first group adds.
+    auto [g, vgrid] = utils::find_proc_grid_fit_groups<3>(comm.size(), {long(nqpts_ibz), long(NP), long(NP)},
+                                                          std::array<long,3>{nqpools, np_P, np_Q});
+    std::optional<mpi3::communicator> group_comm;
+    if (g < comm.size()) group_comm.emplace(comm.split(comm.rank()/g, comm.rank()));
+    bool add_V = (comm.rank() < g);
 
-    auto dV_qPQ = thc.dZ({nqpools, np_P, np_Q});
+    auto dV_qPQ = thc.dZ((group_comm ? *group_comm : thc.mpi()->comm), vgrid);
     auto [nq_loc, NP_loc, NQ_loc] = dV_qPQ.local_shape();
     auto Q_rng = dV_qPQ.local_range(2);
     auto [q_origin, P_origin, Q_origin] = dV_qPQ.origin();
@@ -1618,7 +1631,7 @@ namespace methods {
     auto B_cd_P_conj = nda::reshape(B_cdP_conj, shape_t<2>{nImpOrbs*nImpOrbs, NP_loc});
 
     // Bare interactions
-    for (size_t iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    for (size_t iq_loc = 0; iq_loc < (add_V ? nq_loc : 0); ++iq_loc) {
       // iq lives in IBZ
       size_t iq = q_origin + iq_loc;
 
@@ -1668,8 +1681,15 @@ namespace methods {
     utils::check(nqpools > 0 and nqpools <= nqpts_ibz,
                  "embed_eri_t::downfold_Vq: nqpools <= 0 or nqpools > nqpts_ibz. nqpools = {}", nqpools);
     utils::check(comm.size() % nqpools == 0, "embed_eri_t::downfold_Vq: gcomm.size() % nqpools != 0");
+    // (nqpools, np_P, np_Q) is kept whenever it fits in (nqpts_ibz, Np, Np). Otherwise the ranks are
+    // split into groups of g ranks, each holding all of V on its own grid; only the first group adds.
+    auto [g, vgrid] = utils::find_proc_grid_fit_groups<3>(comm.size(), {long(nqpts_ibz), long(NP), long(NP)},
+                                                          std::array<long,3>{nqpools, np_P, np_Q});
+    std::optional<mpi3::communicator> group_comm;
+    if (g < comm.size()) group_comm.emplace(comm.split(comm.rank()/g, comm.rank()));
+    bool add_V = (comm.rank() < g);
 
-    auto dV_qPQ = thc.dZ({nqpools, np_P, np_Q});
+    auto dV_qPQ = thc.dZ((group_comm ? *group_comm : thc.mpi()->comm), vgrid);
     auto [nq_loc, NP_loc, NQ_loc] = dV_qPQ.local_shape();
     auto Q_rng = dV_qPQ.local_range(2);
     auto [q_origin, P_origin, Q_origin] = dV_qPQ.origin();
@@ -1683,7 +1703,7 @@ namespace methods {
     auto B_cd_P_conj = nda::reshape(B_cdP_conj, shape_t<2>{nImpOrbs*nImpOrbs, NP_loc});
 
     // Bare interactions
-    for (size_t iq_loc = 0; iq_loc < nq_loc; ++iq_loc) {
+    for (size_t iq_loc = 0; iq_loc < (add_V ? nq_loc : 0); ++iq_loc) {
       // iq lives in IBZ
       size_t iq = q_origin + iq_loc;
 

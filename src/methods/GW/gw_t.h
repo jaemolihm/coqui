@@ -190,13 +190,14 @@ namespace methods {
        * @param thc          - [INPUT] THC-ERI instance
        * @param kp_map       - [INPUT] mapping of k-points based on a given symmetry operation
        * @param minus_t      - [INPUT] false: self-energy at tau=(0,beta/2); true: self-energy at tau=(0,-beta/2)
+       * @param add          - [OPTIONAL] see thc_solver_comm::aux_to_primary
        */
       template<nda::MemoryArray Array_primary_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       void setup_Sigma_primary(const memory::darray_t<Array_aux_t, communicator_t> &dSigma_tskPQ,
                                sArray_t<Array_primary_t> &sSigma_tskij,
                                THC_ERI auto &thc,
                                nda::ArrayOfRank<1> auto const& kp_map,
-                               bool minus_t);
+                               bool minus_t, bool add = true);
 
       /**
        * Evaluate GW self-energy by computing the convolution on the R space
@@ -212,6 +213,17 @@ namespace methods {
                                  sArray_t<Array_5D_t> &sSigma_tskij,
                                  THC_ERI auto &thc,
                                  bool minus_t);
+      // eval_Sigma_all_Rspace on the (t, q, P, Q) processor grid `pgrid` (qpools == 1) of the first
+      // g ranks; ranks >= g hold empty blocks of dW_tqPQ
+      template<bool Winp_in_Rspace, bool Wout_in_Rspace,
+          nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
+          typename communicator_t>
+      void eval_Sigma_all_Rspace_impl(const nda::MemoryArrayOfRank<5> auto &G_tskij,
+                                      memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
+                                      sArray_t<Array_5D_t> &sSigma_tskij,
+                                      THC_ERI auto &thc,
+                                      bool minus_t,
+                                      std::array<long, 4> pgrid, long g);
 
       /**
        * Evaluate GW self-energy by computing the convolution on the k space

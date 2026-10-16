@@ -24,6 +24,7 @@
 
 #include <array>
 #include <optional>
+#include <tuple>
 #include <utility>
 
 #include "configuration.hpp"
@@ -118,6 +119,38 @@ namespace solvers {
      */
     static std::pair<std::array<long, 4>, std::array<long, 4>>
     ft_buffer_dist(long np, std::array<long, 4> gshape) {
+      auto dist = ft_buffer_dist_opt(np, gshape);
+      utils::check(dist.has_value(),
+          "scr_coulomb_fourier_t::ft_buffer_dist: PQ too small for proc count (NP*NQ < np_PQ)");
+      return *dist;
+    }
+
+    /**
+     * Staging-buffer distribution of tau_to_w / w_to_tau: ft_buffer_dist on all np ranks whenever
+     * it fits the (1, q, P, Q) extents. Otherwise the buffers live on the first b_np ranks that a
+     * processor grid fits (the other ranks hold empty blocks along q, see
+     * math::nda::make_distributed_array_on_first_ranks).
+     * @return {b_np, pgrid, bsize}
+     */
+    static std::tuple<long, std::array<long, 4>, std::array<long, 4>>
+    ft_buffer_dist_fit(long np, std::array<long, 4> gshape) {
+      std::array<long, 4> extents = {1, gshape[1], gshape[2], gshape[3]};
+      auto dist = ft_buffer_dist_opt(np, gshape);
+      if (dist.has_value() and utils::proc_grid_fits(dist->first, extents))
+        return {np, dist->first, dist->second};
+      auto [b_np, b_pgrid] = utils::find_proc_grid_fit_subset<4>(np, extents);
+      return {b_np, b_pgrid, std::array<long, 4>{1, 1, 1, 1}};
+    }
+
+    utils::TimerManager& timer() { return _Timer; }
+
+  private:
+    /**
+     * ft_buffer_dist, or std::nullopt when the (P, Q) axes are too small for the ranks left over
+     * by the q pools.
+     */
+    static std::optional<std::pair<std::array<long, 4>, std::array<long, 4>>>
+    ft_buffer_dist_opt(long np, std::array<long, 4> gshape) {
       std::array<long, 4> b_pgrid = {1, 1, 1, 1};
       std::array<long, 4> b_bsize = {1, 1, 1, 1};
       long nq = gshape[1];
@@ -126,9 +159,8 @@ namespace solvers {
       if (gshape[2] * gshape[3] >= np_PQ) {
         b_pgrid[2] = utils::find_proc_grid_min_diff(np_PQ, gshape[2], gshape[3]);
         b_pgrid[3] = np_PQ / b_pgrid[2];
-      } else {
-        utils::check(np_PQ == 1,
-            "scr_coulomb_fourier_t::ft_buffer_dist: PQ too small for proc count (NP*NQ < np_PQ)");
+      } else if (np_PQ != 1) {
+        return std::nullopt;
       }
       // Square block size, the same formula as scr_coulomb_t::W_omega_proc_grid:
       // make sure block sizes produce at least one full block per task. Square is
@@ -139,12 +171,9 @@ namespace solvers {
                                     gshape[3] / std::max(b_pgrid[3], 1L)});
       b_bsize[2] = std::max(b_bsize[2], 1L);
       b_bsize[3] = b_bsize[2];
-      return {b_pgrid, b_bsize};
+      return std::make_pair(b_pgrid, b_bsize);
     }
 
-    utils::TimerManager& timer() { return _Timer; }
-
-  private:
     const imag_axes_ft::IAFT* _ft = nullptr;
     utils::TimerManager _Timer;
 

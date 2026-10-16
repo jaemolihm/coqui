@@ -738,7 +738,23 @@ namespace methods {
       }
 
       if (read_Z) {
-        _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, q_pgrid, {_nqpts_ibz, _Np, _Np});
+        // q_pgrid is kept whenever it fits in (nqpts_ibz, Np, Np). Otherwise _dZ is distributed over
+        // a valid grid of all ranks or, when none exists (np > nqpts_ibz*Np*Np or no matching
+        // factorization), every group of g ranks holds a complete copy of Z.
+        long np = _mpi->comm.size();
+        auto [g, zgrid] = utils::find_proc_grid_fit_groups<3>(np, {_nqpts_ibz, _Np, _Np}, q_pgrid);
+        // _dZ is replaced before the communicator it may point to is released
+        if (g == np) {
+          _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, zgrid, {_nqpts_ibz, _Np, _Np});
+          _Z_comm.reset();
+        } else {
+          auto Z_comm = std::make_shared<mpi3::communicator>(_mpi->comm.split(_mpi->comm.rank()/g, _mpi->comm.rank()));
+          _dZ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(*Z_comm, zgrid, {_nqpts_ibz, _Np, _Np});
+          _Z_comm = std::move(Z_comm);
+        }
+        if (g < np)
+          app_log(2, "  thc_reader_t: processor grid for Z: (q, P, Q) = ({}, {}, {}), {} copies",
+                  zgrid[0], zgrid[1], zgrid[2], np/g);
         math::nda::h5_read(grp, "coulomb_matrix", _dZ);
       }
 
@@ -909,7 +925,11 @@ namespace methods {
       _Timer.start("READ_V");
       nda::array<ComplexType, 2> Z_PQ(P_rng.size(), Q_rng.size());
       Z_PQ() = 0.0;
-      if (_storage == eri_storage_e::incore) {
+      if (_storage == eri_storage_e::incore and _Z_comm) {
+        // _dZ is replicated over groups of ranks: Z(iq) is collective within each group only
+        auto Zq = Z(iq);
+        Z_PQ = Zq(P_rng, Q_rng);
+      } else if (_storage == eri_storage_e::incore) {
         for (long iqpool = 0; iqpool < nqpool; ++iqpool) {
           long iqq = (qpool_id==iqpool and q_intra_comm.root())? iq : 0;
           long ip  = (qpool_id==iqpool and q_intra_comm.root())? _mpi->comm.rank() : 0;
@@ -944,10 +964,36 @@ namespace methods {
 
     template<MEMORY_SPACE MEM = HOST_MEMORY>
     auto dZ(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+      return dZ<MEM>(_mpi->comm, pgrid, bsize);
+    }
+
+    /**
+     * Z distributed over the processor grid `pgrid` of `comm`, which is either _mpi->comm or a
+     * sub-communicator of it. Collective over _mpi->comm.
+     */
+    template<MEMORY_SPACE MEM = HOST_MEMORY>
+    auto dZ(mpi3::communicator& comm, std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
       _check_initialized("dZ");
       _Timer.start("READ_V");
-      auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
-      if (_storage == eri_storage_e::incore) {
+      auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+      if (_storage == eri_storage_e::incore and (_Z_comm or &comm != &_mpi->comm)) {
+        // _dZ and dZ_qPQ live on different communicators: fill from the collective Z(iq)
+        auto q_rng = dZ_qPQ.local_range(0);
+        auto P_rng = dZ_qPQ.local_range(1);
+        auto Q_rng = dZ_qPQ.local_range(2);
+        long nq_loc_max = q_rng.size();
+        _mpi->comm.all_reduce_in_place_n(&nq_loc_max, 1, mpi3::max<>{});
+        auto Z_loc = dZ_qPQ.local();
+        for (long iq = 0; iq < nq_loc_max; ++iq) {
+          if (iq < q_rng.size()) {
+            auto Zq = Z(q_rng.first() + iq);
+            Z_loc(iq, nda::ellipsis{}) = Zq(P_rng, Q_rng);
+          } else {
+            // prevent dead block in Z(): every rank calls it the same number of times
+            auto Zq = Z(0);
+          }
+        }
+      } else if (_storage == eri_storage_e::incore) {
         math::nda::redistribute(_dZ, dZ_qPQ);
       } else {
         auto q_rng = dZ_qPQ.local_range(0);
@@ -964,7 +1010,7 @@ namespace methods {
       if constexpr (MEM == HOST_MEMORY) {
         return dZ_qPQ;
       } else {
-        auto dZ_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);  
+        auto dZ_qPQ_d = math::nda::make_distributed_array<Array_t<MEM,3>>(comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);  
         dZ_qPQ_d.local() = dZ_qPQ.local();
         return dZ_qPQ_d; 
       }
@@ -1226,6 +1272,9 @@ namespace methods {
     // add option to keep data on device or on host memory with INCORE
     // keep everything as optionals to keep things simple
 
+    // communicator of _dZ when each group of ranks holds a complete copy of Z (null: _mpi->comm).
+    // Declared before _dZ, which holds a pointer to it, so that it is destroyed after _dZ.
+    std::shared_ptr<mpi3::communicator> _Z_comm;
     dArray_t<HOST_MEMORY,3> _dZ;
     // Semilocal xc-kernel matrix Vxc(q,P,Q), same shape and distribution as _dZ.
     // Present only when the THC was built with Vxc_file, or read from a THC

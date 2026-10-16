@@ -40,6 +40,15 @@ namespace methods {
       int np = mpi->comm.size();
       int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
       int np_Q = np / np_P;
+      // (np_P, np_Q) is kept whenever it fits in (Np, Np). Otherwise the ranks are split into groups
+      // of g ranks, each evaluating J/K on its own (P,Q) grid; only the first group adds to F.
+      auto [g, pq_grid] = utils::find_proc_grid_fit_groups<2>(np, {NP, NP}, std::array<long,2>{np_P, np_Q});
+      np_P = pq_grid[0];
+      np_Q = pq_grid[1];
+      std::optional<mpi3::communicator> group_comm;
+      if (g < np) group_comm.emplace(mpi->comm.split(mpi->comm.rank()/g, mpi->comm.rank()));
+      auto& pq_comm = (group_comm ? *group_comm : mpi->comm);
+      bool add_F = (mpi->comm.rank() < g);
       nda::array<long, 1> R_grid = MF->kp_grid();
       _Timer.start("ALLOC");
       math::shm::shared_array<nda::array_view<ComplexType,2>>  sf_Rk(*mpi,{nkpts,nkpts});
@@ -47,13 +56,17 @@ namespace methods {
       _Timer.stop("ALLOC");
 
       app_log(2, "Evaluation of J/K matrix:");
-      app_log(2, "  - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
+      if (g < np)
+        app_log(2, "  - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {}), {} copies\n",
+                1, 1, np_P, np_Q, np/g);
+      else
+        app_log(2, "  - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
 
       _Timer.start("ALLOC");
       // MAM: Dm_skPQ is needed at all kpoints in 1st-BZ: Use trev-symm here!
-      auto dDm_skPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, {1, 1, np_P, np_Q},
+      auto dDm_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                                {ns, nkpts, NP, NP});
-      auto dF_skPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, {1, 1, np_P, np_Q},
+      auto dF_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                               {ns, nkpts_ibz, NP, NP});
       auto NP_loc = dDm_skPQ.local_shape()[2];
       auto NQ_loc = dDm_skPQ.local_shape()[3];
@@ -64,15 +77,16 @@ namespace methods {
       // MAM: for coulomb only, we should just read q=0 only, should add routine to reader
       // The bare Coulomb dZ({1,np_P,np_Q}) is iteration-invariant; cache the redistributed
       // copy (incore only) so subsequent Fock builds skip the MPI redistribute. See hf_t.h.
+      // Not cached when dU_qPQ lives on the per-call group communicator.
       _Timer.start("READ_Z");
       std::array<long,3> dZ_pgrid = {1, np_P, np_Q};
       long dZ_src = thc.instance_id();
       bool dZ_cacheable = false;
-      if constexpr (requires { thc.dZ_incore(); }) dZ_cacheable = thc.dZ_incore() and dZ_src >= 0;
+      if constexpr (requires { thc.dZ_incore(); }) dZ_cacheable = thc.dZ_incore() and dZ_src >= 0 and not group_comm;
       bool dZ_hit = dZ_cacheable and _dZ_cache.has_value()
                     and _dZ_cache_src == dZ_src and _dZ_cache_pgrid == dZ_pgrid
                     and _dZ_cache_nq == MF->nqpts_ibz() and _dZ_cache_np == NP;
-      dCoulomb_t dU_qPQ = dZ_hit ? *_dZ_cache : thc.dZ(dZ_pgrid);
+      dCoulomb_t dU_qPQ = dZ_hit ? *_dZ_cache : thc.dZ(pq_comm, dZ_pgrid);
       if (dZ_cacheable and not dZ_hit) {
         _dZ_cache = dU_qPQ;
         _dZ_cache_src = dZ_src;
@@ -152,7 +166,7 @@ namespace methods {
         _Timer.stop("COULOMB");
         _Timer.start("AUX_TO_PRIM");
         for( auto ip : nda::range(npol) )
-          thc_solver_comm::aux_to_primary(ip,ip,ComplexType(1.0),dF_skPQ, sF_skij, thc, MF->ks_to_k(0));
+          thc_solver_comm::aux_to_primary(ip,ip,ComplexType(1.0),dF_skPQ, sF_skij, thc, MF->ks_to_k(0), add_F);
         _Timer.stop("AUX_TO_PRIM");
 
       } else {
@@ -261,7 +275,7 @@ namespace methods {
             _Timer.start("AUX_TO_PRIM");
             // will symmetrize below
             thc_solver_comm::aux_to_primary(ip,iq,(ip==iq?ComplexType(1.0):ComplexType(2.0)),
-                                          dF_skPQ, sF_skij, thc, MF->ks_to_k(0));
+                                          dF_skPQ, sF_skij, thc, MF->ks_to_k(0), add_F);
             _Timer.stop("AUX_TO_PRIM");
 
           } // iq
@@ -291,7 +305,7 @@ namespace methods {
             _Timer.stop("COULOMB");
             _Timer.start("AUX_TO_PRIM");
             for( auto ip : nda::range(npol) ) 
-              thc_solver_comm::aux_to_primary(ip,ip,ComplexType(1.0),dF_skPQ, sF_skij, thc, MF->ks_to_k(0));
+              thc_solver_comm::aux_to_primary(ip,ip,ComplexType(1.0),dF_skPQ, sF_skij, thc, MF->ks_to_k(0), add_F);
             _Timer.stop("AUX_TO_PRIM");
           } //compute_hartree
 
@@ -361,8 +375,21 @@ namespace methods {
       int np = mpi->comm.size();
       int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
       int np_Q = np / np_P;
+      // (np_P, np_Q) is kept whenever it fits in (Np, Np). Otherwise the ranks are split into groups
+      // of g ranks, each evaluating J/K on its own (P,Q) grid; only the first group adds to F.
+      auto [g, pq_grid] = utils::find_proc_grid_fit_groups<2>(np, {NP, NP}, std::array<long,2>{np_P, np_Q});
+      np_P = pq_grid[0];
+      np_Q = pq_grid[1];
+      std::optional<mpi3::communicator> group_comm;
+      if (g < np) group_comm.emplace(mpi->comm.split(mpi->comm.rank()/g, mpi->comm.rank()));
+      auto& pq_comm = (group_comm ? *group_comm : mpi->comm);
+      bool add_F = (mpi->comm.rank() < g);
       app_log(2, "  Evaluation of J/K matrix:");
-      app_log(2, "    - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
+      if (g < np)
+        app_log(2, "    - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {}), {} copies\n",
+                1, 1, np_P, np_Q, np/g);
+      else
+        app_log(2, "    - processor grid for density matrix:  (s, k, P, Q) = ({}, {}, {}, {})\n", 1, 1, np_P, np_Q);
 
       // symmetry maps
       auto nq_per_s     = MF->nq_per_s();
@@ -377,9 +404,9 @@ namespace methods {
 
       _Timer.start("ALLOC");
       // For cases where trev(n)==true, use the conjugate of the trev-pair: kp_trev_pair(n).  
-      auto dDm_skPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, {1, 1, np_P, np_Q},
+      auto dDm_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                                {ns, nkpts_no_trev, NP, NP});
-      auto dF_skPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, {1, 1, np_P, np_Q},
+      auto dF_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                               {ns, nkpts_ibz, NP, NP});
       auto NP_loc = dDm_skPQ.local_shape()[2];
       auto NQ_loc = dDm_skPQ.local_shape()[3];
@@ -394,7 +421,7 @@ namespace methods {
       _Timer.stop("PRIM_TO_AUX");
 
       _Timer.start("EXCHANGE");
-      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+      auto dU_qPQ = thc.dZ(pq_comm, {1, np_P, np_Q});
       _Timer.stop("EXCHANGE");
 
       auto F_skPQ = dF_skPQ.local();
@@ -425,14 +452,12 @@ namespace methods {
           auto sUq0_PQ = math::shm::make_shared_array<nda::array_view<ComplexType, 2>>(
               *sF_skij.communicator(), *sF_skij.internode_comm(), *sF_skij.node_comm(), {NP,NP});
           {
+            // gathered at the root of dU_qPQ's communicator (of each group)
             nda::array<ComplexType, 2> Uq0_PQ;
-            if (sUq0_PQ.communicator()->root()) {
-              Uq0_PQ = nda::array<ComplexType, 2>(NP, NP);
-              math::nda::gather_sub_matrix(0, 0, dU_qPQ, &Uq0_PQ);
+            if (pq_comm.root()) Uq0_PQ = nda::array<ComplexType, 2>(NP, NP);
+            math::nda::gather_sub_matrix(0, 0, dU_qPQ, &Uq0_PQ);
+            if (sUq0_PQ.communicator()->root())
               sUq0_PQ.local() = Uq0_PQ;
-            } else {
-              math::nda::gather_sub_matrix(0, 0, dU_qPQ, &Uq0_PQ);
-            }
             sUq0_PQ.all_reduce();
           }
           auto Uq0_PQ = sUq0_PQ.local();
@@ -520,7 +545,7 @@ namespace methods {
         // MAM: This can be skipped for Q!=0 if hartree_only!
         _Timer.start("AUX_TO_PRIM");
         sF_skab.set_zero();
-        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dF_skPQ, sF_skab, thc, ks_to_k(isym,nda::range(nkpts_ibz)));
+        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dF_skPQ, sF_skab, thc, ks_to_k(isym,nda::range(nkpts_ibz)), add_F);
         sF_skij.win().fence();
         {
           using math::sparse::T;
