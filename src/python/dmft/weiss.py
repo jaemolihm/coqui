@@ -228,10 +228,10 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
         Weiss Green's function G₀(iωₙ) on the fermionic Matsubara mesh returned by `iaft`.
         The leading dimension is frequency index; s,a,b are spin and orbital indices.
     iaft : IAFT object
-    high_freq_multiplier : float, default 10
-        Multiplier applied to the last few (three) IR fermionic frequencies (in IR notation)
-        before converting to physical Matsubara frequencies, to push evaluation deep into
-        the asymptotic region for a more stable moment estimate.
+    high_freq_multiplier : int, default 10
+        Multiplier applied to the last three fermionic mesh indices n in physical notation
+        (ω_n = (2n+1)·π/β), to push evaluation deep into the asymptotic region for a more
+        stable moment estimate.
     make_hermitian : bool, default True
         If True, replace t_sIab by its Hermitian part ½(t + t†) and enforce
         Δ(-iω) = Δ(iω)† on the returned Δ.
@@ -250,31 +250,32 @@ def extract_h0_and_delta(g_weiss_wsab, iaft, high_freq_multiplier=10, make_hermi
     nspin = g_weiss_wsab.shape[1]
     
     # 1) Interpolate G0 to very high fermionic frequencies ±iω to improve the accuracy of high-frequency fitting
-    iwn_interp = iaft.wn_mesh('f', phys_notation=True)[-3:] * high_freq_multiplier
+    # Matsubara indices n in IR notation (ω_n = n·π/β, n odd)
+    n_interp = 2 * iaft.wn_mesh('f', phys_notation=True)[-3:] * high_freq_multiplier + 1
     weiss_tmp = []
-    for iwn_idx in (iwn_interp, -iwn_interp - 1):   # n and -n-1: ω_{-n-1} = -ω_n
-        g_weiss_interp = iaft.w_interpolate(g_weiss_wsab, iwn_idx, 'f', phys_notation=True)
-        iwn = iaft.wn_values('f', iwn_idx, phys_notation=True)
+    for n_idx in (n_interp, -n_interp):
+        g_weiss_interp = iaft.w_interpolate(g_weiss_wsab, n_idx, 'f')
+        w = n_idx * np.pi / iaft.beta
         w_tmp = np.zeros(g_weiss_interp.shape, dtype=complex)
-        for n, g in enumerate(g_weiss_interp):
+        for i, g in enumerate(g_weiss_interp):
             for s in range(nspin):
-                w_tmp[n, s] = 1j * iwn[n] - np.linalg.inv(g[s])
+                w_tmp[i, s] = 1j * w[i] - np.linalg.inv(g[s])
         weiss_tmp.append(w_tmp)
-    iwn_interp = iaft.wn_values('f', iwn_interp, phys_notation=True)
+    w_interp = n_interp * np.pi / iaft.beta
 
     # 2) Fitting the zeroth moment as the non-interacting Hamiltonian
-    t_sIab_estimate = estimate_zero_moment(weiss_tmp[0], weiss_tmp[1], iwn_interp)
+    t_sIab_estimate = estimate_zero_moment(weiss_tmp[0], weiss_tmp[1], w_interp)
     if make_hermitian:
         t_sIab_estimate = 0.5 * (t_sIab_estimate + np.swapaxes(t_sIab_estimate, -1, -2).conj())
 
     # 3) Construct Δ(iω) = iω·I - t_sIab - [G0(iω)]^{-1} on the original mesh
-    iwn_mesh_imp = iaft.wn_values('f')
+    w_mesh = iaft.wn_mesh('f') * np.pi / iaft.beta
     delta_estimate = np.zeros(g_weiss_wsab.shape, dtype=complex)
     nbnd = t_sIab_estimate.shape[-1]
     for n in range(delta_estimate.shape[0]):
         for s in range(nspin):
             g_weiss_inv = np.linalg.inv(g_weiss_wsab[n, s])
-            delta_estimate[n, s] = 1j * iwn_mesh_imp[n] * np.eye(nbnd) - t_sIab_estimate[s] - g_weiss_inv
+            delta_estimate[n, s] = 1j * w_mesh[n] * np.eye(nbnd) - t_sIab_estimate[s] - g_weiss_inv
 
     if make_hermitian:
         _hermitize_delta(delta_estimate)
