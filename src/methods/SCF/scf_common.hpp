@@ -189,6 +189,16 @@ inline auto dyson_omega_proc_grid(long nproc, long nw, long nkpts_ibz, int nbnd)
   np /= nkpools;
   int np_i = utils::find_proc_grid_min_diff(np, 1, 1);
   int np_j = np / np_i;
+  // (nwpools, nkpools, np_i, np_j) is kept whenever it fits in (nw, nkpts_ibz, nbnd, nbnd)
+  {
+    auto grid = utils::find_proc_grid_fit_or_abort<4>(nproc,
+                    {long(nw), long(nkpts_ibz), long(nbnd), long(nbnd)},
+                    std::array<long,4>{nwpools, nkpools, np_i, np_j}, "simple_dyson::solve_dyson (w, k, i, j)");
+    nwpools = grid[0];
+    nkpools = grid[1];
+    np_i = grid[2];
+    np_j = grid[3];
+  }
 
   std::array<long, 5> w_pgrid = {nwpools, 1, nkpools, np_i, np_j};
   long ibsize = std::min({1024, nbnd/np_i, nbnd/np_j});
@@ -214,6 +224,21 @@ inline auto dyson_tau_proc_grid(long nproc, long nkpts_ibz)
   return std::array<long, 5>{1, 1, nkpools, np_i, np_j};
 }
 
+/**
+ * dyson_tau_proc_grid whenever it fits in (nkpts_ibz, nbnd, nbnd). Otherwise the grid of the
+ * first g ranks that such a grid fits: the arrays are then built with
+ * math::nda::make_distributed_array_on_first_ranks (empty_dim 2), and the other ranks hold
+ * empty blocks.
+ * @return {g, pgrid}
+ */
+inline auto dyson_tau_proc_grid_fit(long nproc, long nkpts_ibz, long nbnd)
+-> std::pair<long, std::array<long, 5>> {
+  auto t_pgrid = dyson_tau_proc_grid(nproc, nkpts_ibz);
+  auto [g, grid] = utils::find_proc_grid_fit_subset<3>(nproc, {nkpts_ibz, nbnd, nbnd},
+                                                       std::array<long,3>{t_pgrid[2], t_pgrid[3], t_pgrid[4]});
+  return {g, std::array<long, 5>{1, 1, grid[0], grid[1], grid[2]}};
+}
+
 // check_leakage gates the IAFT leakage diagnostic (small but non-negligible cost).
 template<math::shm::SharedArray sArr_t>
 auto distributed_tau_to_w(mpi3::communicator& comm,
@@ -224,6 +249,7 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   requires( ::nda::get_rank<std::decay_t<sArr_t>> == 5 ) {
   decltype(nda::range::all) all;
   using math::nda::make_distributed_array;
+  using math::nda::make_distributed_array_on_first_ranks;
   using Array_5D_t = nda::array<ComplexType, 5>;
   auto [nts, ns, nkpts, nbnd, _] = X_tau_shm.shape();
   auto nw = FT.nw_f();
@@ -231,16 +257,20 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   if (check_leakage and nda::sum(X_tau_shm.local()) != ComplexType(0.0))
     FT.check_leakage(X_tau_shm, imag_axes_ft::fermion, "self-energy");
 
-  auto t_pgrid = dyson_tau_proc_grid(comm.size(), nkpts);
+  // the transform runs on the first g ranks; the other ranks hold empty blocks
+  auto [g, t_pgrid] = dyson_tau_proc_grid_fit(comm.size(), nkpts, nbnd);
+  if (g < comm.size())
+    app_log(2, "  distributed_tau_to_w: (k, i, j) = ({}, {}, {}) on {} of {} ranks",
+            t_pgrid[2], t_pgrid[3], t_pgrid[4], g, comm.size());
 
-  auto dX_wskij = make_distributed_array<Array_5D_t>(comm, t_pgrid,
-                                                     {nw, ns, nkpts, nbnd, nbnd});
+  auto dX_wskij = make_distributed_array_on_first_ranks<Array_5D_t>(comm, t_pgrid,
+                                                                    {nw, ns, nkpts, nbnd, nbnd}, {}, 2);
   auto [nw_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dX_wskij.local_shape();
   auto k_rng = dX_wskij.local_range(2);
   auto i_rng = dX_wskij.local_range(3);
   auto j_rng = dX_wskij.local_range(4);
 
-  {
+  if (comm.rank() < g) {
     nda::array<ComplexType, 5> X_t_sub(nts, ns, nk_loc, ni_loc, nj_loc);
     X_t_sub = X_tau_shm.local()(all, all, k_rng, i_rng, j_rng);
 

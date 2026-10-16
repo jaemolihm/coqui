@@ -257,6 +257,9 @@ namespace methods {
        *                 (nts, ns, nkpts_ibz, nbnd, nbnd) or (ns, nkpts_ibz, nbnd, nbnd)
        * @param thc    - [INPUT] THC-ERI instance
        * @param kp_map - [INPUT] mapping of k-points based on a given symmetry operation
+       * @param add    - [OPTIONAL] false: take part in the collective reduction of O_Iab without
+       *                 adding O_IPQ (uniform over O_IPQ.communicator()). Used when several groups
+       *                 of ranks hold copies of the same O_IPQ and only one of them must contribute.
        */
       template<nda::MemoryArray Array_aux_t, nda::MemoryArray Array_primary_t, THC_ERI thc_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq, 
@@ -264,7 +267,8 @@ namespace methods {
                                  const memory::darray_t<Array_aux_t, communicator_t> &O_IPQ,
                                  sArray_t<Array_primary_t> &O_Iab,
                                  thc_t &thc,
-                                 nda::ArrayOfRank<1> auto const& kp_map) {
+                                 nda::ArrayOfRank<1> auto const& kp_map,
+                                 bool add = true) {
         constexpr int rank = nda::get_rank<Array_primary_t>;
         static_assert(nda::get_rank<Array_aux_t> == nda::get_rank<Array_primary_t>,
                       "thc_solver_comm::aux_to_primay: rank mismatches!");
@@ -278,7 +282,9 @@ namespace methods {
           O_Iab.local() /= value_type(O_Iab.internode_comm()->size());
         O_Iab.node_comm()->barrier();
 
-        if constexpr (rank == 5) {
+        if (not add) {
+          // nothing to add
+        } else if constexpr (rank == 5) {
           auto pgrid = O_IPQ.grid();
           auto t_rng = O_IPQ.local_range(0);
           auto s_rng = O_IPQ.local_range(1);

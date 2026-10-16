@@ -165,6 +165,13 @@ void add_thc_hamiltonian_components(mf::MF &mf,
   utils::check(format == "qmc", "Error in add_thc_hamiltonian_components: Invalid format:{}", format); 
 
   long nx = utils::find_proc_grid_min_diff(mpi->comm.size(),1,1), ny = mpi->comm.size()/nx;
+  // (nx, ny) is kept whenever it fits in (Np, Np)
+  {
+    auto grid = utils::find_proc_grid_fit_or_abort<2>(mpi->comm.size(), {long(Np), long(Np)},
+                    std::array<long,2>{nx, ny}, "add_thc_hamiltonian_components (P, Q)");
+    nx = grid[0];
+    ny = grid[1];
+  }
   auto dZ = thc.dZ(std::array<long,3>{1,nx,ny});
   long nI = dZ.global_shape()[1];
 

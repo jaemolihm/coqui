@@ -41,6 +41,8 @@
 #include "methods/SCF/simple_dyson.h"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/SCF/scf_driver.hpp"
+#include "mean_field/model_hamiltonian/model_readonly.hpp"
+#include "mean_field/model_hamiltonian/tests/model_test_utils.hpp"
 
 namespace bdft_tests {
 
@@ -429,5 +431,88 @@ namespace bdft_tests {
     }
   }
 #endif
+
+
+  // Normalization of a rank-1 THC model interaction (Np=1, X=1, Z(q)=V(q) per unit cell):
+  //   F(k) = 2 V(0) nbar - (1/Nk) sum_q V(q) n(k-q),  nbar = (1/Nk) sum_k n(k)   (ns=1, per spin)
+  // which is U n_sigma for the Hubbard model V(q)=U, independent of Nk.
+  TEST_CASE("thc_hf_hubbard", "[methods][thc][hf][model]") {
+    auto& mpi = utils::make_unit_test_mpi_context();
+
+    auto run = [&](long N, double U, double V, bool k_dependent_n) {
+      long nk = N*N;
+      std::string prefix = "hubbard_hf_test";
+      if(mpi->comm.root()) model_tests::write_minimal_model_h5(prefix+".h5", N, 1.0, 0.0, 1.0, true);
+      mpi->comm.barrier();
+      auto mf = std::make_shared<mf::MF>(mf::MF(mf::model::model_readonly(mpi, "./", prefix, -1)));
+
+      // Qpts are cartesian; latt = identity gives q_crys = Q / (2 pi)
+      auto Q = mf->Qpts();
+      auto Vq = [&](long iq) {
+        return U + 2.0*V*(std::cos(Q(iq,0)) + std::cos(Q(iq,1)));
+      };
+      nda::array<ComplexType,4> X(1,nk,1,1);
+      X() = ComplexType(1.0);
+      nda::array<ComplexType,3> Z(nk,1,1);
+      for(long iq=0; iq<nk; ++iq) Z(iq,0,0) = Vq(iq);
+      // the layout of coqui.interaction.write_thc_h5, including its zero dummies for the ISDF-only
+      // datasets that thc_reader_t::read() requires
+      std::string fname = "hubbard_thc_test.h5";
+      if(mpi->comm.root()) {
+        h5::file file(fname, 'w');
+        h5::group grp(file);
+        std::vector<int> rng = {0, 1};
+        h5::h5_write(grp, "Np", int(1));
+        h5::h5_write(grp, "X_orbital_range", rng);
+        h5::h5_write(grp, "Y_orbital_range", rng);
+        nda::h5_write(grp, "collocation_matrix", X, false);
+        nda::h5_write(grp, "coulomb_matrix", Z, false);
+        nda::h5_write(grp, "interpolating_points", nda::array<long,1>::zeros({1}), false);
+        nda::h5_write(grp, "interpolating_vectors_G0", nda::array<ComplexType,2>::zeros({nk,1}), false);
+        nda::h5_write(grp, "dual_interpolating_vectors_G0", nda::array<ComplexType,2>::zeros({nk,1}), false);
+      }
+      mpi->comm.barrier();
+
+      thc_reader_t thc(mf, "incore", fname);
+      REQUIRE(thc.Np() == 1);
+      solvers::hf_t hf("ignore_g0");
+
+      auto kc = mf->kpts_crystal();
+      nda::array<double,1> n(nk);
+      for(long ik=0; ik<nk; ++ik)
+        n(ik) = 0.4 + (k_dependent_n ? 0.1*std::cos(2.0*M_PI*kc(ik,0)) + 0.05*std::sin(2.0*M_PI*kc(ik,1)) : 0.0);
+      nda::array<ComplexType,4> Dm(1,nk,1,1);
+      for(long ik=0; ik<nk; ++ik) Dm(0,ik,0,0) = n(ik);
+
+      auto sS = make_shared_array<array_view_4d_t>(*mpi, {1, nk, 1, 1});
+      hamilt::set_ovlp(*mf, sS);
+      auto sF = make_shared_array<array_view_4d_t>(*mpi, {1, nk, 1, 1});
+      hf.evaluate(sF, Dm, thc, sS.local(), true, true);
+
+      double nbar = nda::sum(n)/double(nk);
+      auto qk = mf->qk_to_k2();
+      double maxerr = 0.0;
+      for(long ik=0; ik<nk; ++ik) {
+        double ex = 0.0;
+        for(long iq=0; iq<nk; ++iq) ex += Vq(iq)*n(qk(iq,ik));
+        double ref = 2.0*Vq(0)*nbar - ex/double(nk);
+        maxerr = std::max(maxerr, std::abs(sF.local()(0,ik,0,0) - ref));
+      }
+      app_log(2, "thc_hf_hubbard: N={} U={} V={} k_dependent_n={}  max|F-F_ref| = {:.3e}",
+              N, U, V, k_dependent_n, maxerr);
+      REQUIRE(maxerr < 1e-12);
+      if(not k_dependent_n and V == 0.0)
+        for(long ik=0; ik<nk; ++ik) REQUIRE(std::abs(sF.local()(0,ik,0,0) - U*0.4) < 1e-12);
+      mpi->comm.barrier();
+      if(mpi->comm.root()) { remove(fname.c_str()); remove((prefix+".h5").c_str()); }
+      mpi->comm.barrier();
+    };
+
+    for(long N : {1, 2, 4}) {
+      run(N, 2.0, 0.0, false);
+      run(N, 2.0, 0.0, true);
+      run(N, 2.0, 0.5, true);
+    }
+  }
 
 } // bdft_tests

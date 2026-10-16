@@ -118,20 +118,27 @@ namespace {
 
     // G(w) -> G(tau)
     {
-      auto t_pgrid = dyson_tau_proc_grid(_context->comm.size(), _nkpts_ibz);
+      // the transform runs on the first g ranks; the other ranks hold empty blocks
+      auto [g, t_pgrid] = dyson_tau_proc_grid_fit(_context->comm.size(), _nkpts_ibz, _nbnd);
+      if (g < _context->comm.size())
+        app_log(2, "  - G(w) -> G(t): (k, i, j) = ({}, {}, {}) on {} of {} ranks",
+                t_pgrid[2], t_pgrid[3], t_pgrid[4], g, _context->comm.size());
 
-      auto dG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
-                                                             {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
+      using math::nda::make_distributed_array_on_first_ranks;
+      auto dG_wskij_tmp = make_distributed_array_on_first_ranks<Array_5D_t>(_context->comm, t_pgrid,
+                                                                            {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, {}, 2);
       _Timer.start("REDISTRIBUTE");
       math::nda::redistribute(dG_wskij, dG_wskij_tmp);
       _Timer.stop("REDISTRIBUTE");
       dG_wskij.reset(); 
 
-      auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
-                                                         {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
-      auto Gt_loc = dG_tskij.local();
-      auto Gw_loc = dG_wskij_tmp.local();
-      _FT->w_to_tau(Gw_loc, Gt_loc, imag_axes_ft::fermion);
+      auto dG_tskij = make_distributed_array_on_first_ranks<Array_5D_t>(_context->comm, t_pgrid,
+                                                                        {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}, {}, 2);
+      if (_context->comm.rank() < g) {
+        auto Gt_loc = dG_tskij.local();
+        auto Gw_loc = dG_wskij_tmp.local();
+        _FT->w_to_tau(Gw_loc, Gt_loc, imag_axes_ft::fermion);
+      }
       dG_wskij_tmp.reset();
 
       _FT->check_leakage(dG_tskij, imag_axes_ft::fermion, "Green's function");

@@ -141,8 +141,10 @@ namespace solvers {
       utils::check(nproc % nqpools == 0, "gw_t:: gcomm.size() % nqpools != 0");
       utils::check(nproc % (nqpools * nwpools) == 0, "gw_t:: gcomm.size() & (nqpools*nwpools) != 0");
 
-
-      std::array<long, 4> w_pgrid = {nwpools, nqpools, np_P, np_Q}; // (w, q, P, Q)
+      // (nwpools, nqpools, np_P, np_Q) is kept whenever it fits in (nw_half, nqpts_ibz, Np, Np)
+      std::array<long, 4> w_pgrid = utils::find_proc_grid_fit_or_abort<4>(
+          nproc, {nw_half, nqpts_ibz, Np, Np}, std::array<long, 4>{nwpools, nqpools, np_P, np_Q},
+          "scr_coulomb_t::W_omega_proc_grid (w, q, P, Q)"); // (w, q, P, Q)
 
       // Setup square block size: make sure block sizes produce at least one full block per task
       std::array<long, 4> w_bsize;
@@ -151,6 +153,16 @@ namespace solvers {
       w_bsize[3] = w_bsize[2];
 
       return std::make_tuple(w_pgrid, w_bsize);
+    }
+
+    /**
+     * Upper bound on the number of t-pools of Pi_tau_proc_grid, before it is reduced to a divisor
+     * of the number of processors.
+     * CNY: Memory for intermediate objects scales with ntpools.
+     * Therefore, we restrict ntpools*ns*nkpts*Np*Np*2 < nt_half*nqpts_ibz*Np*Np
+     */
+    static long Pi_tau_ntpools_bound(long nt_half, long nqpts_ibz, long ns, long nkpts) {
+      return std::max(long(nt_half * nqpts_ibz / (ns * nkpts * 2)), 1L);
     }
 
     /**
@@ -163,9 +175,7 @@ namespace solvers {
      */
     static auto Pi_tau_proc_grid(long nproc, long nt_half, long nqpts_ibz, long ns, long nkpts)
     -> std::tuple<std::array<long, 4>, std::array<long, 4>> {
-      // CNY: Memory for intermediate objects scales with ntpools.
-      // Therefore, we restrict ntpools*ns*nkpts*Np*Np*2 < nt_half*nqpts_ibz*Np*Np
-      long ntpools_max = std::max(long(nt_half * nqpts_ibz / (ns * nkpts * 2)), 1L);
+      long ntpools_max = Pi_tau_ntpools_bound(nt_half, nqpts_ibz, ns, nkpts);
       while (nproc % ntpools_max != 0) ntpools_max -= 1;
       long ntpools = utils::find_proc_grid_max_npools(nproc, nt_half, 0.2);
       if (ntpools > ntpools_max) ntpools = ntpools_max;

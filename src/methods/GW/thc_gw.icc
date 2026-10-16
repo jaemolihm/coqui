@@ -12,6 +12,7 @@
 
 #include "IO/app_loggers.h"
 #include "utilities/Timer.hpp"
+#include "utilities/proc_grid_partition.hpp"
 #include "utilities/kpoint_utils.hpp"
 
 #include "mean_field/MF.hpp"
@@ -38,18 +39,18 @@ namespace methods {
                                    sArray_t<Array_primary_t> &sSigma_tskij,
                                    THC_ERI auto &thc,
                                    nda::ArrayOfRank<1> auto const& kp_map,
-                                   bool minus_t) {
+                                   bool minus_t, bool add) {
       _Timer.start("SIGMA_AUX_TO_PRIM");
       if (!minus_t) {
         sSigma_tskij.set_zero();
-        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dSigma_tskPQ, sSigma_tskij, thc, kp_map);
+        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dSigma_tskPQ, sSigma_tskij, thc, kp_map, add);
       } else {
         auto [nt, ns, nkpts_ibz, nbnd_i, nbnd_j] = sSigma_tskij.shape();
         auto nt_half = (nt % 2 == 0)? nt / 2 : nt / 2 + 1;
         auto sSigma_mtskij = math::shm::make_shared_array<Array_primary_t>(
             *thc.mpi(), {nt_half, ns, nkpts_ibz, nbnd_i, nbnd_j});
         sSigma_mtskij.set_zero(); 
-        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dSigma_tskPQ, sSigma_mtskij, thc, kp_map); 
+        thc_solver_comm::aux_to_primary(0,0,ComplexType(1.0),dSigma_tskPQ, sSigma_mtskij, thc, kp_map, add);
         // Sigma(beta-t) -> Sigma(t)
         int node_rank = sSigma_tskij.node_comm()->rank();
         int node_size = sSigma_tskij.node_comm()->size();
@@ -72,6 +73,38 @@ namespace methods {
                                sArray_t<Array_5D_t> &sSigma_tskij,
                                THC_ERI auto &thc,
                                bool minus_t) {
+      auto pgrid = dW_tqPQ.grid();
+      long np = dW_tqPQ.communicator()->size();
+      if (pgrid[1] == 1) {
+        eval_Sigma_all_Rspace_impl<Winp_in_Rspace, Wout_in_Rspace>(G_tskij, dW_tqPQ, sSigma_tskij, thc, minus_t,
+                                                                   pgrid, np);
+        return;
+      }
+      // W is distributed over q, which happens when no (t, P, Q) grid fits all ranks. The R-space
+      // convolution needs all q locally: it runs on the first g ranks that a (t, P, Q) grid fits.
+      auto [nt_half, nqpts, NP, NQ] = dW_tqPQ.global_shape();
+      auto [g, grid] = utils::find_proc_grid_fit_subset<3>(np, {nt_half, NP, NQ});
+      std::array<long, 4> sub_grid = {grid[0], 1, grid[1], grid[2]};
+      app_log(2, "    - W redistributed to (t, q, P, Q) = ({}, {}, {}, {}) on {} of {} ranks",
+              sub_grid[0], sub_grid[1], sub_grid[2], sub_grid[3], g, np);
+      auto dW_sub = math::nda::make_distributed_array_on_first_ranks<Array_4D_t>(
+          *dW_tqPQ.communicator(), sub_grid, dW_tqPQ.global_shape(), dW_tqPQ.block_size(), 0);
+      math::nda::redistribute(dW_tqPQ, dW_sub);
+      eval_Sigma_all_Rspace_impl<Winp_in_Rspace, Wout_in_Rspace>(G_tskij, dW_sub, sSigma_tskij, thc, minus_t,
+                                                                 sub_grid, g);
+      // W is transformed in place (q <-> R)
+      math::nda::redistribute(dW_sub, dW_tqPQ);
+    }
+
+    template<bool Winp_in_Rspace, bool Wout_in_Rspace,
+        nda::MemoryArray Array_5D_t, nda::MemoryArray Array_4D_t,
+        typename communicator_t>
+    void gw_t::eval_Sigma_all_Rspace_impl(const nda::MemoryArrayOfRank<5> auto &G_tskij,
+                               memory::darray_t<Array_4D_t, communicator_t> &dW_tqPQ,
+                               sArray_t<Array_5D_t> &sSigma_tskij,
+                               THC_ERI auto &thc,
+                               bool minus_t,
+                               std::array<long, 4> pgrid, long g) {
       _Timer.start("EVALUATE_SIGMA_R");
       auto MF = thc.MF();
       auto mpi = thc.mpi();
@@ -80,7 +113,7 @@ namespace methods {
       auto ns = G_tskij.shape(1);
       auto [nt_loc, nk_loc, NP_loc, NQ_loc] = dW_tqPQ.local_shape();
       auto [nt_half, nkpts, NP, NQ] = dW_tqPQ.global_shape();
-      auto [tpools, qpools, np_P, np_Q] = dW_tqPQ.grid();
+      auto [tpools, qpools, np_P, np_Q] = pgrid;
       auto bsize = dW_tqPQ.block_size();   // (t, q, P, Q)
       utils::check(nk_loc == nkpts, "gw_t::eval_Sigma_all_Rspace: nq_loc = {} != nkpts", nk_loc);
       utils::check(qpools == 1, "gw_t::eval_Sigma_all_Rspace: qpools = {} != 1", qpools);
@@ -115,8 +148,9 @@ namespace methods {
       // layout — its trailing (k,P,Q) block is contiguous — so no (t,s,k)<->(s,k,t)
       // transpose or extra staging array is needed.
       _Timer.start("SIGMA_ALLOC_R");
-      auto dG_tskPQ = make_distributed_array<local_Array_5D_t>(
-          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[0], 1, bsize[1], bsize[2], bsize[3]});
+      // ranks >= g hold empty blocks (nt_loc == 0)
+      auto dG_tskPQ = math::nda::make_distributed_array_on_first_ranks<local_Array_5D_t>(
+          mpi->comm, {tpools, 1, qpools, np_P, np_Q}, {nt_half, ns, nkpts, NP, NQ}, {bsize[0], 1, bsize[1], bsize[2], bsize[3]}, 0);
       _Timer.stop("SIGMA_ALLOC_R");
 
       _Timer.start("SIGMA_PRIM_TO_AUX");
@@ -244,7 +278,20 @@ namespace methods {
 
       // TODO redistribute over (t, k, P, Q) to minimize MPI along (P, Q)-axes
 
-      setup_Sigma_primary(dSigma_tskPQ, sSigma_tskij, thc, MF->ks_to_k(0), minus_t);
+      if (g == mpi->comm.size()) {
+        setup_Sigma_primary(dSigma_tskPQ, sSigma_tskij, thc, MF->ks_to_k(0), minus_t);
+      } else {
+        // aux_to_primary needs the processor grid of Sigma: the first g ranks get their own communicator
+        bool active = (mpi->comm.rank() < g);
+        mpi3::communicator sub_comm = mpi->comm.split(active? 0 : 1, mpi->comm.rank());
+        std::array<long, 5> sub_grid = {tpools, 1, qpools, np_P, np_Q};
+        if (not active) sub_grid = {long(sub_comm.size()), 1, 1, 1, 1};
+        memory::darray_t<local_Array_5D_t, mpi3::communicator> dSigma_sub(
+            std::addressof(sub_comm), sub_grid, dSigma_tskPQ.global_shape(), dSigma_tskPQ.origin(),
+            dSigma_tskPQ.block_size(), local_Array_5D_t(dSigma_tskPQ.local()));
+        dSigma_tskPQ.reset();
+        setup_Sigma_primary(dSigma_sub, sSigma_tskij, thc, MF->ks_to_k(0), minus_t, active);
+      }
       _Timer.stop("EVALUATE_SIGMA_R");
     }
 
@@ -293,8 +340,16 @@ namespace methods {
           {1, bsize[1], bsize[2], bsize[3]});
       // different types of distribution for sigma to improve performance of aux_to_primary()
       long qpools_2 = utils::find_proc_grid_max_npools(t_intra_comm.size(), nkpts_ibz, 0.2);
-      int np_P_2 = utils::find_proc_grid_min_diff(t_intra_comm.size()/qpools_2, 1, 1);
-      int np_Q_2 = (t_intra_comm.size()/qpools_2) / np_P_2;
+      long np_P_2 = utils::find_proc_grid_min_diff(t_intra_comm.size()/qpools_2, 1, 1);
+      long np_Q_2 = (t_intra_comm.size()/qpools_2) / np_P_2;
+      // (qpools_2, np_P_2, np_Q_2) is kept whenever it fits in (nkpts_ibz, NP, NQ)
+      {
+        auto grid = utils::find_proc_grid_fit_or_abort<3>(t_intra_comm.size(), {nkpts_ibz, long(NP), long(NQ)},
+                        std::array<long,3>{qpools_2, np_P_2, np_Q_2}, "gw_t::eval_Sigma_all_kspace (k, P, Q)");
+        qpools_2 = grid[0];
+        np_P_2 = grid[1];
+        np_Q_2 = grid[2];
+      }
       auto dSigma_skPQ_2 = make_distributed_array<local_Array_4D_t>(
           t_intra_comm, {1, qpools_2, np_P_2, np_Q_2}, {ns, nkpts_ibz, NP, NQ});
       app_log(2, "  Self-energy from THC to primary basis:");
