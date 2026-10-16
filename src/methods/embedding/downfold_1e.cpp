@@ -836,6 +836,7 @@ namespace methods {
         // unit cell
         h5::h5_write_attribute(sgrp, "number_of_spins", 1);
         h5::h5_write_attribute(sgrp, "number_of_spins_in_basis", 1);
+        h5::h5_write_attribute(sgrp, "number_of_polarizations", 1);
         h5::h5_write_attribute(sgrp, "number_of_bands", nImpOrbs);
         h5::h5_write_attribute(sgrp, "number_of_elec", 1);
         h5::h5_write_attribute(sgrp, "madelung_constant", 0.0);
@@ -851,9 +852,9 @@ namespace methods {
         nda::diagonal(Hab) = ComplexType(1.0);
         nda::h5_write(sgrp, "overlap", H0_loc_sIab, false);
         H0_loc_sIab() = ComplexType(0.0);
-        // to do: provide proper density matrix and fock matrices from non-interacting solution
+        // fock_matrix is not written: the model reader defaults it to H0
+        // to do: provide proper density matrix from non-interacting solution
         nda::h5_write(sgrp, "density_matrix", H0_loc_sIab, false);
-        nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
       } else 
         APP_ABORT("Error in downfold_mb_solution_qp_impl: Unknown format type: {}",format_type);
     }
@@ -954,6 +955,7 @@ namespace methods {
       // unit cell
       h5::h5_write_attribute(sgrp, "number_of_spins", 1);
       h5::h5_write_attribute(sgrp, "number_of_spins_in_basis", 1);
+      h5::h5_write_attribute(sgrp, "number_of_polarizations", 1);
       h5::h5_write_attribute(sgrp, "number_of_bands", nImpOrbs);
       h5::h5_write_attribute(sgrp, "number_of_elec", 1);
       h5::h5_write_attribute(sgrp, "madelung_constant", 0.0);
@@ -970,9 +972,9 @@ namespace methods {
       nda::diagonal(Hab) = ComplexType(1.0); 
       nda::h5_write(sgrp, "overlap", H0_loc_sIab, false);
       H0_loc_sIab() = ComplexType(0.0);
-      // to do: provide proper density matrix and fock matrices from non-interacting solution
+      // fock_matrix is not written: the model reader defaults it to H0
+      // to do: provide proper density matrix from non-interacting solution
       nda::h5_write(sgrp, "density_matrix", H0_loc_sIab, false);
-      nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
 //      h5::h5_write(sgrp, "chemical_potential", mu);
     }
     _context->comm.barrier();
