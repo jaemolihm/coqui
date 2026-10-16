@@ -1139,16 +1139,24 @@ std::optional<std::string> read_scf_string(mpi_context_t& mpi,
 
 /**
  * Read the div_treatment the scGW run used (stashed in the checkpoint scf
- * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
- * dataset must be regenerated. LR/GW evaluators must reuse this value so
- * divergence heads stay consistent with how W and Sigma were computed.
+ * group by scr_coulomb_t::dump_eps_inv_head). LR/GW evaluators must reuse this
+ * value so divergence heads stay consistent with how W and Sigma were computed.
+ * When the group has no stash (e.g. the embed group), a model mean field takes
+ * the treatment of its model file, which every model ground-state run imposes
+ * (model_div_treatment); other checkpoints must be regenerated.
  */
 template<typename mpi_context_t>
 std::string read_div_treatment(mpi_context_t& mpi,
                                const std::string& input_file,
-                               const std::string& input_grp)
+                               const std::string& input_grp,
+                               std::shared_ptr<mf::MF> const& mf = nullptr)
 {
   auto div = read_scf_string(mpi, input_file, input_grp, "div_treatment");
+  if (!div and mf and mf->mf_type() == mf::model_source) {
+    app_log(2, "  '{}/div_treatment' not found in {}; using \"{}\" from the model file.",
+            input_grp, input_file, mf->model_sys()->div_treatment);
+    return mf->model_sys()->div_treatment;
+  }
   utils::check(div.has_value(),
                "read_div_treatment: '{}/div_treatment' missing in {}. "
                "This checkpoint predates div_treatment dump; please regenerate "
@@ -1165,14 +1173,21 @@ std::string read_div_treatment(mpi_context_t& mpi,
  * Unlike read_div_treatment this does NOT error when the dataset is absent:
  * checkpoints predating the stash fall back to "gygi", which is both hf_t's
  * default and what LR applied unconditionally before, so they keep their
- * previous behaviour instead of needing to be regenerated.
+ * previous behaviour instead of needing to be regenerated. A model mean field
+ * takes the treatment of its model file instead (model_div_treatment).
  */
 template<typename mpi_context_t>
 std::string read_hf_div_treatment(mpi_context_t& mpi,
                                   const std::string& input_file,
-                                  const std::string& input_grp)
+                                  const std::string& input_grp,
+                                  std::shared_ptr<mf::MF> const& mf = nullptr)
 {
   auto div = read_scf_string(mpi, input_file, input_grp, "hf_div_treatment");
+  if (!div and mf and mf->mf_type() == mf::model_source) {
+    app_log(2, "  '{}/hf_div_treatment' not found in {}; using \"{}\" from the model file.",
+            input_grp, input_file, mf->model_sys()->div_treatment);
+    return mf->model_sys()->div_treatment;
+  }
   if (!div) {
     app_log(2, "  '{}/hf_div_treatment' not found in {}; assuming \"gygi\" for the LR "
                "exchange divergence. Regenerate the checkpoint if the ground state "
@@ -1180,6 +1195,21 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
     return "gygi";
   }
   return *div;
+}
+
+/**
+ * The lr_gw_*_calc debug drivers build their τ-side arrays on the preferred LR τ
+ * grid (utils::lr_W_q_local_dist) only; abort with a clear message when it does
+ * not fit (e.g. a one-orbital model on many ranks). run_lr handles that case.
+ */
+inline void check_lr_debug_tau_grid(long np, long nt_half, long NP, const char* where)
+{
+  auto [pgrid, bsize] = utils::lr_W_q_local_dist(np, nt_half, NP);
+  (void)bsize;
+  utils::check(utils::proc_grid_fits(pgrid, std::array<long, 4>{nt_half, 1, NP, NP}),
+               "{}: the LR τ grid (t, q, P, Q) = ({}, {}, {}, {}) of {} MPI ranks does not fit "
+               "(nt_half = {}, Np = {}). This debug driver supports only that grid; use fewer "
+               "ranks, or run_lr.", where, pgrid[0], pgrid[1], pgrid[2], pgrid[3], np, nt_half, NP);
 }
 
 /**
@@ -1225,10 +1255,18 @@ auto load_W_and_eps_inv_head(
   // The dataset on disk is (q,t,P,Q), so the distributed read must target that
   // axis order: h5_read maps the array's index space onto
   // the dataset's and cannot permute axes.
-  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
-  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
+  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid. When that grid
+  // holds only the first g ranks, read on a grid of all ranks instead; the
+  // transpose below then redistributes onto the τ-dist.
+  long np = mpi.comm.size();
+  auto [tq_g, tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist_fit(np, nt_half, NP);
   std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
   std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
+  if (tq_g < np) {
+    qt_pgrid = utils::find_proc_grid_fit_or_abort<4>(np, {nkpts, nt_half, NP, NP},
+                                                     std::nullopt, "load_W_and_eps_inv_head");
+    qt_bsize = {1, 1, 1, 1};
+  }
 
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
@@ -1258,12 +1296,16 @@ auto load_W_and_eps_inv_head(
   }
   mpi.comm.barrier();
 
-  auto div_treatment = read_div_treatment(mpi, input_file, input_grp);
+  auto div_treatment = read_div_treatment(mpi, input_file, input_grp, thc.MF());
 
   // Recompute eps_inv_head from the loaded W_c
   // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
+  auto dW_tqPQ = (tq_g == np)
+      ? utils::transpose_axes_01(dW_qtPQ, mpi.comm)
+      : math::nda::make_distributed_array_on_first_ranks<local_Array_4D_t>(
+            mpi.comm, tq_pgrid, {nt_half, nkpts, NP, NP}, tq_bsize, 0);
+  if (tq_g < np) math::nda::transpose_01(dW_qtPQ, dW_tqPQ);
   dW_qtPQ.reset();
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
@@ -1305,8 +1347,9 @@ auto lr_load_W_omega(
       mpi, thc, input_file, input_grp, ft.nt_f(), screened_interaction_file);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
+  auto [w_pgrid, w_bsize, w_fused] = utils::lr_W_tau_local_dist_fit(
       mpi.comm.size(), nw_half, thc.MF()->nkpts(), thc.Np());
+  (void)w_fused;
 
   solvers::scr_coulomb_fourier_t setup_ft(&ft);
   auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
@@ -1375,8 +1418,9 @@ auto recompute_W_and_eps_inv_head(
   solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
+  auto [w_pgrid, w_bsize, w_fused] = utils::lr_W_tau_local_dist_fit(
       mpi.comm.size(), nw_half, nkpts, thc.Np());
+  (void)w_fused;
 
   auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi.comm.barrier();
@@ -1863,7 +1907,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                unperturbed, input_grp, input_file);
   // Exchange side: needed whenever ΔF carries exchange, independently of W.
   // Absent on pre-stash checkpoints, in which case this falls back to "gygi".
-  std::string hf_div_treatment = read_hf_div_treatment(*mpi, input_file, input_grp);
+  std::string hf_div_treatment = read_hf_div_treatment(*mpi, input_file, input_grp, mf);
   // HSEX needs W too, for the single ν=0 slice its exchange kernel adds to V.
   // The ω array is released inside lr_setup once that slice is taken.
   if (include_gw_sigma || exchange_static_W) {
@@ -1877,8 +1921,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    "screened_interaction_file must not be set.");
       recompute_W = true;
       div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
+      model_div_treatment(mf, "div_treatment", div_treatment, true);
     } else {
-      div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+      div_treatment = read_div_treatment(*mpi, input_file, input_grp, mf);
     }
     if (recompute_W) {
       app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
@@ -2288,6 +2333,8 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
   long nkpts_ibz = mf->nkpts_ibz();
   long nbnd = mf->nbnd();
   long nt = ft.nt_f();
+  check_lr_debug_tau_grid(mpi->comm.size(), (nt % 2 == 0) ? nt / 2 : nt / 2 + 1, thc.Np(),
+                          "lr_gw_sigma_DeltaG_calc");
 
   auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, DeltaG_tskij_root);
@@ -2504,6 +2551,10 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
   auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, DeltaG_tskij_root);
 
+  long nt = sG_tskij.shape()[0];
+  check_lr_debug_tau_grid(mpi->comm.size(), (nt % 2 == 0) ? nt / 2 : nt / 2 + 1, thc.Np(),
+                          "lr_gw_Pi_calc");
+
   // Create lr_rpa_pi solver and compute ΔP
   solvers::lr_rpa_pi lr(q_pert);
 
@@ -2638,6 +2689,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   long NP = thc.Np();
   long nt = ft.nt_f();
   long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+  check_lr_debug_tau_grid(mpi->comm.size(), nt_half, NP, "lr_gw_W_calc");
 
   // Require no symmetry (same as gw_evaluate_W_from_Pi_calc)
   utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
@@ -2760,7 +2812,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // Same div_treatment as the scGW run, so the Δε⁻¹ head stays consistent
   // with how W and Σ were computed
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp, mf);
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -2772,6 +2824,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   long NP = thc.Np();
   long nt = ft.nt_f();
   long nt_half_dw = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
+  check_lr_debug_tau_grid(mpi->comm.size(), nt_half_dw, NP, "lr_gw_sigma_DeltaW_calc");
 
   auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, G_tskij_root);
@@ -2859,7 +2912,7 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
 
   // Same div_treatment as the scGW run (consistent head extrapolation)
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp, mf);
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
@@ -2917,7 +2970,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
 
   // Same div_treatment as the scGW run (consistent divergence handling)
   auto input_grp = io::get_value_with_default<std::string>(pt, "input_type", "scf");
-  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+  auto div_treatment = read_div_treatment(*mpi, input_file, input_grp, mf);
 
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));

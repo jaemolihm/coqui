@@ -152,9 +152,13 @@ namespace methods {
 
       /// Build the cached per-run workspace (comm split, FT-coefficient windows,
       /// FFT objects, phase array, distributed buffers) on the first call.
-      /// τ-dist parameters are read from dDeltaPi_tqPQ; no-op once built.
+      /// τ-dist parameters are read from dDeltaPi_tqPQ, except the processor grid,
+      /// which comes from utils::lr_W_q_local_dist_fit: on the first `g` ranks
+      /// (g < comm.size(), the other ranks hold no τ point and get no buffers),
+      /// the array's grid() is not the processor grid. No-op once built.
       void _setup_workspace(thc_reader_t& thc,
-                            dArr_4D_t const& dDeltaPi_tqPQ, long ns);
+                            dArr_4D_t const& dDeltaPi_tqPQ, long ns,
+                            long g, std::array<long, 4> tau_pgrid);
 
     }; // lr_rpa_pi
   } // solvers

@@ -143,6 +143,11 @@ namespace methods {
        *                    SIGMA_A2P_REDUCE for the reduce-scatter and stripe add.
        * @param O_buf     - [INPUT/OUTPUT] optional caller-owned (ns·nkpts, nbnd, nbnd)
        *                    scratch, resized on shape mismatch; allocated per call if null.
+       * @param replicas  - [INPUT] optional: O_IPQ is replicated over groups of this
+       *                    communicator (split by rank / g, g = O_IPQ's communicator
+       *                    size), and only the first group (rank < g) adds its partials;
+       *                    the other groups join the reduce-scatter with zeros. Null: no
+       *                    replicas, O_IPQ's communicator holds every caller.
        */
       template<nda::MemoryArray AF_t, nda::MemoryArray Array_aux_t, typename communicator_t>
       static void aux_to_primary(int ip, int iq,
@@ -155,7 +160,8 @@ namespace methods {
                                  nda::ArrayOfRank<1> auto const& kp_map,
                                  nda::ArrayOfRank<1> auto const& kpq_map,
                                  utils::TimerManager* Timer = nullptr,
-                                 nda::array<ComplexType, 3>* O_buf = nullptr) {
+                                 nda::array<ComplexType, 3>* O_buf = nullptr,
+                                 mpi3::communicator* replicas = nullptr) {
         static_assert(nda::get_rank<Array_aux_t> == 4,
                       "lr_thc_comm::aux_to_primary: aux rank must be 4");
         constexpr int R = nda::get_rank<AF_t>;
@@ -177,11 +183,12 @@ namespace methods {
         // node_comm must partition O_IPQ's communicator, or some node's reduce-scatter
         // misses ranks (hang) or partials: its roots' sizes add up to that size.
         auto& gcomm = *O_IPQ.communicator();
-        long covered = gcomm.all_reduce_value(long(node_comm.root() ? node_comm.size() : 0),
+        auto& ccomm = replicas ? *replicas : gcomm;
+        long covered = ccomm.all_reduce_value(long(node_comm.root() ? node_comm.size() : 0),
                                               std::plus<>{});
-        utils::check(covered == long(gcomm.size()),
+        utils::check(covered == long(ccomm.size()),
                      "lr_thc_comm::aux_to_primary: node_comm does not partition the aux "
-                     "array's communicator ({} of {} ranks)", covered, gcomm.size());
+                     "array's communicator ({} of {} ranks)", covered, ccomm.size());
 
         nda::array<ComplexType, 3> O_buf_own;
         if (Timer) Timer->start("SIGMA_A2P_ALLOC");
@@ -190,8 +197,11 @@ namespace methods {
           O_buf->resize(ns * nkpts, nbnd, nbnd);
         if (Timer) Timer->stop("SIGMA_A2P_ALLOC");
 
-        _aux_to_primary_gemm(ip, iq, O_IPQ.local(), nbnd, thc, kp_map, kpq_map,
-                             org[1], org[2], org[3], Timer, *O_buf);
+        if (replicas == nullptr or replicas->rank() < gcomm.size())
+          _aux_to_primary_gemm(ip, iq, O_IPQ.local(), nbnd, thc, kp_map, kpq_map,
+                               org[1], org[2], org[3], Timer, *O_buf);
+        else
+          *O_buf = ComplexType(0.0);
 
         if (Timer) Timer->start("SIGMA_A2P_REDUCE");
         math::shm::reduce_scatter_add(O_Iab, node_comm, O_buf->data(), offset,

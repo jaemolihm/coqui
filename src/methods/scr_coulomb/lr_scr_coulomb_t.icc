@@ -342,8 +342,6 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // gemms plus two collectives per transform, on the per-iteration path.
   bool chk_leak = __app_verbosity__ >= 3;
 
-  long nproc = thc.mpi()->comm.size();
-  long NP = thc.Np();
   long nt_half = dDeltaPi_tqPQ.global_shape()[0];
 
   // --- Validate input: q-local dist ---
@@ -375,12 +373,22 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   // because ft_buffer_dist is what tau_to_w / w_to_tau compare the requested
   // layout against internally. So this check doubles as the runtime tripwire for
   // drift between lr_W_tau_local_dist and the ft_buffer_dist it duplicates.
+  //
+  // When the q-dist grid does not fit (utils::lr_W_tau_local_dist_fit falls back to
+  // another grid of all ranks; ft_buffer_dist_fit then stages on fewer ranks), the
+  // transforms cannot fuse and W_full is on that fallback grid: no check, one note.
   const long w_nproc = dW_full_wqPQ.communicator()->size();
   if (w_nproc > 1) {
-    auto [b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist(
+    auto [b_np, b_pgrid, b_bsize] = scr_coulomb_fourier_t::ft_buffer_dist_fit(
         w_nproc, {1L, dW_full_wqPQ.global_shape()[1],
                   dW_full_wqPQ.global_shape()[2], dW_full_wqPQ.global_shape()[3]});
-    utils::check(w_pgrid == b_pgrid and w_bsize == b_bsize,
+    if (b_np < w_nproc and not _fusion_off_logged) {
+      app_log(2, "  solve_lr_dyson_W: W(iω) grid ({}, {}, {}, {}) is not the q-dist "
+                 "distribution, which does not fit; the Fourier transforms are not fused.",
+              w_pgrid[0], w_pgrid[1], w_pgrid[2], w_pgrid[3]);
+      _fusion_off_logged = true;
+    }
+    utils::check(b_np < w_nproc or (w_pgrid == b_pgrid and w_bsize == b_bsize),
                  "solve_lr_dyson_W: W_full is not on the q-dist distribution, so "
                  "both Fourier transforms pay an extra global redistribute (has "
                  "utils::lr_W_tau_local_dist drifted from "
@@ -412,9 +420,8 @@ void lr_scr_coulomb_t::solve_lr_dyson_W(
   }
 
   // FT back: ω → τ, output in q-local (τ-dist) distribution
-  auto [q_pgrid, q_bsize] = utils::lr_W_q_local_dist(nproc, nt_half, NP);
   _Timer.start("LR_W_FT_W_TO_TAU");
-  dDeltaPi_tqPQ = _scr_fourier.w_to_tau(dDeltaPi_wqPQ, q_pgrid, q_bsize, true, chk_leak);
+  dDeltaPi_tqPQ = lr_w_to_tau_fit(_scr_fourier, dDeltaPi_wqPQ, nt_half, true, chk_leak);
   _Timer.stop("LR_W_FT_W_TO_TAU");
 
   _Timer.stop("SOLVE_LR_DYSON_W");

@@ -108,6 +108,32 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
 }
 
 
+void lr_hf::_init_aux_kernel_dist(long NP) {
+  if (_pq_NP == NP) return;
+  long np = _mpi->comm.size();
+  auto [g, pgrid] = utils::lr_aux_kernel_dist(np, NP);
+  _pq_g = g;
+  _pq_pgrid = pgrid;
+  _pq_NP = NP;
+  _pq_group_comm.reset();
+  if (g < np) {
+    _pq_group_comm.emplace(_mpi->comm.split(_mpi->comm.rank() / g, _mpi->comm.rank()));
+    app_log(2, "  LR-HF: (P, Q) kernel grid ({}, {}) on groups of {} ranks, {} copies",
+            pgrid[1], pgrid[2], g, np / g);
+  }
+}
+
+mpi3::communicator& lr_hf::aux_kernel_comm(long NP) {
+  _init_aux_kernel_dist(NP);
+  return _pq_group_comm ? *_pq_group_comm : _mpi->comm;
+}
+
+std::array<long, 3> lr_hf::aux_kernel_pgrid(long NP) {
+  _init_aux_kernel_dist(NP);
+  return _pq_pgrid;
+}
+
+
 void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
                         nda::range P_rng, nda::range Q_rng, bool compute_xc,
                         nda::array<ComplexType, 2>& Uq_PQ) {
@@ -134,6 +160,10 @@ void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
   // the Coulomb term does.
   if (compute_xc) {
     if (not _Vxc_q_cached) {
+      utils::check(_pq_g == _mpi->comm.size(),
+                   "lr_hf: the semilocal xc kernel (include_xc) needs a (P, Q) grid of all "
+                   "{} MPI ranks, but at Np = {} only {} of them fit. Use fewer ranks.",
+                   _mpi->comm.size(), thc.Np(), _pq_g);
       utils::check(thc.has_Vxc(),
                    "lr_hf: include_xc = true but the THC integrals carry no xc-kernel "
                    "matrix. Rebuild the THC with 'Vxc_file' set (and delete any stale "
@@ -253,10 +283,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // Extract unperturbed Dm for primary→aux DeltaX correction
   const nda::array<ComplexType, 4>* Dm_unpert = ibc ? ibc->Dm_ab : nullptr;
 
-  // Determine processor grid
-  auto kernel_pgrid = utils::lr_aux_kernel_pgrid(_mpi->comm.size());
+  // Determine processor grid. When it does not fit (NP, NP) on all ranks, every
+  // group of g ranks evaluates ΔF on its own copy and only the first group adds it.
+  auto& pq_comm = aux_kernel_comm(NP);
+  auto kernel_pgrid = aux_kernel_pgrid(NP);
   long np_P = kernel_pgrid[1];
   long np_Q = kernel_pgrid[2];
+  const bool add_F = (_mpi->comm.rank() < _pq_g);
+  mpi3::communicator* replicas = _pq_group_comm ? std::addressof(_mpi->comm) : nullptr;
   nda::array<long, 1> R_grid = _MF->kp_grid();
 
   // Dense k<->R coefficients, gemm path only.
@@ -298,9 +332,9 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
 
   _Timer.start("ALLOC");
   // ΔDm_skPQ is needed at all k-points in 1st-BZ
-  auto dDeltaDm_skPQ = make_distributed_array<local_Array_4D_t>(_mpi->comm, {1, 1, np_P, np_Q},
+  auto dDeltaDm_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                                  {ns, nkpts, NP, NP});
-  auto dDeltaF_skPQ = make_distributed_array<local_Array_4D_t>(_mpi->comm, {1, 1, np_P, np_Q},
+  auto dDeltaF_skPQ = make_distributed_array<local_Array_4D_t>(pq_comm, {1, 1, np_P, np_Q},
                                                                 {ns, nkpts_ibz, NP, NP});
   auto NP_loc = dDeltaDm_skPQ.local_shape()[2];
   auto NQ_loc = dDeltaDm_skPQ.local_shape()[3];
@@ -385,7 +419,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     //     Reuses thc_solver_comm::primary_to_aux (no DeltaX correction — we
     //     want the plain equilibrium Dm_PQ).
     opt_dDm_sRPQ_unpert.emplace(make_distributed_array<local_Array_4D_t>(
-        _mpi->comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NP}));
+        pq_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NP}));
     auto& dDm_sRPQ_unpert = *opt_dDm_sRPQ_unpert;
 
     solvers::thc_solver_comm::primary_to_aux(0, 0, *Dm_skij_unpert, dDm_sRPQ_unpert,
@@ -402,7 +436,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         Dm_QQ_unpert(idx.first + P_origin) +=
             factor * Dm_unpert_sRPQ_loc(is, 0, idx.first, idx.second);
     }
-    _mpi->comm.all_reduce_in_place_n(Dm_QQ_unpert.data(), Dm_QQ_unpert.size(), std::plus<>{});
+    pq_comm.all_reduce_in_place_n(Dm_QQ_unpert.data(), Dm_QQ_unpert.size(), std::plus<>{});
     _Timer.stop("ALLOC");
   }
   // --- end DeltaV correction setup ---
@@ -477,7 +511,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     for (auto ip : nda::range(npol))
       lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                               dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
-                                              _MF->ks_to_k(0), _kpq_map, &_Timer);
+                                              _MF->ks_to_k(0), _kpq_map, &_Timer, nullptr, replicas);
     _Timer.stop("AUX_TO_PRIM");
 
     // One reduction over the polarization blocks, which accumulated node-locally.
@@ -500,14 +534,14 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                      dU.local_range(2).first() == Q_rng.first() and
                      dU.local_range(2).size() == Q_rng.size(),
                      "lr_hf: the {} (P,Q) tiling differs from ΔDm's. Build it on "
-                     "utils::lr_aux_kernel_pgrid(comm.size()).", name);
+                     "lr_hf::aux_kernel_pgrid / aux_kernel_comm.", name);
         utils::check(dU.local_shape()[0] == nkpts,
                      "lr_hf: the exchange q→R transform needs one {} q per k-point "
                      "(got {} q, {} k).", name, dU.local_shape()[0], nkpts);
       };
 
       _Timer.start("Z_FETCH");
-      auto dU_qPQ = thc.dZ({1, np_P, np_Q});
+      auto dU_qPQ = thc.dZ(pq_comm, {1, np_P, np_Q});
       _Timer.stop("Z_FETCH");
       check_tiling(dU_qPQ, "Coulomb");
       _U_RPQ = dU_qPQ.local();
@@ -615,7 +649,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         // After this, we will symmetrize ΔF_ij and ΔF_ji to enforce Hermiticity.
         lr_thc_comm::aux_to_primary<AF_t>(ip, iq, (ip == iq ? ComplexType(1.0) : ComplexType(2.0)),
                                                 dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
-                                                _MF->ks_to_k(0), _kpq_map, &_Timer);
+                                                _MF->ks_to_k(0), _kpq_map, &_Timer, nullptr, replicas);
         _Timer.stop("AUX_TO_PRIM");
       } // iq
     } // ip
@@ -634,7 +668,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
         for (auto ip : nda::range(npol))
           lr_thc_comm::aux_to_primary<AF_t>(ip, ip, ComplexType(1.0),
                                                   dDeltaF_skPQ, sDeltaF_skij, 0, *sDeltaF_skij.node_comm(), thc,
-                                                  _MF->ks_to_k(0), _kpq_map, &_Timer);
+                                                  _MF->ks_to_k(0), _kpq_map, &_Timer, nullptr, replicas);
         _Timer.stop("AUX_TO_PRIM");
       }
     }
@@ -684,7 +718,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                  "(npol = {}). Set output_aux_fock = false.", npol);
     if (_mpi->comm.rank() == 0)
       *DeltaF_PQ_out = nda::array<ComplexType, 4>(dDeltaF_skPQ.global_shape());
-    math::nda::gather(0, dDeltaF_skPQ, DeltaF_PQ_out);
+    // global rank 0 is the root of the first group, the only one gathering
+    if (add_F) math::nda::gather(0, dDeltaF_skPQ, DeltaF_PQ_out);
   }
 
   // Add precomputed IBC correction for aux→primary (DeltaX terms on unperturbed F_PQ).
@@ -715,8 +750,10 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
   long nkpts_ibz = _MF->nkpts_ibz();
 
   int np = _mpi->comm.size();
-  int np_P = utils::find_proc_grid_min_diff(np, 1, 1);
-  int np_Q = np / np_P;
+  auto& pq_comm = aux_kernel_comm(NP);
+  auto kernel_pgrid = aux_kernel_pgrid(NP);
+  int np_P = kernel_pgrid[1];
+  int np_Q = kernel_pgrid[2];
 
   app_log(3, "  LR-HF J evaluation (diagonal Hartree kernel):");
   app_log(3, "    - processor grid for V(q): (P, Q) = ({}, {})\n", np_P, np_Q);
@@ -727,7 +764,7 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
   // from the distribution the dense path builds.
   using local_Array_2D_t = memory::array<HOST_MEMORY, ComplexType, 2>;
   auto dPQ = math::nda::make_distributed_array<local_Array_2D_t>(
-      _mpi->comm, {np_P, np_Q}, {NP, NP});
+      pq_comm, {np_P, np_Q}, {NP, NP});
   nda::range P_rng(dPQ.origin()[0], dPQ.origin()[0] + dPQ.local_shape()[0]);
   nda::range Q_rng(dPQ.origin()[1], dPQ.origin()[1] + dPQ.local_shape()[1]);
   nda::array<ComplexType, 2> Uq_PQ;
@@ -753,10 +790,11 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
   double factor = (ns == 1 and npol == 1) ? 2.0 : 1.0;
   DeltaDm_QQ *= ComplexType(factor / double(nkpts));
 
-  // (2) ΔJ_P = Σ_Q [V(q) + Vxc(q)]_PQ n_Q
+  // (2) ΔJ_P = Σ_Q [V(q) + Vxc(q)]_PQ n_Q, reduced over the (P,Q) tiles: with
+  //     replicated groups, each group then holds the full ΔJ once.
   nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
   nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
-  _mpi->comm.all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
+  pq_comm.all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
   _Timer.stop("COULOMB");
 
   // (3) ΔF_ij(k) = Σ_(p,P) conj(X_p(k+q)_Pi) ΔJ_P X_p(k)_Pj, one (s,k) block per rank.

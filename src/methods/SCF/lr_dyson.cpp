@@ -256,12 +256,18 @@ void lr_dyson::solve_lr_dyson_impl(
 
   // Convert ΔG(w) -> ΔG(tau)
   {
-    auto t_pgrid = lr_dyson_tau_pgrid(_context->comm.size(), _nkpts_ibz);
-    long nkpools = t_pgrid[2], np_i = t_pgrid[3], np_j = t_pgrid[4];
+    // The transform runs on the first g ranks; when no (k, i, j) grid of all ranks
+    // fits, the other ranks hold empty blocks along k.
+    using math::nda::make_distributed_array_on_first_ranks;
+    auto [g, t_pgrid] = dyson_tau_proc_grid_fit(_context->comm.size(), _nkpts_ibz, _nbnd);
+    long nkpools = t_pgrid[2];
+    long np_i = t_pgrid[3];
+    long np_j = t_pgrid[4];
+    const bool active = (_context->comm.rank() < g);
 
     _Timer.start("LR_DYSON_ALLOC");
-    auto dDeltaG_wskij_tmp = make_distributed_array<Array_5D_t>(_context->comm,
-        t_pgrid, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd});
+    auto dDeltaG_wskij_tmp = make_distributed_array_on_first_ranks<Array_5D_t>(_context->comm,
+        t_pgrid, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}, {}, 2);
     _Timer.stop("LR_DYSON_ALLOC");
 
     _Timer.start("LR_DYSON_REDIST");
@@ -273,14 +279,16 @@ void lr_dyson::solve_lr_dyson_impl(
     _Timer.stop("LR_DYSON_MISC");
 
     _Timer.start("LR_DYSON_ALLOC");
-    auto dDeltaG_tskij = make_distributed_array<Array_5D_t>(_context->comm,
-        t_pgrid, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
+    auto dDeltaG_tskij = make_distributed_array_on_first_ranks<Array_5D_t>(_context->comm,
+        t_pgrid, {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd}, {}, 2);
     _Timer.stop("LR_DYSON_ALLOC");
 
-    auto DeltaGt_loc = dDeltaG_tskij.local();
-    auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
     _Timer.start("LR_DYSON_G_W_TO_T");
-    _dyson.FT()->w_to_tau(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
+    if (active) {
+      auto DeltaGt_loc = dDeltaG_tskij.local();
+      auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
+      _dyson.FT()->w_to_tau(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
+    }
     _Timer.stop("LR_DYSON_G_W_TO_T");
 
     _Timer.start("LR_DYSON_MISC");
@@ -293,8 +301,8 @@ void lr_dyson::solve_lr_dyson_impl(
     // 4-D pgrid below reproduces the same rank->block map, so the two line up.
     _Timer.start("LR_DYSON_DM");
     {
-      auto dDeltaDm_skij = make_distributed_array<Array_4D_t>(_context->comm,
-          {1, nkpools, np_i, np_j}, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+      auto dDeltaDm_skij = make_distributed_array_on_first_ranks<Array_4D_t>(_context->comm,
+          {1, nkpools, np_i, np_j}, {_ns, _nkpts_ibz, _nbnd, _nbnd}, {}, 1);
 
       // The rank->block map has to agree on (s, k, i, j) or tau_to_beta writes this
       // rank's τ contraction into someone else's block: sizes still match, the
@@ -316,8 +324,10 @@ void lr_dyson::solve_lr_dyson_impl(
                        nkpools, np_i, np_j, nkpools, np_i, np_j);
       }
 
-      _dyson.FT()->tau_to_beta(dDeltaG_tskij.local(), dDeltaDm_skij.local());
-      dDeltaDm_skij.local() *= -1.0;
+      if (active) {
+        _dyson.FT()->tau_to_beta(dDeltaG_tskij.local(), dDeltaDm_skij.local());
+        dDeltaDm_skij.local() *= -1.0;
+      }
 
       math::nda::gather_to_shm(dDeltaDm_skij, sDeltaDm_skij);
     }

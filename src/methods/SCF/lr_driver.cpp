@@ -140,21 +140,20 @@ void lr_driver::lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_ful
   // The canonical LR q-local (t,q,P,Q) tiling every τ-side operand shares, and
   // the target of the ω→τ transform below. The fused ΔΣ loop pairs the P/Q tile
   // of W_c (from dW_tqPQ → dW_tRPQ) with that of ΔW and the G^R cache, both
-  // built via lr_W_q_local_dist, so a W_c on a different tiling makes the fused
+  // built via lr_W_q_local_dist_fit, so a W_c on a different tiling makes the fused
   // pairing abort: the contiguous PQ split disagrees whenever Np % np_P != 0
   // (bsize=1 vs bsize=Np/np_P round differently).
   long nt_half = (_nts % 2 == 0) ? _nts / 2 : _nts / 2 + 1;
-  auto [tq_pgrid, tq_bsize] =
-      utils::lr_W_q_local_dist(_mpi->comm.size(), nt_half, thc.Np());
 
   _Timer.start("LR_DRIVER_SETUP_W_FULL");
-  // One ω→τ, landing directly on the LR τ tiling. The ω array survives it only
-  // when the ΔW Dyson needs it as W_full; otherwise the FT releases it before
-  // allocating the output, which a caller-side reset cannot do.
+  // One ω→τ, landing directly on the LR τ tiling (utils::lr_W_q_local_dist_fit).
+  // The ω array survives it only when the ΔW Dyson needs it as W_full; otherwise
+  // the FT releases it before allocating the output, which a caller-side reset
+  // cannot do.
   solvers::scr_coulomb_fourier_t setup_ft(_dyson.FT());
-  auto dW_tqPQ = setup_ft.w_to_tau(*dW_wqPQ_in, tq_pgrid, tq_bsize,
-                                   /*reset_input=*/!gw_full,
-                                   __app_verbosity__ >= 3);
+  auto dW_tqPQ = solvers::lr_w_to_tau_fit(setup_ft, *dW_wqPQ_in, nt_half,
+                                          /*reset_input=*/!gw_full,
+                                          __app_verbosity__ >= 3);
   if (gw_full) {
     lr_scr->lr_Wc_to_Wfull(*dW_wqPQ_in, thc);
     opt_dW_full_wqPQ.emplace(std::move(*dW_wqPQ_in));
@@ -323,7 +322,13 @@ void lr_driver::lr_setup(
   // Z(q) to the ω array in place, which would double-count the bare V here.
   if (p.exchange_static_W || p.precond_hsex) {
     _Timer.start("LR_DRIVER_SETUP_WC0");
-    _opt_dWc0_qPQ.emplace(lr_precompute_Wc_static(*dW_wqPQ_in));
+    // Built on the (P,Q) kernel distribution of the lr_hf instances that read it;
+    // the operator's and the preconditioner's share it (same comm and Np).
+    solvers::lr_hf* hf = _lr_hf ? _lr_hf.get() : _lr_hf_pc.get();
+    utils::check(hf != nullptr,
+                 "lr_driver::lr_setup: an HSEX kernel needs an exchange channel.");
+    _opt_dWc0_qPQ.emplace(lr_precompute_Wc_static(*dW_wqPQ_in, hf->aux_kernel_comm(thc.Np()),
+                                                  hf->aux_kernel_pgrid(thc.Np())));
     // eps_inv_head_w holds ε⁻¹ - 1, q→0 extrapolated, on the PH-symmetric ω
     // half-axis whose index 0 is ν = 0.
     _hsex_head_factor = 1.0 + (*p.eps_inv_head_w)(0).real();
@@ -1246,8 +1251,12 @@ void lr_driver::print_distribution_summary(long NP, bool any_Sigma, bool needs_d
   const long nki  = _nkpts_ibz;
 
   // Aux τ-dist (q-local) grid — the same helper the allocators use.
-  auto [tau_pg, tau_bs] = utils::lr_W_q_local_dist(nproc, nth, NP);
+  auto [tau_g, tau_pg, tau_bs] = utils::lr_W_q_local_dist_fit(nproc, nth, NP);
   (void)tau_bs;
+  // Suffix naming the ranks an array lives on, when not all of them.
+  auto on_ranks = [nproc](long g) {
+    return g < nproc ? fmt::format(" [first {} ranks]", g) : std::string{};
+  };
 
   auto pg4 = [](const std::array<long,4>& g, const char* ax) {
     return fmt::format("{}=({},{},{},{})", ax, g[0], g[1], g[2], g[3]); };
@@ -1261,31 +1270,32 @@ void lr_driver::print_distribution_summary(long NP, bool any_Sigma, bool needs_d
   // Aux τ-dist (q-local) — present whenever a W self-energy is active.
   if (any_Sigma) {
     const char* arrs = needs_dW ? "dW_tRPQ, dG_tsRPQ, dG_mtau, ΔΠ/ΔW" : "dW_tRPQ";
-    app_log(2, "    {:<22s}{:<30s}{}", "aux τ-dist (q-local)",
-            pg4(tau_pg, "(t,q,P,Q)"), arrs);
+    app_log(2, "    {:<22s}{:<30s}{}{}", "aux τ-dist (q-local)",
+            pg4(tau_pg, "(t,q,P,Q)"), arrs, on_ranks(tau_g));
   }
   // Aux q-dist (ω-side) — only the full-GW W Dyson pipeline. One row: the FT
   // staging buffers and W(iω) share a distribution, which is what lets both
   // transforms fuse. The (P, Q) block is reported because it is the SLATE tile the
   // ω-side Dyson runs on.
   if (needs_dW) {
-    auto [w_pg, w_bs] = utils::lr_W_tau_local_dist(nproc, nwbh, nq, NP);
+    auto [w_pg, w_bs, w_fused] = utils::lr_W_tau_local_dist_fit(nproc, nwbh, nq, NP);
     const char* arrs = is_q_gamma() ? "FT staging buffers, dW_full_wqPQ"
                                     : "FT staging buffers, dW_full_wqPQ, _dW_full_qpQ";
-    app_log(2, "    {:<22s}{:<30s}{}", "aux q-dist (ω-side)",
+    app_log(2, "    {:<22s}{:<30s}{}{}", "aux q-dist (ω-side)",
             pg4(w_pg, "(w,q,P,Q)"),
-            fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]));
+            fmt::format("{}; (P,Q) block {}x{}", arrs, w_bs[2], w_bs[3]),
+            w_fused ? "" : "; FT not fused");
   }
 
   // Band-basis Dyson grids, from the helpers solve_lr_dyson_impl allocates with.
   auto [dyw_pg, dyw_bs] = lr_dyson_omega_pgrid(nproc, nw, nki, _nbnd);
   (void)dyw_bs;
-  auto dyt_pg = lr_dyson_tau_pgrid(nproc, nki);
+  auto [dyt_g, dyt_pg] = dyson_tau_proc_grid_fit(nproc, nki, _nbnd);
   app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(ω)",
           pg5(dyw_pg, "(w,s,k,i,j)"),
           any_Sigma ? "ΔG(iω), ΔΣ(iω)" : "ΔG(iω)");
-  app_log(2, "    {:<22s}{:<30s}{}", "band Dyson(τ)",
-          pg5(dyt_pg, "(·,·,k,i,j)"), "ΔG(τ) (+ redistribute tmp)");
+  app_log(2, "    {:<22s}{:<30s}{}{}", "band Dyson(τ)",
+          pg5(dyt_pg, "(·,·,k,i,j)"), "ΔG(τ) (+ redistribute tmp)", on_ranks(dyt_g));
   app_log(2, "  {}", std::string(72, '-'));
   app_log(2, "    (aux & band arrays are distributed over comm; "
              "shared arrays are node-replicated)\n");

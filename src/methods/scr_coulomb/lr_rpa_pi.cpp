@@ -66,7 +66,8 @@ namespace methods {
     }
 
     void lr_rpa_pi::_setup_workspace(thc_reader_t& thc,
-                                      dArr_4D_t const& dDeltaPi_tqPQ, long ns) {
+                                      dArr_4D_t const& dDeltaPi_tqPQ, long ns,
+                                      long g, std::array<long, 4> tau_pgrid) {
       if (_setup_done) return;
       using local_Array_4D_t = nda::array<ComplexType, 4>;
       using math::nda::make_distributed_array;
@@ -79,8 +80,9 @@ namespace methods {
       auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi_tqPQ.origin();
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
       long Np = dDeltaPi_tqPQ.global_shape()[2];
-      auto tau_pgrid = dDeltaPi_tqPQ.grid();
+      long nt_half = dDeltaPi_tqPQ.global_shape()[0];
       auto tau_bsize = dDeltaPi_tqPQ.block_size();
+      const bool active = (mpi->comm.rank() < g);
       long np_P = tau_pgrid[2], np_Q = tau_pgrid[3];
 
       // k<->R transforms: blocked FFT by default; COQUI_DEBUG_GEMM_FT=1
@@ -118,18 +120,22 @@ namespace methods {
       }
 
       // t_intra communicator for rank-4 distributed buffers (collective split).
-      _t_intra_comm.emplace(mpi->comm.split(t_origin, mpi->comm.rank()));
-      utils::check(_t_intra_comm->size()==np_P*np_Q, "t_intra_comm.size() = {} != np_P*np_Q", _t_intra_comm->size());
+      // Ranks holding no τ point form a group of their own and get no buffers.
+      _t_intra_comm.emplace(mpi->comm.split(
+          utils::lr_tau_colour(mpi->comm.rank(), g, t_origin, nt_half), mpi->comm.rank()));
+      if (active) {
+        utils::check(_t_intra_comm->size()==np_P*np_Q, "t_intra_comm.size() = {} != np_P*np_Q", _t_intra_comm->size());
 
-      // Aux-basis buffer for the ΔG factor (lr_thc_comm). The unperturbed G
-      // factor is supplied precomputed via the G^R cache, so no G buffer here.
-      _dDeltaG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
-          *_t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
-          {1, 1, tau_bsize[2], tau_bsize[3]}));
-      // Out-of-place FT buffer (term 1 uses it for ΔG^R, term 2 for ΔG^{-R};
-      // the two terms run sequentially, so one buffer suffices).
-      _fft_out.resize(nkpts, NP_loc*NQ_loc);
-      _DeltaPi_RPQ.resize(nkpts, NP_loc, NQ_loc);
+        // Aux-basis buffer for the ΔG factor (lr_thc_comm). The unperturbed G
+        // factor is supplied precomputed via the G^R cache, so no G buffer here.
+        _dDeltaG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
+            *_t_intra_comm, {1, 1, np_P, np_Q}, {ns, nkpts, Np, Np},
+            {1, 1, tau_bsize[2], tau_bsize[3]}));
+        // Out-of-place FT buffer (term 1 uses it for ΔG^R, term 2 for ΔG^{-R};
+        // the two terms run sequentially, so one buffer suffices).
+        _fft_out.resize(nkpts, NP_loc*NQ_loc);
+        _DeltaPi_RPQ.resize(nkpts, NP_loc, NQ_loc);
+      }
 
       _setup_done = true;
     }
@@ -198,8 +204,9 @@ namespace methods {
                    G_tskij.shape(0), G_tskij.shape(1), G_tskij.shape(2), G_tskij.shape(3), G_tskij.shape(4),
                    DeltaG_tskij.shape(0), DeltaG_tskij.shape(1), DeltaG_tskij.shape(2), DeltaG_tskij.shape(3), DeltaG_tskij.shape(4));
 
-      // τ-dist: distribute over τ and PQ
-      auto [tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, Np);
+      // τ-dist: distribute over τ and PQ, on the first g ranks when no grid of
+      // all ranks fits (the other ranks hold no τ point)
+      auto [g, tau_pgrid, tau_bsize] = utils::lr_W_q_local_dist_fit(mpi->comm.size(), nt_half, Np);
 
       app_log(3, "\n  LR polarization: ΔΠ = ΔG·G + G·ΔG (R-space)");
       app_log(3, "    q_pert = ({:.6f}, {:.6f}, {:.6f})", _q_pert(0), _q_pert(1), _q_pert(2));
@@ -207,15 +214,23 @@ namespace methods {
                  tau_pgrid[0], tau_pgrid[1], tau_pgrid[2], tau_pgrid[3]);
 
       _Timer.start("PI_LR_ALLOC");
-      auto dDeltaPi_tqPQ = make_distributed_array<local_Array_4D_t>(
-          mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_bsize);
+      auto dDeltaPi_tqPQ = math::nda::make_distributed_array_on_first_ranks<local_Array_4D_t>(
+          mpi->comm, tau_pgrid, {nt_half, nkpts, Np, Np}, tau_bsize, 0);
       auto [t_origin, q_origin, P_origin, Q_origin] = dDeltaPi_tqPQ.origin();
       auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dDeltaPi_tqPQ.local_shape();
 
       // One-time setup (comm split, shm FT-coefficient windows, phase array,
       // work buffers), built lazily on the first call and reused across SCF
       // iterations. Kept out of the kernel for readability.
-      _setup_workspace(thc, dDeltaPi_tqPQ, ns);
+      _setup_workspace(thc, dDeltaPi_tqPQ, ns, g, tau_pgrid);
+
+      // Ranks holding no τ point (g < comm.size()) have no buffers and nothing
+      // to compute; the loop below has no collectives.
+      if (mpi->comm.rank() >= g) {
+        _Timer.stop("PI_LR_ALLOC");
+        _Timer.stop("EVALUATE_LR_PI");
+        return dDeltaPi_tqPQ;
+      }
 
       // Local aliases so the loop body below reads as before
       // gemm-path coefficients (_sf_Rk/_sf_qR/_f_minus_Rk) are dereferenced

@@ -122,18 +122,6 @@ lr_dyson_omega_pgrid(long nproc, long nw, long nkpts_ibz, long nbnd) {
 }
 
 /**
- * Processor grid of the τ-side LR Dyson arrays (ΔG(τ) and its redistribute target)
- * over the (t, s, k, i, j) axes: k pools, then the bands. Shared with lr_driver's
- * distribution report.
- */
-inline std::array<long, 5> lr_dyson_tau_pgrid(long nproc, long nkpts_ibz) {
-  long nkpools = utils::find_proc_grid_max_npools(nproc, nkpts_ibz, 0.2);
-  long np = nproc / nkpools;
-  long np_i = utils::find_proc_grid_min_diff(np, 1, 1);
-  return {1, 1, nkpools, np_i, np / np_i};
-}
-
-/**
  * @class lr_dyson
  * @brief Handler for solving the linear response Dyson equation
  *

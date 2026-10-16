@@ -250,10 +250,16 @@ namespace methods {
       auto MF = thc.MF();
 
       // PQ grid/block from dW_ref (axes 2,3). Both layouts (term1: t,R,P,Q;
-      // term2: t,q,P,Q) put τ on axis 0 and the lattice axis on axis 1.
+      // term2: t,q,P,Q) put τ on axis 0 and the lattice axis on axis 1. On the
+      // first g < comm.size() ranks (utils::lr_W_q_local_dist_fit), dW_ref.grid()
+      // is not the processor grid, so take that from the helper instead.
       auto gshape = dW_ref.global_shape();
-      auto grid   = dW_ref.grid();
+      auto [g, fit_grid, fit_bsize] =
+          utils::lr_W_q_local_dist_fit(mpi->comm.size(), gshape[0], gshape[2]);
+      auto grid   = (g == mpi->comm.size()) ? dW_ref.grid() : fit_grid;
       auto bsize  = dW_ref.block_size();
+      // False on ranks a first-ranks τ-side layout leaves without τ points; those hold no buffers.
+      bool tau_active = (mpi->comm.rank() < g);
       auto lshape = dW_ref.local_shape();
       long NP = gshape[2], NQ = gshape[3];
       long NP_loc = lshape[2], NQ_loc = lshape[3];
@@ -267,17 +273,20 @@ namespace methods {
       utils::check(nk_ibz == nkpts,
                    "lr_gw::_setup_workspace: nk_ibz={} != nkpts={}", nk_ibz, nkpts);
 
-      _tau_comm.emplace(mpi->comm.split(t_origin, mpi->comm.rank()));
+      // Ranks holding no τ point form a τ group of their own and get no buffers.
+      _tau_comm.emplace(mpi->comm.split(
+          utils::lr_tau_colour(mpi->comm.rank(), g, t_origin, gshape[0]), mpi->comm.rank()));
       _tau_mpi.emplace(utils::make_mpi_context(*_tau_comm));
 
       // The ΔG aux buffer is read by term 1 only.
-      if (do_term1)
+      if (tau_active and do_term1)
         _dG_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
             *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
             {1, 1, P_bs, Q_bs}));
-      _dSigma_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
-          *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
-          {1, 1, P_bs, Q_bs}));
+      if (tau_active)
+        _dSigma_skPQ.emplace(make_distributed_array<local_Array_4D_t>(
+            *_tau_comm, {1, 1, np_P, np_Q}, {ns, nkpts, NP, NQ},
+            {1, 1, P_bs, Q_bs}));
 
       // Contract: Σ is undivided along (s,k) and lives on _tau_comm, so each τ slab
       // of ΔΣ is written only by its pool, each rank of _tau_mpi->node_comm adding a
@@ -427,8 +436,8 @@ namespace methods {
 
       // Local aliases so the loop body below reads as before.
       // The Σ buffer is accumulated in R-space (dSigma_sRPQ) and FT'd in place
-      // to k-space (aliased dSigma_skPQ) before aux_to_primary.
-      auto& dSigma_sRPQ = *_dSigma_skPQ;
+      // to k-space (aliased dSigma_skPQ) before aux_to_primary. It exists only on
+      // ranks holding τ points, hence aliased inside the τ loop.
       auto& ft_buffer = _ft_buffer;
       auto& W2_tau_RPQ = _W2_tau_RPQ;
       // gemm-path coefficients; engaged only when the FFT optionals are empty
@@ -443,6 +452,7 @@ namespace methods {
       // === Step 2: Per-tau loop with inner minus_t loop ===
       for (long it_local = 0; it_local < nt_loc; ++it_local) {
         long it_w = t_origin + it_local;  // global W tau index (first half: 0..nt_half-1)
+        auto& dSigma_sRPQ = *_dSigma_skPQ;
 
         // --- W slices once per tau (reused for both minus_t passes) ---
         // Term 1's W (dW_tRPQ, (t,R,P,Q)) is a contiguous leading-index slice,

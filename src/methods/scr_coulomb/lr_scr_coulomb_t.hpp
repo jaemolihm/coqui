@@ -43,6 +43,41 @@ namespace methods {
 namespace solvers {
 
   /**
+   * ω→τ transform of an LR W-type quantity onto the τ-side (t, q, P, Q) grid of
+   * utils::lr_W_q_local_dist_fit, the one every LR τ-side operand shares.
+   *
+   * When that grid spans all ranks, this is scr_coulomb_fourier_t::w_to_tau onto it.
+   * Otherwise (no grid of all ranks fits the τ axis with q undivided) the transform
+   * lands on a grid of all ranks first and is redistributed onto the first g ranks,
+   * leaving the others with empty τ blocks.
+   *
+   * @param nt_half - first-half τ extent of the output
+   */
+  template<nda::MemoryArrayOfRank<4> local_Array_t, typename communicator_t>
+  auto lr_w_to_tau_fit(scr_coulomb_fourier_t& ft,
+                       memory::darray_t<local_Array_t, communicator_t>& dW_wqPQ,
+                       long nt_half, bool reset_input, bool check_leakage)
+  -> memory::darray_t<local_Array_t, mpi3::communicator>
+  {
+    auto& comm = *dW_wqPQ.communicator();
+    long np = comm.size();
+    long nq = dW_wqPQ.global_shape()[1];
+    long NP = dW_wqPQ.global_shape()[2];
+    auto [g, t_pgrid, t_bsize] = utils::lr_W_q_local_dist_fit(np, nt_half, NP);
+    if (g == np)
+      return ft.w_to_tau(dW_wqPQ, t_pgrid, t_bsize, reset_input, check_leakage);
+
+    std::array<long, 4> t_gshape = {nt_half, nq, NP, NP};
+    auto all_pgrid = utils::find_proc_grid_fit_or_abort<4>(np, t_gshape, std::nullopt,
+                                                           "lr_w_to_tau_fit");
+    auto dW_all_tqPQ = ft.w_to_tau(dW_wqPQ, all_pgrid, {}, reset_input, check_leakage);
+    auto dW_tqPQ = math::nda::make_distributed_array_on_first_ranks<local_Array_t>(
+        comm, t_pgrid, t_gshape, t_bsize, 0);
+    math::nda::redistribute(dW_all_tqPQ, dW_tqPQ);
+    return dW_tqPQ;
+  }
+
+  /**
    * @brief Linear response screened Coulomb interaction solver.
    *
    * Computes the linearized W Dyson equation:
@@ -168,6 +203,9 @@ namespace solvers {
     bool _is_q_gamma;                  // set in constructor; true iff _q_pert ≈ Γ
     bool _kpq_map_initialized = false; // lazy init for _kpq_map (needs THC handle)
     nda::array<int, 1> _kpq_map;       // iq → iq+q_pert (full BZ); only built for Q≠Γ
+
+    // The "FT not fused" note of solve_lr_dyson_W is printed once per instance.
+    bool _fusion_off_logged = false;
 
     // q-shifted W_full(q+Q) for the Q≠Γ Dyson. Built once during setup and reused during
     // LR iterations. Empty for Q=Γ (the operand is then W_full itself).

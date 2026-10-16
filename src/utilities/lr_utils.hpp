@@ -25,6 +25,9 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <optional>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -153,6 +156,69 @@ inline auto lr_W_q_local_dist(long nproc, long nt, long NP)
 }
 
 /**
+ * The τ-side (t, q, P, Q) distribution with q undivided, for any number of ranks.
+ *
+ * Three tiers, the first that applies:
+ *   1. lr_W_q_local_dist, whenever it fits (t, 1, P, Q) — every ab initio run;
+ *   2. a grid of all ranks that fits, with q still undivided (uneven τ chunks);
+ *   3. a grid of the first g < nproc ranks: the arrays are then built with
+ *      math::nda::make_distributed_array_on_first_ranks(..., empty_dim = 0), so
+ *      the other ranks hold no τ point (nt_loc = 0) and the full q, P, Q extents.
+ * The (P, Q) block size is the lr_W_q_local_dist formula on the chosen grid.
+ *
+ * @return {g, pgrid, bsize}, g = prod(pgrid) <= nproc
+ */
+inline auto lr_W_q_local_dist_fit(long nproc, long nt, long NP)
+    -> std::tuple<long, std::array<long,4>, std::array<long,4>>
+{
+  std::array<long, 4> extents = {nt, 1, NP, NP};
+  auto [pgrid, bsize] = lr_W_q_local_dist(nproc, nt, NP);
+  if (proc_grid_fits(pgrid, extents)) return {nproc, pgrid, bsize};
+
+  long g = nproc;
+  if (auto fit = find_proc_grid_fit<4>(nproc, extents); fit.has_value()) {
+    pgrid = *fit;
+  } else {
+    std::tie(g, pgrid) = find_proc_grid_fit_subset<4>(nproc, extents);
+  }
+  bsize = {1, 1, std::max(NP / std::max(pgrid[2], 1L), 1L),
+                 std::max(NP / std::max(pgrid[3], 1L), 1L)};
+  return {g, pgrid, bsize};
+}
+
+/**
+ * Colour of a rank in the split of the τ-side arrays into groups sharing one τ
+ * tile: the τ origin on the g ranks that hold the array, nt (no τ tile) on the
+ * others, so that those form a group of their own.
+ */
+inline long lr_tau_colour(long rank, long g, long t_origin, long nt)
+{
+  return (rank < g) ? t_origin : nt;
+}
+
+/// lr_W_tau_local_dist, or std::nullopt when the (P, Q) axes are too small for
+/// the ranks left over by the q pools.
+inline auto lr_W_tau_local_dist_opt(long nproc, long nq, long NP)
+    -> std::optional<std::pair<std::array<long,4>, std::array<long,4>>>
+{
+  std::array<long, 4> b_pgrid = {1, 1, 1, 1};
+  std::array<long, 4> b_bsize = {1, 1, 1, 1};
+  b_pgrid[1] = find_proc_grid_max_npools(nproc, nq, 0.2);
+  long np_PQ = nproc / b_pgrid[1];
+  if (NP * NP >= np_PQ) {
+    b_pgrid[2] = find_proc_grid_min_diff(np_PQ, NP, NP);
+    b_pgrid[3] = np_PQ / b_pgrid[2];
+  } else if (np_PQ != 1) {
+    return std::nullopt;
+  }
+  b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
+                                NP / std::max(b_pgrid[3], 1L)});
+  b_bsize[2] = std::max(b_bsize[2], 1L);
+  b_bsize[3] = b_bsize[2];
+  return std::make_pair(b_pgrid, b_bsize);
+}
+
+/**
  * The q-dist distribution for W(iω) on the LR path: pgrid = {1, nqpools, np_P,
  * np_Q}, i.e. the ω axis local, distributed over q and then (P, Q). Square,
  * 1024-capped (P, Q) block.
@@ -190,22 +256,32 @@ inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
                                 [[maybe_unused]] long nw_half, long nq, long NP)
     -> std::pair<std::array<long,4>, std::array<long,4>>
 {
-  std::array<long, 4> b_pgrid = {1, 1, 1, 1};
-  std::array<long, 4> b_bsize = {1, 1, 1, 1};
-  b_pgrid[1] = find_proc_grid_max_npools(nproc, nq, 0.2);
-  long np_PQ = nproc / b_pgrid[1];
-  if (NP * NP >= np_PQ) {
-    b_pgrid[2] = find_proc_grid_min_diff(np_PQ, NP, NP);
-    b_pgrid[3] = np_PQ / b_pgrid[2];
-  } else {
-    check(np_PQ == 1,
-          "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
-  }
-  b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
-                                NP / std::max(b_pgrid[3], 1L)});
-  b_bsize[2] = std::max(b_bsize[2], 1L);
-  b_bsize[3] = b_bsize[2];
-  return {b_pgrid, b_bsize};
+  auto dist = lr_W_tau_local_dist_opt(nproc, nq, NP);
+  check(dist.has_value(),
+        "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
+  return *dist;
+}
+
+/**
+ * The ω-side (w, q, P, Q) distribution for any number of ranks.
+ *
+ * lr_W_tau_local_dist whenever it exists and fits (w, q, P, Q) — every ab initio
+ * run — with fused = true: the Fourier transforms then write into and read out of
+ * W(iω) directly. Otherwise any grid of all ranks that fits, splitting ω if
+ * needed, with a unit block size and fused = false: both transforms then pay a
+ * staging redistribute.
+ *
+ * @return {pgrid, bsize, fused}
+ */
+inline auto lr_W_tau_local_dist_fit(long nproc, long nw_half, long nq, long NP)
+    -> std::tuple<std::array<long,4>, std::array<long,4>, bool>
+{
+  std::array<long, 4> extents = {nw_half, nq, NP, NP};
+  auto dist = lr_W_tau_local_dist_opt(nproc, nq, NP);
+  if (dist.has_value() and proc_grid_fits(dist->first, extents))
+    return {dist->first, dist->second, true};
+  auto pgrid = find_proc_grid_fit_or_abort<4>(nproc, extents, std::nullopt, "LR W(iω)");
+  return {pgrid, std::array<long, 4>{1, 1, 1, 1}, false};
 }
 
 /// Aux-basis kernel distribution: pgrid = {1, np_P, np_Q} over (q, P, Q), q
@@ -216,6 +292,17 @@ inline auto lr_aux_kernel_pgrid(long nproc) -> std::array<long, 3>
 {
   long np_P = find_proc_grid_min_diff(nproc, 1, 1);
   return {1, np_P, nproc / np_P};
+}
+
+/// lr_aux_kernel_pgrid whenever it fits (NP, NP). Otherwise the ranks split into
+/// nproc/g groups of g consecutive ranks, each holding a complete copy of the
+/// (P,Q) kernel arrays on the returned grid (find_proc_grid_fit_groups).
+/// @return {g, {1, np_P, np_Q}}
+inline auto lr_aux_kernel_dist(long nproc, long NP) -> std::pair<long, std::array<long, 3>>
+{
+  auto pref = lr_aux_kernel_pgrid(nproc);
+  auto [g, pq] = find_proc_grid_fit_groups<2>(nproc, {NP, NP}, std::array<long, 2>{pref[1], pref[2]});
+  return {g, {1, pq[0], pq[1]}};
 }
 
 /// Validate that a distributed 4D array follows the lr_W_q_local_dist pattern:
