@@ -227,24 +227,6 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
     std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root);
 
 /**
- * @brief Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
- *
- * Same R-space computation as lr_gw but for a full (non-LR) Green's function.
- * Used for finite-difference testing: Σ[G+εΔG] computed by passing G+εΔG as input.
- *
- * @param eri      - [INPUT] THC ERI handler
- * @param pt       - [INPUT] Parameters as property tree (prefix, output)
- * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
- * @param div_corr - [INPUT] Whether to apply divergence correction (default true)
- * @return Σ(τ,s,k,i,j) as (nt, ns, nk, nb, nb)
- */
-template<typename eri_t>
-nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
-    eri_t &eri, ptree const& pt,
-    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
-    bool div_corr = true);
-
-/**
  * @brief Linear response GW self-energy term 2: -G ⊙ ΔW + div_corr
  *
  * Computes ΔΣ = -G ⊙ ΔW from a pre-computed DeltaW.
@@ -285,20 +267,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
     std::optional<nda::array<ComplexType, 4>> const& W_c_qtPQ_root,
     nda::array<ComplexType, 1> const& eps_inv_head,
     bool div_corr);
-
-/**
- * @brief Compute eps_inv_head from W_c in THC product basis
- *
- * Extracts (ε⁻¹-1) head from W_c and extrapolates to q→0.
- * Matches the convention used by Sigma_div_correction.
- *
- * @param W_c_tqPQ  - [INPUT] Screened interaction W_c (nt_half, nkpts, NP, NP)
- * @return eps_inv_head at q=0, shape (nt_half,)
- */
-template<typename eri_t>
-nda::array<ComplexType, 1> compute_eps_inv_head_calc(
-    eri_t &eri, ptree const& pt,
-    std::optional<nda::array<ComplexType, 4>> const& W_c_tqPQ_root);
 
 /**
  * @brief Band-basis perturbation from a local potential given in the THC aux basis

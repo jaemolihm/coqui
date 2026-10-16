@@ -34,14 +34,6 @@ static auto const fun_0 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "kpts_crys", "q_vec")};
 
-// compute_eps_inv_head
-static auto const fun_1 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
-       std::optional<nda::array<ComplexType, 4>> W_c_tqPQ) {
-      return coqui_py::compute_eps_inv_head(lr_params, h_int, W_c_tqPQ);
-    },
-    "lr_params", "h_int", "W_c_tqPQ")};
-
 // gw_evaluate_Pi
 static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
@@ -57,14 +49,6 @@ static auto const fun_3 = c2py::dispatcher_f_kw_t{c2py::cfun(
       return coqui_py::gw_evaluate_W_from_Pi(lr_params, h_int, Pi_tqPQ);
     },
     "lr_params", "h_int", "Pi_tqPQ")};
-
-// gw_evaluate_sigma
-static auto const fun_4 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
-       std::optional<nda::array<ComplexType, 5>> G_tskij, bool div_corr) {
-      return coqui_py::gw_evaluate_sigma(lr_params, h_int, G_tskij, div_corr);
-    },
-    "lr_params", "h_int", "G_tskij", "div_corr")};
 
 // gw_evaluate_sigma_with_W
 static auto const fun_5 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -152,21 +136,6 @@ static auto const fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "h_int", "q_vec", "DeltaDm_skij", "S_skij", "compute_hartree",
     "compute_exchange")};
-
-// lr_qp_approx
-static auto const fun_12 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](coqui_py::ThcCoulomb &h_int, const std::string &prefix,
-       const nda::array<ComplexType, 5> &DeltaSigma_tskij,
-       const nda::array<ComplexType, 4> &MO_skia,
-       const nda::array<ComplexType, 3> &E_ska, double mu,
-       const nda::array<long, 1> &kpq_map, bool q_is_gamma,
-       std::string off_diag_mode, std::string ac_alg, int Nfit, double eta) {
-      return coqui_py::lr_qp_approx(h_int, prefix, DeltaSigma_tskij, MO_skia,
-                                    E_ska, mu, kpq_map, q_is_gamma,
-                                    off_diag_mode, ac_alg, Nfit, eta);
-    },
-    "h_int", "prefix", "DeltaSigma_tskij", "MO_skia", "E_ska", "mu", "kpq_map",
-    "q_is_gamma", "off_diag_mode", "ac_alg", "Nfit", "eta")};
 
 // mbpt
 static auto const fun_13 = c2py::dispatcher_f_kw_t{
@@ -346,28 +315,6 @@ Returns
               {{c2py::python_typename<const nda::array<double, 2> &>()},
                {c2py::python_typename<const nda::array<double, 1> &>()}},
               {c2py::python_typename<nda::array<long, 1>>()});
-static const auto doc_d_1 = fun_1.doc(
-    R"DOC(
-Compute eps_inv_head from W_c in THC product basis
-
-Parameters
-----------
-lr_params : {par_0}
-   - [INPUT] JSON string with params (prefix for IAFT)
-h_int : {par_1}
-   - [INPUT] THC ERI handler
-W_c_tqPQ : {par_2}
-   - [INPUT] Correlation screened interaction W_c (nt_half, nkpts, NP, NP)
-
-Returns
--------
-{ret_0}
-   - [OUTPUT] eps_inv_head (nt_half,)
-)DOC",
-    {{c2py::python_typename<const std::string &>()},
-     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
-    {c2py::python_typename<nda::array<ComplexType, 1>>()});
 static const auto doc_d_2 = fun_2.doc(
     R"DOC(
 Evaluate standard RPA polarization P[G] (FD helper)
@@ -412,31 +359,6 @@ Returns
      {c2py::python_typename<coqui_py::ThcCoulomb &>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()}},
     {c2py::python_typename<nda::array<ComplexType, 4>>()});
-static const auto doc_d_4 = fun_4.doc(
-    R"DOC(
-Evaluate GW self-energy Σ = -G ⊙ W_c [+ div_corr] using W from file
-
-Parameters
-----------
-lr_params : {par_0}
-   - [INPUT] JSON string with params (prefix)
-h_int : {par_1}
-   - [INPUT] THC ERI handler
-G_tskij : {par_2}
-   - [INPUT] Green's function (nt, ns, nk, nb, nb)
-div_corr : {par_3}
-   - [INPUT] Whether to apply divergence correction
-
-Returns
--------
-{ret_0}
-   - [OUTPUT] Σ (nt, ns, nk, nb, nb)
-)DOC",
-    {{c2py::python_typename<const std::string &>()},
-     {c2py::python_typename<coqui_py::ThcCoulomb &>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
-     {c2py::python_typename<bool>()}},
-    {c2py::python_typename<nda::array<ComplexType, 5>>()});
 static const auto doc_d_5 = fun_5.doc(
     R"DOC(
 Evaluate GW self-energy with provided W and G (FD helper)
@@ -642,60 +564,6 @@ Returns
                 {c2py::python_typename<bool>()},
                 {c2py::python_typename<bool>()}},
                {c2py::python_typename<nda::array<ComplexType, 4>>()});
-static const auto doc_d_12 =
-    fun_12.doc(R"DOC(
-Statify a dynamic LR self-energy ΔΣ into a static ΔV_QPGW (test API)
-
-Python entry point for methods::lr_qp_approx (the q-aware LR-qpGW static
-map). Wraps the numpy inputs into node-shared arrays, reads the IAFT from
-the checkpoint, builds a qp_params_t from the AC parameters, and returns the
-resulting static ΔV_QPGW(k) in the primary basis.
-
-Parameters
-----------
-h_int : {par_0}
-   - [INPUT] THC ERI handler (source of MPI + MF)
-prefix : {par_1}
-   - [INPUT] checkpoint prefix; IAFT read from prefix.mbpt.h5
-DeltaSigma_tskij : {par_2}
-   - [INPUT] dynamic ΔΣ_k(τ), (nt, ns, nk, nb, nb)
-MO_skia : {par_3}
-   - [INPUT] frozen QP MO coefficients C, (ns, nk, nb, nb)
-E_ska : {par_4}
-   - [INPUT] frozen QP energies ε, (ns, nk, nb)
-mu : {par_5}
-   - [INPUT] frozen chemical potential
-kpq_map : {par_6}
-   - [INPUT] k → k+q index map, (nk,)
-q_is_gamma : {par_7}
-   - [INPUT] whether q ≈ 0 (enables Hermitization)
-off_diag_mode : {par_8}
-   - [INPUT] "qp_energy" or "fermi"
-ac_alg : {par_9}
-   - [INPUT] analytic-continuation algorithm (e.g. "pade")
-Nfit : {par_10}
-   - [INPUT] # of AC fit parameters
-eta : {par_11}
-   - [INPUT] AC broadening
-
-Returns
--------
-{ret_0}
-   - [OUTPUT] static ΔV_QPGW(k), (ns, nk, nb, nb)
-)DOC",
-               {{c2py::python_typename<coqui_py::ThcCoulomb &>()},
-                {c2py::python_typename<const std::string &>()},
-                {c2py::python_typename<const nda::array<ComplexType, 5> &>()},
-                {c2py::python_typename<const nda::array<ComplexType, 4> &>()},
-                {c2py::python_typename<const nda::array<ComplexType, 3> &>()},
-                {c2py::python_typename<double>()},
-                {c2py::python_typename<const nda::array<long, 1> &>()},
-                {c2py::python_typename<bool>()},
-                {c2py::python_typename<std::string>()},
-                {c2py::python_typename<std::string>()},
-                {c2py::python_typename<int>()},
-                {c2py::python_typename<double>()}},
-               {c2py::python_typename<nda::array<ComplexType, 4>>()});
 static const auto doc_d_13 = fun_13.doc(R"DOC()DOC");
 static const auto doc_d_14 = fun_14.doc(
     R"DOC(
@@ -767,14 +635,10 @@ Returns
 static PyMethodDef module_methods[] = {
     {"calculate_kpq_map", (PyCFunction)c2py::pyfkw<fun_0>,
      METH_VARARGS | METH_KEYWORDS, doc_d_0.c_str()},
-    {"compute_eps_inv_head", (PyCFunction)c2py::pyfkw<fun_1>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_1.c_str()},
     {"gw_evaluate_Pi", (PyCFunction)c2py::pyfkw<fun_2>,
      METH_VARARGS | METH_KEYWORDS, doc_d_2.c_str()},
     {"gw_evaluate_W_from_Pi", (PyCFunction)c2py::pyfkw<fun_3>,
      METH_VARARGS | METH_KEYWORDS, doc_d_3.c_str()},
-    {"gw_evaluate_sigma", (PyCFunction)c2py::pyfkw<fun_4>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_4.c_str()},
     {"gw_evaluate_sigma_with_W", (PyCFunction)c2py::pyfkw<fun_5>,
      METH_VARARGS | METH_KEYWORDS, doc_d_5.c_str()},
     {"hf_evaluate", (PyCFunction)c2py::pyfkw<fun_6>,
@@ -791,8 +655,6 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_10.c_str()},
     {"lr_hf", (PyCFunction)c2py::pyfkw<fun_11>, METH_VARARGS | METH_KEYWORDS,
      doc_d_11.c_str()},
-    {"lr_qp_approx", (PyCFunction)c2py::pyfkw<fun_12>,
-     METH_VARARGS | METH_KEYWORDS, doc_d_12.c_str()},
     {"mbpt", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
      doc_d_13.c_str()},
     {"run_lr", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
