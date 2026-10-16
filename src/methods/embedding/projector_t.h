@@ -228,7 +228,6 @@ namespace methods {
     void upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab) const;
     template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<6> Ac_t>
     void upfold(sArray_t<Array_base_t> &O_tskij, const Ac_t &O_tskIab) const;
-
     template<nda::ArrayOfRank<5> Array_base_t>
     auto downfold_k_fbz(const sArray_t<Array_base_t> &O_tskij) const -> nda::array<ComplexType, 6>;
 
@@ -253,9 +252,14 @@ namespace methods {
     auto downfold_loc(const nda::MemoryArrayOfRank<4> auto &O_skij, comm_t comm,
                       std::string name = "") const
     -> nda::array<ComplexType, 4>;
+    /**
+     * O_tsab = (1/N_k) sum_k C^{kpq(k)}_{ai} O^k_tsij C^{k*}_{bj}. With kpq_map (k -> k+Q, full BZ only,
+     * force_real = false) O^k is the (k+Q, k) block of a response at momentum transfer Q and the result is
+     * not hermitized; without it, kpq(k) = k.
+     */
     template<bool force_real=false, typename comm_t>
     auto downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
-                      std::string name = "") const
+                      std::string name = "", const nda::array<long, 1> *kpq_map = nullptr) const
     -> nda::array<ComplexType, 5>;
 
     template<bool force_real=false, nda::ArrayOfRank<4> Array_base_t>
@@ -266,6 +270,12 @@ namespace methods {
     -> nda::array<ComplexType, 5>;
 
   private:
+    // O_ab += C^{ik_l}_{ai} O_ij C^{ik_r*}_{bj} for spin is and impurity imp
+    void add_C_O_Cdag(long is, long ik_l, long ik_r, long imp,
+                      const nda::array<ComplexType, 2> &O_ij_W, nda::array<ComplexType, 2> &buffer_aj,
+                      nda::MemoryArrayOfRank<2> auto &&O_ab) const;
+
+
     mf::MF* _MF = nullptr;
 
     std::string _C_file;

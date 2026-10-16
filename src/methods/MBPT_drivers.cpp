@@ -664,6 +664,23 @@ auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
       mf, MBState(ft, outdir+"/"+prefix, mf, projector_ksIai, band_window, kpts_crys, trans_home_cell, false), pt);
 }
 
+auto lr_downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                      nda::array<ComplexType, 5> const& projector_ksIai,
+                      nda::array<long, 3> const& band_window,
+                      nda::array<RealType, 2> const& kpts_crys,
+                      std::optional<nda::array<ComplexType, 5>> const& DeltaG_tskij_root,
+                      nda::array<double, 1> const& q_vec)
+-> nda::array<ComplexType, 5> {
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  auto mpi = mf->mpi();
+  projector_t proj(*mf, projector_ksIai, band_window, kpts_crys, trans_home_cell);
+
+  auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaG_tskij_root);
+  nda::array<long, 1> kpq_map(mf->nkpts());
+  utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
+  return proj.downfold_loc<false>(sDeltaG_tskij.local(), mpi->comm, "", &kpq_map);
+}
+
 auto downfold_gloc_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& pt)
 -> nda::array<ComplexType, 5> {
   std::string err = std::string("downfold_gloc - Incorrect input - ");
@@ -2606,6 +2623,34 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
 
 
 /**
+ * LR of the local screened interaction: ΔW_loc = (1/N_q) Σ_q B^{q+Q†} ΔW^q B^q (no head correction).
+ */
+template<typename eri_t>
+nda::array<ComplexType, 5> lr_downfold_coulomb(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& projector_ksIai,
+    nda::array<long, 3> const& band_window,
+    nda::array<RealType, 2> const& kpts_crys,
+    std::optional<nda::array<ComplexType, 4>> const& DeltaW_xqPQ_root,
+    nda::array<double, 1> const& q_vec) {
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  auto div_treatment = io::tolower_copy(io::get_value_with_default<std::string>(pt, "div_treatment", "gygi"));
+  auto mf = eri.MF();
+  auto mpi = mf->mpi();
+  model_div_treatment(mf, "div_treatment", div_treatment, true);
+
+  projector_boson_t proj_boson(*mf, projector_ksIai, band_window, kpts_crys, trans_home_cell);
+  auto sB_qIPab = proj_boson.calc_bosonic_projector(eri);
+
+  auto sDeltaW_xqPQ = math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, DeltaW_xqPQ_root);
+  nda::array<long, 1> kpq_map(mf->nkpts());
+  utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
+
+  embed_eri_t embed_eri(*mf, div_treatment, "ignore_g0", "default");
+  return embed_eri.downfold_W_q(sDeltaW_xqPQ.local(), sB_qIPab.local(), kpq_map);
+}
+
+/**
  * Evaluate standard RPA polarization P[G] (FD helper).
  *
  * Reads IAFT from checkpoint, constructs scr_coulomb_t, calls eval_Pi_qdep,
@@ -3048,6 +3093,14 @@ template nda::array<ComplexType, 4> lr_gw_Pi_calc(
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&);
 
+// lr_downfold_coulomb instantiations (THC only)
+template nda::array<ComplexType, 5> lr_downfold_coulomb(
+    thc_reader_t&, ptree const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<long, 3> const&,
+    nda::array<RealType, 2> const&,
+    std::optional<nda::array<ComplexType, 4>> const&,
+    nda::array<double, 1> const&);
 // gw_evaluate_Pi_calc instantiations (THC only)
 template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
