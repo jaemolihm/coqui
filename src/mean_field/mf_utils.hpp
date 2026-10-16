@@ -207,6 +207,8 @@ inline std::string get_mf(const std::shared_ptr<utils::mpi_context_t<comm_t>> &m
 inline double wmax_from_mf(const MF& mf, double padding_factor = 1.5)
 {
   auto ev = mf.eigval();
+  utils::check(ev.size() > 0, "mf_utils::wmax_from_mf: the mean field has no eigenvalues "
+               "(a model file needs the eigval dataset).");
   auto [it_min, it_max] = std::minmax_element(ev.data(), ev.data() + ev.size());
   double emin = *it_min, emax = *it_max;
   double ef   = mf.efermi();

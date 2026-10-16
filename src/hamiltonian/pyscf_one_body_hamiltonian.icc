@@ -23,28 +23,40 @@
 namespace hamilt::detail
 {
 /**
- * Read PySCF one-body Hamiltonian associated with a MF object from a h5 file
+ * Default processor grid (spin, k, bands[, 1]) of a one-body quantity: `pgrid` itself unless it is {0}.
+ */
+template<size_t R>
+std::array<long,R> default_1B_pgrid(std::array<long,R> pgrid, long comm_size, long nspin, long nkpts)
+{
+  if( pgrid != std::array<long,R>{0} ) return pgrid;
+  long ps = (comm_size%nspin==0?nspin:1);
+  long n_ = comm_size/ps;
+  long pk = utils::find_proc_grid_max_rows(n_,nkpts);
+  pgrid.fill(1);
+  pgrid[0] = ps; pgrid[1] = pk; pgrid[2] = n_/pk;
+  return pgrid;
+}
+
+/**
+ * Read a one-body matrix associated with a MF object from a h5 file. Shared by the pyscf
+ * backend (group "SCF") and the model backend (group "System").
  * @param mf      - [INPUT] mean-field object
- * @param h5_name - [INPUT] name of h5 file
+ * @param h5_name - [INPUT] name of the dataset in the group
  * @param comm    - [INPUT] communicator for the output distributed array
  * @param pgrid   - [INPUT] processor grid for the distributed array
  * @param bz      - [INPUT] block size for the distributed array
+ * @param h5_group - [INPUT] group of the file that holds the dataset
  * @return - one-body Hamiltonian in a distributed array
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto pyscf_read_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::communicator& comm, 
-			     std::array<long,4> pgrid = {0}, std::array<long,4> bz = {1,1,2048,2048})
+			     std::array<long,4> pgrid = {0}, std::array<long,4> bz = {1,1,2048,2048},
+			     std::string h5_group = "SCF")
 {
   long nspin = mf.nspin();
   long nkpts = mf.nkpts_ibz();
   long nbnd = mf.nbnd();
-  if( (pgrid==std::array<long,4>{0}) ) {
-    long sz = comm.size();
-    long ps = (sz%nspin==0?nspin:1);
-    long n_ = sz/ps;
-    long pk = utils::find_proc_grid_max_rows(n_,nkpts);
-    pgrid = {ps,pk,n_/pk,1};
-  }
+  pgrid = default_1B_pgrid(pgrid, comm.size(), nspin, nkpts);
   utils::check(comm.size() == std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{}),
                "pyscf_read_1B_from_file: MPI size mismatch.");
 
@@ -59,36 +71,32 @@ auto pyscf_read_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::commu
     APP_ABORT("Failed to open h5 file: {}, mode:r",fn);
   }
   h5::group grp(file);
-  h5::group scf_grp = grp.open_group("SCF");
+  h5::group scf_grp = grp.open_group(h5_group);
   math::nda::h5_read(scf_grp, h5_name, Hij);
 
   return Hij;
 }
 
 /**
- * Read the diagonal elements of the PySCF one-body Hamiltonian associated with a MF object from a h5 file
+ * Read the diagonal elements of a one-body matrix associated with a MF object from a h5 file
  * @param mf      - [INPUT] mean-field object
- * @param h5_name - [INPUT] name of h5 file
+ * @param h5_name - [INPUT] name of the dataset in the group
  * @param comm    - [INPUT] communicator for the output distributed array
  * @param pgrid   - [INPUT] processor grid for the distributed array
  * @param bz      - [INPUT] block size for the distributed array
+ * @param h5_group - [INPUT] group of the file that holds the dataset
  * @return - one-body Hamiltonian in a distributed array
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 auto pyscf_read_diag_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::communicator& comm, 
-			     std::array<long,3> pgrid = {0}, std::array<long,3> bz = {1,1,2048})
+			     std::array<long,3> pgrid = {0}, std::array<long,3> bz = {1,1,2048},
+			     std::string h5_group = "SCF")
 {
   decltype(nda::range::all) all;
   long nspin = mf.nspin();
   long nkpts = mf.nkpts_ibz();
   long nbnd = mf.nbnd();
-  if( (pgrid==std::array<long,3>{0}) ) {
-    long sz = comm.size();
-    long ps = (sz%nspin==0?nspin:1);
-    long n_ = sz/ps;
-    long pk = utils::find_proc_grid_max_rows(n_,nkpts);
-    pgrid = {ps,pk,n_/pk};
-  }
+  pgrid = default_1B_pgrid(pgrid, comm.size(), nspin, nkpts);
   utils::check(comm.size() == std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{}),
                "pyscf_read_diag_1B_from_file: MPI size mismatch.");
 
@@ -106,7 +114,7 @@ auto pyscf_read_diag_1B_from_file(mf::MF& mf, std::string h5_name, boost::mpi3::
     APP_ABORT("Failed to open h5 file: {}, mode:r",fn);
   }
   h5::group grp(file);
-  h5::group scf_grp = grp.open_group("SCF");
+  h5::group scf_grp = grp.open_group(h5_group);
   math::nda::h5_read(scf_grp, h5_name, Hij);
 
   using larray3D = memory::array<MEM,ComplexType,3>;

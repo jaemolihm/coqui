@@ -48,11 +48,10 @@ auto make_dummy_model(std::shared_ptr<utils::mpi_context_t<comm_t>> mpi, int nb,
 
   auto symm = mf::bz_symm::gamma_point_instance();
   auto h = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
-  auto s = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
   auto d = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
   auto f = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
 
-  mf::model::model_system m(std::move(mpi),outdir,prefix,symm,ns,npol,nelec,h,s,d,f);
+  mf::model::model_system m(std::move(mpi),outdir,prefix,symm,ns,npol,nelec,h,d,f);
   return model_readonly(std::move(m));
 
 }

@@ -312,11 +312,10 @@ TEST_CASE("model_mf", "[mean_field]")
       mf::bz_symm symm("dummy_symm.h5");
 
       auto h = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
-      auto s = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
       auto d = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
       auto f = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
 
-      mf::model::model_system m(mpi,"./",prefix,symm,ns,1,nel,h,s,d,f);
+      mf::model::model_system m(mpi,"./",prefix,symm,ns,1,nel,h,d,f);
       m.save(prefix+".h5");
       remove("dummy_symm.h5");
     }
@@ -339,11 +338,10 @@ TEST_CASE("model_mf", "[mean_field]")
     auto symm = mf::bz_symm::gamma_point_instance();
 
     auto h = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
-    auto s = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
     auto d = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
     auto f = nda::array<ComplexType,4>::zeros({ns,nk,nb,nb});
 
-    mf::model::model_system m_sys(mpi,"./",prefix,symm,ns,1,nel,h,s,d,f);
+    mf::model::model_system m_sys(mpi,"./",prefix,symm,ns,1,nel,h,d,f);
     mf::MF mf(mf::model::model_readonly{m_sys});
 
     REQUIRE(mf.nspin() == ns);
