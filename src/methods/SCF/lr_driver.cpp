@@ -199,7 +199,7 @@ void lr_driver::lr_setup(
     // The one step would scale the total ΔΣ by the mixing but not the stored
     // G·ΔW term.
     utils::check(p.iter_params.mixing >= 1.0,
-                 "lr_driver::lr_setup: split ΔΣ terms need mixing = 1, got {}.",
+                 "lr_driver::lr_setup: split ΔΣ terms need mixing >= 1 (undamped), got {}.",
                  p.iter_params.mixing);
     utils::check(!p.has_deltax(),
                  "lr_driver::lr_setup: split ΔΣ terms do not support the DeltaX IBC "
@@ -669,8 +669,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   // Reset every quantity carried across SCF iterations, so this solve cannot see
   // the previous perturbation's state. set_zero ends with fence + node_sync.
-  // The previous iterates need no reset: every read of them follows a save in the
-  // same solve (iter > 1, or any iteration under GCR).
+  // The previous iterates need no reset: ΔF/ΔΣ/ΔV_QPGW are saved at every
+  // iteration and ΔDm from iteration 2, each before it is read.
   _Timer.start("LR_RESET");
   sDeltaF_skij.set_zero();
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
