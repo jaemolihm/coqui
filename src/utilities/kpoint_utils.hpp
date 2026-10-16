@@ -22,8 +22,11 @@
 #ifndef UTILITIES_KPOINT_UTILS_HPP
 #define UTILITIES_KPOINT_UTILS_HPP
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <type_traits>
+#include <vector>
 #include <cstdlib>
 #include <string_view>
 #include "IO/app_loggers.h"
@@ -87,21 +90,60 @@ inline long find_kpoint(nda::ArrayOfRank<2> auto const& kpts_crys,
 }
 
 /*
- * Given a regular, "complete" grid of kpts, Qpts  and a set of reciprocal vectors, calculates:
+ * Flat index of grid point i (mod N) on an N0 x N1 x N2 grid: (i0*N1 + i1)*N2 + i2, each i_d wrapped to [0, N_d).
+ */
+inline long grid_flat_index(std::array<long,3> const& i, std::array<long,3> const& N)
+{
+  auto wrap = [](long a, long n) { return ((a % n) + n) % n; };
+  return (wrap(i[0],N[0])*N[1] + wrap(i[1],N[1]))*N[2] + wrap(i[2],N[2]);
+}
+
+namespace detail {
+/*
+ * Index a list of points (crystal coordinates) as the complete Gamma-centred N0 x N1 x N2 grid:
+ *   pts[p] = idx[p] / N (mod 1), per coordinate to within 1e-8, every grid point exactly once, 0 < N_d <= 1000.
+ * On success, flat[grid_flat_index(i, N)] = p is the point at grid index i. Returns false for anything else
+ * (shifted or incomplete grids, duplicates, points not on this grid), in which case the outputs are unspecified.
+ */
+template<nda::ArrayOfRank<2> DMat>
+bool index_gamma_grid(std::array<long,3> const& N, DMat const& pts, nda::array<long,2>& idx, std::vector<long>& flat)
+{
+  utils::check(pts.shape()[1] == 3, "index_gamma_grid: Shape mismatch");
+  long np = pts.shape()[0];
+  for(int d=0; d<3; d++)
+    if(N[d] <= 0 or N[d] > 1000) return false;
+  if(np <= 0 or N[0]*N[1]*N[2] != np) return false;
+  idx = nda::array<long,2>(np, 3);
+  for(int d=0; d<3; d++) {
+    for(long p=0; p<np; p++) {
+      double y = pts(p,d) * double(N[d]);
+      double i = std::round(y);
+      if(std::abs(y - i) > 1e-8 * double(N[d])) return false;
+      idx(p,d) = long(i);
+    }
+  }
+  flat.assign(np, -1);
+  for(long p=0; p<np; p++) {
+    long f = grid_flat_index({idx(p,0), idx(p,1), idx(p,2)}, N);
+    if(flat[f] != -1) return false;
+    flat[f] = p;
+  }
+  return true;
+}
+} // detail
+
+/*
+ * Given a regular, "complete" grid of kpts and Qpts, calculates:
  *   - qk_to_k2[a,b] = c: where Qpts[a] = kpts[b] - kpts[c] - G,
- *   			  for some G in reciprocal cell    
+ *   			  for some G in reciprocal cell
  *   - qminus[a] = b, where Qpts[a] = G - Qpts[b], for some G in reciprocal cell.
- */  
-template<nda::ArrayOfRank<2> SDMat, nda::ArrayOfRank<2> DMat, nda::MemoryArrayOfRank<2> IMat, nda::MemoryArrayOfRank<1> IVec>
-void calculate_Qpt_maps(utils::Communicator auto& comm, SDMat const& bg, DMat const& kpts, DMat const& Qpts, IMat& qk_to_k2, IVec& qminus)
+ * Brute-force search over all (a, b, c): O(nk^3). The reference for calculate_Qpt_maps_regular_grid.
+ */
+template<nda::ArrayOfRank<2> DMat, nda::MemoryArrayOfRank<2> IMat, nda::MemoryArrayOfRank<1> IVec>
+void calculate_Qpt_maps_bruteforce(utils::Communicator auto& comm, DMat const& kpts, DMat const& Qpts,
+                                   IMat& qk_to_k2, IVec& qminus)
 {
   int nk = kpts.shape()[0];
-  utils::check(bg.shape()[0] == 3 and bg.shape()[1] == 3, "Shape mismatch");
-  utils::check(kpts.shape()[1] == 3, "Shape mismatch");
-  utils::check(Qpts.shape()[0] == nk and Qpts.shape()[1] == 3, "Shape mismatch");
-  utils::check(qk_to_k2.shape()[0] == nk and qk_to_k2.shape()[1] == nk, "Shape mismatch");
-  utils::check(qminus.shape()[0] == nk, "Shape mismatch"); 
-  
   app_log(3,"Initializing Qpt maps");
   qk_to_k2() = -1;
   for(int ik_ka=comm.rank(); ik_ka<nk*nk; ik_ka+=comm.size()) {
@@ -152,6 +194,61 @@ found_qk:
     utils::check(qminus(ik) >= 0, "Could not find -q.");
   } // ik
   comm.all_reduce_in_place_n(qminus.data(), nk, mpi3::max<>{}); 
+}
+
+/*
+ * The same tables as calculate_Qpt_maps_bruteforce by integer arithmetic, O(nk^2): when kpts and Qpts are both
+ * the complete Gamma-centred grid of dimensions grid (detail::index_gamma_grid), with grid indices i(k),
+ * c = qk_to_k2[a,b] is the point at i(kpts[b]) - i(Qpts[a]) (mod N) and qminus[a] the Q point at -i(Qpts[a]).
+ * The 1e-8 grid tolerance and N <= 1000 make that point the only one within the brute-force match tolerance
+ * (|d|^2 < 1e-8; any other point is at least 1/N away), so the tables are the same. Returns false, without
+ * touching the outputs, when the points are not that grid.
+ */
+template<nda::ArrayOfRank<1> GVec, nda::ArrayOfRank<2> DMat, nda::MemoryArrayOfRank<2> IMat, nda::MemoryArrayOfRank<1> IVec>
+bool calculate_Qpt_maps_regular_grid(GVec const& grid, DMat const& kpts, DMat const& Qpts, IMat& qk_to_k2, IVec& qminus)
+{
+  utils::check(grid.shape()[0] == 3, "calculate_Qpt_maps_regular_grid: Shape mismatch");
+  std::array<long,3> N = {long(grid(0)), long(grid(1)), long(grid(2))};
+  nda::array<long,2> ik, iq;
+  std::vector<long> kflat, qflat;
+  if(not detail::index_gamma_grid(N, kpts, ik, kflat)) return false;
+  if(not detail::index_gamma_grid(N, Qpts, iq, qflat)) return false;
+  long nk = kpts.shape()[0];
+  for(long a=0; a<nk; a++) {
+    for(long b=0; b<nk; b++)
+      qk_to_k2(a,b) = kflat[grid_flat_index({ik(b,0)-iq(a,0), ik(b,1)-iq(a,1), ik(b,2)-iq(a,2)}, N)];
+    qminus(a) = qflat[grid_flat_index({-iq(a,0), -iq(a,1), -iq(a,2)}, N)];
+  }
+  return true;
+}
+
+/*
+ * Given a regular, "complete" grid of kpts, Qpts  and a set of reciprocal vectors, calculates:
+ *   - qk_to_k2[a,b] = c: where Qpts[a] = kpts[b] - kpts[c] - G,
+ *   			  for some G in reciprocal cell    
+ *   - qminus[a] = b, where Qpts[a] = G - Qpts[b], for some G in reciprocal cell.
+ * grid: the grid dimensions. When kpts and Qpts are both the complete Gamma-centred grid of these dimensions, the
+ * O(nk^2) integer path is taken, otherwise the brute-force search; both give the same tables.
+ */  
+template<nda::ArrayOfRank<2> SDMat, nda::ArrayOfRank<1> GVec, nda::ArrayOfRank<2> DMat, nda::MemoryArrayOfRank<2> IMat, nda::MemoryArrayOfRank<1> IVec>
+void calculate_Qpt_maps(utils::Communicator auto& comm, SDMat const& bg, GVec const& grid, DMat const& kpts, DMat const& Qpts,
+                        IMat& qk_to_k2, IVec& qminus)
+{
+  int nk = kpts.shape()[0];
+  utils::check(bg.shape()[0] == 3 and bg.shape()[1] == 3, "Shape mismatch");
+  utils::check(grid.shape()[0] == 3, "Shape mismatch");
+  utils::check(kpts.shape()[1] == 3, "Shape mismatch");
+  utils::check(Qpts.shape()[0] == nk and Qpts.shape()[1] == 3, "Shape mismatch");
+  utils::check(qk_to_k2.shape()[0] == nk and qk_to_k2.shape()[1] == nk, "Shape mismatch");
+  utils::check(qminus.shape()[0] == nk, "Shape mismatch"); 
+
+  if(calculate_Qpt_maps_regular_grid(grid, kpts, Qpts, qk_to_k2, qminus)) {
+    // complete Gamma-centred grid: integer arithmetic
+    app_log(3,"Initializing Qpt maps (regular grid)");
+  } else {
+    // anything else: brute-force search
+    calculate_Qpt_maps_bruteforce(comm, kpts, Qpts, qk_to_k2, qminus);
+  }
 }
 
 /*

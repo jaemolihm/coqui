@@ -261,6 +261,37 @@ TEST_CASE("bz_symm", "[mean_field]")
   world.barrier(); 
 }
 
+// qk_to_k2 / qminus of QE mean fields (built by utils::calculate_Qpt_maps) against the brute-force search
+TEST_CASE("qpt_maps_qe", "[mean_field]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  for(std::string src : {"qe_lih222", "qe_lih222_sym", "qe_lih223", "qe_lih223_sym", "qe_si333_sym"}) {
+    auto mf = mf::default_MF(mpi, src);
+    long nk = mf.nkpts();
+    // crystal coordinates: x_crys(d) = sum_j lattv(d,j) x(j) / (2 pi)
+    nda::array<double,2> Q_crys(nk, 3);
+    for(long iq=0; iq<nk; ++iq)
+      for(int d=0; d<3; ++d) {
+        Q_crys(iq,d) = 0.0;
+        for(int j=0; j<3; ++j) Q_crys(iq,d) += mf.lattv(d,j)*mf.Qpts(iq,j)/(2.0*M_PI);
+      }
+    nda::array<double,2> k_crys = mf.kpts_crystal();
+    nda::array<int,2> qk_ref(nk, nk);
+    nda::array<int,1> qm_ref(nk);
+    utils::calculate_Qpt_maps_bruteforce(mpi->comm, k_crys, Q_crys, qk_ref, qm_ref);
+    nda::array<int,2> qk_fast(nk, nk);
+    nda::array<int,1> qm_fast(nk);
+    // all five are complete Gamma-centred grids
+    bool fast = utils::calculate_Qpt_maps_regular_grid(mf.kp_grid(), k_crys, Q_crys, qk_fast, qm_fast);
+    app_log(2, "qpt_maps_qe: {} nk = {} regular-grid path = {}", src, nk, fast);
+    REQUIRE( fast );
+    REQUIRE( qk_fast == qk_ref );
+    REQUIRE( qm_fast == qm_ref );
+    REQUIRE( nda::array<int,2>(mf.qk_to_k2()) == qk_ref );
+    REQUIRE( nda::array<int,1>(mf.qminus()) == qm_ref );
+  }
+}
+
 
 TEST_CASE("model_mf", "[mean_field]")
 {

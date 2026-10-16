@@ -351,7 +351,7 @@ struct bz_symm
     print_logs();
 
     // initialize Q grids, checks Qpts against kpts_crys
-    utils::calculate_Qpt_maps(comm,recv,kpts_crys,Qpts,qk_to_k2,qminus);
+    utils::calculate_Qpt_maps(comm,recv,kp_grid,kpts_crys,Qpts,qk_to_k2,qminus);
 
     // transform vectors to cartesian coordinates
     for(int ik=0; ik<nkpts; ik++)
