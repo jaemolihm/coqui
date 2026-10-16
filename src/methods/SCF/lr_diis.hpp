@@ -203,7 +203,7 @@ public:
 
     // Warmup gate, evaluated on the subspace INCLUDING the step just stored.
     const bool warmup =
-        (iter <= static_cast<int>(_warmup_iter) + 1 || _n < _min_subsp);
+        (iter <= static_cast<int>(_warmup_iter) || _n < _min_subsp);
 
     update_B(comm, has_sigma);
 

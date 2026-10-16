@@ -196,6 +196,11 @@ void lr_driver::lr_setup(
     utils::check(p.max_iter == 1,
                  "lr_driver::lr_setup: split ΔΣ terms are only meaningful for a "
                  "one-shot solve (max_iter=1), got max_iter={}.", p.max_iter);
+    // The one step would scale the total ΔΣ by the mixing but not the stored
+    // G·ΔW term.
+    utils::check(p.iter_params.mixing >= 1.0,
+                 "lr_driver::lr_setup: split ΔΣ terms need mixing = 1, got {}.",
+                 p.iter_params.mixing);
     utils::check(!p.has_deltax(),
                  "lr_driver::lr_setup: split ΔΣ terms do not support the DeltaX IBC "
                  "correction (term 2 has no IBC path).");
@@ -245,8 +250,7 @@ void lr_driver::lr_setup(
   // once no matter how many perturbations follow. Built here, ahead of the memory
   // report below, which reads its shape off the object. Damping and undamped
   // Picard keep no history: lr_solve_one mixes them elementwise. Neither
-  // accelerator is built for an empty kernel: GCR would otherwise step on a zero
-  // residual at iteration 1, before the convergence test ends the loop.
+  // accelerator is built for an empty kernel, whose solve runs no iteration.
   if (!K.empty()) {
     if (p.iter_params.alg == "GCR") {
       // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
@@ -694,12 +698,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   double Delta_mu = 0.0;
   int iter = 0;
-  bool converged = false;
-  // Whether the loop ran the iteration-algorithm step (GCR, DIIS, damping or
-  // undamped Picard), which replaces ΔF/ΔΣ without updating ΔDm. Once it runs,
-  // every later iteration runs it too, so at exit this says whether the last
-  // iteration did.
-  bool stepped = false;
+  // An empty kernel has no feedback: the loop is skipped and the Dyson pass after
+  // it is the answer.
+  const int max_iter = K.empty() ? 0 : p.max_iter;
+  bool converged = K.empty();
 
   const bool use_gcr = (_lr_gcr != nullptr);
   // The GCR direction map z = P_c⁻¹ r, preconditioned runs only.
@@ -763,22 +765,19 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     app_log(1, "  " + std::string(92, '-'));
   }
 
-  for (iter = 1; iter <= p.max_iter; ++iter) {
+  for (iter = 1; iter <= max_iter; ++iter) {
 
     // Save the previous iterates, each as this rank's partition slice only.
     _Timer.start("LR_SAVE");
-    // GCR also needs the input ΔF/ΔΣ of the first iteration: that step opens the
-    // right-hand side.
-    if (iter > 1 || use_gcr) {
-      _DeltaF.prev = _DeltaF.slice(sDeltaF_skij.local());
-      if (track_sigma)
-        _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());
-    }
-    if (iter > 1) {
+    // The iteration-algorithm step reads the input ΔF/ΔΣ (ΔV_QPGW) of every
+    // iteration, the reset zeros at the first. ΔDm only enters a difference norm.
+    _DeltaF.prev = _DeltaF.slice(sDeltaF_skij.local());
+    if (track_sigma)
+      _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());
+    if (qp)
+      _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij->local());
+    if (iter > 1)
       _DeltaDm.prev = _DeltaDm.slice(sDeltaDm_skij.local());
-      if (qp)
-        _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij->local());
-    }
     _mpi->comm.barrier();
     _Timer.stop("LR_SAVE");
 
@@ -821,68 +820,65 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     double gcr_rnorm = -1.0;
     bool gcr_converged = false;
     _pc_sweeps = 0;
-    if (iter > 1 || use_gcr) {
-      stepped = true;
-      // Striped: every rank of the global comm participates, each operating on its
-      // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
-      // back in place. Pass .local() views directly (in/out); the "prev" arguments
-      // are already this rank's slice.
-      //
-      // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
-      // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
-      // the same two-slot arguments.
-      //
-      // Damping; mixing >= 1 (undamped Picard) is a no-op.
-      const double mixing = p.iter_params.mixing;
-      auto damp = [&](auto A, auto const& A_prev) {
-        if (mixing >= 1.0 || A.size() == 0) return;
-        const long n = A.size();
-        auto [a0, a1] = _pmap.my_slice(n);
-        utils::check(A_prev.size() == a1 - a0,
-                     "lr_driver: damping history slice ({}) != partition slice ({}).",
-                     A_prev.size(), a1 - a0);
-        auto A_loc = nda::reshape(A, std::array<long, 1>{n})(nda::range(a0, a1));
-        A_loc = mixing * A_loc + (1.0 - mixing) * A_prev;
-      };
-      auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
-        if (use_gcr) {
-          // GCR
-          gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, F, F_prev, S, S_prev,
-                                     p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
-        } else if (_lr_diis) {
-          // DIIS
-          _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
-        } else {
-          // Damping
-          damp(F, F_prev);
-          damp(S, S_prev);
-        }
-      };
-      if (qp) {
-        // qp mode: (ΔF, ΔV_QPGW)
-        step(sDeltaF_skij.local(), _DeltaF.prev,
-             sDeltaVcorr_skij->local(), _DeltaVcorr.prev);
-      } else if (track_sigma) {
-        // Kernel with a Σ: (ΔF, ΔΣ)
-        step(sDeltaF_skij.local(), _DeltaF.prev,
-             sDeltaSigma_tskij->local(), _DeltaSigma.prev);
+    // Striped: every rank of the global comm participates, each operating on its
+    // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
+    // back in place. Pass .local() views directly (in/out); the "prev" arguments
+    // are already this rank's slice.
+    //
+    // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
+    // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
+    // the same two-slot arguments.
+    //
+    // Damping; mixing >= 1 (undamped Picard) is a no-op.
+    const double mixing = p.iter_params.mixing;
+    auto damp = [&](auto A, auto const& A_prev) {
+      if (mixing >= 1.0 || A.size() == 0) return;
+      const long n = A.size();
+      auto [a0, a1] = _pmap.my_slice(n);
+      utils::check(A_prev.size() == a1 - a0,
+                   "lr_driver: damping history slice ({}) != partition slice ({}).",
+                   A_prev.size(), a1 - a0);
+      auto A_loc = nda::reshape(A, std::array<long, 1>{n})(nda::range(a0, a1));
+      A_loc = mixing * A_loc + (1.0 - mixing) * A_prev;
+    };
+    auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
+      if (use_gcr) {
+        // GCR
+        gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, F, F_prev, S, S_prev,
+                                   p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
+      } else if (_lr_diis) {
+        // DIIS
+        _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
       } else {
-        // Σ-free kernel: ΔF alone
-        nda::array<ComplexType, 5> empty_sigma;
-        nda::array<ComplexType, 1> empty_prev;
-        step(sDeltaF_skij.local(), _DeltaF.prev, empty_sigma, empty_prev);
+        // Damping
+        damp(F, F_prev);
+        damp(S, S_prev);
       }
-      // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
-      // place with no trailing collective; each node then holds a valid copy of
-      // its own contiguous element run only. With the striping global, each
-      // element is mixed exactly once in the whole job.
-      if (qp)
-        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaVcorr_skij);
-      else if (track_sigma)
-        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaSigma_tskij);
-      else
-        utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij);
+    };
+    if (qp) {
+      // qp mode: (ΔF, ΔV_QPGW)
+      step(sDeltaF_skij.local(), _DeltaF.prev,
+           sDeltaVcorr_skij->local(), _DeltaVcorr.prev);
+    } else if (track_sigma) {
+      // Kernel with a Σ: (ΔF, ΔΣ)
+      step(sDeltaF_skij.local(), _DeltaF.prev,
+           sDeltaSigma_tskij->local(), _DeltaSigma.prev);
+    } else {
+      // Σ-free kernel: ΔF alone
+      nda::array<ComplexType, 5> empty_sigma;
+      nda::array<ComplexType, 1> empty_prev;
+      step(sDeltaF_skij.local(), _DeltaF.prev, empty_sigma, empty_prev);
     }
+    // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
+    // place with no trailing collective; each node then holds a valid copy of
+    // its own contiguous element run only. With the striping global, each
+    // element is mixed exactly once in the whole job.
+    if (qp)
+      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaVcorr_skij);
+    else if (track_sigma)
+      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaSigma_tskij);
+    else
+      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij);
     _Timer.stop("LR_ITER_ALG");
 
     // Compute norms of ΔF and ΔF-ΔF_prev for logging. The previous iterates are
@@ -920,8 +916,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     bool f_converged = !K.has_F() || norm_DeltaF_diff < p.tol;
     bool sigma_converged = !K.has_sigma() || norm_DeltaSigma_diff < p.tol;
     bool conv_std = (iter > 1) && dm_converged && f_converged && sigma_converged;
-    // An empty kernel has no feedback: the first Dyson solve is the answer.
-    bool iter_converged = K.empty() || (use_gcr ? gcr_converged : conv_std);
+    bool iter_converged = use_gcr ? gcr_converged : conv_std;
 
     // Log iteration
     _Timer.start("LR_CONVERGENCE");
@@ -967,19 +962,16 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _mpi->comm.barrier();
   }
 
-  // Every exit after an iteration-algorithm step, converged or at max_iter: the
-  // step of the last iteration has replaced ΔF (and ΔΣ / ΔV_QPGW) by its next
-  // iterate (a DIIS or damping mix, or GCR's x), while ΔDm is the response to
-  // that iteration's input. The Step 1 Dyson pass forms ΔDm at the returned
-  // iterate (with a Σ it also materializes ΔG(τ); otherwise update_DeltaG forms
-  // it on demand). A DIIS or damping one-shot (max_iter == 1) and an empty
-  // kernel take no step, so the pass is skipped.
-  if (stepped) {
-    _Timer.start("LR_DYSON");
-    dyson_pass();
-    _Timer.stop("LR_DYSON");
-    _mpi->comm.barrier();
-  }
+  // Every exit, converged or at max_iter: the step of the last iteration has
+  // replaced ΔF (and ΔΣ / ΔV_QPGW) by its next iterate (a DIIS or damping mix, or
+  // GCR's x), while ΔDm is the response to that iteration's input. This Dyson
+  // pass forms ΔDm at the returned iterate (with a Σ it also materializes ΔG(τ);
+  // otherwise update_DeltaG forms it on demand). For an empty kernel it is the
+  // only pass.
+  _Timer.start("LR_DYSON");
+  dyson_pass();
+  _Timer.stop("LR_DYSON");
+  _mpi->comm.barrier();
 
   _Timer.stop("LR_SCF");
 

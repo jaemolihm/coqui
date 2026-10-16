@@ -696,6 +696,8 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
         DeltaSigma_tskij     = total correlation ΔΣ = dG0·W_c0 + G0·dW0
         DeltaSigma_GdW_tskij = the G0·dW0 piece, broken out separately
         DeltaF_skij          = exchange ΔK (= -dG0·v, the v part of dG0·W0)
+        DeltaG_tskij         = G0·(ΔH0 + ΔF + ΔΣ)·G0, the Dyson response to the
+                               one-shot ΔF/ΔΣ (save_DeltaG=True)
     so dG0·W_c0 = DeltaSigma_tskij - DeltaSigma_GdW_tskij, and the full
     dG0·W0 = DeltaF_skij + (DeltaSigma_tskij - DeltaSigma_GdW_tskij).
 
