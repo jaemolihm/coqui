@@ -207,6 +207,9 @@ public:
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
    * @param sDeltaVcorr_skij  - [INPUT] static ΔV_QPGW (ns, nk, nb, nb), nullptr if not used.
    *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
+   * @param add_external_sigma - [INPUT] add the frozen external ΔΣ of set_external_sigma(), when
+   *   set, to ΔΣ(iω). Only the LR iteration's own passes ask for it: a pass that applies a linear
+   *   map (the preconditioner, the hessian) must not see the source.
    * @return The Δμ used: computed if fix_density=true at q=Γ, zero otherwise
    */
   template<typename DeltaDm_t, typename DeltaH0_t,
@@ -217,7 +220,16 @@ public:
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
       bool fix_density = false,
-      const DeltaF_t* sDeltaVcorr_skij = nullptr);
+      const DeltaF_t* sDeltaVcorr_skij = nullptr,
+      bool add_external_sigma = false);
+
+  /**
+   * @brief Set (or clear, with nullptr) a frozen external ΔΣ(τ) (nt, ns, nk, nb, nb), the (k+q, k)
+   *        blocks, added to the RHS of the solve_lr_dyson passes that pass add_external_sigma.
+   *
+   * It is transformed to iω once here, on the ω grid of the Dyson pass, and kept until the next call.
+   */
+  void set_external_sigma(const sArray_t<Array_view_5D_t>* sDeltaSigma_ext_tskij);
 
   /**
    * @brief Gather the distributed _dDeltaG_tau_buffer left by the last solve
@@ -441,6 +453,8 @@ private:
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top
   // of every solve so a solve never inherits the previous one's array.
   std::optional<dArray_5D_t> _dDeltaG_tau_buffer;
+  /// Frozen external ΔΣ(iω) on the ω grid of the Dyson pass (set_external_sigma).
+  std::optional<dArray_5D_t> _dDeltaSigma_ext_wskij;
 
   // Δμ response of the LR solution. Δμ enters the RHS only through the −Δμ·S
   // term, so ΔG is affine in it:

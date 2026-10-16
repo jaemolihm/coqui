@@ -232,6 +232,24 @@ namespace solvers {
     auto eval_Pi_qdep(MBState &mb_state, THC_ERI auto &thc)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
+    /**
+     * Upfold a local polarizability correction (product basis, half tau grid) to the THC auxiliary basis:
+     *   Pi[t,q,P,Q] = sum_{ab,cd} B^{kpq(q)}_{P,ab} Pi_loc[t,ab,cd] conj(B^q_{Q,cd}),
+     * the (q+Q, q) block with kpq_map(q) = q+Q (full q mesh). Without a map, kpq(q) = q.
+     *
+     * @param Pi_loc_tabcd - [INPUT] (nt_half, a, b, c, d) in the product basis
+     * @param pgrid, bsize - [INPUT] processor grid and block size of the output (t, q, P, Q)
+     * @param kpq_map      - [INPUT] q -> q+Q map (optional)
+     * @return - distributed (nt_half, nqpts_ibz, NP, NP)
+     */
+    auto upfold_pi_local(
+        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
+        THC_ERI auto &thc,
+        const projector_boson_t &proj,
+        std::array<long, 4> pgrid, std::array<long, 4> bsize,
+        const nda::array<long, 1> *kpq_map = nullptr)
+    -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+
     // TODO function to return Pi(w) directly
 
     /**
@@ -298,12 +316,6 @@ namespace solvers {
                             const projector_t &proj, int scheme)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
-    auto upfold_pi_local(
-        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
-        THC_ERI auto &thc,
-        const projector_boson_t &proj,
-        std::array<long, 4> pgrid, std::array<long, 4> bsize)
-    -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
   private:
     const imag_axes_ft::IAFT* _ft = nullptr;

@@ -476,6 +476,13 @@ namespace solvers {
   template memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>
   scr_coulomb_t::eval_Pi_qdep(MBState&, thc_reader_t&g);
 
+  template memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>
+  scr_coulomb_t::upfold_pi_local(const Arr&, thc_reader_t&, const projector_boson_t&,
+                                 std::array<long, 4>, std::array<long, 4>, const nda::array<long, 1>*);
+  template memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>
+  scr_coulomb_t::upfold_pi_local(const Arrv&, thc_reader_t&, const projector_boson_t&,
+                                 std::array<long, 4>, std::array<long, 4>, const nda::array<long, 1>*);
+
 
   template memory::darray_t<Arr4D, mpi3::communicator>
   scr_coulomb_t::w_to_tau(memory::darray_t<Arr4D, mpi3::communicator> &,
