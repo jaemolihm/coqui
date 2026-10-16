@@ -36,9 +36,6 @@ from typing import Optional, Tuple
 # Import C++ implementation
 from coqui._lib.mbpt_module import calculate_kpq_map as calculate_kpq_map_cpp
 
-# Re-export run_lr from mbpt_driver (the main entry point)
-from .mbpt_driver import run_lr
-
 
 # Kernel a run_lr `method` name expands to, mirroring kernel_spec_from_method
 # (src/methods/SCF/lr_driver.cpp:93) plus the "HSEX" rewrite one level up
@@ -101,60 +98,6 @@ def calculate_kpq_map(kpts_crys: np.ndarray, q_vec: np.ndarray,
     kpts_crys = np.asarray(kpts_crys, dtype=np.float64)
     q_vec = np.asarray(q_vec, dtype=np.float64)
     return calculate_kpq_map_cpp(kpts_crys, q_vec)
-
-
-def is_q_commensurate(kpts_crys: np.ndarray, q_vec: np.ndarray,
-                       threshold: float = 1e-6) -> bool:
-    """
-    Check if q is commensurate with the k-point grid.
-
-    Parameters
-    ----------
-    kpts_crys : np.ndarray
-        k-points in crystal coordinates, shape (nkpts, 3)
-    q_vec : np.ndarray
-        Perturbation wavevector in crystal coordinates, shape (3,)
-    threshold : float, optional
-        Tolerance for k-point matching
-
-    Returns
-    -------
-    bool
-        True if q is commensurate, False otherwise
-    """
-    kpts_crys = np.asarray(kpts_crys, dtype=np.float64)
-    q_vec = np.asarray(q_vec, dtype=np.float64)
-    # k + q must land on the grid (mod G) for every k. Pure-numpy check: the
-    # C++ counterpart aborts on failure, which cannot be caught from python.
-    for kpq in kpts_crys + q_vec[None, :]:
-        d = kpts_crys - kpq[None, :]
-        d = d - np.floor(d)
-        d = d - np.round(d)
-        if not np.any(np.sum(d**2, axis=1) < threshold**2):
-            return False
-    return True
-
-
-def is_q_gamma(q_vec: np.ndarray, threshold: float = 1e-6) -> bool:
-    """
-    Check if q is approximately zero (Gamma point).
-
-    Parameters
-    ----------
-    q_vec : np.ndarray
-        Perturbation wavevector in crystal coordinates, shape (3,)
-    threshold : float, optional
-        Tolerance
-
-    Returns
-    -------
-    bool
-        True if q is approximately zero
-    """
-    d = np.abs(q_vec)
-    d = d - np.floor(d)
-    d = d - np.round(d)
-    return bool(np.sum(d**2) < threshold**2)
 
 
 def lr_DeltaH0_from_thc_aux(h_int, q_vec: np.ndarray,
@@ -234,71 +177,6 @@ def lr_DeltaH0_from_thc_aux(h_int, q_vec: np.ndarray,
 
     DeltaH0 = lr_DeltaH0_from_thc_aux_cpp(h_int, q_vec, u_mP)
     return DeltaH0[0] if squeeze else DeltaH0
-
-
-def read_DeltaH0(filename: str) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Read linear response perturbation ΔH0 from HDF5 file.
-
-    Expected HDF5 structure:
-        /linear_response/
-            q_vec              # (3,) perturbation wavevector in crystal coords
-            DeltaH0_skij       # (ns, nk, nb, nb) complex perturbation matrix
-
-    Parameters
-    ----------
-    filename : str
-        HDF5 file path
-
-    Returns
-    -------
-    tuple
-        (q_vec, DeltaH0_skij)
-
-    Under MPI, prefer calling on rank 0 only: concurrent h5py opens of the
-    same file can contend on the file lock.
-    """
-    with h5py.File(filename, 'r') as f:
-        lr_grp = f['linear_response']
-        q_vec = lr_grp['q_vec'][:]
-        DeltaH0_skij = lr_grp['DeltaH0_skij'][:]
-    return q_vec, DeltaH0_skij
-
-
-def write_DeltaH0(filename: str, q_vec: np.ndarray,
-                   DeltaH0_skij: np.ndarray) -> None:
-    """
-    Write linear response perturbation ΔH0 to HDF5 file.
-
-    Parameters
-    ----------
-    filename : str
-        HDF5 file path
-    q_vec : np.ndarray
-        Perturbation wavevector in crystal coords, shape (3,)
-    DeltaH0_skij : np.ndarray
-        Perturbation matrix, shape (ns, nk, nb, nb)
-
-    MPI-safe: only rank 0 writes (concurrent h5py writers contend on the
-    file lock); all ranks synchronize before returning.
-    """
-    from mpi4py import MPI
-    comm = MPI.COMM_WORLD
-    if comm.Get_rank() == 0:
-        with h5py.File(filename, 'a') as f:
-            if 'linear_response' not in f:
-                lr_grp = f.create_group('linear_response')
-            else:
-                lr_grp = f['linear_response']
-
-            if 'q_vec' in lr_grp:
-                del lr_grp['q_vec']
-            if 'DeltaH0_skij' in lr_grp:
-                del lr_grp['DeltaH0_skij']
-
-            lr_grp.create_dataset('q_vec', data=q_vec)
-            lr_grp.create_dataset('DeltaH0_skij', data=DeltaH0_skij)
-    comm.Barrier()
 
 
 def _is_packed_complex(dset) -> bool:

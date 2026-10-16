@@ -30,11 +30,7 @@ from .mbpt_driver import (
 from .chi_driver import run_chi
 from .lr_driver import (
     calculate_kpq_map,
-    is_q_commensurate,
-    is_q_gamma,
     lr_DeltaH0_from_thc_aux,
-    read_DeltaH0,
-    write_DeltaH0,
     read_lr_results,
     read_lr_hessian,
     METHOD_KERNEL,
@@ -64,11 +60,7 @@ __all__ = [
     "gw_evaluate_sigma_with_W",
     "compute_eps_inv_head",
     "calculate_kpq_map",
-    "is_q_commensurate",
-    "is_q_gamma",
     "lr_DeltaH0_from_thc_aux",
-    "read_DeltaH0",
-    "write_DeltaH0",
     "read_lr_results",
     "read_lr_hessian",
     "METHOD_KERNEL",

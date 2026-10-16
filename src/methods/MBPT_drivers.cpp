@@ -1050,35 +1050,56 @@ template void mbpt(std::string, \
 #undef MBPT_INST
 
 /**
+ * Read the string dataset `name` of group `input_grp` in `input_file` on the
+ * root and broadcast it. std::nullopt when the group or the dataset is absent.
+ */
+template<typename mpi_context_t>
+std::optional<std::string> read_scf_string(mpi_context_t& mpi,
+                                           const std::string& input_file,
+                                           const std::string& input_grp,
+                                           const std::string& name)
+{
+  char buf[64] = {0};
+  int found = 0;
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    if (root_grp.has_subgroup(input_grp)) {
+      auto scf_grp = root_grp.open_group(input_grp);
+      if (scf_grp.has_dataset(name)) {
+        std::string str;
+        h5::h5_read(scf_grp, name, str);
+        utils::check(str.size() < sizeof(buf), "read_scf_string: {} string too long: {}",
+                     name, str);
+        std::copy(str.begin(), str.end(), buf);
+        found = 1;
+      }
+    }
+  }
+  mpi.comm.broadcast_n(&found, 1, 0);
+  if (!found) return std::nullopt;
+  mpi.comm.broadcast_n(buf, sizeof(buf), 0);
+  return std::string(buf);
+}
+
+/**
  * Read the div_treatment the scGW run used (stashed in the checkpoint scf
  * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
- * dataset must be regenerated. Root reads, then broadcasts via a fixed-size
- * buffer. LR/GW evaluators must reuse this value so divergence heads stay
- * consistent with how W and Sigma were computed.
+ * dataset must be regenerated. LR/GW evaluators must reuse this value so
+ * divergence heads stay consistent with how W and Sigma were computed.
  */
 template<typename mpi_context_t>
 std::string read_div_treatment(mpi_context_t& mpi,
                                const std::string& input_file,
                                const std::string& input_grp)
 {
-  char div_buf[64] = {0};
-  if (mpi.comm.root()) {
-    h5::file file(input_file, 'r');
-    auto root_grp = h5::group(file);
-    auto scf_grp = root_grp.open_group(input_grp);
-    utils::check(scf_grp.has_dataset("div_treatment"),
-                 "read_div_treatment: '{}/div_treatment' missing in {}. "
-                 "This checkpoint predates div_treatment dump; please regenerate "
-                 "the scGW checkpoint with the current code.",
-                 input_grp, input_file);
-    std::string div_str;
-    h5::h5_read(scf_grp, "div_treatment", div_str);
-    utils::check(div_str.size() < sizeof(div_buf),
-                 "read_div_treatment: div_treatment string too long: {}", div_str);
-    std::copy(div_str.begin(), div_str.end(), div_buf);
-  }
-  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
-  return std::string(div_buf);
+  auto div = read_scf_string(mpi, input_file, input_grp, "div_treatment");
+  utils::check(div.has_value(),
+               "read_div_treatment: '{}/div_treatment' missing in {}. "
+               "This checkpoint predates div_treatment dump; please regenerate "
+               "the scGW checkpoint with the current code.",
+               input_grp, input_file);
+  return *div;
 }
 
 /**
@@ -1096,32 +1117,14 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
                                   const std::string& input_file,
                                   const std::string& input_grp)
 {
-  char div_buf[64] = {0};
-  int found = 0;
-  if (mpi.comm.root()) {
-    h5::file file(input_file, 'r');
-    auto root_grp = h5::group(file);
-    if (root_grp.has_subgroup(input_grp)) {
-      auto scf_grp = root_grp.open_group(input_grp);
-      if (scf_grp.has_dataset("hf_div_treatment")) {
-        std::string div_str;
-        h5::h5_read(scf_grp, "hf_div_treatment", div_str);
-        utils::check(div_str.size() < sizeof(div_buf),
-                     "read_hf_div_treatment: hf_div_treatment string too long: {}", div_str);
-        std::copy(div_str.begin(), div_str.end(), div_buf);
-        found = 1;
-      }
-    }
-  }
-  mpi.comm.broadcast_n(&found, 1, 0);
-  if (!found) {
+  auto div = read_scf_string(mpi, input_file, input_grp, "hf_div_treatment");
+  if (!div) {
     app_log(2, "  '{}/hf_div_treatment' not found in {}; assuming \"gygi\" for the LR "
                "exchange divergence. Regenerate the checkpoint if the ground state "
                "used hf_div_treatment = \"ignore_g0\".", input_grp, input_file);
     return "gygi";
   }
-  mpi.comm.broadcast_n(div_buf, sizeof(div_buf), 0);
-  return std::string(div_buf);
+  return *div;
 }
 
 /**
@@ -2148,6 +2151,58 @@ template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
 
 
 /**
+ * Rank-0-only copy of a node-shared array, the return convention of the
+ * component drivers below: every other rank gets an empty array (None in
+ * Python). Collective.
+ */
+template<typename mpi_context_t, typename sArray_t>
+auto shm_to_root(mpi_context_t& mpi, sArray_t const& sA)
+{
+  nda::array<ComplexType, nda::get_rank<decltype(sA.local())>> out;
+  if (mpi.comm.root()) out = sA.local();
+  mpi.comm.barrier();
+  return out;
+}
+
+/**
+ * Gather a distributed array into a node-shared window and return it on rank 0
+ * only (see shm_to_root). Collective.
+ */
+template<typename mpi_context_t, typename dArray_t>
+auto gather_to_root(mpi_context_t& mpi, dArray_t const& dA)
+{
+  constexpr int rank = math::nda::get_rank<dArray_t>;
+  auto sA = math::shm::make_shared_array<nda::array_view<ComplexType, rank>>(
+      mpi, dA.global_shape());
+  math::nda::gather_to_shm(dA, sA);
+  return shm_to_root(mpi, sA);
+}
+
+/**
+ * Fill this rank's block of a rank-4 distributed array from a full node-shared
+ * copy. With swap01 the source is read with its first two axes exchanged, i.e.
+ * a (q,t,P,Q) input lands in a (t,q,P,Q) array. Collective (ends in a barrier).
+ */
+template<bool swap01 = false, typename mpi_context_t, typename src_t, typename dArray_t>
+void scatter_from_shm(mpi_context_t& mpi, src_t const& src, dArray_t& dA)
+{
+  auto loc = dA.local();
+  auto [o0, o1, o2, o3] = dA.origin();
+  auto [n0, n1, n2, n3] = dA.local_shape();
+  for (long i0 = 0; i0 < n0; ++i0)
+    for (long i1 = 0; i1 < n1; ++i1)
+      for (long i2 = 0; i2 < n2; ++i2)
+        for (long i3 = 0; i3 < n3; ++i3) {
+          if constexpr (swap01)
+            loc(i0, i1, i2, i3) = src(i1 + o1, i0 + o0, i2 + o2, i3 + o3);
+          else
+            loc(i0, i1, i2, i3) = src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
+        }
+  mpi.comm.barrier();
+}
+
+
+/**
  * Linear response GW self-energy with fixed W (term 1).
  *
  * Computes ΔΣ = -ΔG ⊙ W_c + div_corr (R-space).
@@ -2215,13 +2270,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaG_calc(
                            div_corr ? &eps_inv_head : nullptr);
   mpi->comm.barrier();
 
-  // Rank-0-only return; non-root ranks return an empty array (→ None in Python).
-  nda::array<ComplexType, 5> out;
-  if (mpi->comm.root()) {
-    out = sDeltaSigma_tskij.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return shm_to_root(*mpi, sDeltaSigma_tskij);
 }
 
 
@@ -2260,7 +2309,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, G_tskij_root);
 
-  // Load W and eps_inv_head using helper
   auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(*mpi, thc, input_file, input_grp, nt);
 
   // Read overlap matrix from checkpoint for divergence correction
@@ -2268,7 +2316,6 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
       *mpi, {ns, nkpts_ibz, nbnd, nbnd});
   chkpt::read_ovlp(mpi->node_comm, prefix, sS_skij);
 
-  // Use standard gw_t code path
   solvers::gw_t gw(&ft, div_treatment);
 
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
@@ -2280,13 +2327,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_calc(
   }
   mpi->comm.barrier();
 
-  // Rank-0-only return.
-  nda::array<ComplexType, 5> out;
-  if (mpi->comm.root()) {
-    out = sSigma_tskij.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return shm_to_root(*mpi, sSigma_tskij);
 }
 
 
@@ -2400,7 +2441,6 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
   auto& mpi = thc.mpi();
 
   long nkpts = mf->nkpts();
-  long Np = thc.Np();
 
   // Distribute G and DeltaG into node-local shared-memory windows.
   using Array_view_4D_t = nda::array_view<ComplexType, 4>;
@@ -2408,9 +2448,6 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
       *mpi, G_tskij_root);
   auto sDeltaG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(
       *mpi, DeltaG_tskij_root);
-
-  long nt = sG_tskij.shape()[0];
-  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
 
   // Create lr_rpa_pi solver and compute ΔP
   solvers::lr_rpa_pi lr(q_pert);
@@ -2458,17 +2495,7 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
                                      opt_ibc ? &(*opt_ibc) : nullptr);
   mpi->comm.barrier();
 
-  // Gather to node-local shared window, return on rank 0 only.
-  auto sDeltaPi_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, std::array<long, 4>{nt_half, nkpts, Np, Np});
-  math::nda::gather_to_shm(dDeltaPi, sDeltaPi_tqPQ);
-
-  nda::array<ComplexType, 4> out;
-  if (mpi->comm.root()) {
-    out = sDeltaPi_tqPQ.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return gather_to_root(*mpi, dDeltaPi);
 }
 
 
@@ -2498,7 +2525,6 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
   long nkpts = mf->nkpts();
-  long Np = thc.Np();
 
   // Require no symmetry (same constraint as lr_rpa_pi)
   utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
@@ -2512,7 +2538,6 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
   utils::check(sG_tskij.shape()[0] == nt,
                "gw_evaluate_Pi_calc: G tau dimension {} != IAFT nt_f {}",
                sG_tskij.shape()[0], nt);
-  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
 
   // Use standard scr_coulomb_t to compute P
   solvers::scr_coulomb_t scr_eri(&ft, "rpa");
@@ -2520,18 +2545,7 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
   auto dPi_tqPQ = scr_eri.eval_Pi_qdep(sG_tskij.local(), thc);
   mpi->comm.barrier();
 
-  // Gather to node-local shared window, return on rank 0 only.
-  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
-  auto sPi_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, std::array<long, 4>{nt_half, nkpts, Np, Np});
-  math::nda::gather_to_shm(dPi_tqPQ, sPi_tqPQ);
-
-  nda::array<ComplexType, 4> out;
-  if (mpi->comm.root()) {
-    out = sPi_tqPQ.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return gather_to_root(*mpi, dPi_tqPQ);
 }
 
 
@@ -2575,7 +2589,6 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
                "lr_gw_W_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
                mf->nqpts(), mf->nqpts_ibz(), nkpts);
 
-  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
   auto sDeltaPi_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
@@ -2591,18 +2604,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
   auto dDeltaPi_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, pi_pgrid, {nt_half, nkpts, NP, NP}, pi_bsize);
-  {
-    auto pi_src = sDeltaPi_tqPQ_in.local();
-    auto pi_loc = dDeltaPi_tqPQ.local();
-    auto [po0, po1, po2, po3] = dDeltaPi_tqPQ.origin();
-    auto [pn0, pn1, pn2, pn3] = dDeltaPi_tqPQ.local_shape();
-    for (long i0 = 0; i0 < pn0; ++i0)
-      for (long i1 = 0; i1 < pn1; ++i1)
-        for (long i2 = 0; i2 < pn2; ++i2)
-          for (long i3 = 0; i3 < pn3; ++i3)
-            pi_loc(i0, i1, i2, i3) = pi_src(i0+po0, i1+po1, i2+po2, i3+po3);
-    mpi->comm.barrier();
-  }
+  scatter_from_shm(*mpi, sDeltaPi_tqPQ_in.local(), dDeltaPi_tqPQ);
 
   // LR Dyson: ΔΠ(τ) → ΔW_c(τ) via ΔW_c(iω) = W_full(q+p) · ΔΠ · W_full(q)
   solvers::lr_scr_coulomb_t lr_scr(&ft, q_pert);
@@ -2612,17 +2614,7 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
   // dDeltaPi_tqPQ now contains ΔW_c(τ)
   mpi->comm.barrier();
 
-  // Gather to node-local shared window, return on rank 0 only.
-  auto sDeltaW_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP});
-  math::nda::gather_to_shm(dDeltaPi_tqPQ, sDeltaW_tqPQ);
-
-  nda::array<ComplexType, 4> out;
-  if (mpi->comm.root()) {
-    out = sDeltaW_tqPQ.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return gather_to_root(*mpi, dDeltaPi_tqPQ);
 }
 
 
@@ -2664,7 +2656,6 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
                "gw_evaluate_W_from_Pi_calc: No symmetry required. nqpts={}, nqpts_ibz={}, nkpts={}",
                mf->nqpts(), mf->nqpts_ibz(), nkpts);
 
-  using Array_view_4D_t = nda::array_view<ComplexType, 4>;
   auto sPi_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP}, Pi_tqPQ_root);
 
@@ -2675,35 +2666,14 @@ nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(
                                      {false, false, false, false});
   auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(
       mpi->comm, pgrid, {nt_half, nkpts, NP, NP});
-  {
-    auto pi_src = sPi_tqPQ_in.local();
-    auto pi_loc = dPi_tqPQ.local();
-    auto [o0, o1, o2, o3] = dPi_tqPQ.origin();
-    auto [n0, n1, n2, n3] = dPi_tqPQ.local_shape();
-    for (long i0 = 0; i0 < n0; ++i0)
-      for (long i1 = 0; i1 < n1; ++i1)
-        for (long i2 = 0; i2 < n2; ++i2)
-          for (long i3 = 0; i3 < n3; ++i3)
-            pi_loc(i0, i1, i2, i3) = pi_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
-    mpi->comm.barrier();
-  }
+  scatter_from_shm(*mpi, sPi_tqPQ_in.local(), dPi_tqPQ);
 
   // Use scr_coulomb_t to solve W Dyson equation: Π → W_c(τ)
   solvers::scr_coulomb_t scr(&ft, "rpa");
   auto dW_tqPQ = scr.dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
   mpi->comm.barrier();
 
-  // Gather to node-local shared window, return on rank 0 only.
-  auto sW_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP});
-  math::nda::gather_to_shm(dW_tqPQ, sW_tqPQ);
-
-  nda::array<ComplexType, 4> out;
-  if (mpi->comm.root()) {
-    out = sW_tqPQ.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return gather_to_root(*mpi, dW_tqPQ);
 }
 
 
@@ -2762,18 +2732,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   auto dDeltaW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, tq_pgrid_dw,
       {nt_half_dw, nkpts, NP, NP}, tq_bsize_dw);
-  {
-    auto dw_src = sDeltaW_qtPQ_in.local();   // (q, t, P, Q), shared, full
-    auto dw_loc = dDeltaW_tqPQ.local();      // (t, q, P, Q), this rank's block
-    auto [t_org, q_org, P_org, Q_org] = dDeltaW_tqPQ.origin();
-    auto [nt_loc, nq_loc, nP_loc, nQ_loc] = dDeltaW_tqPQ.local_shape();
-    for (long it = 0; it < nt_loc; ++it)
-      for (long iq = 0; iq < nq_loc; ++iq)
-        for (long iP = 0; iP < nP_loc; ++iP)
-          for (long iQ = 0; iQ < nQ_loc; ++iQ)
-            dw_loc(it, iq, iP, iQ) = dw_src(iq+q_org, it+t_org, iP+P_org, iQ+Q_org);
-    mpi->comm.barrier();
-  }
+  scatter_from_shm<true>(*mpi, sDeltaW_qtPQ_in.local(), dDeltaW_tqPQ);
 
   // Divergence correction flag (default true)
   auto div_corr = io::get_value_with_default<bool>(pt, "div_corr", true);
@@ -2813,13 +2772,7 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
                            apply_div ? &delta_eps_inv_head : nullptr);
   mpi->comm.barrier();
 
-  // Rank-0-only return.
-  nda::array<ComplexType, 5> out;
-  if (mpi->comm.root()) {
-    out = sDeltaSigma_tskij.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return shm_to_root(*mpi, sDeltaSigma_tskij);
 }
 
 
@@ -2864,24 +2817,12 @@ nda::array<ComplexType, 1> compute_eps_inv_head_calc(
   auto sW_c_tqPQ_in = math::shm::make_shared_from_root_input<ComplexType, 4>(
       *mpi, std::array<long, 4>{nt_half_w, nkpts_ibz, NP, NP}, W_c_tqPQ_root);
 
-  // Scatter into distributed (t,q,P,Q) array.
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   auto pgrid = compute_proc_grid_4D(mpi->comm.size(),
       {nt_half_w, nkpts_ibz, NP, NP}, {false, false, false, false});
   auto dW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, pgrid, {nt_half_w, nkpts_ibz, NP, NP});
-  {
-    auto wc_src = sW_c_tqPQ_in.local();
-    auto wc_loc = dW_tqPQ.local();
-    auto [o0, o1, o2, o3] = dW_tqPQ.origin();
-    auto [n0, n1, n2, n3] = dW_tqPQ.local_shape();
-    for (long i0 = 0; i0 < n0; ++i0)
-      for (long i1 = 0; i1 < n1; ++i1)
-        for (long i2 = 0; i2 < n2; ++i2)
-          for (long i3 = 0; i3 < n3; ++i3)
-            wc_loc(i0, i1, i2, i3) = wc_src(i0 + o0, i1 + o1, i2 + o2, i3 + o3);
-    mpi->comm.barrier();
-  }
+  scatter_from_shm(*mpi, sW_c_tqPQ_in.local(), dW_tqPQ);
 
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
@@ -2947,18 +2888,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
       {nt_half_w, nkpts, NP, NP}, {false, true, false, false});
   auto dW_tqPQ = math::nda::make_distributed_array<local_Array_4D_t>(
       mpi->comm, pgrid_w, {nt_half_w, nkpts, NP, NP});
-  {
-    auto wc_src = sW_c_qtPQ_in.local();   // (q, t, P, Q), shared, full
-    auto wc_loc = dW_tqPQ.local();
-    auto [o0, o1, o2, o3] = dW_tqPQ.origin();
-    auto [n0, n1, n2, n3] = dW_tqPQ.local_shape();
-    for (long i0 = 0; i0 < n0; ++i0)
-      for (long i1 = 0; i1 < n1; ++i1)
-        for (long i2 = 0; i2 < n2; ++i2)
-          for (long i3 = 0; i3 < n3; ++i3)
-            wc_loc(i0, i1, i2, i3) = wc_src(i1 + o1, i0 + o0, i2 + o2, i3 + o3);
-    mpi->comm.barrier();
-  }
+  scatter_from_shm<true>(*mpi, sW_c_qtPQ_in.local(), dW_tqPQ);
 
   // Read overlap matrix from checkpoint for divergence correction
   auto sS_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -2977,13 +2907,7 @@ nda::array<ComplexType, 5> gw_evaluate_sigma_with_W_calc(
   }
   mpi->comm.barrier();
 
-  // Rank-0-only return.
-  nda::array<ComplexType, 5> out;
-  if (mpi->comm.root()) {
-    out = sSigma_tskij.local();
-  }
-  mpi->comm.barrier();
-  return out;
+  return shm_to_root(*mpi, sSigma_tskij);
 }
 
 
