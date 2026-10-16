@@ -21,6 +21,9 @@
 
 #undef NDEBUG
 
+#include <optional>
+#include <vector>
+
 #include "catch2/catch.hpp"
 
 #include "mpi3/environment.hpp"
@@ -636,6 +639,75 @@ TEST_CASE("redistribute_round_schedule_is_alltoallv_legal", "[math]")
       REQUIRE(unscheduled == 0);   // every pair is exchanged exactly once
       REQUIRE(mismatched == 0);    // and in the same round at both ends
       REQUIRE(out_of_range == 0);  // within the advertised number of rounds
+    }
+  }
+}
+
+TEST_CASE("first_ranks_and_transpose_01", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  long np = world.size();
+  using larray = nda::array<double,3>;
+  shape_t<3> gshape = {8, 6, 2};
+  auto f = [](long i, long j, long k) { return double(100*i + 10*j + k); };
+  auto fill = [&](auto& A) {
+    auto Aloc = A.local();
+    auto o = A.origin();
+    for(long i=0; i<Aloc.shape(0); ++i)
+      for(long j=0; j<Aloc.shape(1); ++j)
+        for(long k=0; k<Aloc.shape(2); ++k)
+          Aloc(i,j,k) = f(o[0]+i, o[1]+j, o[2]+k);
+  };
+  // every element held by exactly one rank, with the right value
+  auto check = [&](auto& A, bool transposed) {
+    auto Aloc = A.local();
+    auto o = A.origin();
+    long n = Aloc.size(), nbad = 0;
+    for(long i=0; i<Aloc.shape(0); ++i)
+      for(long j=0; j<Aloc.shape(1); ++j)
+        for(long k=0; k<Aloc.shape(2); ++k) {
+          double ref = transposed ? f(o[1]+j, o[0]+i, o[2]+k) : f(o[0]+i, o[1]+j, o[2]+k);
+          if(Aloc(i,j,k) != ref) ++nbad;
+        }
+    REQUIRE( nbad == 0 );
+    REQUIRE( world.all_reduce_value(n, std::plus<>{}) == gshape[0]*gshape[1]*gshape[2] );
+  };
+
+  auto A = make_distributed_array<larray>(world, utils::find_proc_grid_fit<3>(np, gshape).value(), gshape);
+  fill(A);
+
+  // first-ranks array on g < np ranks: redistribute in and out, as in thc_gw / scr_coulomb_t
+  {
+    long g = (np+1)/2;
+    auto grid = utils::find_proc_grid_fit<3>(g, gshape).value();
+    auto B = make_distributed_array_on_first_ranks<larray>(world, grid, gshape, {1,1,1}, 0);
+    if(world.rank() >= g) REQUIRE( B.local().size() == 0 );
+    B.local() = -1.0;
+    redistribute(A, B);
+    check(B, false);
+    auto C = make_distributed_array<larray>(world, A.grid(), gshape);
+    C.local() = -1.0;
+    redistribute(B, C);
+    check(C, false);
+  }
+
+  // transpose_01 between arbitrary grids, including grids distributed over both axes (as in scr_coulomb_t)
+  std::vector<shape_t<3>> agrids = {A.grid()};
+  if(np%2 == 0 and np >= 4) agrids.push_back(shape_t<3>{2, np/2, 1});
+  for(auto agrid : agrids) {
+    if(not utils::proc_grid_fits(agrid, gshape)) continue;
+    auto A2 = make_distributed_array<larray>(world, agrid, gshape);
+    fill(A2);
+    for(std::optional<shape_t<3>> tgrid : {utils::find_proc_grid_fit<3>(np, {6,8,2}),
+                                           std::optional<shape_t<3>>{shape_t<3>{1,np,1}},
+                                           std::optional<shape_t<3>>{shape_t<3>{np/2 > 0 ? 2 : 1, np/2 > 0 ? np/2 : 1, 1}},
+                                           utils::find_proc_grid_fit<3>(np, {6,8,1})}) {
+      if(not tgrid or not utils::proc_grid_fits(*tgrid, shape_t<3>{6,8,2})) continue;
+      if((*tgrid)[0]*(*tgrid)[1]*(*tgrid)[2] != np) continue;
+      auto T = make_distributed_array<larray>(world, *tgrid, {6,8,2});
+      T.local() = -1.0;
+      transpose_01(A2, T);
+      check(T, true);
     }
   }
 }

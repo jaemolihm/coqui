@@ -100,7 +100,64 @@ auto make_distributed_array(communicator_t& comm,
       ip /= grid[n];
     }
   }
-  return Array_t{ std::addressof(comm), grid, shape, lshape, origin, bsize}; 
+  return Array_t{ std::addressof(comm), grid, shape, lshape, origin, bsize};
+}
+
+/*
+ * Distributed array held by the first g = prod(grid) ranks of comm only: rank r < g holds the block
+ * that make_distributed_array(comm_g, grid, shape, bsize) assigns to rank r of a communicator of
+ * g ranks. Every other rank holds an empty block: zero extent along `empty_dim`, the full extents
+ * otherwise (so loops over the local block do nothing). For an array that no processor grid of
+ * comm.size() ranks fits. For g == comm.size(), this is make_distributed_array(comm, grid, ...).
+ * For g < comm.size(), grid() returns {comm.size(), 1, ...}, which is not a processor grid: such an
+ * array is used only through local(), origin(), local_range() and redistribute().
+ */
+template<::nda::Array Array_base_t, typename communicator_t>
+auto make_distributed_array_on_first_ranks(communicator_t& comm,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> grid,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> shape,
+		std::array<long,::nda::get_rank<std::decay_t<Array_base_t>>> bsize,
+		int empty_dim)
+{
+  using local_Array_t = typename std::decay_t<Array_base_t>::regular_type;
+  static_assert( local_Array_t::layout_t::is_stride_order_C(), "Ordering mismatch.");
+  static constexpr int rank = ::nda::get_rank<local_Array_t>;
+  using Array_t = distributed_array<local_Array_t,communicator_t>;
+  using larray_t = typename std::array<long,rank>;
+  long g = std::accumulate(grid.cbegin(), grid.cend(), 1, std::multiplies<>{});
+  if( g == comm.size() ) return make_distributed_array<Array_base_t>(comm, grid, shape, bsize);
+  utils::check( g > 0 and g < comm.size(),
+      "make_distributed_array_on_first_ranks: grid needs more processors ({}) than comm.size() ({})",g,comm.size());
+  utils::check( empty_dim >= 0 and empty_dim < rank,
+      "make_distributed_array_on_first_ranks: empty_dim out of range: {}",empty_dim);
+  for(int n=0; n<rank; ++n)
+    utils::check( shape[n] >= grid[n],
+      "make_distributed_array_on_first_ranks: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
+
+  for(long n=0; n<rank; ++n)
+    bsize[n] = std::min( std::max(1l,bsize[n]), shape[n]/grid[n]);
+
+  larray_t origin, lshape;
+  long ip = long(comm.rank());
+  if( ip < g ) {
+    // row major over proc grid, as in make_distributed_array
+    for(int n=rank-1; n>=0; --n) {
+      std::tie(origin[n],lshape[n])=itertools::chunk_range(0,shape[n]/bsize[n],grid[n],ip%grid[n]);
+      origin[n] *= bsize[n];
+      lshape[n] *= bsize[n];
+      lshape[n] -= origin[n];
+      if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
+      ip /= grid[n];
+    }
+  } else {
+    origin.fill(0);
+    lshape = shape;
+    lshape[empty_dim] = 0;
+  }
+  larray_t full_grid;
+  full_grid.fill(1);
+  full_grid[0] = comm.size();
+  return Array_t{ std::addressof(comm), full_grid, shape, lshape, origin, bsize};
 }
 
 template<::nda::Array Array_base_t, typename communicator_t>
@@ -1028,6 +1085,39 @@ void redistribute_in_place(Arr1_t& A, std::array<long,get_rank<Arr1_t>> grid,
   auto B{make_distributed_array<local_Array_t>(*(A.communicator()),grid,A.global_shape(),bz)};
   redistribute(A,B,a,get_value_t<Arr1_t>{0});
   A = std::move(B);
+}
+
+/*
+ * B(j,i,...) = A(i,j,...): exchanges the first two axes, for any processor grids of A and B on the
+ * same communicator. Each rank transposes its own block locally; redistribute() then moves the blocks.
+ */
+template<DistributedArray Arr1_t, DistributedArray Arr2_t>
+void transpose_01(Arr1_t const& A, Arr2_t& B)
+{
+  constexpr int rank = get_rank<Arr1_t>;
+  static_assert(rank >= 2 and rank == get_rank<Arr2_t>, "transpose_01: rank mismatch.");
+  using local_Array_t = typename std::decay_t<Arr2_t>::Array_t::regular_type;
+  using comm_t = std::decay_t<decltype(*A.communicator())>;
+  auto grid = A.grid();
+  auto gshape = A.global_shape();
+  auto origin = A.origin();
+  auto bsize = A.block_size();
+  std::array<long,rank> lshape;
+  std::copy_n(A.local_shape().data(), rank, lshape.data());
+  std::swap(grid[0], grid[1]);
+  std::swap(gshape[0], gshape[1]);
+  std::swap(origin[0], origin[1]);
+  std::swap(bsize[0], bsize[1]);
+  std::swap(lshape[0], lshape[1]);
+  utils::check(gshape == B.global_shape(), "transpose_01: Size mismatch.");
+
+  local_Array_t X(lshape);
+  auto A_loc = A.local();
+  for(long i=0; i<lshape[1]; ++i)
+    for(long j=0; j<lshape[0]; ++j)
+      X(j, i, ::nda::ellipsis{}) = A_loc(i, j, ::nda::ellipsis{});
+  distributed_array<local_Array_t, comm_t> dX(A.communicator(), grid, gshape, origin, bsize, std::move(X));
+  redistribute(dX, B);
 }
 
 template<DistributedArrayOfRank<2> Arr1_t, DistributedArrayOfRank<2> Arr2_t>

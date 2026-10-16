@@ -24,6 +24,12 @@
 
 #include <array>
 #include <algorithm>
+#include <cstdlib>
+#include <functional>
+#include <numeric>
+#include <optional>
+#include <string>
+#include <utility>
 
 #include "utilities/check.hpp"
 
@@ -175,6 +181,132 @@ inline long find_min_col(long np, long nr_max, long nc_min=1) {
     }
     return m;
   }
+}
+
+/**
+ * Whether a processor grid can distribute an array of the given extents:
+ * every grid dimension is >= 1 and does not exceed the corresponding extent.
+ */
+template<size_t N>
+inline bool proc_grid_fits(std::array<long,N> const& grid, std::array<long,N> const& extents)
+{
+  for(size_t i=0; i<N; ++i)
+    if(grid[i] < 1 or grid[i] > extents[i]) return false;
+  return true;
+}
+
+/**
+ * Processor grid {n_0, ..., n_{N-1}} with prod(n_i) = np and n_i <= extents[i].
+ * Returns `pref` when it is such a grid. Otherwise, among all such grids, the one that maximizes
+ * n_0, then n_1, ..., then n_{N-3}, and splits the remaining factor as evenly as possible between
+ * the last two dimensions (the larger part first).
+ * Returns std::nullopt when no such grid exists.
+ * @param np      - number of processors
+ * @param extents - global shape of the distributed dimensions
+ * @param pref    - [OPTIONAL] preferred grid, returned unchanged when it fits
+ */
+template<size_t N>
+inline std::optional<std::array<long,N>> find_proc_grid_fit(long np, std::array<long,N> const& extents,
+                                                            std::optional<std::array<long,N>> pref = std::nullopt)
+{
+  static_assert(N >= 1, "find_proc_grid_fit: N < 1");
+  utils::check(np > 0, "find_proc_grid_fit: np <= 0");
+  if(pref.has_value()) {
+    long prod = std::accumulate(pref->begin(), pref->end(), 1l, std::multiplies<>{});
+    if(prod == np and proc_grid_fits(*pref, extents)) return pref;
+  }
+  // ranking key: (n_0, ..., n_{N-3}, -|n_{N-2}-n_{N-1}|, n_{N-2}), larger is better
+  auto key = [](std::array<long,N> const& g) {
+    std::array<long,N> k = g;
+    if constexpr (N >= 2) {
+      k[N-2] = -std::abs(g[N-2]-g[N-1]);
+      k[N-1] = g[N-2];
+    }
+    return k;
+  };
+  std::optional<std::array<long,N>> best;
+  std::array<long,N> g;
+  auto search = [&](auto&& self, size_t i, long rem) -> void {
+    if(i == N-1) {
+      if(rem > extents[i]) return;
+      g[i] = rem;
+      if(not best.has_value() or key(g) > key(*best)) best = g;
+      return;
+    }
+    for(long d=1; d<=std::min(rem,extents[i]); ++d) {
+      if(rem%d != 0) continue;
+      g[i] = d;
+      self(self, i+1, rem/d);
+    }
+  };
+  search(search, 0, np);
+  return best;
+}
+
+/**
+ * Splits np processors into np/g groups of g consecutive ranks, each group holding a complete copy
+ * of an array of the given extents on the processor grid find_proc_grid_fit(g, extents, pref).
+ * g is the largest divisor of np for which such a grid exists: g == np (one group, grid == pref
+ * when pref fits) whenever the array can be distributed over all processors, g == 1 at worst.
+ * @return {g, grid}
+ */
+template<size_t N>
+inline std::pair<long, std::array<long,N>> find_proc_grid_fit_groups(long np, std::array<long,N> const& extents,
+                                                                      std::optional<std::array<long,N>> pref = std::nullopt)
+{
+  for(long g=np; g>1; --g) {
+    if(np%g != 0) continue;
+    auto grid = find_proc_grid_fit(g, extents, (g==np ? pref : std::nullopt));
+    if(grid.has_value()) return {g, *grid};
+  }
+  std::array<long,N> ones;
+  ones.fill(1);
+  return {1, ones};
+}
+
+/**
+ * Largest g <= np for which a processor grid of g ranks fits the given extents, and that grid
+ * (find_proc_grid_fit(g, extents), with `pref` considered only for g == np). g == np whenever the
+ * array can be distributed over all processors, g == 1 at worst. Used with
+ * math::nda::make_distributed_array_on_first_ranks, which leaves the remaining np-g ranks empty.
+ *
+ * Why not find_proc_grid_capped + detail::assemble_one_body (one_body_hamiltonian.hpp), which also
+ * idles surplus ranks: those build the array on a sub-communicator of the active ranks (uneven tiles
+ * allowed) and only fill a shared array through it. The first-ranks array instead keeps the full
+ * communicator, so it takes part in math::nda::redistribute, gather_to_shm and collectives on
+ * mpi->comm like any all-rank array, with no communicator split, and is the plain array when g == np.
+ * @return {g, grid}
+ */
+template<size_t N>
+inline std::pair<long, std::array<long,N>> find_proc_grid_fit_subset(long np, std::array<long,N> const& extents,
+                                                                      std::optional<std::array<long,N>> pref = std::nullopt)
+{
+  for(long g=np; g>1; --g) {
+    auto grid = find_proc_grid_fit(g, extents, (g==np ? pref : std::nullopt));
+    if(grid.has_value()) return {g, *grid};
+  }
+  std::array<long,N> ones;
+  ones.fill(1);
+  return {1, ones};
+}
+
+/**
+ * find_proc_grid_fit() that aborts with a clear message when no processor grid exists.
+ * @param where - name of the caller, for the error message
+ */
+template<size_t N>
+inline std::array<long,N> find_proc_grid_fit_or_abort(long np, std::array<long,N> const& extents,
+                                                      std::optional<std::array<long,N>> pref,
+                                                      std::string const& where)
+{
+  auto grid = find_proc_grid_fit(np, extents, pref);
+  if(not grid.has_value()) {
+    std::string ext;
+    for(size_t i=0; i<N; ++i) ext += (i==0 ? "" : ", ") + std::to_string(extents[i]);
+    utils::check(false, "{}: no processor grid of {} MPI ranks fits the distributed dimensions ({}). "
+                        "Use a number of ranks that factorizes within these extents.", where, np, ext);
+  }
+  return *grid;
 }
 
 template<typename communicator>

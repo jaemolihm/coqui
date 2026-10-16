@@ -275,7 +275,8 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
   auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
-  {
+  // an empty local block contributes nothing
+  if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
     nda::array<ComplexType, 1> Ac0_i(dim1);
     auto Tc0_t = T_ct(0, nda::range::all);
@@ -284,7 +285,7 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
     coeff_first = nda::max_element(Ac0_i_abs);
   }
 
-  {
+  if (dim1 > 0) {
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
     auto nIR = T_ct.shape(0);
@@ -325,7 +326,8 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
   auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
-  {
+  // an empty local block contributes nothing
+  if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
     nda::array<ComplexType, 1> Ac0_i(dim1);
     nda::array<ComplexType, 1> Tc0_t_pos(nt_half);
@@ -338,7 +340,7 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
     coeff_first = nda::max_element(Ac0_i_abs);
   }
 
-  {
+  if (dim1 > 0) {
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
     auto nIR = T_ct.shape(0);
