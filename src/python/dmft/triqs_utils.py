@@ -855,10 +855,11 @@ def symmetrize_blk2_gf(u_iw_blk_gf2, deg_blk, gf_struct):
                     up_offdiag_buffer += u_iw_blk_gf2[blk_name1, blk_name2]
                     offdiag_count_prime += 1
 
-        u_diag_buffer /= diag_count
-        up_diag_buffer /= diag_count_prime
-        u_offdiag_buffer /= offdiag_count
-        up_offdiag_buffer /= offdiag_count_prime
+        # a zero count (e.g. no off-diagonal orbital pairs for one orbital) leaves a buffer that is never written back
+        for buf, count in ((u_diag_buffer, diag_count), (up_diag_buffer, diag_count_prime),
+                           (u_offdiag_buffer, offdiag_count), (up_offdiag_buffer, offdiag_count_prime)):
+            if count > 0:
+                buf /= count
 
         for b1, b2 in product(blks, repeat=2):
             blk_name1, blk_name2 = gf_struct[b1][0], gf_struct[b2][0]
