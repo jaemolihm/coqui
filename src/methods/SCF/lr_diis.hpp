@@ -49,11 +49,6 @@ struct lr_iter_params {
   /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
   size_t max_subsp_size = 10;
   size_t diis_warmup = 0;
-
-  /// True when the accelerator is allowed to extrapolate. "damping" never does,
-  /// and lr_diis collapses its subspace accordingly. Single source of the string
-  /// comparison, so no caller repeats the literal.
-  bool use_diis() const { return alg == "DIIS"; }
 };
 
 
@@ -94,21 +89,19 @@ public:
   using Vec1D    = nda::array<ComplexType, 1>;
 
   /**
-   * @param params    - the whole iteration spec: alg, mixing, subspace depth,
-   *                    warmup. "damping" collapses the subspace to depth 1 and the
-   *                    warmup to 0, which is what puts a damping run on the damping
-   *                    write for good (see is_simple_mixing).
+   * @param params    - the DIIS spec: mixing (warmup / fallback damping), subspace
+   *                    depth, warmup.
    */
   explicit lr_diis(lr_iter_params const& params)
-      : _max_subsp_size(params.use_diis() ? params.max_subsp_size : 1),
-        _warmup_iter(params.use_diis() ? params.diis_warmup : 0),
+      : _max_subsp_size(params.max_subsp_size),
+        _warmup_iter(params.diis_warmup),
         _mixing(params.mixing),
         _B(0, 0) {
-    // A DIIS run whose max_subsp_size is below _min_subsp gets the permanent
-    // warmup gate is_simple_mixing() describes, and silently degrades to plain
-    // damping — which would otherwise show up only as "DIIS converges exactly
-    // like mixing".
-    utils::check(!params.use_diis() or !is_simple_mixing(),
+    utils::check(params.alg == "DIIS", "lr_diis: built from a non-DIIS iter_alg '{}'.", params.alg);
+    // A subspace capped below _min_subsp keeps the warmup gate on forever, so DIIS
+    // would silently degrade to plain damping — which would otherwise show up only
+    // as "DIIS converges exactly like mixing".
+    utils::check(_max_subsp_size >= _min_subsp,
                  "lr_diis: DIIS was requested but a subspace of depth {} can never "
                  "reach min_subsp = {}, so it would never extrapolate. Raise "
                  "iter_params.max_subsp_size or use damping explicitly.",
@@ -130,11 +123,8 @@ public:
     _head = 0;
     _B = nda::matrix<ComplexType>(0, 0);
   }
-  /// Subspace depth, and whether a residual vector is kept per entry. Both follow
-  /// from the algorithm, so the caller's memory report reads them here instead of
-  /// re-deriving them from lr_iter_params.
+  /// Subspace depth, for the caller's memory report.
   size_t max_subsp_size() const { return _max_subsp_size; }
-  bool stores_residuals() const { return !is_simple_mixing(); }
 
   /**
    * @brief One combined DIIS step on (ΔF, ΔΣ), striped over `comm`.
@@ -159,11 +149,6 @@ public:
    * @param DeltaSigma       - [IN/OUT] full ΔΣ (as DeltaF); empty if no GW
    * @param DeltaSigma_prev  - [INPUT]  this rank's slice of the previous ΔΣ
    * @param iter             - [INPUT]  current iteration number (1-based)
-   *
-   * Every mixing option takes the same path through here, undamped Picard
-   * included: its damping write is a no-op (mixing >= 1 leaves the arrays
-   * untouched) and its ring is never read, but it is still stored, so the caller
-   * needs no per-algorithm branch.
    */
   template<typename Comm, typename FView, typename FPrev, typename SView, typename SPrev>
   void next_step_combined(Comm& comm, utils::part_map const& pmap,
@@ -207,31 +192,20 @@ public:
     // all_reduce over comm). Assigning into the slot keeps the buffers the
     // previous solve/iteration allocated: past the first max_subsp_size+1
     // iterations this loop performs no allocation at all.
-    //
-    // The residuals feed local_overlap, which only update_B reaches, so a
-    // configuration that never extrapolates must not pay for them either: they
-    // cost a full-slice subtraction and a slice of storage per iteration for a
-    // matrix nothing builds.
-    const bool build_res = !is_simple_mixing();
     const size_t s = push_slot();
     _xF[s] = F_loc;
-    if (build_res) _resF[s] = F_loc - F_prev_loc;
+    _resF[s] = F_loc - F_prev_loc;
     if (has_sigma) {
       auto S_loc = nda::reshape(DeltaSigma, std::array<long, 1>{nS})(nda::range(sS0, sS1));
       _xS[s] = S_loc;
-      if (build_res) _resS[s] = S_loc - DeltaSigma_prev;
+      _resS[s] = S_loc - DeltaSigma_prev;
     }
 
     // Warmup gate, evaluated on the subspace INCLUDING the step just stored.
     const bool warmup =
         (iter <= static_cast<int>(_warmup_iter) + 1 || _n < _min_subsp);
 
-    // A subspace that can never reach _min_subsp never extrapolates, so B is
-    // dead work: two full-slice dotc's per history entry plus an all_reduce
-    // every iteration, feeding a matrix nothing reads. That is exactly the
-    // depth-1 ring a damping run builds. Any configuration that CAN extrapolate
-    // takes the branch unchanged, so DIIS is untouched.
-    if (!is_simple_mixing()) update_B(comm, has_sigma);
+    update_B(comm, has_sigma);
 
     if (_n > _max_subsp_size) purge_oldest();
 
@@ -269,19 +243,6 @@ public:
   }
 
 private:
-  /**
-   * @brief True when this accelerator only ever damps, never extrapolates.
-   *
-   * The subspace is capped at _max_subsp_size, so a _min_subsp above that makes
-   * the warmup gate `_n < _min_subsp` fire on every step for the lifetime of the
-   * object: every call takes the damping write. It is how a damping run is
-   * expressed as an lr_diis, and it is what lets the B-matrix work be skipped.
-   *
-   * Not public: callers ask `stores_residuals()`, which is the same fact stated as
-   * what it costs them.
-   */
-  bool is_simple_mixing() const { return _min_subsp > _max_subsp_size; }
-
   /// History vectors required before extrapolating, counted AFTER the current
   /// step is stored: the first extrapolation lands on the third call.
   static constexpr size_t _min_subsp = 3;
@@ -377,19 +338,15 @@ private:
    * shift — it is (S+1)² and costs nothing.
    */
   void purge_oldest() {
-    // B is empty when it is never built (is_simple_mixing()); there is then
-    // nothing to shift, and forming a (n-1) x (n-1) matrix from n = 0 would be
-    // a negative extent.
     size_t n = _B.shape()[0];
-    if (n > 0) {
-      nda::matrix<ComplexType> Bnew(n - 1, n - 1);
-      for (size_t i = 0; i < n - 1; ++i) {
-        for (size_t j = 0; j < n - 1; ++j) {
-          Bnew(i, j) = _B(i + 1, j + 1);
-        }
+    utils::check(n > 0 && _n > 0, "lr_diis::purge_oldest: history is empty.");
+    nda::matrix<ComplexType> Bnew(n - 1, n - 1);
+    for (size_t i = 0; i < n - 1; ++i) {
+      for (size_t j = 0; j < n - 1; ++j) {
+        Bnew(i, j) = _B(i + 1, j + 1);
       }
-      _B = Bnew;
     }
+    _B = Bnew;
 
     _head = (_head + 1) % _xF.size();
     --_n;

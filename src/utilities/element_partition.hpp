@@ -190,10 +190,9 @@ void complete_shared_slices(MPI_Context_t& mpi, part_map const& pmap, sArr_t&...
  * @brief Frobenius norm and successive-iterate difference norm from pre-sliced
  *        1D views, reduced over `comm`.
  *
- * The striped counterpart of a whole-array distributed norm: the caller has
- * already cut both arrays down to this rank's part_map slice (the "previous
- * iterate" is only stored as that slice), so there is nothing left to re-slice
- * here. The union of the slices covers the array exactly once, so the
+ * The caller has already cut both arrays down to this rank's part_map slice (the
+ * "previous iterate" is only stored as that slice), so there is nothing left to
+ * re-slice here. The union of the slices covers the array exactly once, so the
  * all_reduce gives the full norm on every rank.
  *
  * @param comm         - [INPUT] communicator the slices are striped over

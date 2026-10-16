@@ -233,29 +233,19 @@ void lr_driver::lr_setup(
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.iter_params.mixing);
-  if (p.iter_params.use_diis()) {
+  if (p.iter_params.alg == "DIIS") {
     app_log(1, "  max_subsp_size = {}", p.iter_params.max_subsp_size);
     app_log(1, "  diis_warmup = {}", p.iter_params.diis_warmup);
   }
   // ΔΣ-sized striped previous iterates: the tracked ΔΣ.
   const long n_sigma_prev = (K.has_sigma() && !qp) ? 1 : 0;
 
-  // The accelerator, built once: lr_solve_one reset()s the subspace rather
+  // The accelerator (DIIS or GCR), built once: lr_solve_one reset()s it rather
   // than rebuilding it, so the (job-wide, striped) history is allocated exactly
   // once no matter how many perturbations follow. Built here, ahead of the memory
-  // report below, which reads its shape off the object.
-  //
-  // DIIS, damping and undamped Picard all go through it, so lr_solve_one has one
-  // call site for them and no per-algorithm branch. Damping is
-  // lr_diis::next_step_combined's own damping write — the same striped expression,
-  // hence bit-identical to an inline elementwise update — on a depth-1 subspace
-  // whose warmup gate is permanently on. Undamped Picard takes that same write,
-  // which at mixing >= 1 leaves the arrays untouched; it pays a ring it never reads
-  // and in exchange the driver knows nothing about which algorithm is running.
-  //
-  // GCR replaces it at the same slot. At most one of the two exists; GCR is
-  // built only for a kernel with something to iterate, since an empty one never
-  // steps it.
+  // report below, which reads its shape off the object. Damping and undamped
+  // Picard keep no history: lr_solve_one mixes them elementwise. Neither
+  // accelerator is built for an empty kernel, which never steps one.
   if (p.iter_params.alg == "GCR") {
     // GCR
     // Capacity 0 = default: a ΔF-only pair is tiny, so keep many; with a Σ
@@ -265,8 +255,8 @@ void lr_driver::lr_setup(
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
     }
-  } else {
-    // DIIS, damping or undamped Picard
+  } else if (p.iter_params.alg == "DIIS" && !K.empty()) {
+    // DIIS
     _lr_diis = std::make_unique<lr_diis>(p.iter_params);
   }
   // The preconditioner's inner GCR iterates ΔF alone, so its pairs are tiny.
@@ -281,12 +271,11 @@ void lr_driver::lr_setup(
     inner_hist.n_vec = 2 * inner_hist.depth + 4 + (p.precond_kernel.empty() ? 0 : 1);
     inner_hist.n_F = 1;
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
-  } else if (_lr_diis && !K.empty()) {
+  } else if (_lr_diis) {
     // The ring holds max_subsp_size + 1 slots: push_slot() grows to that before
-    // the first eviction. Each slot stores a trial AND a residual, unless the
-    // ring can never extrapolate.
+    // the first eviction. Each slot stores a trial AND a residual.
     inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
-    inner_hist.n_vec = (_lr_diis->stores_residuals() ? 2 : 1) * (inner_hist.depth + 1);
+    inner_hist.n_vec = 2 * (inner_hist.depth + 1);
     inner_hist.n_F = qp ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
   }
@@ -388,18 +377,13 @@ void lr_driver::lr_setup(
   // each of those quantities once instead of once per node.
   _pmap = utils::make_part_map(*_mpi);
 
-  // Allocate array for previous density matrix (for convergence check).
-  // Kept whole (0.1 GB) — it only feeds a norm, and the ΔDm norm stays on the
-  // node_comm path.
-  _sDeltaDm_prev_skij.emplace(math::shm::make_shared_array<Array_view_4D_t>(
-      *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd}));
-
-  // Previous ΔF / ΔΣ / ΔV_QPGW (for damping/DIIS and the difference norms) are
-  // rank-private slices of the flattened arrays, in the `_pmap` partition. ΔΣ is
-  // tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
+  // Previous ΔDm / ΔF / ΔΣ / ΔV_QPGW (for damping/DIIS and the difference norms)
+  // are rank-private slices of the flattened arrays, in the `_pmap` partition. ΔΣ
+  // is tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
   // tracks the static ΔV_QPGW in its place). An inactive quantity gets
   // n_flat = 0.
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
+  _DeltaDm.alloc(_pmap, nF);
   _DeltaF.alloc(_pmap, nF);
   _DeltaSigma.alloc(_pmap, (K.has_sigma() && !qp) ? _nts * nF : 0);
   _DeltaVcorr.alloc(_pmap, qp ? nF : 0);
@@ -670,7 +654,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
-  auto& sDeltaDm_prev_skij = *_sDeltaDm_prev_skij;
   auto& opt_ibc            = _opt_ibc;
   utils::check(!qp || sDeltaVcorr_skij, "lr_driver::lr_solve_one: qp mode needs a ΔV_QPGW array.");
   utils::check(!K.has_sigma() || sDeltaSigma_tskij,
@@ -778,9 +761,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   for (iter = 1; iter <= p.max_iter; ++iter) {
 
-    // Save previous density matrix and Fock matrix. ΔDm is node-replicated, so
-    // node root copies it whole; the mixed quantities are saved as this rank's
-    // partition slice only, in parallel across the node.
+    // Save the previous iterates, each as this rank's partition slice only.
     _Timer.start("LR_SAVE");
     // GCR also needs the input ΔF/ΔΣ of the first iteration: that step opens the
     // right-hand side.
@@ -790,8 +771,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());
     }
     if (iter > 1) {
-      if (_mpi->node_comm.root())
-        sDeltaDm_prev_skij.local() = sDeltaDm_skij.local();
+      _DeltaDm.prev = _DeltaDm.slice(sDeltaDm_skij.local());
       if (qp)
         _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij->local());
     }
@@ -804,17 +784,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _Timer.stop("LR_DYSON");
     _mpi->comm.barrier();
 
-    // Compute norms for logging. lr_distributed_norm splits the element range
-    // over node_comm ranks and reduces within the node; the shared array is
-    // node-replicated, so the trailing broadcast from global rank 0 preserves
-    // exact global agreement.
+    // Compute norms for logging, reduced over the global comm from the slices.
     _Timer.start("LR_CONVERGENCE");
-    auto norms_Dm = utils::lr_distributed_norm(
-        _mpi->node_comm, sDeltaDm_skij.local(), sDeltaDm_prev_skij.local(), iter > 1);
+    auto norms_Dm = utils::striped_norm(
+        _mpi->comm, _DeltaDm.slice(sDeltaDm_skij.local()), _DeltaDm.prev, iter > 1);
     double norm_DeltaDm = norms_Dm.first;
     double norm_DeltaDm_diff = norms_Dm.second;
-    _mpi->comm.broadcast_n(&norm_DeltaDm, 1, 0);
-    _mpi->comm.broadcast_n(&norm_DeltaDm_diff, 1, 0);
     _Timer.stop("LR_CONVERGENCE");
 
     // Steps 2-3: apply the kernel — the ΔF branch, then the ΔΠ -> ΔW -> ΔΣ pipeline.
@@ -851,14 +826,31 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
       // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
       // the same two-slot arguments.
+      //
+      // Damping; mixing >= 1 (undamped Picard) is a no-op.
+      const double mixing = p.iter_params.mixing;
+      auto damp = [&](auto A, auto const& A_prev) {
+        if (mixing >= 1.0 || A.size() == 0) return;
+        const long n = A.size();
+        auto [a0, a1] = _pmap.my_slice(n);
+        utils::check(A_prev.size() == a1 - a0,
+                     "lr_driver: damping history slice ({}) != partition slice ({}).",
+                     A_prev.size(), a1 - a0);
+        auto A_loc = nda::reshape(A, std::array<long, 1>{n})(nda::range(a0, a1));
+        A_loc = mixing * A_loc + (1.0 - mixing) * A_prev;
+      };
       auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
         if (use_gcr) {
           // GCR
           gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, F, F_prev, S, S_prev,
                                      p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
-        } else {
-          // DIIS / damping
+        } else if (_lr_diis) {
+          // DIIS
           _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
+        } else {
+          // Damping
+          damp(F, F_prev);
+          damp(S, S_prev);
         }
       };
       if (qp) {

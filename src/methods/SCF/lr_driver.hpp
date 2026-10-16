@@ -498,6 +498,7 @@ private:
   std::unique_ptr<solvers::lr_gw> _lr_gw2;       // ΔΣ term 2, split-output path only
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
+  /// DIIS, when iter_params.alg == "DIIS" and the kernel is not empty.
   std::unique_ptr<lr_diis> _lr_diis;
   /// GCR in place of _lr_diis when iter_params.alg == "GCR" and the kernel is
   /// not empty.
@@ -517,7 +518,7 @@ private:
   std::optional<lr_ibc_DeltaX> _opt_ibc;
 
   /**
-   * One elementwise-mixed quantity (ΔF, ΔΣ or ΔV_QPGW), striped over the global
+   * One iterated quantity (ΔDm, ΔF, ΔΣ or ΔV_QPGW), striped over the global
    * comm: this rank owns [i0, i1) of the flattened array and keeps only that
    * slice of the previous iterate. The whole job then stores each previous
    * iterate once instead of once per node.
@@ -542,8 +543,7 @@ private:
   //     of lr_solve_one or written before it is read, so mode m's solve cannot
   //     see mode m−1's state.
   utils::part_map _pmap;
-  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_prev_skij;
-  lr_iterate_history _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔF, ΔΣ(iω), ΔV_QPGW
+  lr_iterate_history _DeltaDm, _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔDm, ΔF, ΔΣ(iω), ΔV_QPGW
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from

@@ -266,67 +266,6 @@ auto transpose_axes_01(
   return d_out;
 }
 
-/**
- * @brief Distributed Frobenius norm and successive-iterate difference norm.
- *
- * Computes ||A||_F and ||A - A_prev||_F with the work distributed over the
- * ranks of `comm`. Since the Frobenius norm is independent of how the elements
- * are grouped, the array is viewed as 1D and each rank takes a contiguous slice
- * of the element range; the two partial sums are then all-reduced so every rank
- * returns identical totals.
- *
- * `A` and `A_prev` must be contiguous (e.g. a shared-array `.local()` view) and
- * share the same shape. The difference norm reads `A - A_prev` lazily (no
- * temporary is allocated). When `compute_diff` is false the second component is
- * returned as 0.
- *
- * Typical use: pass `mpi.node_comm` with node-replicated shared arrays; every
- * rank on the node then holds the full norm. (A trailing global broadcast is
- * still appropriate if exact cross-node bit-agreement is required.)
- *
- * @param comm         - [INPUT] communicator the block work is striped over
- * @param A            - [INPUT] current array/view, rank >= 2
- * @param A_prev       - [INPUT] previous array/view (same shape as A)
- * @param compute_diff - [INPUT] whether to also compute ||A - A_prev||_F
- * @return {||A||_F, ||A - A_prev||_F}
- */
-template<typename Comm, typename ArrA, typename ArrB>
-std::pair<double, double> lr_distributed_norm(Comm& comm,
-                                              ArrA const& A,
-                                              ArrB const& A_prev,
-                                              bool compute_diff) {
-  // The Frobenius norm is partition-invariant, so view the (contiguous) array
-  // as 1D and give each rank a contiguous slice of the element range.
-  const long n = A.size();
-  if (compute_diff) {
-    check(static_cast<long>(A_prev.size()) == n,
-          "lr_distributed_norm: A and A_prev sizes differ ({} vs {})", A_prev.size(), n);
-  }
-  const long nr = comm.size();
-  const long r = comm.rank();
-  const long chunk = (n + nr - 1) / nr;
-  const long i0 = std::min(r * chunk, n);
-  const long i1 = std::min(i0 + chunk, n);
-
-  double n2 = 0.0, d2 = 0.0;
-  if (i1 > i0) {
-    auto a_sub = nda::reshape(A, std::array<long, 1>{n})(nda::range(i0, i1));
-    n2 = std::real(nda::blas::dotc(a_sub, a_sub));  // ||slice||^2 via BLAS
-    if (compute_diff) {
-      auto b_sub = nda::reshape(A_prev, std::array<long, 1>{A_prev.size()})(nda::range(i0, i1));
-      // ||a - b||^2 as a no-alloc lazy reduction (BLAS can't take the lazy a-b).
-      d2 = nda::sum(nda::map([](auto x, auto y) {
-        double d = std::abs(x - y);
-        return d * d;
-      })(a_sub, b_sub));
-    }
-  }
-
-  double acc[2] = {n2, d2};
-  comm.all_reduce_in_place_n(acc, 2, std::plus<>{});
-  return {std::sqrt(acc[0]), std::sqrt(acc[1])};
-}
-
 } // namespace utils
 
 #endif // UTILITIES_LR_UTILS_HPP
