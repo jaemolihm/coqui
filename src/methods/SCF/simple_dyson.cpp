@@ -26,6 +26,7 @@
 #include "nda/h5.hpp"
 #include "nda/linalg.hpp"
 #include "nda/nda.hpp"
+#include "numerics/gemm_guard.hpp"
 
 namespace methods {
 
@@ -204,7 +205,7 @@ namespace {
         auto ik = sk % _nkpts_ibz;
 
         FpSigma = H0(is, ik, nda::ellipsis{}) + F(is, ik, nda::ellipsis{});
-        nda::blas::gemm(ComplexType(1.0), S_inv(is, ik, nda::ellipsis{}), FpSigma, ComplexType(0.0), SFS);
+        math::detail::gemm_guarded(ComplexType(1.0), S_inv(is, ik, nda::ellipsis{}), FpSigma, ComplexType(0.0), SFS);
         auto eigvals = nda::linalg::geigenvalues(SFS);
 
         for (size_t n_neg = 0; n_neg < nw_half; ++n_neg) {
@@ -234,7 +235,7 @@ namespace {
 
       FpSigma = H0(is, ik, nda::ellipsis{}) + F(is, ik, nda::ellipsis{}) + Sigmaw_ij;
 
-      nda::blas::gemm(ComplexType(1.0), S_inv(is, ik, nda::ellipsis{}), FpSigma, ComplexType(0.0), SFS);
+      math::detail::gemm_guarded(ComplexType(1.0), S_inv(is, ik, nda::ellipsis{}), FpSigma, ComplexType(0.0), SFS);
 
       // Matsubara quantities are not Hermitian!
       spectra(n_pos, is, ik, nda::range::all) = nda::linalg::geigenvalues(SFS);
