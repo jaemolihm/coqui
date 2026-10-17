@@ -29,6 +29,7 @@
 #include "nda/blas.hpp"
 #include "nda/h5.hpp"
 #include "numerics/nda_functions.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/distributed_array/nda.hpp"
 
 #include "IO/app_loggers.h"
@@ -337,7 +338,7 @@ namespace methods {
           Chi_bar_Q_conj = nda::conj(Chi_bar_qu(q, Q_rng));
           double factor = (q_abs2 / fpi) * mf.volume();
           for (auto [ix, x_idx] : itertools::enumerate(x_rng)) {
-            nda::blas::gemv(Wloc(ix, iq, nda::ellipsis{}), Chi_bar_Q_conj, buffer_P);
+            math::detail::gemv_guarded(Wloc(ix, iq, nda::ellipsis{}), Chi_bar_Q_conj, buffer_P);
             eps_inv_x(x_idx, q) += factor * nda::blas::dot(Chi_bar_qu(q, P_rng), buffer_P);
           }
         }
@@ -374,7 +375,7 @@ namespace methods {
           for (auto [iq, q] : itertools::enumerate(qpt_rng)) {
             Chi_bar_Q_conj = nda::conj(Chi_bar_qu(q, Q_rng));
             for (auto [it, t] : itertools::enumerate(t_rng)) {
-              nda::blas::gemv(Mloc(it, iq, nda::ellipsis{}), Chi_bar_Q_conj, buffer_P);
+              math::detail::gemv_guarded(Mloc(it, iq, nda::ellipsis{}), Chi_bar_Q_conj, buffer_P);
               m_t(t, q) += nda::blas::dot(Chi_bar_qu(q, P_rng), buffer_P);
             }
           }
@@ -383,7 +384,7 @@ namespace methods {
           auto Chi_qu = thc.basis_head();
           for (auto [iq, q] : itertools::enumerate(qpt_rng)) {
             for (auto [it, t] : itertools::enumerate(t_rng)) {
-              nda::blas::gemv(Mloc(it, iq, nda::ellipsis{}), Chi_qu(q, Q_rng), buffer_P);
+              math::detail::gemv_guarded(Mloc(it, iq, nda::ellipsis{}), Chi_qu(q, Q_rng), buffer_P);
               m_t(t, q) += nda::blas::dotc(Chi_qu(q, P_rng), buffer_P);
             }
           }

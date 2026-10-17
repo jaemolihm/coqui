@@ -36,6 +36,8 @@
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/scf_driver.hpp"
+#include "mean_field/model_hamiltonian/model_readonly.hpp"
+#include "mean_field/model_hamiltonian/tests/model_test_utils.hpp"
 
 // TODO add lih_223 unit tests
 
@@ -405,6 +407,92 @@ namespace bdft_tests {
       solve_thc_gw(mf, 10.0);
       solve_thc_gw(mf, 100.0);
     }
+  }
+#endif
+
+#ifdef ENABLE_DLR
+  // Hubbard model on a 2x2 lattice (Np = 1, nk = nq = 4, nbnd = 1): with more ranks than the (k, i, j),
+  // (1, q, P, Q) or (t, P, Q) extents, Dyson, the tau <-> w buffers, Pi and Sigma run on grids with empty
+  // local blocks (nt_half = 12: np = 16 reaches all of them). Two scGW iterations on all ranks must reproduce
+  // the same calculation on one rank.
+  TEST_CASE("thc_gw_hubbard", "[methods][thc][gw][model]") {
+    auto& mpi = utils::make_unit_test_mpi_context();
+    long N = 2, nk = N*N;
+    double t = 1.0, U = 4.0, beta = 5.0, wmax = 5.0;
+    std::string prefix = "hubbard_gw_test";
+    std::string fname = "hubbard_gw_thc_test.h5";
+
+    if(mpi->comm.root()) {
+      model_tests::write_minimal_model_h5(prefix+".h5", N, t, 0.0, 1.0, true);
+      nda::array<ComplexType,3> Z(nk,1,1);
+      Z() = ComplexType(U);
+      model_tests::write_rank1_thc_h5(fname, Z);
+    }
+    mpi->comm.barrier();
+
+    auto run_scgw = [&](std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> ctx, std::string output) {
+      auto mf = std::make_shared<mf::MF>(mf::MF(mf::model::model_readonly(ctx, "./", prefix, -1)));
+      imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+      thc_reader_t thc(mf, "incore", fname);
+      auto eri = mb_eri_t(thc, thc);
+      solvers::hf_t hf("ignore_g0");
+      solvers::gw_t gw(&ft, "ignore_g0", output);
+      solvers::scr_coulomb_t scr_eri(&ft, "rpa", "ignore_g0");
+      simple_dyson dyson(mf.get(), &ft);
+      iter_scf::iter_scf_t iter_sol("damping");
+      MBState mb_state(ctx, ft, output);
+      scf_loop(mb_state, dyson, eri, ft, solvers::mb_solver_t(&hf,&gw,&scr_eri), &iter_sol,
+               2, false, 1e-12, false);
+      ctx->comm.barrier();
+    };
+
+    run_scgw(mpi, "hubbard_gw_test_all");
+    // reference on rank 0 alone
+    auto sub_comm = mpi->comm.split(mpi->comm.root() ? 0 : 1, mpi->comm.rank());
+    if(mpi->comm.root())
+      run_scgw(std::make_shared<utils::mpi_context_t<mpi3::communicator>>(utils::make_mpi_context(sub_comm)),
+               "hubbard_gw_test_one");
+    mpi->comm.barrier();
+
+    if(mpi->comm.root()) {
+      auto read = [](std::string output) {
+        h5::file file(output+".mbpt.h5", 'r');
+        h5::group grp(file);
+        auto scf_grp = grp.open_group("scf");
+        long it;
+        h5::h5_read(scf_grp, "final_iter", it);
+        auto iter_grp = scf_grp.open_group("iter"+std::to_string(it));
+        double mu;
+        nda::array<ComplexType,4> F;
+        nda::array<ComplexType,5> Sigma, G;
+        h5::h5_read(iter_grp, "mu", mu);
+        nda::h5_read(iter_grp, "F_skij", F);
+        nda::h5_read(iter_grp, "Sigma_tskij", Sigma);
+        nda::h5_read(iter_grp, "G_tskij", G);
+        return std::make_tuple(it, mu, F, Sigma, G);
+      };
+      auto [it_a, mu_a, F_a, Sigma_a, G_a] = read("hubbard_gw_test_all");
+      auto [it_1, mu_1, F_1, Sigma_1, G_1] = read("hubbard_gw_test_one");
+      auto diff = [](auto const& A, auto const& B) {
+        return std::sqrt(nda::sum(nda::abs2(nda::make_regular(A - B))));
+      };
+      double dF = diff(F_a, F_1), dSigma = diff(Sigma_a, Sigma_1), dG = diff(G_a, G_1);
+      app_log(2, "thc_gw_hubbard: np = {}, |dmu| = {:.3e}, |dF| = {:.3e}, |dSigma| = {:.3e}, |dG| = {:.3e}",
+              mpi->comm.size(), std::abs(mu_a - mu_1), dF, dSigma, dG);
+      // CHECK, not REQUIRE: a throw on the root would leave the other ranks in the barrier below
+      CHECK(it_a == 2);
+      CHECK(it_1 == 2);
+      CHECK(std::abs(mu_a - mu_1) < 1e-12);
+      CHECK(dF < 1e-12);
+      CHECK(dSigma < 1e-12);
+      CHECK(dG < 1e-12);
+      CHECK(std::sqrt(nda::sum(nda::abs2(Sigma_1))) > 1e-3);
+
+      for(auto fn : {prefix+".h5", fname, std::string("hubbard_gw_test_all.mbpt.h5"),
+                     std::string("hubbard_gw_test_one.mbpt.h5")})
+        remove(fn.c_str());
+    }
+    mpi->comm.barrier();
   }
 #endif
 

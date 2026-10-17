@@ -109,6 +109,29 @@ namespace model_tests {
     }
   }
 
+  /*
+   * Writes a rank-1 THC file (Np = 1, one orbital) in the layout of coqui.interaction.write_thc_h5:
+   * X = 1, coulomb_matrix Z[q] = V(q) (Z has shape [nq, 1, 1], nq = nk), and the zero dummies for the
+   * ISDF-only datasets that thc_reader_t::read() requires.
+   * Call on one rank only.
+   */
+  inline void write_rank1_thc_h5(std::string fname, nda::array<ComplexType,3> const& Z) {
+    long nk = Z.shape(0);
+    nda::array<ComplexType,4> X(1,nk,1,1);
+    X() = ComplexType(1.0);
+    h5::file file(fname, 'w');
+    h5::group grp(file);
+    std::vector<int> rng = {0, 1};
+    h5::h5_write(grp, "Np", int(1));
+    h5::h5_write(grp, "X_orbital_range", rng);
+    h5::h5_write(grp, "Y_orbital_range", rng);
+    nda::h5_write(grp, "collocation_matrix", X, false);
+    nda::h5_write(grp, "coulomb_matrix", Z, false);
+    nda::h5_write(grp, "interpolating_points", nda::array<long,1>::zeros({1}), false);
+    nda::h5_write(grp, "interpolating_vectors_G0", nda::array<ComplexType,2>::zeros({nk,1}), false);
+    nda::h5_write(grp, "dual_interpolating_vectors_G0", nda::array<ComplexType,2>::zeros({nk,1}), false);
+  }
+
 } // model_tests
 
 #endif
