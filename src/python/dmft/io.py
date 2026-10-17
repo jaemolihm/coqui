@@ -170,6 +170,9 @@ def _normalize_solver_params_list(solver_params_list, comm_size):
         solver_params_norm = deepcopy(solver_params)
 
         mu_params = solver_params_norm.get('chemical_potential')
+        if mu_params is not None and mu_params.get('update', 'search') not in ('search', 'predict'):
+            raise ValueError(f"chemical_potential.update = {mu_params['update']!r}: "
+                             "valid options are 'search' and 'predict'")
         if mu_params: 
             mu_params.setdefault('n_cycles', int(solver_params_norm['n_cycles']*0.05))
             mu_params['n_cycles'] = int(mu_params['n_cycles']/comm_size) 
@@ -433,6 +436,34 @@ def read_impurity_chkpt(h5_filename, iteration=-1, *, read="both", impurity_indi
         return solver_inputs
     else:
         return solver_results, solver_inputs
+
+
+def _read_impurity_mu_imp(h5_filename, iteration=-1, impurity_indices=None):
+    """
+    Impurity chemical potentials stored in ``dmft/iter{iteration}/impurity_{i}/results/mu_imp``.
+
+    Returns a list with one float per impurity (all impurities of the iteration when
+    ``impurity_indices`` is None), with None where the value is not stored.
+    """
+    mu_list = None
+    if mpi.is_master_node():
+        with HDFArchive(h5_filename, 'r') as ar:
+            dmft_grp = ar["dmft"]
+            if iteration == -1:
+                iteration = dmft_grp["final_iter"] if "final_iter" in dmft_grp.keys() \
+                    else dmft_grp["final_iteration"]
+            iter_grp = dmft_grp[f"iter{iteration}"]
+            if impurity_indices is None:
+                impurity_indices = range(len([k for k in iter_grp.keys() if k.startswith("impurity_")]))
+            mu_list = []
+            for i in impurity_indices:
+                mu = None
+                if f"impurity_{i}" in iter_grp.keys():
+                    imp_grp = iter_grp[f"impurity_{i}"]
+                    if "results" in imp_grp.keys() and "mu_imp" in imp_grp["results"].keys():
+                        mu = float(np.real(imp_grp["results"]["mu_imp"]))
+                mu_list.append(mu)
+    return mpi.bcast(mu_list)
 
 
 def update_impurity_results_from_chkpt(solver_results, h5_filename, iteration=-1):
