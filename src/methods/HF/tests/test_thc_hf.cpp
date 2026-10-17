@@ -38,6 +38,7 @@
 #include "methods/ERI/mb_eri_context.h"
 #include "methods/ERI/eri_utils.hpp"
 #include "methods/SCF/mb_solver_t.h"
+#include "methods/HF/lr_thc_comm.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "methods/SCF/scf_driver.hpp"
@@ -497,6 +498,64 @@ namespace bdft_tests {
       run(N, 2.0, 0.0, true);
       run(N, 2.0, 0.5, true);
     }
+  }
+
+  // lr_thc_comm::aux_to_primary on a one-orbital (Np = 1) aux array whose (P,Q) grid exceeds the extent,
+  // so most ranks hold NP_loc = 0 or NQ_loc = 0. The contraction over the empty axis must give an
+  // all-zero partial even though the caller's scratch buffer holds garbage (k = 0 gemm).
+  TEST_CASE("lr_aux_to_primary_empty_block", "[methods][thc][hf][model][lr]") {
+    auto& mpi = utils::make_unit_test_mpi_context();
+    using local_Array_4D_t = memory::array<HOST_MEMORY, ComplexType, 4>;
+
+    long N = 2, nk = N*N;
+    std::string prefix = "hubbard_a2p_test";
+    std::string fname = "hubbard_a2p_thc_test.h5";
+    if(mpi->comm.root()) {
+      model_tests::write_minimal_model_h5(prefix+".h5", N, 1.0, 0.0, 1.0, true);
+      nda::array<ComplexType,3> Z(nk,1,1);
+      Z() = 2.0;
+      model_tests::write_rank1_thc_h5(fname, Z);
+    }
+    mpi->comm.barrier();
+    auto mf = std::make_shared<mf::MF>(mf::MF(mf::model::model_readonly(mpi, "./", prefix, -1)));
+    thc_reader_t thc(mf, "incore", fname);
+    REQUIRE(thc.Np() == 1);
+
+    long np = mpi->comm.size();
+    nda::array<long,1> kmap(nk);
+    for(long k=0; k<nk; ++k) kmap(k) = k;
+    auto Ofull = [](long k) { return ComplexType(1.0 + 0.5*k, 0.25 - 0.1*k); };
+
+    // (P,Q) grids with the whole rank count on P, on Q, and split over both
+    long npP2 = (np % 2 == 0) ? 2 : 1;
+    for(auto pg : {std::array<long,4>{1,1,np,1}, std::array<long,4>{1,1,1,np}, std::array<long,4>{1,1,npP2,np/npP2}}) {
+      auto dO = math::nda::make_distributed_array<local_Array_4D_t>(mpi->comm, pg, {1, nk, 1, 1});
+      auto org = dO.origin();
+      auto Ol = dO.local();
+      for(long k=0; k<Ol.shape(1); ++k)
+        for(long P=0; P<Ol.shape(2); ++P)
+          for(long Q=0; Q<Ol.shape(3); ++Q) Ol(0,k,P,Q) = Ofull(org[1]+k);
+
+      auto sO = make_shared_array<array_view_4d_t>(*mpi, {1, nk, 1, 1});
+      sO.set_zero();
+      nda::array<ComplexType,3> buf(nk, 1, 1);
+      buf() = ComplexType(1e3, -1e3);  // garbage: must be overwritten, also on ranks with an empty block
+      solvers::lr_thc_comm::aux_to_primary<array_view_4d_t>(0, 0, ComplexType(1.0), dO, sO, 0,
+                                                            *sO.node_comm(), thc, kmap, kmap, nullptr, &buf);
+      sO.all_reduce_parallel();
+
+      double err = 0.0;
+      for(long k=0; k<nk; ++k) {
+        auto X = thc.X(0, 0, k);
+        ComplexType ref = std::conj(X(0,0)) * Ofull(k) * X(0,0);
+        err = std::max(err, std::abs(sO.local()(0,k,0,0) - ref));
+      }
+      app_log(2, "lr_aux_to_primary_empty_block: pgrid ({},{}) max|O_ab - ref| = {:.3e}", pg[2], pg[3], err);
+      REQUIRE(err < 1e-12);
+    }
+    mpi->comm.barrier();
+    if(mpi->comm.root()) { remove(fname.c_str()); remove((prefix+".h5").c_str()); }
+    mpi->comm.barrier();
   }
 
 } // bdft_tests
