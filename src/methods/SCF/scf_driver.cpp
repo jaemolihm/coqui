@@ -131,6 +131,9 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   if (mb_solver.hf != nullptr)
     chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
                                  mb_solver.hf->div_treatment());
+  // Mark a ground state run at a fixed chemical potential (see chkpt::dump_fixed_mu)
+  if (dyson.fixed_mu() or restart)
+    chkpt::dump_fixed_mu(mpi->comm, mb_state.coqui_prefix+".mbpt.h5", dyson.fixed_mu());
   Timer.stop("WRITE");
 
   double F_conv, Sigma_conv;
@@ -462,6 +465,9 @@ double qp_scf_loop(
   if (mb_solver.hf != nullptr)
     chkpt::dump_hf_div_treatment(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
                                  mb_solver.hf->div_treatment());
+  // mu is searched here: drop the fixed-mu mark of an earlier scf_loop run on this checkpoint
+  if (restart)
+    chkpt::dump_fixed_mu(mpi->comm, mb_state.coqui_prefix+".mbpt.h5", std::nullopt);
   Timer.stop("WRITE");
 
   double Heff_conv;

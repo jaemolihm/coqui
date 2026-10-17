@@ -21,12 +21,16 @@ limitations under the License.
 from mpi4py import MPI
 import os
 import shutil
+import subprocess
+import sys
+import textwrap
 
 import h5py
 import numpy as np
 import pytest
 
 import coqui
+from coqui.mbpt import run_lr
 from coqui.mean_field import write_model_h5
 from coqui.interaction import write_thc_h5
 from coqui.utils.tests.test_coqui_env import mpi
@@ -211,6 +215,117 @@ def test_extended_hubbard_scgw(mpi):
             if os.path.exists(fn):
                 os.remove(fn)
     mpi.barrier()
+
+
+def test_hubbard_scgw_fixed_mu(mpi):
+    """scGW restarts at fixed mu = mu0 +- dmu (input "mu"): every iteration keeps mu, and particle-hole symmetry
+    of the half-filled t' = 0 Hubbard model gives n(mu0 + dmu) - 1 = 1 - n(mu0 - dmu)."""
+    N, t, U, beta, dmu = 4, 0.1, 0.4, 50.0, 0.01
+    nk = N * N
+    kpts, ek = square_lattice(N, t, 0.0)
+    prefix, thc_file = "hubbard_fixed_mu", "hubbard_fixed_mu_thc.h5"
+    write_model_h5(f"./{prefix}.h5", ek.reshape(1, nk, 1, 1).astype(complex), 1.0, kpts_crys=kpts,
+                   latt=np.diag([1.0, 1.0, 50.0]), mpi=mpi)
+    write_thc_h5(thc_file, np.ones((1, nk, 1, 1)), np.full((nk, 1, 1), U, dtype=complex), mpi=mpi)
+    mf = coqui.make_mf(mpi, {"prefix": prefix, "outdir": "./"}, "model")
+    thc = coqui.make_thc_coulomb(mf, {"save": thc_file, "storage": "incore"})
+
+    common = {"outdir": "./", "prefix": prefix, "beta": beta, "conv_thr": 1e-11,
+              "iaft": {"prec": "high", "wmax": 3.0, "basis": "dlr"}}
+    coqui.run_hf(dict(common, restart=False, niter=20, iter_alg={"alg": "damping", "mixing": 0.7}), h_int=thc)
+    coqui.run_gw(dict(common, restart=True, niter=100, iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+    mpi.barrier()
+    with h5py.File(f"{prefix}.mbpt.h5", "r") as f:
+        it0 = f["scf/final_iter"][()]
+        mu0 = f[f"scf/iter{it0}/mu"][()]
+    assert abs(mu0 - U / 2) < 1e-8
+
+    def density(chk):
+        with h5py.File(chk, "r") as f:
+            it = f["scf/final_iter"][()]
+            mus = [f[f"scf/iter{i}/mu"][()] for i in range(it0 + 1, it + 1)]
+            dm = read_complex(f[f"scf/iter{it}/Dm_skij"])[0, :, 0, 0].real
+            w = f["system/k_weight"][()]
+        return it, mus, 2 * np.dot(w, dm)
+
+    n = {}
+    for sign in (+1, -1):
+        pre = f"{prefix}_mu{sign:+d}"
+        if mpi.root():
+            shutil.copy(f"{prefix}.mbpt.h5", f"{pre}.mbpt.h5")
+        mpi.barrier()
+        coqui.run_gw(dict(common, prefix=pre, restart=True, niter=100, mu=mu0 + sign * dmu,
+                          iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+        mpi.barrier()
+        it, mus, n[sign] = density(f"{pre}.mbpt.h5")
+        assert it0 < it < it0 + 100, "fixed-mu scGW did not converge"
+        assert np.allclose(mus, mu0 + sign * dmu, rtol=0, atol=1e-14)
+    assert n[+1] - 1 > 1e-3
+    assert abs((n[+1] - 1) - (1 - n[-1])) < 1e-8, (n[+1], n[-1])
+    mpi.barrier()
+
+    # the checkpoint records the fixed mu, the one of the searched-mu run does not
+    if mpi.root():
+        with h5py.File(f"{prefix}_mu+1.mbpt.h5", "r") as f:
+            assert abs(f["scf/fixed_mu"][()] - (mu0 + dmu)) < 1e-14
+        with h5py.File(f"{prefix}.mbpt.h5", "r") as f:
+            assert "fixed_mu" not in f["scf"]
+    mpi.barrier()
+
+    # run_lr: fix_density = True on a fixed-mu ground state aborts, fix_density = False runs
+    q_vec = [0.0, 0.0, 0.0]
+    dH0 = np.zeros((1, nk, 1, 1), dtype=complex)
+    dH0[0, :, 0, 0] = 1.0
+    lr_params = {"outdir": "./", "prefix": f"{prefix}_mu+1", "max_iter": 5, "tol": 1e-8}
+    run_lr(dict(lr_params), thc, q_vec, dH0, fix_density=False)
+    mpi.barrier()
+    msg = None
+    if mpi.root():
+        runner = textwrap.dedent(f"""
+            from mpi4py import MPI  # noqa: F401 - MPI init before coqui
+            import numpy as np, coqui
+            from coqui.mbpt import run_lr
+            mpi = coqui.MpiHandler()
+            mf = coqui.make_mf(mpi, {{"prefix": "{prefix}", "outdir": "./"}}, "model")
+            thc = coqui.make_thc_coulomb(mf, {{"save": "{thc_file}", "storage": "incore"}})
+            dH0 = np.ones(({1}, {nk}, 1, 1), dtype=complex)
+            run_lr({{"outdir": "./", "prefix": "{prefix}_mu+1", "max_iter": 5, "tol": 1e-8}},
+                         thc, [0.0, 0.0, 0.0], dH0, fix_density=True)
+            print("GUARD_NOT_TRIGGERED")
+        """)
+        # utils::check aborts via MPI_Abort instead of raising, so the call runs in its own process
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
+        proc = subprocess.run(["mpirun", "-np", "1", sys.executable, "-c", runner], env=env,
+                              capture_output=True, text=True, timeout=600)
+        out = proc.stdout + proc.stderr
+        if proc.returncode == 0 or "GUARD_NOT_TRIGGERED" in out:
+            msg = f"fix_density = True on a fixed-mu checkpoint was accepted:\n{out[-2000:]}"
+        elif "fix_density = true is not meaningful" not in out:
+            msg = f"rejected, but not by the fixed-mu guard:\n{out[-2000:]}"
+    msg = MPI.COMM_WORLD.bcast(msg, root=0)
+    assert msg is None, msg
+    mpi.barrier()
+
+    if mpi.root():
+        for fn in (f"{prefix}.h5", thc_file, f"{prefix}.mbpt.h5", f"{prefix}_mu+1.mbpt.h5", f"{prefix}_mu-1.mbpt.h5"):
+            if os.path.exists(fn):
+                os.remove(fn)
+    mpi.barrier()
+
+
+def test_gw_edmft_params_forward_mu(tmp_path):
+    """gw_edmft "mu" reaches the GW and dmft_embed groups, and nowhere when absent."""
+    pytest.importorskip("triqs")
+    from coqui.dmft.io import convert_gw_edmft_params
+    (tmp_path / "coqui.mbpt.h5").touch()
+    base = {"niter": 1, "outdir": str(tmp_path), "prefix": "coqui",
+            "edmft": {"impurity": {"n_cycles": 100, "n_warmup_cycles": 10, "length_cycle": 5}}}
+    p = convert_gw_edmft_params(dict(base, mu=0.123))
+    assert p["gw"]["mu"] == 0.123
+    assert p["dmft_embed"]["mu"] == 0.123
+    assert "mu" not in p["wloc"] and "mu" not in p["gloc"] and "mu" not in p["impurity"]
+    p = convert_gw_edmft_params(base)
+    assert "mu" not in p["gw"] and "mu" not in p["dmft_embed"]
 
 
 def test_write_model_h5_validation():
