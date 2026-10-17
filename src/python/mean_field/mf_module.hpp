@@ -102,7 +102,7 @@ namespace coqui_py {
     auto kp_grid() const { return _mf->kp_grid(); }
     auto nkpts() const { return _mf->nkpts(); }
     auto kpts() const { return _mf->kpts(); }
-    auto kpts_crystal() const { return _mf->kpts_crystal(); }
+    auto kpts_crystal() const { return nda::array<double,2>(_mf->kpts_crystal()); }
     auto k_weights() const { return _mf->k_weight(); }
     auto nkpts_ibz() const { return _mf->nkpts_ibz(); }
     auto kpts_ibz() const { return _mf->kpts_ibz(); }

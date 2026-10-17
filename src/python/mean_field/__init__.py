@@ -18,7 +18,7 @@ limitations under the License.
 ==========================================================================
 """
 
-from .mf import make_mf, augment_mf, augment_mf_dpsi
+from .mf import make_mf, augment_mf, augment_mf_dpsi, write_model_h5
 from .eph import compute_bare_eph_vertex, compute_bare_eph_vertex_d2
 from .pw import compute_pw_matrix_elements
 
@@ -31,4 +31,4 @@ else:
     from . import pyscf_interface
 
 __all__ = ["make_mf", "augment_mf", "augment_mf_dpsi", "compute_bare_eph_vertex",
-           "compute_bare_eph_vertex_d2", "compute_pw_matrix_elements"]
+           "compute_bare_eph_vertex_d2", "compute_pw_matrix_elements", "write_model_h5"]
