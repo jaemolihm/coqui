@@ -526,6 +526,141 @@ TEST_CASE("distributed_inverse", "[math]")
   run(41);
 }
 
+// Matrices smaller than the processor grid: ranks beyond the extent hold empty
+// blocks and SLATE runs with idle process rows/columns. inverse (getrf+getri),
+// determinant and multiply (incl. the batched rank-3 path of the Dyson/W
+// multiplies) must agree with serial LAPACK/BLAS on every grid of world.size().
+TEST_CASE("undersized_matrices", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  long np = world.size();
+  using local_Array_t = nda::array<ComplexType, 2>;
+  decltype(nda::range::all) all;
+
+  auto val = [](long o, long i, long j, long N) {
+    return ComplexType(std::sin(0.3*i + 0.7*j + 1.0 + o), std::cos(0.2*i - 0.5*j + o))
+           + (i == j ? ComplexType(2*N + o) : ComplexType(0));
+  };
+
+  std::vector<std::pair<long,long>> grids;
+  for (long p = 1; p <= np; ++p) if (np%p == 0) grids.emplace_back(p, np/p);
+
+  auto max_err = [&](auto const& dX, auto const& Ref) {
+    double err = 0.0;
+    auto Xloc = dX.local();
+    for (auto [i, in] : itertools::enumerate(dX.local_range(0)))
+      for (auto [j, jn] : itertools::enumerate(dX.local_range(1)))
+        err = std::max(err, std::abs(Xloc(i, j) - Ref(in, jn)));
+    return world.all_reduce_value(err, boost::mpi3::max<>{});
+  };
+
+  for (long N : {1l, 2l, 3l}) {
+    nda::array<ComplexType, 2> A(N, N), B(N, N);
+    for (long i = 0; i < N; ++i)
+      for (long j = 0; j < N; ++j) {
+        A(i, j) = val(0, i, j, N);
+        B(i, j) = val(1, i, j, N);
+      }
+    nda::array<ComplexType, 2> Ainv_ref(A), AB_ref(N, N), AhB_ref(N, N);
+    {
+      nda::matrix_view<ComplexType> Am(Ainv_ref);
+      Ainv_ref = nda::inverse(Am);
+    }
+    AB_ref = nda::matmul(A, B);
+    AhB_ref = nda::matmul(nda::dagger(A), B);
+    ComplexType det_ref;
+    {
+      nda::matrix<ComplexType> Am(A);
+      det_ref = nda::determinant_in_place(Am);
+    }
+
+    for (auto [p, q] : grids) {
+      INFO("N = " << N << ", pgrid = (" << p << ", " << q << ")");
+      auto make = [&]() {
+        return make_distributed_array<local_Array_t>(world, shape_t<2>{p, q},
+                   shape_t<2>{N, N}, shape_t<2>{1024, 1024}, true);
+      };
+      auto dA = make();
+      REQUIRE(dA.block_size()[0] >= 1);
+      REQUIRE(dA.block_size()[1] >= 1);
+      REQUIRE(dA.is_slate_compatible());
+      long nloc = dA.local().size();
+      REQUIRE(world.all_reduce_value(nloc, std::plus<>{}) == N*N);
+
+      // inverse
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
+      math::nda::slate_ops::inverse(dA);
+      double err_inv = max_err(dA, Ainv_ref);
+
+      // determinant
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
+      auto det = math::nda::slate_ops::determinant(dA);
+      double err_det = std::abs(det - det_ref)/std::abs(det_ref);
+
+      // multiply: C = A*B and C = A^H*B, C starting from garbage
+      auto dB = make();
+      auto dC = make();
+      dA.local() = A(dA.local_range(0), dA.local_range(1));
+      dB.local() = B(dB.local_range(0), dB.local_range(1));
+      dC.local() = ComplexType(7.0, -3.0);
+      math::nda::slate_ops::multiply(dA, dB, dC);
+      double err_mul = max_err(dC, AB_ref);
+      dC.local() = ComplexType(7.0, -3.0);
+      math::nda::slate_ops::multiply(H(dA), dB, dC);
+      double err_mulh = max_err(dC, AhB_ref);
+
+      app_log(2, "  undersized: N = {}, pgrid = ({}, {}), bsize = ({}, {}), "
+                 "err inverse = {:.3e}, det = {:.3e}, A*B = {:.3e}, A^H*B = {:.3e}",
+              N, p, q, dA.block_size()[0], dA.block_size()[1],
+              err_inv, err_det, err_mul, err_mulh);
+      CHECK(err_inv < 1e-12);
+      CHECK(err_det < 1e-12);
+      CHECK(err_mul < 1e-12);
+      CHECK(err_mulh < 1e-12);
+    }
+
+    // batched rank-3 multiply: a leading pool axis of 2 when it divides np, the
+    // rest of the ranks on the (undersized) matrix axes
+    for (long nb : {1l, 2l}) {
+      if (np%nb != 0) continue;
+      nda::array<ComplexType, 3> A3(nb, N, N), B3(nb, N, N), R3(nb, N, N);
+      for (long b = 0; b < nb; ++b) {
+        for (long i = 0; i < N; ++i)
+          for (long j = 0; j < N; ++j) {
+            A3(b, i, j) = val(2+b, i, j, N);
+            B3(b, i, j) = val(4+b, i, j, N);
+          }
+        R3(b, all, all) = nda::matmul(nda::array<ComplexType,2>(A3(b, all, all)),
+                                      nda::array<ComplexType,2>(B3(b, all, all)));
+      }
+      for (long p = 1; p <= np/nb; ++p) {
+        if ((np/nb)%p != 0) continue;
+        long q = np/nb/p;
+        INFO("rank-3: nb = " << nb << ", N = " << N << ", pgrid = (" << nb << ", " << p << ", " << q << ")");
+        auto make3 = [&]() {
+          return make_distributed_array<nda::array<ComplexType, 3>>(world, shape_t<3>{nb, p, q},
+                     shape_t<3>{nb, N, N}, shape_t<3>{1, 1024, 1024}, true);
+        };
+        auto dA3 = make3(), dB3 = make3(), dC3 = make3();
+        dA3.local() = A3(dA3.local_range(0), dA3.local_range(1), dA3.local_range(2));
+        dB3.local() = B3(dB3.local_range(0), dB3.local_range(1), dB3.local_range(2));
+        dC3.local() = ComplexType(7.0, -3.0);
+        math::nda::slate_ops::multiply(dA3, dB3, dC3);
+        double err = 0.0;
+        auto Cloc = dC3.local();
+        for (auto [b, bn] : itertools::enumerate(dC3.local_range(0)))
+          for (auto [i, in] : itertools::enumerate(dC3.local_range(1)))
+            for (auto [j, jn] : itertools::enumerate(dC3.local_range(2)))
+              err = std::max(err, std::abs(Cloc(b, i, j) - R3(bn, in, jn)));
+        err = world.all_reduce_value(err, boost::mpi3::max<>{});
+        app_log(2, "  undersized rank-3: N = {}, pgrid = ({}, {}, {}), err A*B = {:.3e}",
+                N, nb, p, q, err);
+        CHECK(err < 1e-12);
+      }
+    }
+  }
+}
+
 // scr_coulomb_fourier_t::ft_buffer_dist — the q-dist distribution, which on the
 // LR path is the one every W(iω) is carried on.
 // Three properties are load-bearing on that path: the (P,Q) block is square

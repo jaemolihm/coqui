@@ -145,8 +145,8 @@ struct darray
     } else {
       if( (block_size[0] <= 0) or
 	  (block_size[1] <= 0) or
-          (block_size[0] > gextents[0]/grid[0]) or
-          (block_size[1] > gextents[1]/grid[1]) or
+          (block_size[0] > std::max(1L, gextents[0]/grid[0])) or
+          (block_size[1] > std::max(1L, gextents[1]/grid[1])) or
           (comm->size() != grid[0]*grid[1]) ) return false;
       long ix, iy;
       if constexpr (is_stride_order_C) {

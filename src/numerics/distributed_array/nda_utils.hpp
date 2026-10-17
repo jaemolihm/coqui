@@ -46,6 +46,11 @@ namespace math::nda
 
 /*
  * Factories for distributed_array
+ *
+ * A grid factor larger than the extent along an axis (grid[n] > shape[n]) is allowed: the
+ * trailing ranks along that axis get an empty local block (itertools::chunk_range gives (N, N)),
+ * and the block size along it is 1. Chunk 0 is never empty, and every element is owned by
+ * exactly one rank.
  */ 
 template<::nda::Array Array_base_t, typename communicator_t>
 auto make_distributed_array(communicator_t& comm, 
@@ -64,13 +69,10 @@ auto make_distributed_array(communicator_t& comm,
   long np = std::accumulate(grid.cbegin(), grid.cend(), 1, std::multiplies<>{});
   utils::check( comm.size() == np, 
       "make_distributed_array: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
-  for(int n=0; n<rank; ++n) 
-    utils::check( shape[n] >= grid[n], 
-      "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]); 
 
   // setting defaults by hand until I figure a better way
   for(long n=0; n<rank; ++n) 
-    bsize[n] = std::min( std::max(1l,bsize[n]), shape[n]/grid[n]);   
+    bsize[n] = std::max(1l, std::min( std::max(1l,bsize[n]), shape[n]/grid[n]));
 
   if(squared_blocks) {
     auto bmin = *std::min_element(std::begin(bsize),std::end(bsize));
@@ -121,12 +123,10 @@ auto make_distributed_array(communicator_t& comm,
   utils::check( comm.size() == np,
       "make_distributed_array: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
   for(int n=0; n<rank; ++n) { 
-    utils::check( shape[n] >= grid[n],
-      "make_distributed_array: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
     utils::check( bsize[n] > 0,
       "make_distributed_array: block size must be positive- rank:{}, dim:{}, block size:{}",rank,n,bsize[n]);
-    utils::check( bsize[n] <= shape[n]/grid[n], 
-      "make_distributed_array: block size error ( > shape/grid)- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
+    utils::check( bsize[n] <= std::max(1l, shape[n]/grid[n]),
+      "make_distributed_array: block size error ( > max(1, shape/grid))- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
       rank,n,bsize[n],shape[n],grid[n]);
   }
 
@@ -178,12 +178,10 @@ auto make_distributed_array_view(communicator_t& comm,
   utils::check( comm.size() == np,
       "make_distributed_array_view: Number of processors does not match grid: size:{} grid:{}",comm.size(),np);
   for(int n=0; n<rank; ++n) {
-    utils::check( shape[n] >= grid[n],
-      "make_distributed_array_view: Too many processors i:{}, shape:{}, grid:{}",n,shape[n],grid[n]);
     utils::check( bsize[n] > 0,
       "make_distributed_array_view: block size must be positive- rank:{}, dim:{}, block size:{}",rank,n,bsize[n]);
-    utils::check( bsize[n] <= shape[n]/grid[n], 
-      "make_distributed_array_view: block size error ( > shape/grid)- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
+    utils::check( bsize[n] <= std::max(1l, shape[n]/grid[n]),
+      "make_distributed_array_view: block size error ( > max(1, shape/grid))- rank:{}, dim:{}, block size:{}, shape:{}. grid:{}",
       rank,n,bsize[n],shape[n],grid[n]);
   }
 
@@ -199,7 +197,7 @@ auto make_distributed_array_view(communicator_t& comm,
       if(ip%grid[n] == grid[n]-1) lshape[n] = shape[n]-origin[n];
       ip /= grid[n];
       // check that everything is consistent!!!
-      utils::check(A_.shape[n] == lshape[n], "Size mismatch.");
+      utils::check(A_.shape(n) == lshape[n], "Size mismatch.");
     }
   } else {
     // row major over proc grid for all other cases
@@ -1656,7 +1654,8 @@ requires( get_rank<std::decay_t<dArr_t>> == get_rank<std::decay_t<sArr_t>> ) {
   std::vector<::nda::range> rng_v(rank,::nda::range(0));
   for(int r=0; r<rank; ++r)
     rng_v[r] = dA.local_range(r);
-  ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
+  if (dA.local().size() > 0)
+    ::nda::tensor::assign(dA.local(),detail::get_sub_matrix<rank>(sA_loc,rng_v));
   toc("GATHER_SHM_ASSIGN");
 
   // The store above is purely local, so this barrier absorbs whatever imbalance

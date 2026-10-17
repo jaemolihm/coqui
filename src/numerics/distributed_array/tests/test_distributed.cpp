@@ -21,10 +21,14 @@
 
 #undef NDEBUG
 
+#include <cstdio>
+#include <vector>
+
 #include "catch2/catch.hpp"
 
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
+#include "mpi3/shared_communicator.hpp"
 
 #include "configuration.hpp"
 #include "IO/AppAbort.hpp"
@@ -34,6 +38,7 @@
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/distributed_array/h5.hpp"
+#include "numerics/shared_array/nda.hpp"
 #include "utilities/test_common.hpp"
 
 namespace bdft_tests
@@ -638,6 +643,150 @@ TEST_CASE("redistribute_round_schedule_is_alltoallv_legal", "[math]")
       REQUIRE(out_of_range == 0);  // within the advertised number of rounds
     }
   }
+}
+
+// Grid factors larger than the extent: trailing ranks along that axis hold an
+// empty block. Every grid of world.size() over extents (1,3,2) and (5,3,2):
+// exact ownership, then make/redistribute/gather/gather_sub_matrix/scatter/
+// gather_to_shm/h5 round trips against the replicated reference.
+TEST_CASE("empty_local_blocks", "[math]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  long np = world.size();
+  auto node_comm = world.split_shared();
+  auto internode_comm = world.split(node_comm.rank(), world.rank());
+  using larray = nda::array<double,3>;
+  using larray_view = nda::array_view<double,3>;
+  decltype(nda::range::all) all;
+  auto f = [](long i, long j, long k) { return double(1 + 100*i + 10*j + k); };
+
+  std::vector<shape_t<3>> grids;
+  for(long p0=1; p0<=np; ++p0)
+    for(long p1=1; p1<=np; ++p1)
+      if(np%(p0*p1) == 0) grids.push_back({p0, p1, np/(p0*p1)});
+
+  auto fill = [&](auto& A) {
+    auto Aloc = A.local();
+    auto o = A.origin();
+    for(long i=0; i<Aloc.shape(0); ++i)
+      for(long j=0; j<Aloc.shape(1); ++j)
+        for(long k=0; k<Aloc.shape(2); ++k)
+          Aloc(i,j,k) = f(o[0]+i, o[1]+j, o[2]+k);
+  };
+  // number of local elements that differ from the reference, summed over ranks
+  auto nbad = [&](auto const& A) {
+    auto Aloc = A.local();
+    auto o = A.origin();
+    long n = 0;
+    for(long i=0; i<Aloc.shape(0); ++i)
+      for(long j=0; j<Aloc.shape(1); ++j)
+        for(long k=0; k<Aloc.shape(2); ++k)
+          if(Aloc(i,j,k) != f(o[0]+i, o[1]+j, o[2]+k)) ++n;
+    return world.all_reduce_value(n, std::plus<>{});
+  };
+
+  std::string fname = "empty_local_blocks.h5";
+  for(shape_t<3> gshape : {shape_t<3>{1,3,2}, shape_t<3>{5,3,2}}) {
+    larray ref(gshape);
+    for(long i=0; i<gshape[0]; ++i)
+      for(long j=0; j<gshape[1]; ++j)
+        for(long k=0; k<gshape[2]; ++k)
+          ref(i,j,k) = f(i,j,k);
+    long ntot = gshape[0]*gshape[1]*gshape[2];
+
+    for(auto [ig, grid] : itertools::enumerate(grids)) {
+      INFO("gshape = (" << gshape[0] << "," << gshape[1] << "," << gshape[2] << "), grid = ("
+           << grid[0] << "," << grid[1] << "," << grid[2] << ")");
+      auto A = make_distributed_array<larray>(world, grid, gshape);
+
+      // exact ownership; block sizes stay positive; rank 0 is never empty
+      larray cnt(gshape);
+      cnt() = 0.0;
+      cnt(A.local_range(0), A.local_range(1), A.local_range(2)) += 1.0;
+      world.all_reduce_in_place_n(cnt.data(), cnt.size(), std::plus<>{});
+      REQUIRE( nda::max_element(cnt) == 1.0 );
+      REQUIRE( nda::min_element(cnt) == 1.0 );
+      for(int n=0; n<3; ++n) REQUIRE( A.block_size()[n] >= 1 );
+      if(world.root()) REQUIRE( A.local().size() > 0 );
+      // an oversized factor gives blocks of extent 1 or 0 along its axis
+      for(int n=0; n<3; ++n)
+        if(grid[n] > gshape[n] and A.local_shape()[n] > 0) REQUIRE( A.local_shape()[n] == 1 );
+
+      fill(A);
+      REQUIRE( nbad(A) == 0 );
+
+      // redistribute to every other grid and back
+      for(auto tgrid : grids) {
+        auto B = make_distributed_array<larray>(world, tgrid, gshape);
+        B.local() = -1.0;
+        redistribute(A, B);
+        REQUIRE( nbad(B) == 0 );
+        auto C = make_distributed_array<larray>(world, grid, gshape);
+        C.local() = -1.0;
+        redistribute(B, C);
+        REQUIRE( nbad(C) == 0 );
+      }
+
+      // gather to the root
+      {
+        larray L(gshape);
+        L() = -1.0;
+        gather(0, A, std::addressof(L));
+        long n = (world.root() and not (L == ref)) ? 1 : 0;
+        REQUIRE( world.all_reduce_value(n, std::plus<>{}) == 0 );
+      }
+
+      // gather_sub_matrix along the leading axis
+      for(long i=0; i<gshape[0]; ++i) {
+        nda::array<double,2> L(gshape[1], gshape[2]);
+        L() = -1.0;
+        gather_sub_matrix(i, 0, A, std::addressof(L));
+        long n = (world.root() and not (L == nda::array<double,2>(ref(i, all, all)))) ? 1 : 0;
+        REQUIRE( world.all_reduce_value(n, std::plus<>{}) == 0 );
+      }
+
+      // scatter from the root
+      {
+        auto B = make_distributed_array<larray>(world, grid, gshape);
+        B.local() = -1.0;
+        scatter(0, std::addressof(ref), B);
+        REQUIRE( nbad(B) == 0 );
+      }
+
+      // gather_to_shm
+      {
+        auto sA = math::shm::shared_array<larray_view>(std::addressof(world),
+                     std::addressof(internode_comm), std::addressof(node_comm), gshape);
+        gather_to_shm(A, sA);
+        long n = (node_comm.root() and not (larray(sA.local()) == ref)) ? 1 : 0;
+        REQUIRE( world.all_reduce_value(n, std::plus<>{}) == 0 );
+      }
+
+      // h5_write from this grid, h5_read into the next one
+      {
+        if(world.root()) {
+          h5::file file(fname, 'w');
+          h5::group grp(file);
+          math::nda::h5_write(grp, "A", A);
+        } else {
+          h5::group grp;
+          math::nda::h5_write(grp, "A", A);
+        }
+        world.barrier();
+        auto B = make_distributed_array<larray>(world, grids[(ig+1)%grids.size()], gshape);
+        B.local() = -1.0;
+        {
+          h5::file file(fname, 'r');
+          h5::group grp(file);
+          math::nda::h5_read(grp, "A", B);
+        }
+        world.barrier();
+        REQUIRE( nbad(B) == 0 );
+      }
+      REQUIRE( world.all_reduce_value(long(A.local().size()), std::plus<>{}) == ntot );
+    }
+  }
+  if(world.root()) std::remove(fname.c_str());
 }
 
 } // bdft_tests

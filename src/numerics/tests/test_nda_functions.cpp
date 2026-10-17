@@ -34,6 +34,7 @@
 #include "utilities/test_common.hpp"
 #include "numerics/device_kernels/kernels.h"
 #include "numerics/nda_functions.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "utilities/Timer.hpp"
 
 namespace bdft_tests
@@ -439,6 +440,63 @@ TEST_CASE("copy_select", "[nda_functions]")
 {
   test_copy_select<double>();
   test_copy_select<std::complex<double>>();
+}
+
+// Empty local blocks: a contracted extent k = 0 must give C = beta*C (BLAS
+// rejects the ld = 0 call and would leave C stale); an empty C is a no-op.
+TEST_CASE("gemm_guarded_empty", "[nda_functions]")
+{
+  using T = std::complex<double>;
+  const T c0(7.0, -3.0);
+  // k = 0, C-layout operands, C a transposed view
+  {
+    nda::array<T,2> a(3, 0), b(0, 4);
+    nda::array<T,2> c(3, 4);
+    c() = c0;
+    math::detail::gemm_guarded(a, b, c);
+    REQUIRE( nda::max_element(nda::abs(c)) == 0.0 );
+
+    c() = c0;
+    math::detail::gemm_guarded(T(1.0), a, b, T(0.0), c);
+    REQUIRE( nda::max_element(nda::abs(c)) == 0.0 );
+
+    c() = c0;
+    math::detail::gemm_guarded(T(1.0), a, b, T(1.0), c);
+    REQUIRE( nda::max_element(nda::abs(c - c0)) == 0.0 );
+
+    c() = c0;
+    math::detail::gemm_guarded(T(1.0), a, b, T(0.0, 2.0), c);
+    REQUIRE( nda::max_element(nda::abs(c - c0*T(0.0, 2.0))) == 0.0 );
+
+    nda::array<T,2> ct(4, 3);
+    ct() = c0;
+    math::detail::gemm_guarded(T(1.0), a, b, T(0.0), nda::transpose(ct));
+    REQUIRE( nda::max_element(nda::abs(ct)) == 0.0 );
+
+    // contracted extent of a dagger expression
+    nda::array<T,2> ah(0, 3);
+    c() = c0;
+    math::detail::gemm_guarded(nda::dagger(ah), b, c);
+    REQUIRE( nda::max_element(nda::abs(c)) == 0.0 );
+  }
+  // C empty: no call, nothing touched
+  {
+    nda::array<T,2> a(0, 5), b(5, 4), c(0, 4);
+    a() = c0; b() = c0;
+    math::detail::gemm_guarded(a, b, c);
+    math::detail::gemm_guarded(T(1.0), a, b, T(1.0), c);
+    REQUIRE( c.size() == 0 );
+  }
+  // non-empty operands: identical to nda::blas::gemm
+  {
+    auto a = utils::make_random<T>(3, 5);
+    auto b = utils::make_random<T>(5, 4);
+    nda::array<T,2> c(3, 4), cref(3, 4);
+    c() = c0; cref() = c0;
+    math::detail::gemm_guarded(T(0.5), a, b, T(2.0), c);
+    nda::blas::gemm(T(0.5), a, b, T(2.0), cref);
+    REQUIRE( nda::max_element(nda::abs(c - cref)) == 0.0 );
+  }
 }
 
 }
