@@ -328,6 +328,177 @@ def test_gw_edmft_params_forward_mu(tmp_path):
     assert "mu" not in p["gw"] and "mu" not in p["dmft_embed"]
 
 
+# LR on the t' != 0, n = 0.85 Hubbard model (particle-hole symmetry broken, so the GW kernel carries a
+# non-zero DeltaW): per (q, kernel), DeltaN = 2 sum_k w_k DeltaDm_k (q = 0 only) and ||DeltaDm||, generated
+# at np = 1. The LR result does not depend on the MPI distribution, so every rank count reproduces them;
+# one-orbital (Np = 1, nbnd = 1) arrays have empty local blocks on most ranks at np > 1.
+# These multi-rank tests are not run by ctest; run them by hand under mpirun at np 1, 4, 8 and 16 (np 16 is the
+# count that reached the empty-block path of lr_gw's cached aux_to_primary buffer).
+# W is recomputed from the checkpoint G, except for "GW0_file", which reads the W the ground state dumps
+# (dump_w_to_h5) and must reproduce "GW0".
+LR_METHODS = ("Hartree", "HF", "HSEX", "GW0", "GW0_file", "GW")
+LR_Q = {"q0": (0.0, 0.0, 0.0), "q1": (0.25, 0.0, 0.0)}
+# The references are np = 1 solves converged to tol = 1e-13 (the test's 1e-10 lands within 1e-11 of them). They
+# depend on the DLR grid: they are those of cppdlr 7a0f60c (cppdlr f6bd6ab differs by ~1e-9 at q0 and up to 2e-6
+# relative at q1).
+LR_REF = {
+    ("q0", "Hartree"): (1.070176354223493, 3.872862523032440),
+    ("q0", "HF"): (1.361608625076144, 4.927527126051464),
+    ("q0", "HSEX"): (1.174732178269491, 4.264864905394354),
+    ("q0", "GW0"): (1.324067851334970, 4.791980130300074),
+    ("q0", "GW"): (1.351445166030098, 4.947668504661141),
+    ("q1", "Hartree"): (None, 5.676292692311771),
+    ("q1", "HF"): (None, 5.920503262449584),
+    ("q1", "HSEX"): (None, 5.913910231009422),
+    ("q1", "GW0"): (None, 5.922730387520320),
+    ("q1", "GW"): (None, 6.009907824914611),
+}
+LR_W_FILE_TOL = 1e-12
+
+
+@pytest.fixture(scope="module")
+def hubbard_lr_gs(mpi):
+    """HF + scGW ground state of the N = 4, t' = -0.3t, n = 0.85 Hubbard model."""
+    N, t, tp, U, nelec, beta = 4, 0.1, -0.03, 0.4, 0.85, 50.0
+    nk = N * N
+    kpts, ek = square_lattice(N, t, tp)
+    prefix, thc_file = "hubbard_lr", "hubbard_lr_thc.h5"
+    write_model_h5(f"./{prefix}.h5", ek.reshape(1, nk, 1, 1).astype(complex), nelec, kpts_crys=kpts,
+                   latt=np.diag([1.0, 1.0, 50.0]), mpi=mpi)
+    write_thc_h5(thc_file, np.ones((1, nk, 1, 1)), np.full((nk, 1, 1), U, dtype=complex), mpi=mpi)
+    mf = coqui.make_mf(mpi, {"prefix": prefix, "outdir": "./"}, "model")
+    thc = coqui.make_thc_coulomb(mf, {"save": thc_file, "storage": "incore"})
+    common = {"outdir": "./", "prefix": prefix, "beta": beta, "conv_thr": 1e-11,
+              "iaft": {"prec": "high", "wmax": 3.0, "basis": "dlr"}}
+    coqui.run_hf(dict(common, restart=False, niter=40, iter_alg={"alg": "damping", "mixing": 0.7}), h_int=thc)
+    coqui.run_gw(dict(common, restart=True, niter=100, iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+    mpi.barrier()
+    with h5py.File(f"{prefix}.mbpt.h5", "r") as f:
+        assert f["scf/final_iter"][()] < 140, "scGW did not converge"
+    # W of the converged G: one more scGW iteration with dump_w_to_h5 on a copy of the checkpoint in wdir
+    # (the W of iteration n + 1 is built from the G of iteration n, the one run_lr linearizes)
+    wdir = f"./{prefix}_wdump"
+    if mpi.root():
+        os.makedirs(wdir, exist_ok=True)
+        shutil.copy(f"{prefix}.mbpt.h5", f"{wdir}/{prefix}.mbpt.h5")
+    mpi.barrier()
+    coqui.run_gw(dict(common, outdir=wdir, restart=True, niter=1, dump_w_to_h5=True,
+                      iter_alg={"alg": "damping", "mixing": 0.5}), h_int=thc)
+    mpi.barrier()
+    yield {"prefix": prefix, "thc": thc, "kpts": kpts, "common": common,
+           "w_file": f"{wdir}/thc_screened_interaction.h5"}
+
+    mpi.barrier()
+    if mpi.root():
+        for fn in (f"{prefix}.h5", thc_file, f"{prefix}.mbpt.h5"):
+            if os.path.exists(fn):
+                os.remove(fn)
+        shutil.rmtree(wdir, ignore_errors=True)
+    mpi.barrier()
+
+
+def run_lr_chi(mpi, gs, method, q, dH0, tag):
+    """run_lr on the ground state of hubbard_lr_gs; returns (DeltaN, DeltaDm_skij)."""
+    out = f"{gs['prefix']}_lr_{tag}_{method}"
+    if mpi.root():
+        h5py.File(f"{out}.mbpt.h5", "w").close()
+    mpi.barrier()
+    if method == "GW0_file":
+        w_kw = {"method": "GW0", "screened_interaction_file": gs["w_file"]}
+    else:
+        w_kw = {"method": method, "recompute_W": method in ("HSEX", "GW0", "GW")}
+    coqui.mbpt.run_lr({"prefix": f"./{gs['prefix']}", "output": out, "h0_source": "checkpoint"},
+                      gs["thc"], np.asarray(q), dH0 if mpi.root() else None,
+                      fix_density=False, max_iter=100, tol=1e-10, iter_alg={"alg": "GCR"}, **w_kw)
+    mpi.barrier()
+    with h5py.File(f"{out}.mbpt.h5", "r") as f:
+        ddm = read_complex(f["linear_response/DeltaDm_skij"])
+    with h5py.File(f"{gs['prefix']}.mbpt.h5", "r") as f:
+        w = f["system/k_weight"][()]
+    mpi.barrier()
+    if mpi.root():
+        os.remove(f"{out}.mbpt.h5")
+    mpi.barrier()
+    return 2.0 * np.einsum("k,kii->", w, ddm[0]), ddm
+
+
+@pytest.mark.parametrize("qtag", list(LR_Q))
+def test_hubbard_lr_ladder(mpi, hubbard_lr_gs, qtag):
+    """Hartree, HF, HSEX, GW0 and GW LR at q = 0 (DeltaH0 = -1, the charge susceptibility) and at finite q
+    (DeltaH0_k = cos(2 pi k_x)) against the np = 1 references; GW0 with W read from file against GW0."""
+    gs = hubbard_lr_gs
+    kpts = gs["kpts"]
+    nk = kpts.shape[0]
+    if qtag == "q0":
+        dH0 = -np.ones((1, nk, 1, 1), dtype=complex)
+    else:
+        dH0 = np.cos(2 * np.pi * kpts[:, 0]).reshape(1, nk, 1, 1).astype(complex)
+    res = {}
+    for method in LR_METHODS:
+        dn, ddm = run_lr_chi(mpi, gs, method, LR_Q[qtag], dH0, qtag)
+        res[method] = (dn, ddm)
+        if mpi.root():
+            print(f"LR_LADDER {qtag} {method}: DeltaN = {dn.real:.15e} {dn.imag:+.3e}j, "
+                  f"||DeltaDm|| = {np.linalg.norm(ddm):.15e}", flush=True)
+    # DeltaW != 0: the GW kernel differs from GW0 by -G DeltaW
+    assert np.linalg.norm(res["GW"][1] - res["GW0"][1]) > 1e-4 * np.linalg.norm(res["GW0"][1])
+    e_file = np.linalg.norm(res["GW0_file"][1] - res["GW0"][1]) / np.linalg.norm(res["GW0"][1])
+    if mpi.root():
+        print(f"LR_LADDER {qtag}: ||DeltaDm(GW0_file) - DeltaDm(GW0)|| / ||DeltaDm(GW0)|| = {e_file:.3e}", flush=True)
+    assert e_file < LR_W_FILE_TOL
+    for method in LR_METHODS:
+        if method == "GW0_file":
+            continue
+        dn, ddm = res[method]
+        ref_dn, ref_norm = LR_REF[(qtag, method)]
+        if qtag == "q0":
+            assert abs(dn - ref_dn) < 1e-9, (method, dn, ref_dn)
+        assert abs(np.linalg.norm(ddm) - ref_norm) < 1e-9, (method, np.linalg.norm(ddm), ref_norm)
+
+
+def test_hubbard_lr_gw_fd(mpi, hubbard_lr_gs):
+    """LR GW at q = 0 is the exact derivative of scGW: chi = dN/dmu against fixed-mu scGW runs at mu0 +- h.
+    The central difference is off by ~ -53 h^2 here, so it is Richardson-extrapolated from h and 2h."""
+    gs = hubbard_lr_gs
+    nk = gs["kpts"].shape[0]
+    prefix, dmu = gs["prefix"], 5e-4
+    chi, _ = run_lr_chi(mpi, gs, "GW", LR_Q["q0"], -np.ones((1, nk, 1, 1), dtype=complex), "fd")
+    with h5py.File(f"{prefix}.mbpt.h5", "r") as f:
+        it0 = f["scf/final_iter"][()]
+        mu0 = f[f"scf/iter{it0}/mu"][()]
+    chi_cd = {}
+    for h in (dmu, 2 * dmu):
+        n = {}
+        for sign in (+1, -1):
+            pre = f"{prefix}_fd_mu{sign:+d}"
+            if mpi.root():
+                shutil.copy(f"{prefix}.mbpt.h5", f"{pre}.mbpt.h5")
+            mpi.barrier()
+            coqui.run_gw(dict(gs["common"], prefix=pre, restart=True, niter=200, mu=mu0 + sign * h,
+                              conv_thr=1e-13, iter_alg={"alg": "damping", "mixing": 0.5}), h_int=gs["thc"])
+            mpi.barrier()
+            with h5py.File(f"{pre}.mbpt.h5", "r") as f:
+                it = f["scf/final_iter"][()]
+                dm = read_complex(f[f"scf/iter{it}/Dm_skij"])[0, :, 0, 0].real
+                w = f["system/k_weight"][()]
+            assert it0 < it < it0 + 200, "fixed-mu scGW did not converge"
+            n[sign] = 2 * np.dot(w, dm)
+        chi_cd[h] = (n[+1] - n[-1]) / (2 * h)
+    chi_fd = (4 * chi_cd[dmu] - chi_cd[2 * dmu]) / 3
+    if mpi.root():
+        print(f"LR_GW_FD: chi_LR = {chi.real:.12f}, chi_FD = {chi_fd:.12f} (central differences "
+              f"{chi_cd[dmu]:.12f}, {chi_cd[2 * dmu]:.12f}), diff = {chi.real - chi_fd:.3e}", flush=True)
+    assert abs(chi.imag) < 1e-10
+    assert abs(chi.real - chi_fd) < 1e-8 * abs(chi_fd), (chi, chi_fd)
+    mpi.barrier()
+    if mpi.root():
+        for sign in (+1, -1):
+            fn = f"{prefix}_fd_mu{sign:+d}.mbpt.h5"
+            if os.path.exists(fn):
+                os.remove(fn)
+    mpi.barrier()
+
+
 def test_write_model_h5_validation():
     H0 = np.zeros((1, 4, 1, 1), complex)
     kpts = np.zeros((4, 3))

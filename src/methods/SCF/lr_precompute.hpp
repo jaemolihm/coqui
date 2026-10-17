@@ -26,6 +26,7 @@
 
 #include "IO/app_loggers.h"
 #include "nda/blas.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -142,7 +143,7 @@ auto lr_precompute_W_tRPQ(memory::darray_t<Array_4D_t, communicator_t>& dW_tqPQ_
 
     // gemm: W_RPQ = f_qR @ W_qPQ
     auto W_2D_view = nda::reshape(W_buf_qPQ, std::array<long, 2>{nkpts, NP_loc * NQ_loc});
-    nda::blas::gemm(f_qR, W_2D_view, W_buf_RPQ);
+    math::detail::gemm_guarded(f_qR, W_2D_view, W_buf_RPQ);
 
     // Copy back to dW from gemm output (now stores W(t,R,P,Q))
     auto W_RPQ_3D = nda::reshape(W_buf_RPQ, std::array<long, 3>{nkpts, NP_loc, NQ_loc});
@@ -304,7 +305,7 @@ auto lr_precompute_G_R_pair(const nda::array_view<ComplexType, 5>& G_tskij,
         for (long is = 0; is < ns; ++is) {
           auto G_2D = nda::reshape(G_skPQ_loc(is, nda::ellipsis{}),
                                    std::array<long, 2>{nkpts, NP_loc * NQ_loc});
-          nda::blas::gemm(f_Rk, G_2D, ft_out);
+          math::detail::gemm_guarded(f_Rk, G_2D, ft_out);
           target.local()(it, is, all, all, all) =
               nda::reshape(ft_out, std::array<long, 3>{nkpts, NP_loc, NQ_loc});
         }

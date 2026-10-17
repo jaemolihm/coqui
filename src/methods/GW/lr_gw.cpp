@@ -25,6 +25,7 @@
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/nda_functions.hpp"
@@ -462,7 +463,7 @@ namespace methods {
               _fft_q->k_to_R(W2_2D, W2_2D);
             } else {
               auto f_qR = opt_sf_qR->local();
-              nda::blas::gemm(f_qR, W2_2D, ft_buffer);
+              math::detail::gemm_guarded(f_qR, W2_2D, ft_buffer);
               W2_2D = ft_buffer;
             }
             _Timer.stop("SIGMA_FT_R");
@@ -507,7 +508,7 @@ namespace methods {
                   _fft_k->k_to_R(G_3D(s, nda::ellipsis{}), G_3D(s, nda::ellipsis{}));
                 } else {
                   auto f_Rk = opt_sf_Rk->local();
-                  nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
+                  math::detail::gemm_guarded(f_Rk, G_3D(s, nda::ellipsis{}), ft_buffer);
                   G_3D(s, nda::ellipsis{}) = ft_buffer;
                 }
               }
@@ -555,7 +556,7 @@ namespace methods {
                 _fft_k->R_to_k(Sigma_3D(s, nda::ellipsis{}), Sigma_3D(s, nda::ellipsis{}));
               } else {
                 auto f_kR = opt_sf_kR->local();
-                nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), ft_buffer);
+                math::detail::gemm_guarded(f_kR, Sigma_3D(s, nda::ellipsis{}), ft_buffer);
                 Sigma_3D(s, nda::ellipsis{}) = ft_buffer;
               }
             }
