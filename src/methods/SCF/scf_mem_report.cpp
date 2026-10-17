@@ -200,9 +200,11 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
       double Z_nelem = double(p.nqi) * p.NP * p.NP;
       arrays.push_back({times("_dZ"), fmt::format("({},{},{})", p.nqi, p.NP, p.NP),
                         nr * Z_nelem, DIST, PERSIST});
-      if (p.have_hf)
-        arrays.push_back({"hf_t::_dZ_cache", fmt::format("({},{},{})", p.nqi, p.NP, p.NP),
-                          Z_nelem, DIST, PERSIST});
+      if (p.n_fock_dZ_cache > 0)
+        arrays.push_back({p.n_fock_dZ_cache > 1 ? fmt::format("thc_reader_t::_dZ_cache (x{})", p.n_fock_dZ_cache)
+                                                : std::string("thc_reader_t::_dZ_cache"),
+                          fmt::format("({},{},{})", p.nqi, p.NP, p.NP),
+                          p.n_fock_dZ_cache * Z_nelem, DIST, PERSIST});
     }
   }
 

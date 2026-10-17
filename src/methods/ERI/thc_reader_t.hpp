@@ -22,9 +22,9 @@
 #ifndef COQUI_THC_READER_T_HPP
 #define COQUI_THC_READER_T_HPP
 
-#include <atomic>
 #include <string>
 #include <optional>
+#include <utility>
 
 #include "configuration.hpp"
 #include "IO/ptree/ptree_utilities.hpp"
@@ -60,28 +60,6 @@ namespace methods {
    *   auto Yk = thc.Y(is, ik); // return nda::array_view
    *   auto Zq = thc.Z(iq);
    */
-  namespace detail {
-  /// Monotonic identity token. It identifies the *data*, not the object: a fresh
-  /// value on construction and on copy, so a consumer caching data derived from
-  /// its owner cannot mistake a different object -- or a new object at a recycled
-  /// address -- for the one it cached from; a move carries the value over, since
-  /// the destination owns the very buffers the cache was built from. The
-  /// corollary is that a moved-from owner shares the id with its destination and
-  /// must not be used again.
-  struct instance_id_t {
-    long value = next();
-    instance_id_t() = default;
-    instance_id_t(instance_id_t const&) : value(next()) {}
-    instance_id_t& operator=(instance_id_t const&) { value = next(); return *this; }
-    instance_id_t(instance_id_t&&) = default;
-    instance_id_t& operator=(instance_id_t&&) = default;
-    static long next() {
-      static std::atomic<long> counter{0};
-      return ++counter;
-    }
-  };
-  } // namespace detail
-
   class thc_reader_t {
     template<MEMORY_SPACE MEM = HOST_MEMORY, long R = 1>
     using Array_t = memory::array<MEM, ComplexType, R>;
@@ -186,6 +164,7 @@ namespace methods {
       print_thc_reader_info(build_eri);
 
       utils::check(_X_type == "q_indep", "thc_reader_t: q-dependent Xk is not implemented yet!");
+      _dZ_cache.dZ.reset();
 
       for (auto &v: {"BUILD_TOTAL", "BUILD_THC", "BUILD_GATHER", "BUILD_WRITE",
                      "READ_X", "READ_V"})
@@ -942,13 +921,29 @@ namespace methods {
       }
     }
 
+    // With use_cache = true (incore storage only), the redistributed array is kept and later
+    // calls with the same (pgrid, bsize) copy it instead of redistributing. The cache is
+    // one more distributed copy of the Coulomb matrix (nqpts_ibz*Np^2 complex) and stays
+    // until release_dZ_cache(). Every call returns its own copy, since callers overwrite
+    // it in place (U(q) -> U(R) in thc_hf).
     template<MEMORY_SPACE MEM = HOST_MEMORY>
-    auto dZ(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}) const {
+    auto dZ(std::array<long, 3> pgrid, std::array<long, 3> bsize = {0, 0, 0}, bool use_cache = false) const {
       _check_initialized("dZ");
       _Timer.start("READ_V");
-      auto dZ_qPQ = math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
+      use_cache = use_cache and _storage == eri_storage_e::incore;
+      bool hit = use_cache and _dZ_cache.dZ.has_value()
+                 and _dZ_cache.pgrid == pgrid and _dZ_cache.bsize == bsize;
+      dArray_t<HOST_MEMORY,3> dZ_qPQ = hit ? *_dZ_cache.dZ :
+          math::nda::make_distributed_array<Array_t<HOST_MEMORY,3>>(_mpi->comm, pgrid, {_nqpts_ibz, _Np, _Np}, bsize);
       if (_storage == eri_storage_e::incore) {
-        math::nda::redistribute(_dZ, dZ_qPQ);
+        if (not hit) {
+          math::nda::redistribute(_dZ, dZ_qPQ);
+          if (use_cache) {
+            _dZ_cache.pgrid = pgrid;
+            _dZ_cache.bsize = bsize;
+            _dZ_cache.dZ = dZ_qPQ;
+          }
+        }
       } else {
         auto q_rng = dZ_qPQ.local_range(0);
         auto P_rng = dZ_qPQ.local_range(1);
@@ -1071,14 +1066,9 @@ namespace methods {
     std::string& set_X_type() { return _X_type; }
     const std::string thc_X_type() const { return _X_type; }
     // True when the Coulomb matrix _dZ is held in memory (incore), so a redistribute
-    // in dZ() reuses resident data rather than re-reading from disk. Lets callers decide
-    // whether caching a redistributed copy is worthwhile (it is only for incore).
+    // in dZ() reuses resident data rather than re-reading from disk.
     bool dZ_incore() const { return _storage == eri_storage_e::incore; }
-    // Identity of this reader instance, for consumers that cache data derived from
-    // it (hf_t::_dZ_cache). Not the object's address: the allocator recycles
-    // addresses, so a destroyed reader replaced at the same address with matching
-    // dimensions would silently validate a stale cache.
-    long instance_id() const { return _instance_id.value; }
+    void release_dZ_cache() const { _dZ_cache.dZ.reset(); }
     std::string filename() const { return _eri_file; }
     //mpi3::communicator* comm() const { return std::addressof(_mpi->comm); }
     auto& MF() const { return _MF; }
@@ -1227,6 +1217,23 @@ namespace methods {
     // keep everything as optionals to keep things simple
 
     dArray_t<HOST_MEMORY,3> _dZ;
+    // _dZ redistributed by dZ(pgrid, bsize, use_cache = true). Copying the reader leaves
+    // the copy's cache empty, so a copy never silently duplicates it; a move keeps it.
+    struct dZ_cache_t {
+      std::array<long,3> pgrid{0,0,0};
+      std::array<long,3> bsize{0,0,0};
+      std::optional<dArray_t<HOST_MEMORY,3>> dZ;
+      dZ_cache_t() = default;
+      dZ_cache_t(dZ_cache_t const&) {}
+      dZ_cache_t& operator=(dZ_cache_t const&) { dZ.reset(); return *this; }
+      dZ_cache_t(dZ_cache_t&& o) noexcept
+          : pgrid(o.pgrid), bsize(o.bsize), dZ(std::exchange(o.dZ, std::nullopt)) {}
+      dZ_cache_t& operator=(dZ_cache_t&& o) noexcept {
+        pgrid = o.pgrid; bsize = o.bsize; dZ = std::exchange(o.dZ, std::nullopt);
+        return *this;
+      }
+    };
+    mutable dZ_cache_t _dZ_cache;
     // Semilocal xc-kernel matrix Vxc(q,P,Q), same shape and distribution as _dZ.
     // Present only when the THC was built with Vxc_file, or read from a THC
     // checkpoint that carries the "Vxc" dataset. Deliberately NOT merged into
@@ -1245,8 +1252,6 @@ namespace methods {
     memory::array<HOST_MEMORY, long, 1> _rp;
 
     mutable utils::TimerManager _Timer;
-
-    detail::instance_id_t _instance_id;
   };
 
 } // methods

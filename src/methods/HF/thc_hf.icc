@@ -62,24 +62,10 @@ namespace methods {
       _Timer.stop("ALLOC");
 
       // MAM: for coulomb only, we should just read q=0 only, should add routine to reader
-      // The bare Coulomb dZ({1,np_P,np_Q}) is iteration-invariant; cache the redistributed
-      // copy (incore only) so subsequent Fock builds skip the MPI redistribute. See hf_t.h.
+      // The bare Coulomb is iteration-invariant: the reader keeps the redistributed copy,
+      // so later Fock builds skip the MPI redistribute. Callers release it when done.
       _Timer.start("READ_Z");
-      std::array<long,3> dZ_pgrid = {1, np_P, np_Q};
-      long dZ_src = thc.instance_id();
-      bool dZ_cacheable = false;
-      if constexpr (requires { thc.dZ_incore(); }) dZ_cacheable = thc.dZ_incore() and dZ_src >= 0;
-      bool dZ_hit = dZ_cacheable and _dZ_cache.has_value()
-                    and _dZ_cache_src == dZ_src and _dZ_cache_pgrid == dZ_pgrid
-                    and _dZ_cache_nq == MF->nqpts_ibz() and _dZ_cache_np == NP;
-      dCoulomb_t dU_qPQ = dZ_hit ? *_dZ_cache : thc.dZ(dZ_pgrid);
-      if (dZ_cacheable and not dZ_hit) {
-        _dZ_cache = dU_qPQ;
-        _dZ_cache_src = dZ_src;
-        _dZ_cache_pgrid = dZ_pgrid;
-        _dZ_cache_nq = MF->nqpts_ibz();
-        _dZ_cache_np = NP;
-      }
+      auto dU_qPQ = thc.dZ({1, np_P, np_Q}, {0, 0, 0}, /*use_cache=*/true);
       auto dU_qPQ_loc = dU_qPQ.local();
 
       // keep a copy of U(q=0)

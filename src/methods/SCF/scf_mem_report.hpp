@@ -60,6 +60,7 @@ struct scf_mem_params {
 
   // ---- active code paths ----
   bool have_hf   = false;   // static Fock solver present
+  int  n_fock_dZ_cache = 0;  // readers whose Fock builds cache the redistributed Coulomb matrix
   bool have_corr = false;   // dynamic self-energy solver present (gw/gf2)
   bool have_scr  = false;   // screened-interaction solver present (Pi + W)
   bool is_gw     = false;
@@ -115,6 +116,15 @@ scf_mem_params make_scf_mem_params(mf_ptr_t mf, const imag_axes_ft::IAFT& FT,
   p.nb      = mf->nbnd();
 
   p.have_hf   = (mb_solver.hf != nullptr);
+  // One cached Coulomb copy per reader the Fock builds use: two for distinct split
+  // Hartree/exchange readers, one otherwise.
+  if (p.have_hf) {
+    p.n_fock_dZ_cache = 1;
+    if (mb_eri.hartree_eri and mb_eri.exchange_eri and
+        static_cast<const void*>(std::addressof(mb_eri.hartree_eri->get())) !=
+        static_cast<const void*>(std::addressof(mb_eri.exchange_eri->get())))
+      p.n_fock_dZ_cache = 2;
+  }
   p.have_corr = (mb_solver.corr != nullptr);
   p.have_scr  = (mb_solver.scr_eri != nullptr);
   p.is_gw     = std::is_same_v<corr_solver_t, solvers::gw_t> and p.have_corr;

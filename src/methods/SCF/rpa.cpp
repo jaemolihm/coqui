@@ -91,6 +91,7 @@ double rpa_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_
       mb_solver.hf->evaluate(sF_skij, sDm_skij.local(), mb_eri.corr_eri->get(),
                                dyson.sS_skij().local(), true, true);
     }
+    mb_eri.release_dZ_cache();
     mpi->comm.barrier();
   }
   // RPA energy evaluated using the KS Green's function

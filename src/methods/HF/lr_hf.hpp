@@ -234,7 +234,7 @@ private:
   // lr_hf is constructed per (q, THC handler) and lives for the whole LR SCF, so
   // the Coulomb kernel is the same on every call — including its HSEX form, since
   // one instance is only ever handed one `hsex` kernel. Fetching and transforming it
-  // once is the trade hf_t::_dZ_cache already makes in the ground state, and the
+  // once is the trade the ground-state Fock build makes with thc.dZ(..., use_cache), and the
   // caches die with the solver at the end of the run.
   //
   // Filled on first use rather than at construction: lr_hf never holds thc (it is

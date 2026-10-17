@@ -22,8 +22,6 @@
 #ifndef COQUI_HF_T_H
 #define COQUI_HF_T_H
 
-#include <optional>
-
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
@@ -121,31 +119,13 @@ namespace methods {
                            const nda::MemoryArrayOfRank<4> auto &S_skij, double madelung);
 
       std::string& div_treatment() { return _div_treatment; }
-      void print_chol_hf_timers(); 
-      void print_thc_hf_timers(); 
+      void print_chol_hf_timers();
+      void print_thc_hf_timers();
 
     private:
       std::string _div_treatment;
 
       utils::TimerManager _Timer;
-
-      // Cache of the redistributed bare Coulomb matrix returned by thc.dZ({1,np_P,np_Q}).
-      // The bare Coulomb interaction is iteration-invariant across an SCF loop, and the
-      // redistribute is arithmetic-free data movement, so a cached copy is byte-identical
-      // to a fresh redistribute (bit-exact). hf_t and its THC reader both persist across
-      // SCF iterations (mb_solver.hf), so this replaces a per-Fock-build MPI redistribute
-      // of the full Coulomb matrix (~nqpts_ibz*Np*Np complex, distributed) with a local
-      // copy. Only used for incore readers. A fresh copy is returned each call because the
-      // exchange path overwrites the array in place (U(q)->U(R)). Keyed on the reader's
-      // monotonic instance id (an address would be recycled by the allocator, so a
-      // destroyed reader replaced at the same address would hit a stale cache), basis
-      // dimensions, and target processor grid.
-      using dCoulomb_t = math::nda::distributed_array<nda::array<ComplexType,3>, mpi3::communicator>;
-      std::optional<dCoulomb_t> _dZ_cache;
-      long _dZ_cache_src = -1;
-      std::array<long,3> _dZ_cache_pgrid{0,0,0};
-      long _dZ_cache_nq = -1;
-      long _dZ_cache_np = -1;
 
       /**
        * Single k-point (molecular) Coulomb matrix J w/o SOC from Cholesky-type ERIs.

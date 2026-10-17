@@ -292,6 +292,7 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
     Timer.stop("WRITE");
     output_iter++;
   } while (output_iter<output_iter_init+niter and not converged());
+  mb_eri.release_dZ_cache();
   Timer.stop("SCF_TOTAL");
 
   // Run-status marker, written only once the loop has exited: a run killed
@@ -556,6 +557,7 @@ double qp_scf_loop(
 
     it++;
   } while(it<init_it+niter+1 and std::abs(Heff_conv) > std::abs(conv_tol));
+  mb_eri.release_dZ_cache();
   Timer.stop("SCF_TOTAL");
 
   app_log(2, "\n  QP-SCF timers");

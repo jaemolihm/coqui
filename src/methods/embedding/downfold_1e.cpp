@@ -924,6 +924,7 @@ namespace methods {
     // compute HF for the whole lattice problem
     solvers::hf_t hf(hf_div_treatment);
     hf.evaluate(sVhf_skij, sDm_skij.local(), eri, sS_skij.local());
+    eri.release_dZ_cache();
 
     // downfold the HF solution
     _Timer.start("DF_DOWNFOLD");
