@@ -37,12 +37,12 @@
 
 namespace methods {
 
-auto get_mf_MOs(utils::mpi_context_t<mpi3::communicator> &context, mf::MF &mf, hamilt::pseudopot &psp)
+auto get_mf_MOs(utils::mpi_context_t<mpi3::communicator> &context, mf::MF &mf)
   -> std::tuple<sArray_t<Array_view_4D_t>, sArray_t<Array_view_3D_t> > {
   using math::shm::make_shared_array;
   auto sF_skij = make_shared_array<Array_view_4D_t>(context.comm, context.internode_comm, context.node_comm,
                                                     {mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-  hamilt::set_fock(mf, std::addressof(psp), sF_skij, false);
+  hamilt::set_fock(mf, nullptr, sF_skij, false);
   auto sS_skij = make_shared_array<Array_view_4D_t>(context.comm, context.internode_comm, context.node_comm,
                                                     {mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
   hamilt::set_ovlp(mf, sS_skij);

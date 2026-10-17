@@ -1725,7 +1725,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // this branch. See qp_scf_common::write_mf_data for the same recipe.
     app_log(2, "Building DFT/KS mean-field reference G0 (G0W0@DFT)...");
     lr_init_timer.start("LR_INIT_UPDATE_G");
-    auto [sMO_skia, sE_ska] = get_mf_MOs(*mpi, *mf, *dyson.PSP());
+    auto [sMO_skia, sE_ska] = get_mf_MOs(*mpi, *mf);
     mu = update_mu(0.0, *mf, sE_ska, ft.beta());
     app_log(2, "  DFT reference mu = {:.8f}", mu);
     update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
