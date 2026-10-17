@@ -836,6 +836,7 @@ namespace methods {
         // unit cell
         h5::h5_write_attribute(sgrp, "number_of_spins", 1);
         h5::h5_write_attribute(sgrp, "number_of_spins_in_basis", 1);
+        h5::h5_write_attribute(sgrp, "number_of_polarizations", 1);
         h5::h5_write_attribute(sgrp, "number_of_bands", nImpOrbs);
         h5::h5_write_attribute(sgrp, "number_of_elec", 1);
         h5::h5_write_attribute(sgrp, "madelung_constant", 0.0);
@@ -846,14 +847,15 @@ namespace methods {
         utils::check(nImps==1, "Error in hf_downfolding: nImps != 1 not yet implemented.");
         H0_loc_sIab() += (Vhf_loc_sIab() - Vhf_dc_sIab() + Vcorr_loc_sIab() - Vcorr_dc_sIab());
         nda::h5_write(sgrp, "H0", H0_loc_sIab, false);
+        // mean-field one-body Hamiltonian for density_matrix = 0 (written below), i.e. H0
+        nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
         H0_loc_sIab() = ComplexType(0.0);
         auto Hab = H0_loc_sIab(0,0,nda::ellipsis{});
         nda::diagonal(Hab) = ComplexType(1.0);
         nda::h5_write(sgrp, "overlap", H0_loc_sIab, false);
         H0_loc_sIab() = ComplexType(0.0);
-        // to do: provide proper density matrix and fock matrices from non-interacting solution
+        // to do: provide proper density matrix from non-interacting solution
         nda::h5_write(sgrp, "density_matrix", H0_loc_sIab, false);
-        nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
       } else 
         APP_ABORT("Error in downfold_mb_solution_qp_impl: Unknown format type: {}",format_type);
     }
@@ -954,6 +956,7 @@ namespace methods {
       // unit cell
       h5::h5_write_attribute(sgrp, "number_of_spins", 1);
       h5::h5_write_attribute(sgrp, "number_of_spins_in_basis", 1);
+      h5::h5_write_attribute(sgrp, "number_of_polarizations", 1);
       h5::h5_write_attribute(sgrp, "number_of_bands", nImpOrbs);
       h5::h5_write_attribute(sgrp, "number_of_elec", 1);
       h5::h5_write_attribute(sgrp, "madelung_constant", 0.0);
@@ -965,14 +968,15 @@ namespace methods {
       //H0_loc_sIab() += (Vhf_loc_sIab() - Vhf_dc_sIab()); 
       H0_loc_sIab() += Vhf_loc_sIab(); 
       nda::h5_write(sgrp, "H0", H0_loc_sIab, false);
+      // mean-field one-body Hamiltonian for density_matrix = 0 (written below), i.e. H0
+      nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
       H0_loc_sIab() = ComplexType(0.0);
       auto Hab = H0_loc_sIab(0,0,all,all);
       nda::diagonal(Hab) = ComplexType(1.0); 
       nda::h5_write(sgrp, "overlap", H0_loc_sIab, false);
       H0_loc_sIab() = ComplexType(0.0);
-      // to do: provide proper density matrix and fock matrices from non-interacting solution
+      // to do: provide proper density matrix from non-interacting solution
       nda::h5_write(sgrp, "density_matrix", H0_loc_sIab, false);
-      nda::h5_write(sgrp, "fock_matrix", H0_loc_sIab, false);
 //      h5::h5_write(sgrp, "chemical_potential", mu);
     }
     _context->comm.barrier();

@@ -22,6 +22,8 @@
 #ifndef HAMILTONIAN_ONE_BODY_HAMILTONIAN_HPP
 #define HAMILTONIAN_ONE_BODY_HAMILTONIAN_HPP
 
+#include <cstdlib>
+#include <string_view>
 #include "configuration.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
@@ -49,6 +51,62 @@ namespace hamilt
 
 namespace detail
 {
+/**
+ * Overlap of a model Hamiltonian: the model basis is orthonormal (S = 1) and the model file
+ * has no overlap dataset to read. Same layout as pyscf_read_1B_from_file.
+ */
+template<MEMORY_SPACE MEM = HOST_MEMORY>
+auto model_identity_1B(mf::MF& mf, boost::mpi3::communicator& comm,
+                       std::array<long,4> pgrid = {0}, std::array<long,4> bz = {1,1,2048,2048})
+{
+  long nspin = mf.nspin();
+  long nkpts = mf.nkpts_ibz();
+  long nbnd = mf.nbnd();
+  pgrid = default_1B_pgrid(pgrid, comm.size(), nspin, nkpts);
+  utils::check(comm.size() == std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{}),
+               "model_identity_1B: MPI size mismatch.");
+  using larray = memory::array<MEM,ComplexType,4>;
+  auto S = math::nda::make_distributed_array<larray>(comm,pgrid,{nspin,nkpts,nbnd,nbnd},bz);
+  nda::array<ComplexType,4> S_loc(S.local_shape());
+  S_loc() = ComplexType(0.0);
+  auto ri = S.local_range(2);
+  auto rj = S.local_range(3);
+  for( long i=0; i<ri.size(); ++i )
+    for( long j=0; j<rj.size(); ++j )
+      if( ri.first()+i == rj.first()+j )
+        S_loc(nda::ellipsis{},i,j) = ComplexType(1.0);
+  S.local() = S_loc;
+  return S;
+}
+
+/**
+ * Diagonal of the model overlap (all ones). Same layout as pyscf_read_diag_1B_from_file.
+ */
+template<MEMORY_SPACE MEM = HOST_MEMORY>
+auto model_identity_diag_1B(mf::MF& mf, boost::mpi3::communicator& comm,
+                            std::array<long,3> pgrid = {0}, std::array<long,3> bz = {1,1,2048})
+{
+  long nspin = mf.nspin();
+  long nkpts = mf.nkpts_ibz();
+  long nbnd = mf.nbnd();
+  pgrid = default_1B_pgrid(pgrid, comm.size(), nspin, nkpts);
+  utils::check(comm.size() == std::accumulate(pgrid.cbegin(), pgrid.cend(), long(1), std::multiplies<>{}),
+               "model_identity_diag_1B: MPI size mismatch.");
+  using larray3D = memory::array<MEM,ComplexType,3>;
+  auto S = math::nda::make_distributed_array<larray3D>(comm,pgrid,{nspin,nkpts,nbnd},bz);
+  nda::array<ComplexType,3> S_loc(S.local_shape());
+  S_loc() = ComplexType(1.0);
+  S.local() = S_loc;
+  return S;
+}
+
+// aborts in a one-body dispatch on a mean-field source it does not handle
+[[noreturn]] inline void unsupported_mf_source(std::string_view fn, mf::MF const& mf)
+{
+  APP_ABORT("{}: unsupported mean-field source {}", fn, mf::mf_source_enum_to_string(mf.mf_type()));
+  std::abort();
+}
+
 /**
  * Build a distributed one-body (rank-4) quantity and scatter it into the shared
  * array `sX`. The distributed array is built over the first `n_active` ranks of
@@ -108,11 +166,16 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_range,b_range,psi,p3,p4);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismacth");
+  } else if (mf.mf_type() == mf::model_source) {
+    utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with model backend yet.");
+    utils::check(b_range.size() == mf.nbnd(), "No b_range with model backend yet.");
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz,"System");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::H0", mf);
   }
 }
 
@@ -168,9 +231,10 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
                                nda::range(mf.nspin()),k_rng,b_rng,bz);
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_rng,b_rng,psi,p3,std::addressof(nij));
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::H", mf);
   }
 }
 
@@ -201,9 +265,10 @@ auto H(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
                                nda::range(mf.nspin()),k_rng,b_rng,bz);
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_H0<MEM>(mf,comm,psp,k_rng,b_rng,psi,std::addressof(nii),p4);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::H", mf);
   }
 }
 
@@ -261,11 +326,16 @@ auto F(mf::MF& mf, boost::mpi3::communicator& comm,
       comm.barrier();
       return Fij;
     }
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::model_source) {
+    utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with model backend yet.");
+    utils::check(b_range.size() == mf.nbnd(), "No b_range with model backend yet.");
+    return detail::pyscf_read_1B_from_file<MEM>(mf,"fock_matrix",comm,pgrid,bz,"System");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"Fock",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::F", mf);
   }
 }
 
@@ -427,14 +497,15 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
                                                             nda::range(-1,-1), k_range, b_range, bz);
     memory::array_view<MEM,ComplexType,3> *p3=nullptr;
     return detail::gen_Vhartree<MEM>(mf,comm,psp,k_range,b_range,psi,p3,std::addressof(nij),false);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(mf.orb_on_fft_grid(),
                  "Vhartree: The Hartree potential cannot be evaluated using FFT if mf.orb_on_fft_grid() == false");
     utils::check(false, "Vhartree: Hartree potential using FFT is not implemented for non-orthogonal basis yet!");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::Vhartree", mf);
   }
 }
 
@@ -454,14 +525,15 @@ auto Vhartree(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
                                                             nda::range(-1,-1), k_range, b_range, bz);
     memory::array_view<MEM,ComplexType,4> *p4=nullptr;
     return detail::gen_Vhartree<MEM>(mf,comm,psp,k_range,b_range,psi,std::addressof(nii),p4,false);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(mf.orb_on_fft_grid(),
                  "Vhartree: The Hartree potential cannot be evaluated using FFT if mf.orb_on_fft_grid() == false");
     utils::check(false, "Vhartree: Hartree potential using FFT is not implemented for non-orthogonal basis yet!");
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"H0",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::Vhartree", mf);
   }
 }
 
@@ -535,11 +607,16 @@ auto ovlp(mf::MF& mf, boost::mpi3::communicator& comm,
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
                                nda::range(-1,-1), k_range, b_range, bz); 
     return detail::gen_ovlp<MEM,false>(comm,psi);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::model_source) {
+    utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with model backend yet.");
+    utils::check(b_range.size() == mf.nbnd(), "No b_range with model backend yet.");
+    return detail::model_identity_1B<MEM>(mf,comm,pgrid,bz);
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::ovlp", mf);
   }
 }
 /**
@@ -560,11 +637,16 @@ auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm,
              {pgrid[0],pgrid[1],pgrid[2],1},nda::range(-1,-1), k_range, b_range,
              {bz[0],bz[1],bz[2],2048});
     return detail::gen_ovlp<MEM,true>(comm,psi);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::model_source) {
+    utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with model backend yet.");
+    utils::check(b_range.size() == mf.nbnd(), "No b_range with model backend yet.");
+    return detail::model_identity_diag_1B<MEM>(mf,comm,pgrid,bz);
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_diag_1B_from_file<MEM>(mf,"ovlp",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::ovlp_diagonal", mf);
   }
 }
 
@@ -611,11 +693,12 @@ auto Vxc(mf::MF &mf, boost::mpi3::communicator &comm,
     auto psi = mf::read_distributed_orbital_set_ibz<larray>(mf,comm,'w',pgrid,
                                                             nda::range(-1,-1), k_range, b_range, bz);
     return detail::gen_Vxc<MEM>(mf,k_range,b_range,psi);
-  } else {
-    utils::check(mf.mf_type() == mf::pyscf_source, "Source mismatch");
+  } else if (mf.mf_type() == mf::pyscf_source) {
     utils::check(k_range.size() == mf.nkpts_ibz(), "No k_range with pyscf backend yet.");
     utils::check(b_range.size() == mf.nbnd(), "No b_range with pyscf backend yet.");
     return detail::pyscf_read_1B_from_file<MEM>(mf,"Vxc",comm,pgrid,bz);
+  } else {
+    detail::unsupported_mf_source("hamilt::Vxc", mf);
   }
 }
 

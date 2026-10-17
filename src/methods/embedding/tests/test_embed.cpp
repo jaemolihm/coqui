@@ -870,6 +870,9 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
           auto grp = h5::group(file);
           nda::h5_read(grp, "Interaction/Vq0", V_abcd);
           nda::h5_read(grp, "System/H0",Hhf_ref);
+          nda::array<ComplexType, 4> F;
+          nda::h5_read(grp, "System/fock_matrix", F);
+          ARRAY_EQUAL(F, Hhf_ref, 0.0);  // fock_matrix = H0 for density_matrix = 0
         }
 
 
@@ -880,6 +883,9 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
           auto grp = h5::group(file);
           nda::h5_read(grp, "Interaction/Vq0", V5d);
           nda::h5_read(grp, "System/H0",Hhf);
+          nda::array<ComplexType, 4> F;
+          nda::h5_read(grp, "System/fock_matrix", F);
+          ARRAY_EQUAL(F, Hhf, 0.0);  // fock_matrix = H0 for density_matrix = 0
         }
 
         nda::array<ComplexType, 5> U5d;
@@ -889,6 +895,9 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
           auto grp = h5::group(file);
           nda::h5_read(grp, "Interaction/Vq0", U5d);
           nda::h5_read(grp, "System/H0",Hgw);
+          nda::array<ComplexType, 4> F;
+          nda::h5_read(grp, "System/fock_matrix", F);
+          ARRAY_EQUAL(F, Hgw, 0.0);  // fock_matrix = H0 for density_matrix = 0
         }
 
         {

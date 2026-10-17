@@ -78,7 +78,7 @@ pseudopot::pseudopot(MF_t &mf, std::string const filename) :
   svsc(make_shared_array<nda::array_view<ComplexType,3>>(*mpi,{1,1,1})),  // resize later
   qgm(make_shared_array<nda::array_view<ComplexType,3>>(*mpi,{1,1,1}))             // resize later
 { 
-  if( mf.mf_type() == mf::pyscf_source ) { 
+  if( mf.mf_type() == mf::pyscf_source or mf.mf_type() == mf::model_source ) { 
 
     // nothing to do, evaluation routines should not be called! 
     ptype = pp_FILE_t;
