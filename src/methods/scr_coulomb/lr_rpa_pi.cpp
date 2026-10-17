@@ -27,6 +27,7 @@
 #include "nda/blas.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/nda_functions.hpp"
 
 #include "IO/app_loggers.h"
@@ -274,7 +275,7 @@ namespace methods {
                                            shape_t<2>{nkpts, NP_loc * NQ_loc});
             _Timer.start("PI_LR_FT_R");
             if (_fft_k) _fft_k->k_to_R(DeltaG_2D, fft_out);
-            else        nda::blas::gemm(_sf_Rk->local(), DeltaG_2D, fft_out);
+            else        math::detail::gemm_guarded(_sf_Rk->local(), DeltaG_2D, fft_out);
             _Timer.stop("PI_LR_FT_R");
 
             _Timer.start("PI_LR_HADPROD");
@@ -318,7 +319,7 @@ namespace methods {
                                            shape_t<2>{nkpts, NP_loc * NQ_loc});
             _Timer.start("PI_LR_FT_R");
             if (_fft_k) _fft_k->k_to_mR(DeltaG_2D, fft_out);
-            else        nda::blas::gemm(f_minus_Rk, DeltaG_2D, fft_out);
+            else        math::detail::gemm_guarded(f_minus_Rk, DeltaG_2D, fft_out);
             _Timer.stop("PI_LR_FT_R");
 
             // Phase multiply on fft_out: e^{ip·R} for each R
@@ -356,7 +357,7 @@ namespace methods {
                                               shape_t<2>{nkpts, NP_loc * NQ_loc});
           auto DeltaPi_R_2D = nda::reshape(DeltaPi_RPQ, shape_t<2>{nkpts, NP_loc * NQ_loc});
           if (_fft_q) _fft_q->R_to_k(DeltaPi_R_2D, DeltaPi_tq_2D);
-          else        nda::blas::gemm(_sf_qR->local(), DeltaPi_R_2D, DeltaPi_tq_2D);
+          else        math::detail::gemm_guarded(_sf_qR->local(), DeltaPi_R_2D, DeltaPi_tq_2D);
           _Timer.stop("PI_LR_FT_R");
         } else {
           DeltaPi_tqPQ_loc(it, nda::ellipsis{}) = DeltaPi_RPQ;

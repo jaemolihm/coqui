@@ -24,6 +24,7 @@
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/distributed_array/nda.hpp"
 
@@ -201,7 +202,7 @@ namespace methods {
         if (buffer.shape() != std::array<long, 2>{nkpts, NP_loc * NQ_loc})
           buffer.resize(std::array<long, 2>{nkpts, NP_loc * NQ_loc});
         for (int s = 0; s < ns; ++s) {
-          nda::blas::gemm(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
+          math::detail::gemm_guarded(f_Rk, Dm_3D(s, nda::ellipsis{}), buffer);
           Dm_3D(s, nda::ellipsis{}) = buffer;
         }
       }
@@ -219,7 +220,7 @@ namespace methods {
     auto add_J = [&]() {
       dDm_skPQ.communicator()->all_reduce_in_place_n(Dm_QQ.data(), Dm_QQ.size(), std::plus<>{});
       nda::array<ComplexType, 1> J_PP(NP, ComplexType(0.0));
-      nda::blas::gemv(Uq0_PQ, Dm_QQ(dU_qPQ.local_range(2)), J_PP(dU_qPQ.local_range(1)));
+      math::detail::gemv_guarded(Uq0_PQ, Dm_QQ(dU_qPQ.local_range(2)), J_PP(dU_qPQ.local_range(1)));
       dDm_skPQ.communicator()->all_reduce_in_place_n(J_PP.data(), J_PP.size(), std::plus<>{});
       auto F_skPQ = dF_skPQ.local();
       for (long is = 0; is < ns; ++is) {
@@ -245,7 +246,7 @@ namespace methods {
         auto f_Rk = sf_Rk.local();
         utils::k_to_R_coefficients(mpi.comm, nda::range(nkpts), MF->Qpts(), MF->lattv(), R_grid, sf_Rk);
         auto U_2D = nda::reshape(dU_qPQ_loc, std::array<long, 2>{nkpts, NP_loc * NQ_loc});
-        nda::blas::gemm(f_Rk, U_2D, buffer);
+        math::detail::gemm_guarded(f_Rk, U_2D, buffer);
         U_2D = buffer;
       }
       auto& U_RPQ_loc = dU_qPQ_loc;
@@ -272,8 +273,8 @@ namespace methods {
         auto K_R_3D = nda::reshape(dK_sRPQ.local(), std::array<long, 3>{ns, nkpts, NP_loc * NQ_loc});
         auto F_k_3D = nda::reshape(dF_skPQ.local(), std::array<long, 3>{ns, nkpts_ibz, NP_loc * NQ_loc});
         for (int s = 0; s < ns; ++s) {
-          nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
-                          K_R_3D(s, nda::ellipsis{}), ComplexType(1.0), F_k_3D(s, nda::ellipsis{}));
+          math::detail::gemm_guarded(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
+                                     K_R_3D(s, nda::ellipsis{}), ComplexType(1.0), F_k_3D(s, nda::ellipsis{}));
         }
       } else {
         auto F_loc = dF_skPQ.local();
@@ -367,14 +368,14 @@ namespace methods {
         // This is because the left X is at k' and the right X is at k in the LR transform.
 
         // Term 1: [δ^{-q} X(k+q)]† · A_PQ(k) · X(k)
-        nda::blas::gemm(nda::dagger(DX_mq(P_rng, all)), A_loc(is, k, all, all), Ask_aQ);
-        nda::blas::gemm(ComplexType(1.0), Ask_aQ, X_R(Q_rng, all),
-                        ComplexType(1.0), Oab_buffer);
+        math::detail::gemm_guarded(nda::dagger(DX_mq(P_rng, all)), A_loc(is, k, all, all), Ask_aQ);
+        math::detail::gemm_guarded(ComplexType(1.0), Ask_aQ, X_R(Q_rng, all),
+                                   ComplexType(1.0), Oab_buffer);
 
         // Term 2: X(k+q)† · A_PQ(k+q) · δ^q X(k)   [note: A at k+q, not k]
-        nda::blas::gemm(nda::dagger(X_L(P_rng, all)), A_loc(is, kpq, all, all), Ask_aQ);
-        nda::blas::gemm(ComplexType(1.0), Ask_aQ, DX(Q_rng, all),
-                        ComplexType(1.0), Oab_buffer);
+        math::detail::gemm_guarded(nda::dagger(X_L(P_rng, all)), A_loc(is, kpq, all, all), Ask_aQ);
+        math::detail::gemm_guarded(ComplexType(1.0), Ask_aQ, DX(Q_rng, all),
+                                   ComplexType(1.0), Oab_buffer);
 
         // Reduce across PQ ranks
         mpi->comm.reduce_in_place_n(Oab_buffer.data(), Oab_buffer.size(), std::plus<>{}, 0);
@@ -484,7 +485,7 @@ namespace methods {
           auto f_Rk = sf_Rk.local();
           auto G_3D = nda::reshape(dG_skPQ.local(), shape_t_3{ns, nkpts, NP_loc * NQ_loc});
           for (long s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_Rk, G_3D(s, nda::ellipsis{}), fft_buffer);
+            math::detail::gemm_guarded(f_Rk, G_3D(s, nda::ellipsis{}), fft_buffer);
             G_3D(s, nda::ellipsis{}) = fft_buffer;
           }
         }
@@ -504,7 +505,7 @@ namespace methods {
           auto f_kR = sf_kR.local();
           auto Sigma_3D = nda::reshape(dSigma_skPQ.local(), shape_t_3{ns, nkpts, NP_loc * NQ_loc});
           for (long s = 0; s < ns; ++s) {
-            nda::blas::gemm(f_kR, Sigma_3D(s, nda::ellipsis{}), fft_buffer);
+            math::detail::gemm_guarded(f_kR, Sigma_3D(s, nda::ellipsis{}), fft_buffer);
             Sigma_3D(s, nda::ellipsis{}) = fft_buffer;
           }
         }

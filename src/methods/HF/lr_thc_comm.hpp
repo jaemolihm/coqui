@@ -28,6 +28,7 @@
 #include "nda/nda.hpp"
 #include "utilities/proc_grid_partition.hpp"
 #include "utilities/Timer.hpp"
+#include "numerics/gemm_guard.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/distributed_array/nda.hpp"
 #include "numerics/shared_array/nda.hpp"
@@ -425,9 +426,9 @@ namespace methods {
 
             auto left_times = [&](auto const& O_ab) {
               if (kp_trev(k)) {
-                nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ab), Ask_Pb);
+                math::detail::gemm_guarded(Xsk_Pa_l(X_P_rng, all), nda::transpose(O_ab), Ask_Pb);
               } else {
-                nda::blas::gemm(Xsk_Pa_l(X_P_rng, all), O_ab, Ask_Pb);
+                math::detail::gemm_guarded(Xsk_Pa_l(X_P_rng, all), O_ab, Ask_Pb);
               }
             };
             if constexpr (transposed) {
@@ -438,7 +439,7 @@ namespace methods {
             }
 
             // Osk_PQ = Ask_Pb * conj(Xsk_Qb)
-            nda::blas::gemm(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_PQ);
+            math::detail::gemm_guarded(Ask_Pb, nda::dagger(Xsk_Pa_r(O_Q_rng, all)), O_PQ);
 
             if (has_deltax) {
               auto DX_q  = ibc->DeltaX(s, k, all, all);         // δ^q X(k), stored at index k
@@ -453,9 +454,9 @@ namespace methods {
               };
               // O_PQ += L_P · O_buf · R_Q†
               auto add_term = [&](auto const& L, auto const& R) {
-                nda::blas::gemm(L(X_P_rng, all), O_buf, Ask_Pb);
-                nda::blas::gemm(ComplexType(1.0), Ask_Pb, nda::dagger(R(O_Q_rng, all)),
-                                ComplexType(1.0), O_PQ);
+                math::detail::gemm_guarded(L(X_P_rng, all), O_buf, Ask_Pb);
+                math::detail::gemm_guarded(ComplexType(1.0), Ask_Pb, nda::dagger(R(O_Q_rng, all)),
+                                           ComplexType(1.0), O_PQ);
               };
 
               load_unpert(k);
@@ -544,12 +545,12 @@ namespace methods {
           auto Oab_i = O_buf_iab(i, all, all);
           if (q_first) {
             // Ask_Pb = Osk_PQ * Xsk_Qb;  Osk_ab = conj(Xsk_Pa) * Ask_Pb
-            nda::blas::gemm(O_iPQ_3D(i, all, all), Xsk_Pa_r(Q_rng, all), Ask_buf);
-            nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), Ask_buf, Oab_i);
+            math::detail::gemm_guarded(O_iPQ_3D(i, all, all), Xsk_Pa_r(Q_rng, all), Ask_buf);
+            math::detail::gemm_guarded(nda::dagger(Xsk_Pa_l(P_rng, all)), Ask_buf, Oab_i);
           } else {
             // Ask_aQ = conj(Xsk_Pa) * Osk_PQ;  Osk_ab = Ask_aQ * Xsk_Qb
-            nda::blas::gemm(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_buf);
-            nda::blas::gemm(Ask_buf, Xsk_Pa_r(Q_rng, all), Oab_i);
+            math::detail::gemm_guarded(nda::dagger(Xsk_Pa_l(P_rng, all)), O_iPQ_3D(i, all, all), Ask_buf);
+            math::detail::gemm_guarded(Ask_buf, Xsk_Pa_r(Q_rng, all), Oab_i);
           }
         } // i
         toc("SIGMA_A2P_GEMM");
