@@ -26,6 +26,7 @@
 
 #include "nda/nda.hpp"
 #include "nda/blas.hpp"
+#include "numerics/gemm_guard.hpp"
 
 using thc_reader_t = methods::thc_reader_t;
 
@@ -286,7 +287,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
       if (buffer.shape() != shape_t<2>{nkpts, A_3D.extent(2)})
         buffer.resize(shape_t<2>{nkpts, A_3D.extent(2)});
       for (long s = 0; s < A_3D.extent(0); ++s) {
-        nda::blas::gemm(f_Rk, A_3D(s, nda::ellipsis{}), buffer);
+        math::detail::gemm_guarded(f_Rk, A_3D(s, nda::ellipsis{}), buffer);
         A_3D(s, nda::ellipsis{}) = buffer;
       }
     }
@@ -423,11 +424,11 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
     // MAM: communication not optimized
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaDm_QQ.data(), DeltaDm_QQ.size(), std::plus<>{});
     nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-    nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
+    math::detail::gemv_guarded(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
     if (DeltaV_qPQ) {
-      nda::blas::gemv(ComplexType(1.0), DeltaV_qGamma_PQ,
-                      Dm_QQ_unpert(Q_rng),
-                      ComplexType(1.0), DeltaJ_PP(P_rng));
+      math::detail::gemv_guarded(ComplexType(1.0), DeltaV_qGamma_PQ,
+                                 Dm_QQ_unpert(Q_rng),
+                                 ComplexType(1.0), DeltaJ_PP(P_rng));
     }
     dDeltaDm_skPQ.communicator()->all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
 
@@ -597,8 +598,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
             utils::R_to_k_coefficients(_mpi->comm, nda::range(nkpts), _MF->kpts(),
                                        _MF->lattv(), R_grid, *sf_Rk);
             for (int s = 0; s < ns; ++s) {
-              nda::blas::gemm(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
-                              DeltaK_R_3D(s, nda::ellipsis{}), ComplexType(1.0), DeltaF_k_3D(s, nda::ellipsis{}));
+              math::detail::gemm_guarded(ComplexType(1.0), f_kR(nda::range(nkpts_ibz), nda::range::all),
+                                         DeltaK_R_3D(s, nda::ellipsis{}), ComplexType(1.0), DeltaF_k_3D(s, nda::ellipsis{}));
             }
           }
           _Timer.stop("FT_R");
@@ -755,7 +756,7 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
 
   // (2) ΔJ_P = Σ_Q [V(q) + Vxc(q)]_PQ n_Q
   nda::array<ComplexType, 1> DeltaJ_PP(NP, ComplexType(0.0));
-  nda::blas::gemv(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
+  math::detail::gemv_guarded(Uq_PQ, DeltaDm_QQ(Q_rng), DeltaJ_PP(P_rng));
   _mpi->comm.all_reduce_in_place_n(DeltaJ_PP.data(), DeltaJ_PP.size(), std::plus<>{});
   _Timer.stop("COULOMB");
 

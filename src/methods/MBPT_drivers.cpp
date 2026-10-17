@@ -1144,6 +1144,7 @@ std::optional<double> read_fixed_mu(mpi_context_t& mpi,
  * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
  * dataset must be regenerated. LR/GW evaluators must reuse this value so
  * divergence heads stay consistent with how W and Sigma were computed.
+ * A group without the stash (e.g. the embed group) takes the scf group's.
  */
 template<typename mpi_context_t>
 std::string read_div_treatment(mpi_context_t& mpi,
@@ -1151,8 +1152,13 @@ std::string read_div_treatment(mpi_context_t& mpi,
                                const std::string& input_grp)
 {
   auto div = read_scf_string(mpi, input_file, input_grp, "div_treatment");
+  if (!div and input_grp != "scf") {
+    div = read_scf_string(mpi, input_file, "scf", "div_treatment");
+    if (div) app_log(2, "  '{}/div_treatment' not found in {}; using \"{}\" from the scf group.",
+                     input_grp, input_file, *div);
+  }
   utils::check(div.has_value(),
-               "read_div_treatment: '{}/div_treatment' missing in {}. "
+               "read_div_treatment: '{}/div_treatment' (and 'scf/div_treatment') missing in {}. "
                "This checkpoint predates div_treatment dump; please regenerate "
                "the scGW checkpoint with the current code.",
                input_grp, input_file);
@@ -1167,7 +1173,8 @@ std::string read_div_treatment(mpi_context_t& mpi,
  * Unlike read_div_treatment this does NOT error when the dataset is absent:
  * checkpoints predating the stash fall back to "gygi", which is both hf_t's
  * default and what LR applied unconditionally before, so they keep their
- * previous behaviour instead of needing to be regenerated.
+ * previous behaviour instead of needing to be regenerated. A group without
+ * the stash (e.g. the embed group) takes the scf group's.
  */
 template<typename mpi_context_t>
 std::string read_hf_div_treatment(mpi_context_t& mpi,
@@ -1175,8 +1182,13 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
                                   const std::string& input_grp)
 {
   auto div = read_scf_string(mpi, input_file, input_grp, "hf_div_treatment");
+  if (!div and input_grp != "scf") {
+    div = read_scf_string(mpi, input_file, "scf", "hf_div_treatment");
+    if (div) app_log(2, "  '{}/hf_div_treatment' not found in {}; using \"{}\" from the scf group.",
+                     input_grp, input_file, *div);
+  }
   if (!div) {
-    app_log(2, "  '{}/hf_div_treatment' not found in {}; assuming \"gygi\" for the LR "
+    app_log(2, "  '{}/hf_div_treatment' (and 'scf/hf_div_treatment') not found in {}; assuming \"gygi\" for the LR "
                "exchange divergence. Regenerate the checkpoint if the ground state "
                "used hf_div_treatment = \"ignore_g0\".", input_grp, input_file);
     return "gygi";

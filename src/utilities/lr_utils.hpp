@@ -194,13 +194,8 @@ inline auto lr_W_tau_local_dist([[maybe_unused]] long nproc,
   std::array<long, 4> b_bsize = {1, 1, 1, 1};
   b_pgrid[1] = find_proc_grid_max_npools(nproc, nq, 0.2);
   long np_PQ = nproc / b_pgrid[1];
-  if (NP * NP >= np_PQ) {
-    b_pgrid[2] = find_proc_grid_min_diff(np_PQ, NP, NP);
-    b_pgrid[3] = np_PQ / b_pgrid[2];
-  } else {
-    check(np_PQ == 1,
-          "lr_W_tau_local_dist: PQ too small for proc count (NP*NQ < np_PQ)");
-  }
+  b_pgrid[2] = find_proc_grid_min_diff(np_PQ, NP, NP);
+  b_pgrid[3] = np_PQ / b_pgrid[2];
   b_bsize[2] = std::min({1024L, NP / std::max(b_pgrid[2], 1L),
                                 NP / std::max(b_pgrid[3], 1L)});
   b_bsize[2] = std::max(b_bsize[2], 1L);
