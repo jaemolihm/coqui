@@ -29,6 +29,7 @@
 #include "mean_field/mf_utils.hpp"
 #include "methods/MBPT_drivers.h"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
+#include "methods/tools/chkpt_utils.h"
 
 namespace bdft_tests {
 
@@ -88,6 +89,59 @@ namespace bdft_tests {
     // Asserts arithmetic, not accuracy.
     REQUIRE(mf::wmax_from_mf(*mf, 1.5) == Approx(1.5 * (span + halfw)));
     REQUIRE(mf::wmax_from_mf(*mf, 2.0) == Approx(2.0 * (span + halfw)));
+  }
+
+  // The "fixed_mu" mark of a checkpoint group (read by run_lr to refuse fix_density) is written on
+  // the group it is given, only when mu is given, and removed again without one.
+  TEST_CASE("dump_fixed_mu", "[methods][mbpt][chkpt]") {
+    auto& mpi_context = utils::make_unit_test_mpi_context();
+    auto& comm = mpi_context->comm;
+    std::string fn = "dump_fixed_mu_test.mbpt.h5";
+    if (comm.root()) {
+      h5::file file(fn, 'w');
+      h5::group grp(file);
+      grp.create_group("scf");
+    }
+    comm.barrier();
+
+    auto has = [&](std::string g) {
+      int r = 0;
+      if (comm.root()) {
+        h5::file file(fn, 'r');
+        h5::group grp(file);
+        r = grp.has_subgroup(g) and grp.open_group(g).has_dataset("fixed_mu");
+      }
+      comm.broadcast_n(&r, 1, 0);
+      return r == 1;
+    };
+
+    methods::chkpt::dump_fixed_mu(comm, fn, std::nullopt);
+    methods::chkpt::dump_fixed_mu(comm, fn, std::nullopt, "embed");
+    REQUIRE(not has("scf"));
+    REQUIRE(not has("embed"));
+
+    // "embed" does not exist yet: it is created
+    methods::chkpt::dump_fixed_mu(comm, fn, 0.123, "embed");
+    REQUIRE(has("embed"));
+    REQUIRE(not has("scf"));
+    if (comm.root()) {
+      h5::file file(fn, 'r');
+      double mu = 0.0;
+      h5::h5_read(h5::group(file).open_group("embed"), "fixed_mu", mu);
+      REQUIRE(mu == 0.123);
+    }
+
+    methods::chkpt::dump_fixed_mu(comm, fn, 0.5);
+    REQUIRE(has("scf"));
+    methods::chkpt::dump_fixed_mu(comm, fn, std::nullopt, "embed");
+    REQUIRE(not has("embed"));
+    REQUIRE(has("scf"));
+    methods::chkpt::dump_fixed_mu(comm, fn, std::nullopt);
+    REQUIRE(not has("scf"));
+
+    comm.barrier();
+    if (comm.root()) std::remove(fn.c_str());
+    comm.barrier();
   }
 
 } // bdft_tests
