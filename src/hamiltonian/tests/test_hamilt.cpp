@@ -752,7 +752,7 @@ TEST_CASE("aug_hks_set_fock", "[hamilt]") {
 
   // LR "mf_dft" seed: the MO energies of the stored matrix are the parent eigenvalues
   {
-    auto [sMO_skia, sE_ska] = methods::get_mf_MOs(*mpi, aug_mf, *psp);
+    auto [sMO_skia, sE_ska] = methods::get_mf_MOs(*mpi, aug_mf);
     double e_mo = 0.0;
     if (mpi->node_comm.root()) {
       auto E = sE_ska.local();

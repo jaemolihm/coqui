@@ -41,7 +41,6 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/ERI/mb_eri_context.h"
 #include "methods/ERI/eri_utils.hpp"
-#include "hamiltonian/pseudo/pseudopot.h"
 #include "numerics/iter_scf/iter_scf_utils.hpp"
 
 namespace bdft_tests {
@@ -58,10 +57,9 @@ namespace bdft_tests {
     std::string source_path = PROJECT_SOURCE_DIR;
     std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
     auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
-    hamilt::pseudopot psp(mf);
     double beta = 1000.0;
 
-    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf, psp);
+    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf);
 
     auto E_ski_ref = mf.eigval();
     ARRAY_EQUAL(sE_ski.local(), E_ski_ref, 1e-8);
@@ -76,10 +74,9 @@ namespace bdft_tests {
     std::string source_path = PROJECT_SOURCE_DIR;
     std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
     auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
-    hamilt::pseudopot psp(mf);
     double beta = 1000.0;
 
-    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf, psp);
+    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf);
 
     double mu_bisection = update_mu(0.0, mf, sE_ski, beta, 1e-9, "bisection");
     VALUE_EQUAL(mu_bisection, 0.175, 1e-9);
@@ -97,13 +94,12 @@ namespace bdft_tests {
     std::string source_path = PROJECT_SOURCE_DIR;
     std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
     auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
-    hamilt::pseudopot psp(mf);
 
     double beta = 1000;
     double wmax = 1.2;
     imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::ir_basis, "high");
 
-    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf, psp);
+    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf);
     double mu = 0.175;
     double Nelec = compute_Nelec(mu, mf, sE_ski, ft.beta());
     VALUE_EQUAL(Nelec, 8.0, 1e-8);

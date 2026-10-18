@@ -273,7 +273,7 @@ void hermitize_in_tau(Array_t &&A_ij, std::string name="") {
   }
 }
 
-auto get_mf_MOs(utils::mpi_context_t<mpi3::communicator> &context, mf::MF &mf, hamilt::pseudopot &psp)
+auto get_mf_MOs(utils::mpi_context_t<mpi3::communicator> &context, mf::MF &mf)
   -> std::tuple<sArray_t<Array_view_4D_t>, sArray_t<Array_view_3D_t> >;
 
 void update_MOs(sArray_t<Array_view_4D_t> &sMO_skij, sArray_t<Array_view_3D_t> &sE_ski,

@@ -602,9 +602,8 @@ namespace methods {
 
     if (weiss_f_iter==-1) {
       // QP approximation for the dynamic GW self-energy
-      auto psp = hamilt::make_pseudopot(*_MF);
       // a) Find MOs of the mean-field solution
-      std::tie(sMO_skia, sE_ska) = get_mf_MOs(*mpi, *_MF, *psp);
+      std::tie(sMO_skia, sE_ska) = get_mf_MOs(*mpi, *_MF);
 
       // b) compute qp energies; sbuff_tskij = Sigma_tskij, sbuff_skij = Vhf_skij
       if (sVhf_skij.node_comm()->root()) sVhf_skij.local() += dyson.H0();
