@@ -78,10 +78,10 @@ namespace solvers {
     auto nImpOrbs = B_qIPab.shape()[3];
     auto [nts_half, nqpts_ibz, NP_Pi, NQ_Pi] = dPi_tqPQ.global_shape();
     utils::check(NP_Pi == NP and NQ_Pi == NP and Pi_loc_tabcd.shape(0) == nts_half,
-                 "upfold_pi_local: shape mismatch (Pi: nt = {}, NP = {}, NQ = {}; B: NP = {}; Pi_loc: nt = {}).",
+                 "upfold_pi_local_impl: shape mismatch (Pi: nt = {}, NP = {}, NQ = {}; B: NP = {}; Pi_loc: nt = {}).",
                  nts_half, NP_Pi, NQ_Pi, NP, Pi_loc_tabcd.shape(0));
     utils::check(kpq_map == nullptr or (nqpts_ibz == nqpts and kpq_map->shape(0) == nqpts),
-                 "lr_upfold_pi_local: a q+Q map requires the full q mesh (nqpts_ibz = {}, nqpts = {}).",
+                 "upfold_pi_local_impl: a q+Q map requires the full q mesh (nqpts_ibz = {}, nqpts = {}).",
                  nqpts_ibz, nqpts);
 
     auto [nt_loc, nq_loc, NP_loc, NQ_loc] = dPi_tqPQ.local_shape();

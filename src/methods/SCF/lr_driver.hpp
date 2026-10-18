@@ -580,7 +580,7 @@ private:
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
   /// ΔDm(Δμ=0) of the frozen external ΔΣ (lr_params::DeltaSigma_ext_tskij) alone,
-  /// solved once per perturbation.
+  /// solved once per lr_setup.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_ext_Sigma;
   /// δW^loc(τ) of the last kernel evaluation of the current lr_solve_one; empty if it ran none.
   std::optional<nda::array<ComplexType, 5>> _DeltaWloc_tabcd;

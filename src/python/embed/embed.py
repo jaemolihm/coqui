@@ -178,6 +178,7 @@ def lr_downfold_coulomb(h_int, params, dW_xqPQ, q_vec, *, projector_info):
         h_int (ThcCoulomb): THC Coulomb handler (full q mesh).
         params (dict): optional "translate_home_cell"; optional "distributed" (bool, default False): project
             the blocks of a distributed copy of dW, as run_lr does, rather than dealing the replicated array out.
+            The result is the same up to round-off; the tests use it.
         dW_xqPQ (np.ndarray): (nx, nq, NP, NP) with any leading axis (tau or iw); required on the MPI root.
         q_vec: Q in crystal coordinates (3,).
         projector_info (dict): "proj_mat", "band_window", "kpts_w90" as for downfold_coulomb.

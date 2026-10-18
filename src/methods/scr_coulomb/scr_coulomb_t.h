@@ -308,7 +308,8 @@ namespace solvers {
         std::array<long, 4> pgrid, std::array<long, 4> bsize)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
-    // The local blocks of dPi_tqPQ (= or +=) the upfold from a prebuilt B_qIPab
+    // The local blocks of dPi_tqPQ (= or +=) the upfold from a prebuilt B_qIPab.
+    // kpq_map(q) is the index of q+Q; kpq_map = nullptr means kpq(q) = q (Q = 0), any q mesh.
     auto upfold_pi_local_impl(
         const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
         const nda::ArrayOfRank<5> auto &B_qIPab,

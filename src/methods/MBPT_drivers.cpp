@@ -1452,7 +1452,7 @@ auto recompute_W_and_eps_inv_head(
  * Helper: upfold a GW+EDMFT local polarizability into a frozen LR source at momentum transfer Q.
  * Shared by run_lr_calc and the lr_upfold_pi entry point.
  *
- * Boson: Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as the gw_edmft branch of
+ * Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as the gw_edmft branch of
  * scr_coulomb_t::eval_Pi_qdep. The frozen source ΔΠ^q(τ) = B^{q+Q} Π_loc(τ) B^{q†} is
  * scr_coulomb_t::lr_add_upfold_pi_local of this local array.
  */
@@ -1959,8 +1959,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   // GW+EDMFT local terms and the band-basis external ΔΣ:
   //   ΔΣ_ext^k(τ), at every Dyson RHS: the band-basis source, frozen;
-  //   ΔΠ_ext^q(τ) = B^{q+Q} (δΠ_imp - δΠ_dc)(τ) B^{q†}, added to ΔΠ before ΔW at every kernel evaluation
-  //   from the local array, so no aux-basis ΔΠ is stored;
+  //   ΔΠ_ext^q(τ) = B^{q+Q} (δΠ_imp - δΠ_dc)(τ) B^{q†}, added to ΔΠ before ΔW at every kernel evaluation,
+  //   upfolded block by block from the local array inside the kernel;
   //   δG^loc, δW^loc: the local projections of ΔG and ΔW_c.
   // The ground-state Π_imp, Π_dc live in mb_local, from which recompute_W builds the GW+EDMFT W.
   using sArray_5D_ext_t = math::shm::shared_array<Array_view_5D_t>;
@@ -2779,8 +2779,8 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
 
 /**
  * LR of the local screened interaction: ΔW_loc = (1/N_q) Σ_q B^{q+Q†} ΔW^q B^q (no head correction).
- * The key "distributed" (default false) projects the blocks of a distributed copy of ΔW, the way run_lr does,
- * instead of dealing the replicated array out over the ranks.
+ * The key "distributed" (default false) selects the block path of run_lr: the blocks of a distributed copy of ΔW
+ * are projected instead of dealing the replicated array out over the ranks. The result is the same up to round-off; the tests use it.
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> lr_downfold_coulomb(
