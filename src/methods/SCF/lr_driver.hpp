@@ -582,7 +582,7 @@ private:
   /// ΔDm(Δμ=0) of the frozen external ΔΣ (lr_params::DeltaSigma_ext_tskij) alone,
   /// solved once per perturbation.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_ext_Sigma;
-  /// δW^loc(τ) of the last kernel evaluation, overwritten at every call.
+  /// δW^loc(τ) of the last kernel evaluation of the current lr_solve_one; empty if it ran none.
   std::optional<nda::array<ComplexType, 5>> _DeltaWloc_tabcd;
 
   // --- Preconditioner buffers (preconditioned runs only): the gathered residual

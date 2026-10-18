@@ -2223,16 +2223,16 @@ namespace methods {
                                              bool replicated)
   -> nda::array<ComplexType, 5> {
     auto [nqpts, nImps, NP, nImpOrbs, nImpOrbs2] = B_qIPab.shape();
-    utils::check(nImps == 1, "embed_eri_t::lr_downfold_DeltaW_q: only a single impurity is supported (nImps = {}).", nImps);
+    utils::check(nImps == 1, "embed_eri_t::lr_downfold_DeltaW_block: only a single impurity is supported (nImps = {}).", nImps);
     utils::check(_MF->nqpts_ibz() == _MF->nqpts() and nqpts == _MF->nqpts() and kpq_map.shape(0) == nqpts,
-                 "embed_eri_t::lr_downfold_DeltaW_q: requires the full q mesh (nqpts_ibz = {}, nqpts = {}, B nq = {}, kpq_map: {}).",
+                 "embed_eri_t::lr_downfold_DeltaW_block: requires the full q mesh (nqpts_ibz = {}, nqpts = {}, B nq = {}, kpq_map: {}).",
                  _MF->nqpts_ibz(), _MF->nqpts(), nqpts, kpq_map.shape(0));
     auto [nx_loc, nq_loc, NP_loc, NQ_loc] = W_block.shape();
     auto [x_origin, q_origin, P_origin, Q_origin] = origin;
     utils::check(W_block.size() == 0 or
                  (x_origin + nx_loc <= nx and q_origin + nq_loc <= nqpts and
                   P_origin + NP_loc <= NP and Q_origin + NQ_loc <= NP),
-                 "embed_eri_t::lr_downfold_DeltaW_q: the block ({}, {}, {}, {}) at ({}, {}, {}, {}) exceeds (nx, nq, NP, NP) = ({}, {}, {}, {}).",
+                 "embed_eri_t::lr_downfold_DeltaW_block: the block ({}, {}, {}, {}) at ({}, {}, {}, {}) exceeds (nx, nq, NP, NP) = ({}, {}, {}, {}).",
                  nx_loc, nq_loc, NP_loc, NQ_loc, x_origin, q_origin, P_origin, Q_origin, nx, nqpts, NP, NP);
 
     nda::array<ComplexType, 5> W_xcdab(nx, nImpOrbs, nImpOrbs, nImpOrbs, nImpOrbs);
@@ -2264,6 +2264,10 @@ namespace methods {
   auto embed_eri_t::lr_downfold_DeltaW_q(nda::array_view<ComplexType, 4> W_xqPQ, const B_t &B_qIPab,
                                          const nda::array<long, 1> &kpq_map)
   -> nda::array<ComplexType, 5> {
+    utils::check(W_xqPQ.shape(1) == B_qIPab.shape(0) and W_xqPQ.shape(2) == B_qIPab.shape(2) and
+                 W_xqPQ.shape(3) == B_qIPab.shape(2),
+                 "embed_eri_t::lr_downfold_DeltaW_q: W shape (nq, NP, NQ) = ({}, {}, {}) differs from B (nq, NP) = ({}, {}).",
+                 W_xqPQ.shape(1), W_xqPQ.shape(2), W_xqPQ.shape(3), B_qIPab.shape(0), B_qIPab.shape(2));
     return lr_downfold_DeltaW_block(W_xqPQ, {0, 0, 0, 0}, W_xqPQ.shape(0), B_qIPab, kpq_map, true);
   }
 

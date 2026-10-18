@@ -21,25 +21,6 @@
 namespace methods {
 namespace solvers {
 
-  auto scr_coulomb_t::upfold_pi_local(
-      const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
-      THC_ERI auto &thc,
-      const projector_boson_t &proj,
-      std::array<long, 4> pgrid, std::array<long, 4> bsize)
-  -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> {
-    return upfold_pi_local_impl(Pi_loc_tabcd, thc, proj, pgrid, bsize, nullptr);
-  }
-
-  auto scr_coulomb_t::lr_upfold_pi_local(
-      const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
-      THC_ERI auto &thc,
-      const projector_boson_t &proj,
-      std::array<long, 4> pgrid, std::array<long, 4> bsize,
-      const nda::array<long, 1> &kpq_map)
-  -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> {
-    return upfold_pi_local_impl(Pi_loc_tabcd, thc, proj, pgrid, bsize, &kpq_map);
-  }
-
   auto scr_coulomb_t::lr_add_upfold_pi_local(
       const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
       const nda::ArrayOfRank<5> auto &B_qIPab,
@@ -49,12 +30,11 @@ namespace solvers {
     upfold_pi_local_impl(Pi_loc_tabcd, B_qIPab, dPi_tqPQ, &kpq_map, true);
   }
 
-  auto scr_coulomb_t::upfold_pi_local_impl(
+  auto scr_coulomb_t::upfold_pi_local(
       const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
       THC_ERI auto &thc,
       const projector_boson_t &proj,
-      std::array<long, 4> pgrid, std::array<long, 4> bsize,
-      const nda::array<long, 1> *kpq_map)
+      std::array<long, 4> pgrid, std::array<long, 4> bsize)
   -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> {
 
     using local_Array_4D_t = nda::array<ComplexType, 4>;
@@ -79,7 +59,7 @@ namespace solvers {
     auto NP = sB_qIPab.shape()[2];
     auto dPi_tqPQ = make_distributed_array<local_Array_4D_t>(mpi->comm, pgrid, {nts_half, mf->nqpts_ibz(), NP, NP}, bsize);
     mpi->comm.barrier();
-    upfold_pi_local_impl(Pi_loc_tabcd, sB_qIPab.local(), dPi_tqPQ, kpq_map, false);
+    upfold_pi_local_impl(Pi_loc_tabcd, sB_qIPab.local(), dPi_tqPQ, nullptr, false);
     return dPi_tqPQ;
   }
 

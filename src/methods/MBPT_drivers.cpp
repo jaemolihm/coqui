@@ -1449,26 +1449,9 @@ auto recompute_W_and_eps_inv_head(
 }
 
 /**
- * Helpers: upfold a GW+EDMFT local response into a frozen LR source at momentum transfer Q.
- * Shared by run_lr_calc and the lr_upfold_sigma / lr_upfold_pi entry points.
+ * Helper: upfold a GW+EDMFT local polarizability into a frozen LR source at momentum transfer Q.
+ * Shared by run_lr_calc and the lr_upfold_pi entry point.
  *
- * Fermion: ΔΣ^k(τ) = C^{k+Q†} Σ_loc(τ) C^k, Σ_loc(τ) = w_to_tau(Σ_loc(iω)), as embed_t::add_Sigma_dyn_correction.
- */
-template<typename sArray_5D_t>
-void lr_upfold_sigma_impl(projector_t const& proj, imag_axes_ft::IAFT const& ft,
-                          nda::array<ComplexType, 5> const& Sigma_loc_wsIab,
-                          nda::array<long, 1> const& kpq_map, sArray_5D_t& sDeltaSigma_tskij)
-{
-  utils::check(Sigma_loc_wsIab.shape(0) == ft.nw_f(),
-               "lr_upfold_sigma: Sigma_loc has {} frequencies, the IAFT nw_f = {}.",
-               Sigma_loc_wsIab.shape(0), ft.nw_f());
-  auto [nw, ns, nImps, na, nb] = Sigma_loc_wsIab.shape();
-  nda::array<ComplexType, 5> Sigma_loc_tsIab(ft.nt_f(), ns, nImps, na, nb);
-  ft.w_to_tau(Sigma_loc_wsIab, Sigma_loc_tsIab, imag_axes_ft::fermion);
-  proj.lr_upfold(sDeltaSigma_tskij, Sigma_loc_tsIab, kpq_map);
-}
-
-/**
  * Boson: Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as the gw_edmft branch of
  * scr_coulomb_t::eval_Pi_qdep. The frozen source ΔΠ^q(τ) = B^{q+Q} Π_loc(τ) B^{q†} is
  * scr_coulomb_t::lr_add_upfold_pi_local of this local array.
@@ -2854,7 +2837,14 @@ auto lr_upfold_sigma(std::shared_ptr<mf::MF> mf, ptree const& pt,
   utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
   auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  lr_upfold_sigma_impl(proj, ft, Sigma_loc_wsIab, kpq_map, sDeltaSigma_tskij);
+  // ΔΣ^k(τ) = C^{k+Q†} Σ_loc(τ) C^k, Σ_loc(τ) = w_to_tau(Σ_loc(iω)), as embed_t::add_Sigma_dyn_correction
+  utils::check(Sigma_loc_wsIab.shape(0) == ft.nw_f(),
+               "lr_upfold_sigma: Sigma_loc has {} frequencies, the IAFT nw_f = {}.",
+               Sigma_loc_wsIab.shape(0), ft.nw_f());
+  auto [nw, ns, nImps, na, nb] = Sigma_loc_wsIab.shape();
+  nda::array<ComplexType, 5> Sigma_loc_tsIab(ft.nt_f(), ns, nImps, na, nb);
+  ft.w_to_tau(Sigma_loc_wsIab, Sigma_loc_tsIab, imag_axes_ft::fermion);
+  proj.lr_upfold(sDeltaSigma_tskij, Sigma_loc_tsIab, kpq_map);
   return shm_to_root(*mpi, sDeltaSigma_tskij);
 }
 

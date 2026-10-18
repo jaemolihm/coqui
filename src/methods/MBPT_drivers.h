@@ -143,7 +143,7 @@ auto lr_upfold_sigma(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * @brief Upfold of a local polarizability response at momentum transfer Q
  *
  * ΔΠ^q_{PQ}(τ) = Σ B^{q+Q}_{P,ab} Π_loc_{ab,cd}(τ) conj(B^q_{Q,cd}), the (q+Q, q) block, with
- * Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as scr_coulomb_t::lr_upfold_pi_local. Full q mesh only, single impurity.
+ * Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as scr_coulomb_t::lr_add_upfold_pi_local. Full q mesh only, single impurity.
  * The projector algebra is tested at Q != 0 (synthetic adjoint and NumPy references); the physical Q != 0
  * end-to-end response is not yet validated.
  *

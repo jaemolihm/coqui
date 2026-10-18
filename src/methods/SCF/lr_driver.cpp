@@ -687,6 +687,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>* DeltaF_PQ_out) {
 
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
+  _DeltaWloc_tabcd.reset();
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
   auto& opt_ibc            = _opt_ibc;
