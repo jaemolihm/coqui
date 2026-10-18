@@ -174,4 +174,43 @@ namespace methods {
     return dPi_tab;
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Composed response on the projector layout
+  // -------------------------------------------------------------------------------------------
+
+  namespace {
+
+    carray_t<4> single_impurity(const carray_t<5> &A_tsIab, std::string_view name) {
+      utils::check(A_tsIab.extent(2) == 1, "{}: only a single impurity is supported (nImps = {}).",
+                   name, A_tsIab.extent(2));
+      carray_t<4> A_tsab = A_tsIab(nda::range::all, nda::range::all, 0, nda::range::all, nda::range::all);
+      return A_tsab;
+    }
+
+  } // anonymous
+
+  carray_t<5> lr_dc_pi(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab, const dc_cells_t &cells) {
+    auto dPi_tab = lr_eval_pi_rpa_cells(single_impurity(G_tsIab, "lr_dc_pi"), single_impurity(dG_tsIab, "lr_dc_pi"),
+                                        cells);
+    return density_density_to_product_basis(dPi_tab);
+  }
+
+  carray_t<5> lr_dc_sigma(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                          const carray_t<5> &W_tabcd, const carray_t<5> &dW_tabcd, const dc_cells_t &cells) {
+    auto dSigma_tsab = lr_eval_gw_dc_cells(single_impurity(G_tsIab, "lr_dc_sigma"),
+                                           single_impurity(dG_tsIab, "lr_dc_sigma"), W_tabcd, dW_tabcd, cells);
+    carray_t<5> dSigma_tsIab(dSigma_tsab.extent(0), dSigma_tsab.extent(1), 1, dSigma_tsab.extent(2),
+                             dSigma_tsab.extent(3));
+    dSigma_tsIab(nda::range::all, nda::range::all, 0, nda::range::all, nda::range::all) = dSigma_tsab;
+    return dSigma_tsIab;
+  }
+
+  std::tuple<carray_t<5>, carray_t<5>> lr_dc_response(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                                                      const carray_t<5> &W_tabcd, const carray_t<5> &dW_tabcd,
+                                                      const dc_cells_t &cells) {
+    auto W_pb = chemistry_to_product_basis(W_tabcd);
+    auto dW_pb = chemistry_to_product_basis(dW_tabcd);
+    return {lr_dc_sigma(G_tsIab, dG_tsIab, W_pb, dW_pb, cells), lr_dc_pi(G_tsIab, dG_tsIab, cells)};
+  }
+
 } // methods

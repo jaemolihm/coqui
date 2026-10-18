@@ -52,29 +52,45 @@ def _run_mbpt(solver_type, params, h_int,
         mbpt_cxx(*args)
 
 
-def _lr_local_args(projector_info, local_polarizabilities=None, local_polarizability_response=None):
+def _lr_local_args(projector_info, local_polarizabilities=None, local_polarizability_response=None, local_dc=None):
     """Projector arrays and local dicts of the GW+EDMFT LR interface, as passed to C++."""
     import numpy as np
     dicts = {"local_polarizabilities": local_polarizabilities,
-             "local_polarizability_response": local_polarizability_response}
+             "local_polarizability_response": local_polarizability_response,
+             "local_dc": local_dc}
     if projector_info is None:
         given = [k for k, v in dicts.items() if v is not None]
         if given:
             raise ValueError(f"{given} require projector_info.")
-        return [None, None, None, None, None]
+        return [None] * 7
     out = {}
-    for name, d in dicts.items():
+    for name in ("local_polarizabilities", "local_polarizability_response"):
+        d = dicts[name]
         if d is None:
             out[name] = None
             continue
-        missing = {"imp", "dc"} - d.keys()
+        # With local_dc the kernel owns the double counting: the response is the impurity part alone
+        keys = ("imp",) if (name == "local_polarizability_response" and local_dc is not None) else ("imp", "dc")
+        if set(d.keys()) != set(keys):
+            raise ValueError(f"{name} needs the keys {set(keys)}, got {set(d.keys())}"
+                             + (" (with local_dc the kernel owns the double counting: no 'dc' key)"
+                                if local_dc is not None and name == "local_polarizability_response" else "."))
+        out[name] = {k: np.asarray(d[k], dtype=np.complex128) for k in keys}
+    dc, cells = None, None
+    if local_dc is not None:
+        missing = {"cells", "Gloc_t", "Wloc_t"} - local_dc.keys()
         if missing:
-            raise ValueError(f"Missing keys in {name}: {missing}")
-        out[name] = {k: np.asarray(d[k], dtype=np.complex128) for k in ("imp", "dc")}
+            raise ValueError(f"Missing keys in local_dc: {missing}")
+        cells_in = local_dc["cells"]
+        missing = {"cell_offset", "cell_size", "orb_block"} - cells_in.keys()
+        if missing:
+            raise ValueError(f"Missing keys in local_dc['cells']: {missing}")
+        dc = {k: np.asarray(local_dc[k], dtype=np.complex128) for k in ("Gloc_t", "Wloc_t")}
+        cells = {k: np.asarray(cells_in[k], dtype=np.int64) for k in ("cell_offset", "cell_size", "orb_block")}
     return [np.asarray(projector_info["proj_mat"], dtype=np.complex128),
             np.asarray(projector_info["band_window"], dtype=np.int64),
             np.asarray(projector_info["kpts_w90"], dtype=np.float64),
-            out["local_polarizabilities"], out["local_polarizability_response"]]
+            out["local_polarizabilities"], out["local_polarizability_response"], dc, cells]
 
 
 def run_hf(params, h_int, h_int_exchange=None):
@@ -423,7 +439,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            *, projector_info=None,
            local_polarizabilities=None,
            local_polarizability_response=None,
-           DeltaSigma_ext_tskij=None):
+           DeltaSigma_ext_tskij=None,
+           local_dc=None):
     """
     Run unified linear response calculation.
 
@@ -599,6 +616,19 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         ``lr_upfold_sigma`` of the local δΣ_imp - δΣ_dc, plus any lattice term. Required
         on the MPI root; ignored elsewhere. It is a source only: never mixed, never
         written to DeltaSigma_tskij.
+    local_dc : dict or None, optional
+        The GW+EDMFT double counting inside the kernel, ``{"cells": ImpurityBlockMap.cell_args, "Gloc_t": G^loc,
+        "Wloc_t": W^loc}`` with the ground-state G^loc(τ) (nt, ns, 1, n, n) as the double counting reads it
+        and W^loc(τ) (nt_half, n, n, n, n) in the order ``downfold_coulomb`` returns. Requires projector_info and
+        gw_mode="full". Every kernel evaluation then adds the linearized double counting of the local terms: the
+        density-only δΠ_dc[δG^loc] enters ΔΠ before ΔW = W ΔΠ W, and δΣ_dc[δG^loc, δW^loc] is subtracted from
+        ΔΣ (upfolded), each through the ground state's iω round trip, so the solve is the response of the lattice
+        and double counting to the frozen impurity responses
+        (``DeltaSigma_ext_tskij``, ``local_polarizability_response``). ``DeltaSigma_tskij`` is then the iterate,
+        ΔΣ_GW - up(δΣ_dc), without the frozen source. ns is the number of spins of the lattice (nspin = 2 with the
+        ground state's spin_average = True is not supported). The response dict has the key "imp" only; a "dc"
+        key is an error (the kernel owns the double counting). The hessian, qp_static, split_sigma_terms
+        and gw_mode other than "full" are rejected.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -738,7 +768,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         DeltaSigma_ext_tskij = np.asarray(DeltaSigma_ext_tskij, dtype=np.complex128)
     else:
         DeltaSigma_ext_tskij = None
-    local_args = _lr_local_args(projector_info, local_polarizabilities, local_polarizability_response)
+    local_args = _lr_local_args(projector_info, local_polarizabilities, local_polarizability_response, local_dc)
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
@@ -1282,7 +1312,7 @@ def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ, *, projector_info=None,
         G_tskij = np.asarray(G_tskij, dtype=np.complex128)
     else:
         G_tskij = None
-    proj_mat, band_window, kpts_w90, local_pi, _ = _lr_local_args(projector_info, local_polarizabilities)
+    proj_mat, band_window, kpts_w90, local_pi = _lr_local_args(projector_info, local_polarizabilities)[:4]
     arr = lr_gw_W_cpp(json.dumps(params), h_int, q_pert, DeltaPi_tqPQ, G_tskij,
                       proj_mat, band_window, kpts_w90, local_pi)
     return arr if arr.size else None

@@ -108,13 +108,26 @@ struct lr_diis_hist_t {
  */
 struct lr_local_terms {
   using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
-  /// ΔΠ(τ) += the frozen local source B^{q+Q}(δΠ_imp - δΠ_dc)B^{q†} on ΔΠ's own blocks,
-  /// without communication. Empty: no source.
-  std::function<void(dArr_4D_t&)> add_pi_source;
+  using sArr_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
+  /// ΔΠ(τ) += the local source B^{q+Q}(δΠ_imp - δΠ_dc)B^{q†} on ΔΠ's own blocks, without
+  /// communication. The frozen δΠ_imp (empty: none) is a closure; δΠ_dc is built from the
+  /// local response of the call, dGloc_tsIab (nullptr: no double counting in the kernel). Empty:
+  /// neither a frozen source nor a double counting.
+  std::function<void(dArr_4D_t&, const nda::array<ComplexType, 5>* dGloc_tsIab)> add_pi_source;
+  /// The double counting is part of the kernel (the remaining members of this block). Empty: it is not.
+  /// δG^loc(τ) = (1/N_k) Σ_k C^{k+Q} ΔG^k C^{k†}, (nt, ns, 1, n, n), from ΔG(τ) on the local copy of
+  /// the node. Collective: every rank enters and gets the full result.
+  std::function<nda::array<ComplexType, 5>(nda::array_view<ComplexType, 5>)> downfold_G;
+  /// ΔΣ(τ) -= C^{k+Q†} δΣ_dc[δG^loc, δW^loc] C^k on the node-replicated ΔΣ; the double counting of the ground
+  /// state acts on the local Green's function and screened interaction only. Collective over the node.
+  std::function<void(sArr_5D_t&, const nda::array<ComplexType, 5>& dGloc_tsIab,
+                     const nda::array<ComplexType, 5>& dWloc_tabcd)> subtract_sigma_dc;
   /// δW^loc(τ) = (1/N_q) Σ_q B^{q+Q†} ΔW_c B^q, (nt_half, n, n, n, n), from the distributed
   /// ΔW_c(τ). Collective: every rank enters and gets the full result. Called after every
   /// ΔW solve of the kernel; ΔW_c is not modified.
   std::function<nda::array<ComplexType, 5>(dArr_4D_t&)> downfold_W;
+
+  bool has_dc() const { return static_cast<bool>(subtract_sigma_dc); }
 };
 
 /**

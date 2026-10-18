@@ -54,6 +54,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/embedding/embed_t.h"
 #include "methods/embedding/embed_eri_t.h"
+#include "methods/embedding/dc_response.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/iter_scf/iter_scf_utils.hpp"
 
@@ -1972,6 +1973,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   std::optional<embed_eri_t> opt_embed_eri;
   std::optional<solvers::scr_coulomb_t> opt_scr_local;
   std::optional<lr_local_terms> opt_local_terms;
+  std::optional<dc_cells_t> opt_dc_cells;
+  nda::array<ComplexType, 5> dc_W_pb;                   // W^loc of the double counting, product basis
   {
     int has_sigma_ext_raw = 0;
     if (mpi->comm.root()) has_sigma_ext_raw = DeltaSigma_ext_root.has_value() ? 1 : 0;
@@ -2022,14 +2025,70 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
             dW_tqPQ.local(), dW_tqPQ.origin(), dW_tqPQ.global_shape()[0],
             opt_sB_qIPab->local(), kpq_map_local, false);
       };
+      const bool has_dc = local->local_dc.has_value();
+      const long nt_half_b = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
       if (has_pi_resp) {
         auto const& r = local->local_polarizability_response.value();
-        nda::array<ComplexType, 5> dPi_loc = r.at("imp") - r.at("dc");
+        utils::check(r.count("imp") == 1 and (r.count("dc") == (has_dc ? 0 : 1)) and r.size() == (has_dc ? 1 : 2),
+                     "run_lr_calc: local_polarizability_response needs the keys {{imp, dc}}, and only {{imp}} with "
+                     "local_dc (the kernel owns the double counting).");
+        nda::array<ComplexType, 5> dPi_loc = has_dc ? r.at("imp") : r.at("imp") - r.at("dc");
         Pi_source_tabcd = lr_pi_local_tau(ft, proj_boson, dPi_loc);
+      }
+      if (has_dc) {
+        // The double counting is part of the kernel: δΠ_dc[δG^loc] enters ΔΠ before the ΔW solve and
+        // δΣ_dc[δG^loc, δW^loc] leaves ΔΣ after the Σ evaluation.
+        auto const& dc = local->local_dc.value();
+        const long n = proj_boson.nImpOrbs();
+        utils::check(dc.Gloc_tsIab.shape() == std::array<long, 5>{ft.nt_f(), mf->nspin(), 1, n, n},
+                     "run_lr_calc: local_dc Gloc_t must have the shape (nt, ns, 1, n, n) = ({}, {}, 1, {}, {}).",
+                     ft.nt_f(), mf->nspin(), n, n);
+        utils::check(dc.Wloc_tabcd.shape() == std::array<long, 5>{nt_half_b, n, n, n, n},
+                     "run_lr_calc: local_dc Wloc_t must have the shape (nt_half, n, n, n, n) = ({}, {}, {}, {}, {}).",
+                     nt_half_b, n, n, n, n);
+        opt_dc_cells.emplace(dc_cells_t{dc.cell_offset, dc.cell_size, dc.orb_block});
+        opt_dc_cells->check(n);
+        dc_W_pb = chemistry_to_product_basis(dc.Wloc_tabcd);
+        if (!has_pi_resp) {
+          Pi_source_tabcd = nda::array<ComplexType, 5>(nt_half_b, n, n, n, n);
+          Pi_source_tabcd() = ComplexType(0.0);
+        }
+
+        // ft.nt_f() == ft.nt_b() is asserted in lr_setup; the half-grid round trips mirror the ground state's
+        // iω step of Σ_dc and Π_dc.
+        opt_local_terms->downfold_G = [&](nda::array_view<ComplexType, 5> dG_tskij) {
+          return proj_boson.proj_fermi().lr_downfold_loc(dG_tskij, mpi->comm, kpq_map_local);
+        };
+        opt_local_terms->subtract_sigma_dc = [&](lr_local_terms::sArr_5D_t& dSigma_tskij,
+                                                 const nda::array<ComplexType, 5>& dGloc_tsIab,
+                                                 const nda::array<ComplexType, 5>& dWloc_tabcd) {
+          auto dSigma_dc_t = lr_dc_sigma(local->local_dc->Gloc_tsIab, dGloc_tsIab, dc_W_pb,
+                                         chemistry_to_product_basis(dWloc_tabcd), *opt_dc_cells);
+          nda::array<ComplexType, 5> dSigma_dc_w(ft.nw_f(), dSigma_dc_t.extent(1), 1, dSigma_dc_t.extent(3),
+                                                 dSigma_dc_t.extent(4));
+          ft.tau_to_w(dSigma_dc_t, dSigma_dc_w, imag_axes_ft::fermion);
+          ft.w_to_tau(dSigma_dc_w, dSigma_dc_t, imag_axes_ft::fermion);
+          proj_boson.proj_fermi().lr_upfold_accumulate(dSigma_tskij, dSigma_dc_t, kpq_map_local, ComplexType(-1.0));
+        };
+      }
+      if (has_pi_resp or has_dc) {
         opt_scr_local.emplace(&ft, "gw_edmft");
-        opt_local_terms->add_pi_source = [&](lr_local_terms::dArr_4D_t& dPi_tqPQ) {
-          opt_scr_local->lr_add_upfold_pi_local(Pi_source_tabcd, opt_sB_qIPab->local(), dPi_tqPQ,
-                                                kpq_map_local);
+        opt_local_terms->add_pi_source = [&](lr_local_terms::dArr_4D_t& dPi_tqPQ,
+                                             const nda::array<ComplexType, 5>* dGloc_tsIab) {
+          if (dGloc_tsIab == nullptr) {
+            opt_scr_local->lr_add_upfold_pi_local(Pi_source_tabcd, opt_sB_qIPab->local(), dPi_tqPQ,
+                                                  kpq_map_local);
+            return;
+          }
+          // Source = δΠ_imp - δΠ_dc, with δΠ_dc through the ground state's iν round trip
+          auto dPi_dc_t = lr_dc_pi(local->local_dc->Gloc_tsIab, *dGloc_tsIab, *opt_dc_cells);
+          const long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+          nda::array<ComplexType, 5> dPi_dc_w(nw_half, dPi_dc_t.extent(1), dPi_dc_t.extent(2), dPi_dc_t.extent(3),
+                                              dPi_dc_t.extent(4));
+          ft.tau_to_w_PHsym(dPi_dc_t, dPi_dc_w);
+          ft.w_to_tau_PHsym(dPi_dc_w, dPi_dc_t);
+          dPi_dc_t = Pi_source_tabcd - dPi_dc_t;
+          opt_scr_local->lr_add_upfold_pi_local(dPi_dc_t, opt_sB_qIPab->local(), dPi_tqPQ, kpq_map_local);
         };
       }
     }

@@ -233,6 +233,14 @@ namespace methods {
     template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<5> Oloc_t>
     void lr_upfold(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab,
                    const nda::array<long, 1> &kpq_map) const;
+    /**
+     * O_tskij += alpha * (the lr_upfold of Oloc_tsIab), written straight into the node-replicated window: the (t, s, k)
+     * blocks are dealt out over the node, so there is no zeroing, no buffer and no reduction. Collective over the
+     * node (window fences).
+     */
+    template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<5> Oloc_t>
+    void lr_upfold_accumulate(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab,
+                              const nda::array<long, 1> &kpq_map, ComplexType alpha) const;
     template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<6> Ac_t>
     void upfold(sArray_t<Array_base_t> &O_tskij, const Ac_t &O_tskIab) const;
 

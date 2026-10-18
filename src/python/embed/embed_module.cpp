@@ -187,6 +187,14 @@ namespace coqui_py {
     return methods::lr_eval_pi_rpa_cells(G_tsab, dG_tsab, methods::dc_cells_t{cell_offset, cell_size, orb_block});
   }
 
+  auto lr_dc_response(const carr_t<5> &G_tsIab, const carr_t<5> &dG_tsIab,
+                      const carr_t<5> &W_tabcd, const carr_t<5> &dW_tabcd,
+                      const nda::array<long, 1> &cell_offset, const nda::array<long, 1> &cell_size,
+                      const nda::array<long, 1> &orb_block) -> std::tuple<carr_t<5>, carr_t<5>> {
+    return methods::lr_dc_response(G_tsIab, dG_tsIab, W_tabcd, dW_tabcd,
+                                   methods::dc_cells_t{cell_offset, cell_size, orb_block});
+  }
+
 
   // public template instantiation
   template std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>

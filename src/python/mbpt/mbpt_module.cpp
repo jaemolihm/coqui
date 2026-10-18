@@ -42,14 +42,28 @@ namespace coqui_py {
       std::optional<nda::array<long, 3>> band_window,
       std::optional<nda::array<double, 2>> kpts_w90,
       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
-      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
-    bool any_local = local_polarizabilities or local_polarizability_response;
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_dc = std::nullopt,
+      std::optional<std::map<std::string, nda::array<long, 1>>> local_dc_cells = std::nullopt) {
+    bool any_local = local_polarizabilities or local_polarizability_response or local_dc or local_dc_cells;
     utils::check(!any_local or (proj_mat and band_window and kpts_w90),
                  "LR GW+EDMFT local terms require the projector (proj_mat, band_window, kpts_w90).");
     if (!proj_mat) return std::nullopt;
     utils::check(band_window and kpts_w90, "LR GW+EDMFT: proj_mat requires band_window and kpts_w90.");
+    utils::check(local_dc.has_value() == local_dc_cells.has_value(),
+                 "LR GW+EDMFT: local_dc and local_dc_cells go together.");
+    std::optional<methods::lr_dc_inputs> dc;
+    if (local_dc) {
+      for (auto k : {"Gloc_t", "Wloc_t"})
+        utils::check(local_dc->count(k) == 1, "LR GW+EDMFT: local_dc is missing the key {}.", k);
+      for (auto k : {"cell_offset", "cell_size", "orb_block"})
+        utils::check(local_dc_cells->count(k) == 1, "LR GW+EDMFT: local_dc_cells is missing the key {}.", k);
+      dc = methods::lr_dc_inputs{local_dc->at("Gloc_t"), local_dc->at("Wloc_t"), local_dc_cells->at("cell_offset"),
+                                 local_dc_cells->at("cell_size"), local_dc_cells->at("orb_block")};
+    }
     return methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90),
-                                    std::move(local_polarizabilities), std::move(local_polarizability_response)};
+                                    std::move(local_polarizabilities), std::move(local_polarizability_response),
+                                    std::move(dc)};
   }
 
   /**
@@ -76,6 +90,10 @@ namespace coqui_py {
    * @param kpts_w90          - [INPUT] Optional k-points of the projector (crystal)
    * @param local_polarizabilities        - [INPUT] Optional ground-state {"imp", "dc"} Π (GW+EDMFT W)
    * @param local_polarizability_response - [INPUT] Optional {"imp", "dc"} δΠ (iν), upfolded into ΔΠ_ext
+   * @param local_dc          - [INPUT] Optional {"Gloc_t", "Wloc_t"}: the ground-state G^loc, W^loc of the double
+   *                            counting in the kernel; the response then has no "dc" key
+   * @param local_dc_cells    - [INPUT] The cells of the correlated space of local_dc: "cell_offset", "cell_size",
+   *                            "orb_block"
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
@@ -91,11 +109,14 @@ namespace coqui_py {
       std::optional<nda::array<long, 3>> band_window,
       std::optional<nda::array<double, 2>> kpts_w90,
       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
-      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_dc,
+      std::optional<std::map<std::string, nda::array<long, 1>>> local_dc_cells) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     auto local = make_lr_local_inputs(std::move(proj_mat), std::move(band_window), std::move(kpts_w90),
-                                      std::move(local_polarizabilities), std::move(local_polarizability_response));
+                                      std::move(local_polarizabilities), std::move(local_polarizability_response),
+                                      std::move(local_dc), std::move(local_dc_cells));
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ,
                                 DeltaSigma_ext_tskij, local ? &(*local) : nullptr);

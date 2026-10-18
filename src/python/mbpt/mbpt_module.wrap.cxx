@@ -326,17 +326,20 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
        std::optional<nda::array<long, 3>> band_window,
        std::optional<nda::array<double, 2>> kpts_w90,
        std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
-       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_dc,
+       std::optional<std::map<std::string, nda::array<long, 1>>> local_dc_cells) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
                               DeltaX_left, DeltaX_right, DeltaV_qPQ, DeltaSigma_ext_tskij,
                               proj_mat, band_window, kpts_w90,
                               local_polarizabilities,
-                              local_polarizability_response);
+                              local_polarizability_response,
+                              local_dc, local_dc_cells);
     },
     "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ", "DeltaSigma_ext_tskij", "proj_mat",
     "band_window", "kpts_w90", "local_polarizabilities",
-    "local_polarizability_response")};
+    "local_polarizability_response", "local_dc", "local_dc_cells")};
 
 // lr_DeltaH0_from_thc_aux
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -771,6 +774,10 @@ local_polarizabilities : {par_11}
    - [INPUT] Optional ground-state {"imp", "dc"} Π (GW+EDMFT W)
 local_polarizability_response : {par_12}
    - [INPUT] Optional {"imp", "dc"} δΠ (iν), upfolded into ΔΠ_ext
+local_dc : {par_13}
+   - [INPUT] Optional {"Gloc_t", "Wloc_t"}: the ground-state G^loc, W^loc of the double counting in the kernel; the response then has no "dc" key
+local_dc_cells : {par_14}
+   - [INPUT] The cells of the correlated space of local_dc: "cell_offset", "cell_size", "orb_block"
 
 Returns
 -------
@@ -788,6 +795,8 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
      {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
      {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
+     {},
+     {},
      {},
      {}},
     {c2py::python_typename<

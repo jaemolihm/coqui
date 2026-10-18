@@ -22,6 +22,8 @@
 #define COQUI_DC_RESPONSE_HPP
 
 #include "configuration.hpp"
+#include <tuple>
+
 #include "nda/nda.hpp"
 
 /**
@@ -80,6 +82,29 @@ namespace methods {
   // Density-only dPi_dc(t) = P(dG, G) + P(G, dG) per cell, P of weiss.eval_pi_rpa(density_only=True); both factors
   // carry the same momentum transfer. (nt_half, nC, nC), zero outside the cells. Same half tau grid assumption.
   carray_t<3> lr_eval_pi_rpa_cells(const carray_t<4> &G_tsab, const carray_t<4> &dG_tsab, const dc_cells_t &cells);
+
+  // ---------------------------------------------------------------------------------------------
+  // Composed response on the projector layout (the kernel of run_lr and its Python binding)
+  // ---------------------------------------------------------------------------------------------
+
+  // The arrays of the projector layout carry the impurity axis, which is 1 (single impurity): G (nt, ns, 1, n, n),
+  // W (nt_half, n, n, n, n). ns is the number of spins of the lattice, passed to the per-cell kernels as it is: ns = 1
+  // uses the spin factor -2 in Pi, which equals the ground state's duplicated spin blocks with spin_average = True. A
+  // lattice with ns = 2 is evaluated per spin; ns = 2 with the ground state's spin_average = True is not supported.
+
+  // Density-only dPi_dc of lr_eval_pi_rpa_cells in the product basis, (nt_half, n, n, n, n):
+  // density_density_to_product_basis of the ground state's Pi_dc embedding.
+  carray_t<5> lr_dc_pi(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab, const dc_cells_t &cells);
+
+  // dSigma_dc of lr_eval_gw_dc_cells, (nt, ns, 1, n, n). W and dW are in the product basis.
+  carray_t<5> lr_dc_sigma(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                          const carray_t<5> &W_tabcd, const carray_t<5> &dW_tabcd, const dc_cells_t &cells);
+
+  // (dSigma_dc, dPi_dc) in tau, the ground state's {dc} arrays of dmft_embed / run_gw before their transforms to
+  // the Matsubara axis. W and dW are in the order lr_downfold_coulomb returns (chemistry).
+  std::tuple<carray_t<5>, carray_t<5>> lr_dc_response(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                                                      const carray_t<5> &W_tabcd, const carray_t<5> &dW_tabcd,
+                                                      const dc_cells_t &cells);
 
 } // methods
 

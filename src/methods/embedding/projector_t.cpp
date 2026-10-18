@@ -149,6 +149,45 @@ namespace methods {
     upfold_impl(O_tskij, Oloc_tsIab, &kpq_map);
   }
 
+  template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<5> Oloc_t>
+  void projector_t::lr_upfold_accumulate(sArray_t<Array_base_t> &O_tskij, const Oloc_t &Oloc_tsIab,
+                                         const nda::array<long, 1> &kpq_map, ComplexType alpha) const {
+    utils::check(_MF->nkpts_ibz() == _MF->nkpts() and kpq_map.shape(0) == _MF->nkpts(),
+                 "projector_t::lr_upfold_accumulate: a k+Q map requires the full BZ (nkpts_ibz = {}, nkpts = {}, kpq_map: {}).",
+                 _MF->nkpts_ibz(), _MF->nkpts(), kpq_map.shape(0));
+    utils::check(O_tskij.shape()[0] == Oloc_tsIab.shape(0) and O_tskij.shape()[1] == Oloc_tsIab.shape(1) and
+                 O_tskij.shape()[1] == _C_skIai.shape(0) and O_tskij.shape()[2] == _MF->nkpts_ibz() and
+                 Oloc_tsIab.shape(2) == _nImps and Oloc_tsIab.shape(3) == _nImpOrbs,
+                 "projector_t::lr_upfold_accumulate: shape mismatch (O: {}, {}, {}; Oloc: {}, {}, {}, {}).",
+                 O_tskij.shape()[0], O_tskij.shape()[1], O_tskij.shape()[2],
+                 Oloc_tsIab.shape(0), Oloc_tsIab.shape(1), Oloc_tsIab.shape(2), Oloc_tsIab.shape(3));
+
+    auto [nts, ns, nkpts, nbnd, nbnd_b] = O_tskij.shape();
+    nda::array<ComplexType, 2> buffer_ib(_nOrbs_W, _nImpOrbs);
+    nda::array<ComplexType, 2> block(_nOrbs_W, _nOrbs_W);
+    auto O_loc = O_tskij.local();
+    int rank = O_tskij.node_comm()->rank();
+    int size = O_tskij.node_comm()->size();
+
+    O_tskij.win().fence();
+    for (long imp = 0; imp < _nImps; ++imp) {
+      for (long tsk = rank; tsk < nts*ns*nkpts; tsk += size) {
+        long it = tsk / (ns*nkpts); // tsk = it * ns*nkpts + is * nkpts + ik
+        long is = (tsk / nkpts) % ns;
+        long ik = tsk % nkpts;
+
+        nda::blas::gemm(ComplexType(1.0),
+                        nda::dagger(_C_skIai(is,kpq_map(ik),imp,nda::ellipsis{})),
+                        Oloc_tsIab(it,is,imp,nda::ellipsis{}),
+                        ComplexType(0.0),
+                        buffer_ib);
+        nda::blas::gemm(buffer_ib, _C_skIai(is,ik,imp,nda::ellipsis{}), block);
+        O_loc(it,is,ik,_W_rng[imp],_W_rng[imp]) += alpha * block;
+      }
+    }
+    O_tskij.win().fence();
+  }
+
   template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<6> Ac_t>
   void projector_t::upfold(sArray_t<Array_base_t> &O_tskij, const Ac_t &O_tskIab) const {
 
@@ -537,6 +576,8 @@ namespace methods {
   template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 5>&) const;
   template void projector_t::lr_upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 5>&,
                                        const nda::array<long, 1>&) const;
+  template void projector_t::lr_upfold_accumulate(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 5>&,
+                                                   const nda::array<long, 1>&, ComplexType) const;
   template void projector_t::upfold(sArray_t<nda::array_view<ComplexType, 5>>&, const nda::array<ComplexType, 6>&) const;
 
   template nda::array<ComplexType, 6> projector_t::downfold_k_fbz(const sArray_t<nda::array_view<ComplexType, 5>>&) const;

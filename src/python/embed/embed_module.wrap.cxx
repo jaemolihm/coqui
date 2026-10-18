@@ -260,6 +260,19 @@ static auto const _c2py_fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "G_tsab", "dG_tsab", "cell_offset", "cell_size", "orb_block")};
 
+// lr_dc_response
+static auto const _c2py_fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<std::complex<double>, 5> &G_tsIab,
+       const nda::array<std::complex<double>, 5> &dG_tsIab,
+       const nda::array<std::complex<double>, 5> &W_tabcd,
+       const nda::array<std::complex<double>, 5> &dW_tabcd,
+       const nda::array<long, 1> &cell_offset,
+       const nda::array<long, 1> &cell_size,
+       const nda::array<long, 1> &orb_block) {
+      return coqui_py::lr_dc_response(G_tsIab, dG_tsIab, W_tabcd, dW_tabcd, cell_offset, cell_size, orb_block);
+    },
+    "G_tsIab", "dG_tsIab", "W_tabcd", "dW_tabcd", "cell_offset", "cell_size", "orb_block")};
+
 // lr_upfold_sigma
 static auto const _c2py_fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const coqui_py::Mf &mf, const std::string &params,
@@ -332,6 +345,7 @@ static const auto _c2py_doc_12 = _c2py_fun_12.doc(R"DOC()DOC");
 static const auto _c2py_doc_13 = _c2py_fun_13.doc(R"DOC()DOC");
 static const auto _c2py_doc_14 = _c2py_fun_14.doc(R"DOC()DOC");
 static const auto _c2py_doc_15 = _c2py_fun_15.doc(R"DOC()DOC");
+static const auto _c2py_doc_16 = _c2py_fun_16.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -369,6 +383,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_14.c_str()},
     {"lr_upfold_pi", (PyCFunction)c2py::pyfkw<_c2py_fun_15>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_15.c_str()},
+    {"lr_dc_response", (PyCFunction)c2py::pyfkw<_c2py_fun_16>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_16.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

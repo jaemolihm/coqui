@@ -279,13 +279,24 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * The response is the (q+Q, q) local response at the run's q_vec. The local self-energy response enters
  * through the band-basis DeltaSigma_ext_root (see lr_upfold_sigma).
  * The projector also switches on the local outputs DeltaGloc_tsIab and DeltaWloc_tabcd.
+ *   local_dc                      - the double counting inside the kernel (lr_dc_inputs); the response then has
+ *                                   no "dc" key (the kernel owns it)
  */
+struct lr_dc_inputs {
+  nda::array<ComplexType, 5> Gloc_tsIab;   ///< ground-state G^loc(τ) (nt, ns, 1, n, n), as the double counting reads it
+  nda::array<ComplexType, 5> Wloc_tabcd;   ///< ground-state W^loc(τ) (nt_half, n, n, n, n), chemistry order
+  nda::array<long, 1> cell_offset;         ///< cells of the correlated space (dc_cells_t)
+  nda::array<long, 1> cell_size;
+  nda::array<long, 1> orb_block;
+};
+
 struct lr_local_inputs {
   nda::array<ComplexType, 5> projector_ksIai;
   nda::array<long, 3> band_window;
   nda::array<RealType, 2> kpts_crys;
   std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities;
   std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response;
+  std::optional<lr_dc_inputs> local_dc;
 };
 
 /**

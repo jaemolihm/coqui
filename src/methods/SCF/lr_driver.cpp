@@ -175,6 +175,19 @@ void lr_driver::lr_setup(
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
 
+  // The double counting in the kernel needs δW^loc (so ΔW) and the unsplit ΔΣ of the plain kernel, and
+  // the Π_dc half grid is built from nt_f where the lattice ΔΠ uses nt_b.
+  if (p.local && p.local->has_dc()) {
+    utils::check(K.sigma_G_dW,
+                 "lr_driver::lr_setup: the double counting in the kernel requires gw_mode = full (it needs δW^loc).");
+    utils::check(!qp && !p.hessian() && !p.split_sigma_terms,
+                 "lr_driver::lr_setup: the double counting in the kernel is incompatible with qp_static mode, "
+                 "the hessian and split_sigma_terms.");
+    utils::check(_dyson.FT()->nt_f() == _dyson.FT()->nt_b(),
+                 "lr_driver::lr_setup: the double counting in the kernel requires nt_f == nt_b (got {}, {}).",
+                 _dyson.FT()->nt_f(), _dyson.FT()->nt_b());
+  }
+
   // Frozen external sources: ΔΠ_ext needs a channel that evaluates ΔW; neither is
   // carried by the qp static map or by the hessian's extra Dyson solve.
   const bool pi_source = p.local && p.local->add_pi_source;
@@ -493,8 +506,12 @@ void lr_driver::apply_kernel_gw(
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
       sG_tskij.local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
-  // + frozen local ΔΠ source, upfolded onto this rank's block
-  if (p.local && p.local->add_pi_source) p.local->add_pi_source(dDeltaPi_tqPQ);
+  // + local ΔΠ source, upfolded onto this rank's block: the frozen δΠ_imp and, with the double counting
+  // in the kernel, -δΠ_dc[δG^loc]
+  std::optional<nda::array<ComplexType, 5>> dGloc_tsIab;
+  if (p.local && p.local->has_dc()) dGloc_tsIab.emplace(p.local->downfold_G(sDeltaG_tskij.local()));
+  if (p.local && p.local->add_pi_source)
+    p.local->add_pi_source(dDeltaPi_tqPQ, dGloc_tsIab ? &(*dGloc_tsIab) : nullptr);
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_PI");
 
@@ -555,6 +572,8 @@ void lr_driver::apply_kernel_gw(
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
         &S_loc, p.eps_inv_head, &delta_eps_inv_head);
   }
+  // - up_Σ(δΣ_dc[δG^loc, δW^loc])
+  if (dGloc_tsIab) p.local->subtract_sigma_dc(sSigma_tskij_out, *dGloc_tsIab, *_DeltaWloc_tabcd);
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_SIGMA");
 }
