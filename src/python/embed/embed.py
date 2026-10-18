@@ -176,7 +176,8 @@ def lr_downfold_coulomb(h_int, params, dW_xqPQ, q_vec, *, projector_info):
 
     Args:
         h_int (ThcCoulomb): THC Coulomb handler (full q mesh).
-        params (dict): optional "translate_home_cell".
+        params (dict): optional "translate_home_cell"; optional "distributed" (bool, default False): project
+            the blocks of a distributed copy of dW, as run_lr does, rather than dealing the replicated array out.
         dW_xqPQ (np.ndarray): (nx, nq, NP, NP) with any leading axis (tau or iw); required on the MPI root.
         q_vec: Q in crystal coordinates (3,).
         projector_info (dict): "proj_mat", "band_window", "kpts_w90" as for downfold_coulomb.
@@ -188,6 +189,61 @@ def lr_downfold_coulomb(h_int, params, dW_xqPQ, q_vec, *, projector_info):
     return embed_cxx.lr_downfold_coulomb(
         h_int, json.dumps(params), projector_info["proj_mat"], projector_info["band_window"],
         projector_info["kpts_w90"], _root_input(dW_xqPQ, np.complex128), np.asarray(q_vec, dtype=np.float64)
+    )
+
+
+def lr_upfold_sigma(mf, params, Sigma_loc_w, q_vec, *, projector_info):
+    """
+    Upfold of a local self-energy response at momentum transfer Q:
+    dSigma^k(tau) = C^{k+Q,dagger} Sigma_loc(tau) C^k, the (k+Q, k) block, with
+    Sigma_loc(tau) = w_to_tau(Sigma_loc(iw)). No 1/N_k and no hermitization (as the
+    ground-state upfold in dmft_embed). The frozen source of run_lr is this map of
+    imp - dc, passed as DeltaSigma_ext_tskij.
+    The projector algebra is tested at Q != 0 (synthetic adjoint and NumPy references); the physical Q != 0
+    end-to-end response is not yet validated.
+
+    Args:
+        mf: Mean-field object (full BZ, no symmetry).
+        params (dict): "prefix" (checkpoint stem, for the IAFT), optional "translate_home_cell".
+        Sigma_loc_w (np.ndarray): (nw_f, ns, [nImps,] nImpOrbs, nImpOrbs) on every rank.
+        q_vec: Q in crystal coordinates (3,).
+        projector_info (dict): "proj_mat", "band_window", "kpts_w90".
+
+    Returns:
+        np.ndarray: (nt_f, ns, nk, nbnd, nbnd) on the MPI root, None on the other ranks.
+    """
+    Sigma_loc_w = np.asarray(Sigma_loc_w, dtype=np.complex128)
+    if Sigma_loc_w.ndim == 4:
+        Sigma_loc_w = Sigma_loc_w[:, :, None]
+    out = embed_cxx.lr_upfold_sigma(
+        mf, json.dumps(params), projector_info["proj_mat"], projector_info["band_window"],
+        projector_info["kpts_w90"], Sigma_loc_w, np.asarray(q_vec, dtype=np.float64)
+    )
+    return out if out.size else None
+
+
+def lr_upfold_pi(h_int, params, Pi_loc_w, q_vec, *, projector_info):
+    """
+    Upfold of a local polarizability response at momentum transfer Q:
+    dPi^q_{PQ}(tau) = sum B^{q+Q}_{P,ab} Pi_loc_{ab,cd}(tau) conj(B^q_{Q,cd}), the (q+Q, q) block, with
+    Pi_loc(tau) = w_to_tau_phsym(Pi_loc(iv)) on the half grids (as the gw_edmft W of run_gw). The frozen
+    source run_lr builds from local_polarizability_response is this map of imp - dc. Full q mesh, single impurity.
+    The projector algebra is tested at Q != 0 (synthetic adjoint and NumPy references); the physical Q != 0
+    end-to-end response is not yet validated.
+
+    Args:
+        h_int (ThcCoulomb): THC Coulomb handler (full q mesh).
+        params (dict): "prefix" (checkpoint stem, for the IAFT), optional "translate_home_cell".
+        Pi_loc_w (np.ndarray): (nw_half, a, b, c, d) in the product basis, like local_pi_w, on every rank.
+        q_vec: Q in crystal coordinates (3,).
+        projector_info (dict): "proj_mat", "band_window", "kpts_w90".
+
+    Returns:
+        np.ndarray: (nt_half, nq, NP, NP) on every rank.
+    """
+    return embed_cxx.lr_upfold_pi(
+        h_int, json.dumps(params), projector_info["proj_mat"], projector_info["band_window"],
+        projector_info["kpts_w90"], np.asarray(Pi_loc_w, dtype=np.complex128), np.asarray(q_vec, dtype=np.float64)
     )
 
 

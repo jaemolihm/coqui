@@ -52,6 +52,31 @@ def _run_mbpt(solver_type, params, h_int,
         mbpt_cxx(*args)
 
 
+def _lr_local_args(projector_info, local_polarizabilities=None, local_polarizability_response=None):
+    """Projector arrays and local dicts of the GW+EDMFT LR interface, as passed to C++."""
+    import numpy as np
+    dicts = {"local_polarizabilities": local_polarizabilities,
+             "local_polarizability_response": local_polarizability_response}
+    if projector_info is None:
+        given = [k for k, v in dicts.items() if v is not None]
+        if given:
+            raise ValueError(f"{given} require projector_info.")
+        return [None, None, None, None, None]
+    out = {}
+    for name, d in dicts.items():
+        if d is None:
+            out[name] = None
+            continue
+        missing = {"imp", "dc"} - d.keys()
+        if missing:
+            raise ValueError(f"Missing keys in {name}: {missing}")
+        out[name] = {k: np.asarray(d[k], dtype=np.complex128) for k in ("imp", "dc")}
+    return [np.asarray(projector_info["proj_mat"], dtype=np.complex128),
+            np.asarray(projector_info["band_window"], dtype=np.int64),
+            np.asarray(projector_info["kpts_w90"], dtype=np.float64),
+            out["local_polarizabilities"], out["local_polarizability_response"]]
+
+
 def run_hf(params, h_int, h_int_exchange=None):
     """
     Run a self-consistent Hartree-Fock (HF) calculation. 
@@ -394,7 +419,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            nbnd_save=None,
            method=None,
            precond_method="none",
-           hessian=False):
+           hessian=False,
+           *, projector_info=None,
+           local_polarizabilities=None,
+           local_polarizability_response=None,
+           DeltaSigma_ext_tskij=None):
     """
     Run unified linear response calculation.
 
@@ -537,6 +566,39 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
         Requires the bare-vertex path: rejected together with DeltaX/DeltaV
         (IBC) and with a qpGW static map.
+    projector_info : dict or None, optional
+        GW+EDMFT interface, as run_gw / dmft_embed: "proj_mat", "band_window",
+        "kpts_w90". Required by the two local dicts below. Given, it also switches on
+        the local outputs ``DeltaGloc_tsIab`` (nt, ns, 1, n, n), the (k+Q, k) local
+        projection (1/N_k) sum_k C^{k+Q} dG^k C^{k dagger} of the returned dG(tau), and,
+        with gw_mode="full", ``DeltaWloc_tabcd`` (nt_half, n, n, n, n), the local
+        projection of dW_c(tau) as lr_downfold_coulomb (chemistry order), taken from
+        the last kernel evaluation; the two agree to ``tol``. Both go into the mode
+        group of ``linear_response/``.
+    local_polarizabilities : dict or None, optional
+        Ground-state {"imp": Π_imp, "dc": Π_dc} on the half bosonic grid, product
+        basis (nw_half, a, b, c, d), as run_gw. W is then the GW+EDMFT W of the
+        checkpoint G (RPA bubble + upfolded Π_imp - Π_dc); requires recompute_W.
+    local_polarizability_response : dict or None, optional
+        {"imp": δΠ_imp, "dc": δΠ_dc}, the local polarizability responses in the
+        shape of local_polarizabilities. The frozen source
+        ΔΠ_ext^q(τ) = B^{q+Q}(δΠ_imp - δΠ_dc)(τ)B^{q†} is formed from this local array
+        and added to ΔΠ before ΔW = W ΔΠ W at every kernel evaluation; requires
+        gw_mode="full".
+
+        The local responses are the (q+Q, q) local responses at q_vec.
+        LR GW+EDMFT supports only a ground state run with corr_only = True (the
+        lattice gets the dynamic Σ_imp - Σ_dc only, so no local static response
+        enters the lattice) and set_sigma_infty_to_dc = False (the Weiss field uses
+        the impurity's own Σ_∞, see coqui.dmft.lr_weiss.lr_compute_weiss_fields_w).
+        Both dicts are given on every rank; with the frozen sources below they are
+        rejected with a stack of perturbations.
+    DeltaSigma_ext_tskij : np.ndarray or None, optional
+        The frozen self-energy source: ΔΣ(τ) in the band basis, (nt, ns, nk, nb, nb), the
+        (k+Q, k) blocks, added to the ΔΣ of every Dyson RHS. GW+EDMFT: the upfold
+        ``lr_upfold_sigma`` of the local δΣ_imp - δΣ_dc, plus any lattice term. Required
+        on the MPI root; ignored elsewhere. It is a source only: never mixed, never
+        written to DeltaSigma_tskij.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -672,8 +734,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
 
+    if MPI.COMM_WORLD.Get_rank() == 0 and DeltaSigma_ext_tskij is not None:
+        DeltaSigma_ext_tskij = np.asarray(DeltaSigma_ext_tskij, dtype=np.complex128)
+    else:
+        DeltaSigma_ext_tskij = None
+    local_args = _lr_local_args(projector_info, local_polarizabilities, local_polarizability_response)
+
     niter, delta_mu = run_lr_cpp(
-        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ)
+        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
+        DeltaSigma_ext_tskij, *local_args)
     if squeeze:
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu
@@ -1161,12 +1230,15 @@ def gw_evaluate_sigma(params, h_int, G_tskij, div_corr=True):
     arr = gw_evaluate_sigma_cpp(json.dumps(params), h_int, G_tskij, bool(div_corr))
     return arr if arr.size else None
 
-def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
+def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ, *, projector_info=None,
+                local_polarizabilities=None, G_tskij=None):
     """
     Compute LR screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c).
 
     Reads W_c from thc_screened_interaction.h5 and IAFT from checkpoint,
     then calls lr_scr_coulomb_t::solve_lr_dyson_W to compute ΔW_c(τ).
+    With local_polarizabilities, W_c is instead the GW+EDMFT W of G_tskij
+    (RPA bubble + upfolded Π_imp - Π_dc), built as run_lr's recompute_W.
 
     Parameters
     ----------
@@ -1180,6 +1252,14 @@ def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
     DeltaPi_tqPQ : np.ndarray or None
         LR polarization, shape (nt_half, nkpts, NP, NP). Required on the MPI
         global root; ignored on non-root ranks.
+    projector_info : dict or None, optional
+        "proj_mat", "band_window", "kpts_w90", as run_gw. Required by
+        local_polarizabilities.
+    local_polarizabilities : dict or None, optional
+        Ground-state {"imp": Π_imp, "dc": Π_dc} (nw_half, a, b, c, d), as run_gw.
+    G_tskij : np.ndarray or None, optional
+        G(τ) (nt, ns, nk, nb, nb) of the GW+EDMFT W; required on the MPI root with
+        local_polarizabilities.
 
     Returns
     -------
@@ -1198,7 +1278,13 @@ def run_lr_gw_W(params, h_int, q_pert, DeltaPi_tqPQ):
     else:
         DeltaPi_tqPQ = None
 
-    arr = lr_gw_W_cpp(json.dumps(params), h_int, q_pert, DeltaPi_tqPQ)
+    if MPI.COMM_WORLD.Get_rank() == 0 and G_tskij is not None:
+        G_tskij = np.asarray(G_tskij, dtype=np.complex128)
+    else:
+        G_tskij = None
+    proj_mat, band_window, kpts_w90, local_pi, _ = _lr_local_args(projector_info, local_polarizabilities)
+    arr = lr_gw_W_cpp(json.dumps(params), h_int, q_pert, DeltaPi_tqPQ, G_tskij,
+                      proj_mat, band_window, kpts_w90, local_pi)
     return arr if arr.size else None
 
 def gw_evaluate_W_from_Pi(params, h_int, Pi_tqPQ):

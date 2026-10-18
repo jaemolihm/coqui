@@ -222,6 +222,34 @@ namespace solvers {
     auto eval_Pi_qdep(MBState &mb_state, THC_ERI auto &thc)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
+    /**
+     * Upfold a local polarizability response to the THC auxiliary basis:
+     *   Pi[t,q,P,Q] = sum_{ab,cd} B^{q+Q}_{P,ab} Pi_loc[t,ab,cd] conj(B^q_{Q,cd}),
+     * the (q+Q, q) block with kpq_map(q) = q+Q (full q mesh only).
+     * Pi_loc_tabcd: (nt_half, a, b, c, d) in the product basis; returns Pi distributed as
+     * (nt_half, nqpts, NP, NP) on pgrid with block sizes bsize.
+     */
+    auto lr_upfold_pi_local(
+        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
+        THC_ERI auto &thc,
+        const projector_boson_t &proj,
+        std::array<long, 4> pgrid, std::array<long, 4> bsize,
+        const nda::array<long, 1> &kpq_map)
+    -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+
+    /**
+     * Accumulate the upfold of a local polarizability response onto a distributed Π:
+     *   Pi[t,q,P,Q] += sum_{ab,cd} B^{q+Q}_{P,ab} Pi_loc[t,ab,cd] conj(B^q_{Q,cd})
+     * on the local block of dPi_tqPQ (any grid), from a prebuilt bosonic projector B_qIPab (nq, 1, NP, a, b).
+     * No communication. Full q mesh only.
+     */
+    auto lr_add_upfold_pi_local(
+        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
+        const nda::ArrayOfRank<5> auto &B_qIPab,
+        memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> &dPi_tqPQ,
+        const nda::array<long, 1> &kpq_map)
+    -> void;
+
     // TODO function to return Pi(w) directly
 
     /**
@@ -294,6 +322,24 @@ namespace solvers {
         const projector_boson_t &proj,
         std::array<long, 4> pgrid, std::array<long, 4> bsize)
     -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+
+    // kpq_map = nullptr means kpq(q) = q
+    auto upfold_pi_local_impl(
+        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
+        THC_ERI auto &thc,
+        const projector_boson_t &proj,
+        std::array<long, 4> pgrid, std::array<long, 4> bsize,
+        const nda::array<long, 1> *kpq_map)
+    -> memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+
+    // The local blocks of dPi_tqPQ (= or +=) the upfold from a prebuilt B_qIPab
+    auto upfold_pi_local_impl(
+        const nda::MemoryArrayOfRank<5> auto &Pi_loc_tabcd,
+        const nda::ArrayOfRank<5> auto &B_qIPab,
+        memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator> &dPi_tqPQ,
+        const nda::array<long, 1> *kpq_map,
+        bool accumulate)
+    -> void;
 
   private:
     const imag_axes_ft::IAFT* _ft = nullptr;

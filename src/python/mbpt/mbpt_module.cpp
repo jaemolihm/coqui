@@ -34,6 +34,25 @@
 namespace coqui_py {
 
   /**
+   * GW+EDMFT local terms of an LR call (methods::lr_local_inputs): engaged when the
+   * projector is given; the dicts are optional on their own.
+   */
+  inline std::optional<methods::lr_local_inputs> make_lr_local_inputs(
+      std::optional<nda::array<ComplexType, 5>> proj_mat,
+      std::optional<nda::array<long, 3>> band_window,
+      std::optional<nda::array<double, 2>> kpts_w90,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
+    bool any_local = local_polarizabilities or local_polarizability_response;
+    utils::check(!any_local or (proj_mat and band_window and kpts_w90),
+                 "LR GW+EDMFT local terms require the projector (proj_mat, band_window, kpts_w90).");
+    if (!proj_mat) return std::nullopt;
+    utils::check(band_window and kpts_w90, "LR GW+EDMFT: proj_mat requires band_window and kpts_w90.");
+    return methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90),
+                                    std::move(local_polarizabilities), std::move(local_polarizability_response)};
+  }
+
+  /**
    * @brief Unified linear response calculation
    *
    * Reads the unperturbed state from the checkpoint, runs the LR SCF loop
@@ -51,6 +70,12 @@ namespace coqui_py {
    * @param DeltaX_left       - [INPUT] Optional δ^q X collocation perturbation (root only)
    * @param DeltaX_right      - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
    * @param DeltaV_qPQ        - [INPUT] Optional THC Coulomb perturbation δV (root only)
+   * @param DeltaSigma_ext_tskij - [INPUT] Optional frozen external ΔΣ(τ) in the band basis (root only)
+   * @param proj_mat          - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W), GW+EDMFT
+   * @param band_window       - [INPUT] Optional band window of the projector
+   * @param kpts_w90          - [INPUT] Optional k-points of the projector (crystal)
+   * @param local_polarizabilities        - [INPUT] Optional ground-state {"imp", "dc"} Π (GW+EDMFT W)
+   * @param local_polarizability_response - [INPUT] Optional {"imp", "dc"} δΠ (iν), upfolded into ΔΠ_ext
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
@@ -60,11 +85,20 @@ namespace coqui_py {
       std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
       std::optional<nda::array<ComplexType, 4>> DeltaX_right,
-      std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
+      std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ,
+      std::optional<nda::array<ComplexType, 5>> DeltaSigma_ext_tskij,
+      std::optional<nda::array<ComplexType, 5>> proj_mat,
+      std::optional<nda::array<long, 3>> band_window,
+      std::optional<nda::array<double, 2>> kpts_w90,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizability_response) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
+    auto local = make_lr_local_inputs(std::move(proj_mat), std::move(band_window), std::move(kpts_w90),
+                                      std::move(local_polarizabilities), std::move(local_polarizability_response));
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
-                                DeltaX_left, DeltaX_right, DeltaV_qPQ);
+                                DeltaX_left, DeltaX_right, DeltaV_qPQ,
+                                DeltaSigma_ext_tskij, local ? &(*local) : nullptr);
   }
 
 
@@ -395,16 +429,28 @@ namespace coqui_py {
    * @param h_int          - [INPUT] THC ERI handler
    * @param q_pert         - [INPUT] LR perturbation wavevector (3,)
    * @param DeltaPi_tqPQ   - [INPUT] LR polarization (nt_half, nkpts, NP, NP)
+   * @param G_tskij        - [INPUT] Optional G(τ) of the GW+EDMFT W (root only)
+   * @param proj_mat, band_window, kpts_w90 - [INPUT] Optional projector (GW+EDMFT)
+   * @param local_polarizabilities - [INPUT] Optional ground-state {"imp", "dc"} Π: W_c is then the
+   *                         GW+EDMFT W of G_tskij instead of the W file
    * @return               - [OUTPUT] ΔW_c (nt_half, nkpts, NP, NP)
    */
   nda::array<ComplexType, 4> lr_gw_W(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_pert,
-      std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ) {
+      std::optional<nda::array<ComplexType, 4>> DeltaPi_tqPQ,
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      std::optional<nda::array<ComplexType, 5>> proj_mat,
+      std::optional<nda::array<long, 3>> band_window,
+      std::optional<nda::array<double, 2>> kpts_w90,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::lr_gw_W_calc(mb_eri, parser.get_root(), q_pert, DeltaPi_tqPQ);
+    auto local = make_lr_local_inputs(std::move(proj_mat), std::move(band_window), std::move(kpts_w90),
+                                      std::move(local_polarizabilities), std::nullopt);
+    return methods::lr_gw_W_calc(mb_eri, parser.get_root(), q_pert, DeltaPi_tqPQ,
+                                 G_tskij, local ? &(*local) : nullptr);
   }
 
 

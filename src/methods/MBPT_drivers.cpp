@@ -1364,8 +1364,9 @@ auto lr_load_W_omega(
  * This reuses the exact scGW pipeline (scr_coulomb_t::eval_Pi_qdep +
  * dyson_W_from_Pi_tau + div_utils::eps_inv_head_t), so the recomputed W_c is,
  * by construction, consistent with the currently-loaded THC. RPA screening
- * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
- * the no-symmetry requirement below + the RPA screen_type.
+ * (standard GW), or GW+EDMFT screening when mb_local is given: its projector
+ * and local polarizabilities Π_imp, Π_dc enter through the gw_edmft branch of
+ * scr_coulomb_t::eval_Pi_qdep, as in run_gw. cRPA is not supported.
  *
  * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
  * wants (utils::lr_W_tau_local_dist) — the one layout lr_driver accepts.
@@ -1391,7 +1392,8 @@ auto recompute_W_and_eps_inv_head(
     THC_t& thc,
     imag_axes_ft::IAFT const& ft,
     sArray_5D_t& sG_tskij,
-    const std::string& div_treatment)
+    const std::string& div_treatment,
+    MBState* mb_local = nullptr)
 {
   auto mf = thc.MF();
   long nkpts = mf->nkpts();
@@ -1402,14 +1404,29 @@ auto recompute_W_and_eps_inv_head(
                "nqpts={}, nqpts_ibz={}, nkpts={}",
                mf->nqpts(), mf->nqpts_ibz(), nkpts);
 
-  // Standard GW: W is RPA-screened. cRPA / edmft are not supported here.
-  solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
+  // W is RPA-screened, or GW+EDMFT-screened with the local polarizabilities of mb_local.
+  solvers::scr_coulomb_t scr(&ft, (mb_local == nullptr) ? "rpa" : "gw_edmft", div_treatment);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
   auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
       mpi.comm.size(), nw_half, nkpts, thc.Np());
 
-  auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
+  auto dPi_tqPQ = [&]() {
+    if (mb_local == nullptr) {
+      // RPA
+      return scr.eval_Pi_qdep(sG_tskij.local(), thc);
+    } else {
+      // GW+EDMFT: Π_RPA[G] + upfold(Π_imp - Π_dc). G is lent to mb_local for the call and moved back.
+      utils::check(mb_local->sPi_imp_wabcd.has_value() and mb_local->sPi_dc_wabcd.has_value(),
+                   "recompute_W_and_eps_inv_head: GW+EDMFT screening requires the local "
+                   "polarizabilities.");
+      mb_local->sG_tskij.emplace(std::move(sG_tskij));
+      auto dPi = scr.eval_Pi_qdep(*mb_local, thc);
+      sG_tskij = std::move(mb_local->sG_tskij.value());
+      mb_local->sG_tskij.reset();
+      return dPi;
+    }
+  }();
   mpi.comm.barrier();
   auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
   mpi.comm.barrier();
@@ -1432,6 +1449,77 @@ auto recompute_W_and_eps_inv_head(
 }
 
 /**
+ * Helpers: upfold a GW+EDMFT local response into a frozen LR source at momentum transfer Q.
+ * Shared by run_lr_calc and the lr_upfold_sigma / lr_upfold_pi entry points.
+ *
+ * Fermion: ΔΣ^k(τ) = C^{k+Q†} Σ_loc(τ) C^k, Σ_loc(τ) = w_to_tau(Σ_loc(iω)), as embed_t::add_Sigma_dyn_correction.
+ */
+template<typename sArray_5D_t>
+void lr_upfold_sigma_impl(projector_t const& proj, imag_axes_ft::IAFT const& ft,
+                          nda::array<ComplexType, 5> const& Sigma_loc_wsIab,
+                          nda::array<long, 1> const& kpq_map, sArray_5D_t& sDeltaSigma_tskij)
+{
+  utils::check(Sigma_loc_wsIab.shape(0) == ft.nw_f(),
+               "lr_upfold_sigma: Sigma_loc has {} frequencies, the IAFT nw_f = {}.",
+               Sigma_loc_wsIab.shape(0), ft.nw_f());
+  auto [nw, ns, nImps, na, nb] = Sigma_loc_wsIab.shape();
+  nda::array<ComplexType, 5> Sigma_loc_tsIab(ft.nt_f(), ns, nImps, na, nb);
+  ft.w_to_tau(Sigma_loc_wsIab, Sigma_loc_tsIab, imag_axes_ft::fermion);
+  proj.lr_upfold(sDeltaSigma_tskij, Sigma_loc_tsIab, kpq_map);
+}
+
+/**
+ * Boson: Π_loc(τ) = w_to_tau_PHsym(Π_loc(iν)) on the half grids, as the gw_edmft branch of
+ * scr_coulomb_t::eval_Pi_qdep. The frozen source ΔΠ^q(τ) = B^{q+Q} Π_loc(τ) B^{q†} is
+ * scr_coulomb_t::lr_add_upfold_pi_local of this local array.
+ */
+nda::array<ComplexType, 5> lr_pi_local_tau(imag_axes_ft::IAFT const& ft, projector_boson_t const& proj,
+                                           nda::array<ComplexType, 5> const& Pi_loc_wabcd)
+{
+  utils::check(proj.nImps() == 1, "lr_upfold_pi: only a single impurity is supported (nImps = {}).", proj.nImps());
+  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+  utils::check(Pi_loc_wabcd.shape(0) == nw_half,
+               "lr_upfold_pi: Pi_loc has {} frequencies, the IAFT half bosonic grid has {}.",
+               Pi_loc_wabcd.shape(0), nw_half);
+  auto [nw, na, nb, nc, nd] = Pi_loc_wabcd.shape();
+  nda::array<ComplexType, 5> Pi_loc_tabcd(nt_half, na, nb, nc, nd);
+  ft.w_to_tau_PHsym(Pi_loc_wabcd, Pi_loc_tabcd);
+  return Pi_loc_tabcd;
+}
+
+/**
+ * The upfold of a local polarizability response, gathered into the node-replicated sDeltaPi_tqPQ.
+ * It is formed on the distribution of ΔW_c(τ) (utils::lr_W_q_local_dist), which is the one the
+ * kernel of run_lr accumulates it on.
+ */
+template<typename THC_t, typename sArray_4D_t>
+void lr_upfold_pi_impl(THC_t& thc, imag_axes_ft::IAFT const& ft, projector_boson_t const& proj,
+                       nda::array<ComplexType, 5> const& Pi_loc_wabcd,
+                       nda::array<long, 1> const& kpq_map, sArray_4D_t& sDeltaPi_tqPQ)
+{
+  auto Pi_loc_tabcd = lr_pi_local_tau(ft, proj, Pi_loc_wabcd);
+  long nt_half = Pi_loc_tabcd.shape(0);
+
+  auto [nt_s, nq_s, NP_s, NQ_s] = sDeltaPi_tqPQ.shape();
+  utils::check(nt_s == nt_half and nq_s == thc.MF()->nkpts() and NP_s == thc.Np() and NQ_s == thc.Np(),
+               "lr_upfold_pi: output shape ({}, {}, {}, {}) != (nt_half, nkpts, Np, Np) = ({}, {}, {}, {}).",
+               nt_s, nq_s, NP_s, NQ_s, nt_half, thc.MF()->nkpts(), thc.Np(), thc.Np());
+  utils::check(thc.MF()->nqpts_ibz() == thc.MF()->nqpts(),
+               "lr_upfold_pi: requires the full q mesh (nqpts_ibz = {}, nqpts = {}).",
+               thc.MF()->nqpts_ibz(), thc.MF()->nqpts());
+  auto sB_qIPab = proj.calc_bosonic_projector(thc);
+  auto [pgrid, bsize] = utils::lr_W_q_local_dist(thc.mpi()->comm.size(), nt_half, thc.Np());
+  auto dPi_tqPQ = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+      thc.mpi()->comm, pgrid, {nt_half, thc.MF()->nkpts(), thc.Np(), thc.Np()}, bsize);
+  dPi_tqPQ.local() = ComplexType(0.0);
+  solvers::scr_coulomb_t scr(&ft, "gw_edmft");
+  scr.lr_add_upfold_pi_local(Pi_loc_tabcd, sB_qIPab.local(), dPi_tqPQ, kpq_map);
+  math::nda::gather_to_shm(dPi_tqPQ, sDeltaPi_tqPQ);
+  thc.mpi()->comm.barrier();
+}
+
+/**
  * Unified linear response calculation.
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
@@ -1448,6 +1536,14 @@ auto recompute_W_and_eps_inv_head(
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
+ * @param DeltaSigma_ext_root - [INPUT] Frozen external ΔΣ(τ) (nt, ns, nk, nb, nb) in the band basis,
+ *                             root only; added to every Dyson RHS (lr_params::DeltaSigma_ext_tskij)
+ * @param local            - [INPUT] GW+EDMFT local terms (lr_local_inputs): the projector, the
+ *                             ground-state Π_imp/Π_dc of the GW+EDMFT W (recompute_W), and the local
+ *                             polarizability response, which the kernel upfolds onto ΔΠ at every
+ *                             evaluation. With the projector, "linear_response/" also gets the local
+ *                             responses DeltaGloc_tsIab (of the returned ΔG) and, for gw_mode = "full",
+ *                             DeltaWloc_tabcd (of the last kernel evaluation).
  *
  * Kernel and SCF keys read from `pt`:
  *   include_hartree        ΔJ in the SCF loop (default true)
@@ -1475,7 +1571,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root,
-                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root) {
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root,
+                                     std::optional<nda::array<ComplexType, 5>> const& DeltaSigma_ext_root,
+                                     const lr_local_inputs* local) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1876,6 +1974,84 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
 
+  // GW+EDMFT local terms and the band-basis external ΔΣ:
+  //   ΔΣ_ext^k(τ), at every Dyson RHS: the band-basis source, frozen;
+  //   ΔΠ_ext^q(τ) = B^{q+Q} (δΠ_imp - δΠ_dc)(τ) B^{q†}, added to ΔΠ before ΔW at every kernel evaluation
+  //   from the local array, so no aux-basis ΔΠ is stored;
+  //   δG^loc, δW^loc: the local projections of ΔG and ΔW_c.
+  // The ground-state Π_imp, Π_dc live in mb_local, from which recompute_W builds the GW+EDMFT W.
+  using sArray_5D_ext_t = math::shm::shared_array<Array_view_5D_t>;
+  std::optional<MBState> opt_mb_local;
+  std::optional<sArray_5D_ext_t> opt_sDeltaSigma_ext;
+  std::optional<sArray_5D_ext_t> opt_sB_qIPab;          // B^q, built once
+  nda::array<long, 1> kpq_map_local;
+  nda::array<ComplexType, 5> Pi_source_tabcd;           // δΠ_imp - δΠ_dc in τ, half grid
+  std::optional<embed_eri_t> opt_embed_eri;
+  std::optional<solvers::scr_coulomb_t> opt_scr_local;
+  std::optional<lr_local_terms> opt_local_terms;
+  {
+    int has_sigma_ext_raw = 0;
+    if (mpi->comm.root()) has_sigma_ext_raw = DeltaSigma_ext_root.has_value() ? 1 : 0;
+    mpi->comm.broadcast_n(&has_sigma_ext_raw, 1, 0);
+    const bool has_pi_resp = local && local->local_polarizability_response.has_value();
+    utils::check(nmodes == 1 or !(has_sigma_ext_raw or has_pi_resp),
+                 "run_lr_calc: external ΔΣ / local responses are per perturbation; batching {} "
+                 "perturbations with them is not supported. Call run_lr once per mode.", nmodes);
+    // W is loaded only for a kernel with Σ (or HSEX); then the local polarizabilities replace the W file,
+    // and a polarizability response needs the GW+EDMFT W they or a W file provide.
+    const bool needs_W = include_gw_sigma || exchange_static_W;
+    const bool has_local_pi = local && local->local_polarizabilities.has_value();
+    const bool W_recomputed = recompute_W or unperturbed == "mf_dft" or qp_static_sigma;
+    utils::check(!needs_W or !has_local_pi or W_recomputed,
+                 "run_lr_calc: local_polarizabilities build the GW+EDMFT W in place of a W file; "
+                 "they require recompute_W = true.");
+    utils::check(!has_pi_resp or has_local_pi or !W_recomputed,
+                 "run_lr_calc: local_polarizability_response with a recomputed W requires "
+                 "local_polarizabilities: the recomputed W would otherwise be the RPA W, which does not "
+                 "contain the local polarizabilities the response is taken around.");
+
+    if (has_sigma_ext_raw) {
+      // Band-basis external ΔΣ
+      opt_sDeltaSigma_ext.emplace(math::shm::make_shared_from_root_input<ComplexType, 5>(
+          *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}, DeltaSigma_ext_root));
+    }
+    if (local) {
+      utils::check(mf->nkpts_ibz() == mf->nkpts() and mf->nqpts_ibz() == mf->nqpts(),
+                   "run_lr_calc: the GW+EDMFT local terms require the full BZ (no k/q symmetry reduction).");
+      auto& thc_l = eri.corr_eri->get();
+      auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+      opt_mb_local.emplace(ft, prefix, mf, local->projector_ksIai, local->band_window, local->kpts_crys,
+                           trans_home_cell, false);
+      if (local->local_polarizabilities)
+        opt_mb_local->set_local_polarizabilities(*local->local_polarizabilities);
+      auto const& proj_boson = opt_mb_local->proj_boson.value();
+      utils::check(proj_boson.nImps() == 1, "run_lr_calc: only a single impurity is supported (nImps = {}).",
+                   proj_boson.nImps());
+
+      kpq_map_local.resize(mf->nkpts());
+      utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map_local);
+      opt_sB_qIPab.emplace(proj_boson.calc_bosonic_projector(thc_l));
+      opt_embed_eri.emplace(*mf, "ignore_g0", "ignore_g0", "default");
+      opt_local_terms.emplace();
+      // δW^loc = (1/N_q) Σ_q B^{q+Q†} ΔW_c B^q on the blocks of the distributed ΔW_c
+      opt_local_terms->downfold_W = [&](lr_local_terms::dArr_4D_t& dW_tqPQ) {
+        return opt_embed_eri->lr_downfold_DeltaW_block(
+            dW_tqPQ.local(), dW_tqPQ.origin(), dW_tqPQ.global_shape()[0],
+            opt_sB_qIPab->local(), kpq_map_local, false);
+      };
+      if (has_pi_resp) {
+        auto const& r = local->local_polarizability_response.value();
+        nda::array<ComplexType, 5> dPi_loc = r.at("imp") - r.at("dc");
+        Pi_source_tabcd = lr_pi_local_tau(ft, proj_boson, dPi_loc);
+        opt_scr_local.emplace(&ft, "gw_edmft");
+        opt_local_terms->add_pi_source = [&](lr_local_terms::dArr_4D_t& dPi_tqPQ) {
+          opt_scr_local->lr_add_upfold_pi_local(Pi_source_tabcd, opt_sB_qIPab->local(), dPi_tqPQ,
+                                                kpq_map_local);
+        };
+      }
+    }
+  }
+
   // Load W and eps_inv_head if GW self-energy is requested. W is either read
   // from disk (explicit screened_interaction_file, else the auto-derived path)
   // or recomputed on the fly from the checkpoint Green's function (RPA). Both
@@ -1921,9 +2097,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     }
     if (recompute_W) {
-      app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
+      MBState* mb_W = (opt_mb_local && local->local_polarizabilities) ? &(*opt_mb_local) : nullptr;
+      app_log(2, "Recomputing W from checkpoint Green's function ({})...",
+              mb_W ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
       auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment);
+          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment, mb_W);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
       opt_eps_inv_w.emplace(std::move(eps_inv_w));
@@ -2060,6 +2238,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.Dm_ab            = Dm_ab_ptr;
   p.DeltaV_qPQ       = pDeltaV_qPQ;
   p.qp_static        = pQpStatic;
+  p.DeltaSigma_ext_tskij = opt_sDeltaSigma_ext ? &(*opt_sDeltaSigma_ext) : nullptr;
+  p.local = opt_local_terms ? &(*opt_local_terms) : nullptr;
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
@@ -2132,6 +2312,24 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
+
+    // Local responses δG^loc of the returned ΔG(τ) and δW^loc of the last kernel evaluation.
+    // The projection is collective; only the root writes.
+    if (opt_local_terms) {
+      auto DeltaGloc_tsIab = opt_mb_local->proj_boson.value().proj_fermi().lr_downfold_loc(
+          sDeltaG_tskij.local(), mpi->comm, kpq_map_local);
+      if (mpi->comm.root()) {
+        h5::file file(output + ".mbpt.h5", 'a');
+        auto lr_grp = chkpt::lr_group(file, nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt);
+        nda::h5_write(lr_grp, "DeltaGloc_tsIab", DeltaGloc_tsIab, false);
+        app_log(2, "  - DeltaGloc_tsIab written to \"linear_response/\"");
+        if (driver.DeltaWloc()) {
+          nda::h5_write(lr_grp, "DeltaWloc_tabcd", *driver.DeltaWloc(), false);
+          app_log(2, "  - DeltaWloc_tabcd written to \"linear_response/\"");
+        }
+      }
+      mpi->comm.barrier();
+    }
 
     // Store this mode's operands for the stationary hessian estimator. A copy out
     // and nothing else: ΔF/ΔΣ and ΔDm/ΔG live in shm windows, so they have to be
@@ -2241,7 +2439,9 @@ template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     std::optional<nda::array<ComplexType, 5>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
-    std::optional<nda::array<ComplexType, 3>> const&);
+    std::optional<nda::array<ComplexType, 3>> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    const lr_local_inputs*);
 
 
 
@@ -2596,6 +2796,8 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
 
 /**
  * LR of the local screened interaction: ΔW_loc = (1/N_q) Σ_q B^{q+Q†} ΔW^q B^q (no head correction).
+ * The key "distributed" (default false) projects the blocks of a distributed copy of ΔW, the way run_lr does,
+ * instead of dealing the replicated array out over the ranks.
  */
 template<typename eri_t>
 nda::array<ComplexType, 5> lr_downfold_coulomb(
@@ -2617,7 +2819,73 @@ nda::array<ComplexType, 5> lr_downfold_coulomb(
   utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
 
   embed_eri_t embed_eri(*mf, "ignore_g0", "ignore_g0", "default");
-  return embed_eri.lr_downfold_DeltaW_q(sDeltaW_xqPQ.local(), sB_qIPab.local(), kpq_map);
+  if (!io::get_value_with_default<bool>(pt, "distributed", false)) {
+    // Replicated: the (x, q) pairs are dealt out over the ranks
+    return embed_eri.lr_downfold_DeltaW_q(sDeltaW_xqPQ.local(), sB_qIPab.local(), kpq_map);
+  }
+  // Distributed: scatter to the layout of ΔW_c(τ) in run_lr and project block-wise, as its kernel does
+  auto [nx, nq, NP, NQ] = sDeltaW_xqPQ.shape();
+  auto [pgrid, bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nx, NP);
+  auto dDeltaW_xqPQ = math::nda::make_distributed_array<nda::array<ComplexType, 4>>(
+      mpi->comm, pgrid, {nx, nq, NP, NQ}, bsize);
+  scatter_from_shm(*mpi, sDeltaW_xqPQ.local(), dDeltaW_xqPQ);
+  return embed_eri.lr_downfold_DeltaW_block(
+      dDeltaW_xqPQ.local(), dDeltaW_xqPQ.origin(), nx, sB_qIPab.local(), kpq_map, false);
+}
+
+/**
+ * LR upfold of a local self-energy response: ΔΣ^k(τ) = C^{k+Q†} Σ_loc(τ) C^k, on the MPI root only.
+ */
+auto lr_upfold_sigma(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                     nda::array<ComplexType, 5> const& projector_ksIai,
+                     nda::array<long, 3> const& band_window,
+                     nda::array<RealType, 2> const& kpts_crys,
+                     nda::array<ComplexType, 5> const& Sigma_loc_wsIab,
+                     nda::array<double, 1> const& q_vec)
+-> nda::array<ComplexType, 5> {
+  std::string err = std::string("lr_upfold_sigma - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  auto mpi = mf->mpi();
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(prefix + ".mbpt.h5", false));
+  projector_t proj(*mf, projector_ksIai, band_window, kpts_crys, trans_home_cell);
+
+  nda::array<long, 1> kpq_map(mf->nkpts());
+  utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
+  auto sDeltaSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  lr_upfold_sigma_impl(proj, ft, Sigma_loc_wsIab, kpq_map, sDeltaSigma_tskij);
+  return shm_to_root(*mpi, sDeltaSigma_tskij);
+}
+
+/**
+ * LR upfold of a local polarizability response: ΔΠ^q(τ) = B^{q+Q} Π_loc(τ) B^{q†}.
+ */
+template<typename eri_t>
+nda::array<ComplexType, 4> lr_upfold_pi(
+    eri_t &eri, ptree const& pt,
+    nda::array<ComplexType, 5> const& projector_ksIai,
+    nda::array<long, 3> const& band_window,
+    nda::array<RealType, 2> const& kpts_crys,
+    nda::array<ComplexType, 5> const& Pi_loc_wabcd,
+    nda::array<double, 1> const& q_vec) {
+  std::string err = std::string("lr_upfold_pi - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err + "prefix");
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  auto mf = eri.MF();
+  auto mpi = mf->mpi();
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(prefix + ".mbpt.h5", false));
+  projector_boson_t proj_boson(*mf, projector_ksIai, band_window, kpts_crys, trans_home_cell);
+
+  nda::array<long, 1> kpq_map(mf->nkpts());
+  utils::calculate_kpq_map(mf->kpts_crystal(), q_vec, kpq_map);
+  long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+  auto sDeltaPi_tqPQ = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {nt_half, mf->nkpts(), eri.Np(), eri.Np()});
+  lr_upfold_pi_impl(eri, ft, proj_boson, Pi_loc_wabcd, kpq_map, sDeltaPi_tqPQ);
+  nda::array<ComplexType, 4> out = sDeltaPi_tqPQ.local();
+  mpi->comm.barrier();
+  return out;
 }
 
 /**
@@ -2680,7 +2948,9 @@ template<typename eri_t>
 nda::array<ComplexType, 4> lr_gw_W_calc(
     eri_t &eri, ptree const& pt,
     nda::array<double, 1> const& q_pert,
-    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root) {
+    std::optional<nda::array<ComplexType, 4>> const& DeltaPi_tqPQ_root,
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    const lr_local_inputs* local) {
 
   using local_Array_4D_t = nda::array<ComplexType, 4>;
   using math::nda::make_distributed_array;
@@ -2714,12 +2984,34 @@ nda::array<ComplexType, 4> lr_gw_W_calc(
       *mpi, std::array<long, 4>{nt_half, nkpts, NP, NP},
       DeltaPi_tqPQ_root);
 
-  // Load W_c from thc_screened_interaction.h5 and take it in ω, the axis the LR
-  // W Dyson works on.
+  // W_c on ω, the axis the LR W Dyson works on: the GW+EDMFT W of G (local
+  // polarizabilities given), else read from thc_screened_interaction.h5.
   // eps_inv_head: not yet used here, will be needed for div_corr (TODO)
-  auto [dW_wqPQ, eps_inv_head, eps_inv_head_w, div_treatment] = lr_load_W_omega(
-      *mpi, thc, ft, input_file, input_grp);
-  (void)div_treatment;
+  using dW_omega_t = std::tuple_element_t<0, decltype(lr_load_W_omega(
+      *mpi, thc, ft, input_file, input_grp))>;
+  auto dW_wqPQ = [&]() -> dW_omega_t {
+    if (local && local->local_polarizabilities) {
+      // GW+EDMFT W recomputed from the given G
+      int has_G = 0;
+      if (mpi->comm.root()) has_G = G_tskij_root.has_value() ? 1 : 0;
+      mpi->comm.broadcast_n(&has_G, 1, 0);
+      utils::check(has_G, "lr_gw_W_calc: local_polarizabilities require G_tskij (the G of the GW+EDMFT W).");
+      auto sG_tskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, G_tskij_root);
+      auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+      MBState mb_local(ft, prefix, mf, local->projector_ksIai, local->band_window, local->kpts_crys,
+                       trans_home_cell, false);
+      mb_local.set_local_polarizabilities(*local->local_polarizabilities);
+      auto div_treatment = read_div_treatment(*mpi, input_file, input_grp);
+      auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
+          *mpi, thc, ft, sG_tskij, div_treatment, &mb_local);
+      return std::move(dW);
+    } else {
+      // W from file
+      auto [dW, eps_inv, eps_inv_w, div_treatment] = lr_load_W_omega(
+          *mpi, thc, ft, input_file, input_grp);
+      return std::move(dW);
+    }
+  }();
 
   // Convert ΔΠ shared-memory window → distributed array (τ-dist)
   auto [pi_pgrid, pi_bsize] = utils::lr_W_q_local_dist(mpi->comm.size(), nt_half, NP);
@@ -3069,6 +3361,14 @@ template nda::array<ComplexType, 5> lr_downfold_coulomb(
     nda::array<RealType, 2> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     nda::array<double, 1> const&);
+template nda::array<ComplexType, 4> lr_upfold_pi(
+    thc_reader_t&, ptree const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<long, 3> const&,
+    nda::array<RealType, 2> const&,
+    nda::array<ComplexType, 5> const&,
+    nda::array<double, 1> const&);
+
 // gw_evaluate_Pi_calc instantiations (THC only)
 template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
@@ -3080,7 +3380,9 @@ template nda::array<ComplexType, 4> lr_gw_W_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
     nda::array<double, 1> const&,
-    std::optional<nda::array<ComplexType, 4>> const&);
+    std::optional<nda::array<ComplexType, 4>> const&,
+    std::optional<nda::array<ComplexType, 5>> const&,
+    const lr_local_inputs*);
 
 // gw_evaluate_W_from_Pi_calc instantiations (THC only)
 template nda::array<ComplexType, 4> gw_evaluate_W_from_Pi_calc(

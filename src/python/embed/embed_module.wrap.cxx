@@ -260,6 +260,62 @@ static auto const _c2py_fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "G_tsab", "dG_tsab", "cell_offset", "cell_size", "orb_block")};
 
+// lr_upfold_sigma
+static auto const _c2py_fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const std::string &params,
+       const nda::basic_array<
+           std::complex<double>, 5, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &projector_ksIai,
+       const nda::basic_array<
+           long, 3, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &band_window,
+       const nda::basic_array<
+           double, 2, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &kpts_crys,
+       const nda::basic_array<
+           std::complex<double>, 5, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &Sigma_loc_wsIab,
+       const nda::basic_array<
+           double, 1, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>> &q_vec) {
+      return coqui_py::lr_upfold_sigma(mf, params, projector_ksIai, band_window,
+                                       kpts_crys, Sigma_loc_wsIab, q_vec);
+    },
+    "mf", "params", "projector_ksIai", "band_window", "kpts_crys",
+    "Sigma_loc_wsIab", "q_vec")};
+
+// lr_upfold_pi
+static auto const _c2py_fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](coqui_py::ThcCoulomb &eri, const std::string &params,
+       const nda::basic_array<
+           std::complex<double>, 5, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &projector_ksIai,
+       const nda::basic_array<
+           long, 3, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &band_window,
+       const nda::basic_array<
+           double, 2, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &kpts_crys,
+       const nda::basic_array<
+           std::complex<double>, 5, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &Pi_loc_wabcd,
+       const nda::basic_array<
+           double, 1, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>> &q_vec) {
+      return coqui_py::lr_upfold_pi<coqui_py::ThcCoulomb>(
+          eri, params, projector_ksIai, band_window, kpts_crys, Pi_loc_wabcd, q_vec);
+    },
+    "eri", "params", "projector_ksIai", "band_window", "kpts_crys",
+    "Pi_loc_wabcd", "q_vec")};
+
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");
 static const auto _c2py_doc_2 = _c2py_fun_2.doc(R"DOC()DOC");
@@ -274,6 +330,8 @@ static const auto _c2py_doc_10 = _c2py_fun_10.doc(R"DOC()DOC");
 static const auto _c2py_doc_11 = _c2py_fun_11.doc(R"DOC()DOC");
 static const auto _c2py_doc_12 = _c2py_fun_12.doc(R"DOC()DOC");
 static const auto _c2py_doc_13 = _c2py_fun_13.doc(R"DOC()DOC");
+static const auto _c2py_doc_14 = _c2py_fun_14.doc(R"DOC()DOC");
+static const auto _c2py_doc_15 = _c2py_fun_15.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -307,6 +365,10 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_12.c_str()},
     {"lr_eval_pi_rpa_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_13>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_13.c_str()},
+    {"lr_upfold_sigma", (PyCFunction)c2py::pyfkw<_c2py_fun_14>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_14.c_str()},
+    {"lr_upfold_pi", (PyCFunction)c2py::pyfkw<_c2py_fun_15>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_15.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

@@ -289,6 +289,17 @@ namespace methods {
                               const nda::array<long, 1> &kpq_map)
     -> nda::array<ComplexType, 5>;
 
+    /**
+     * The same projection of a block of W_xqPQ: W_block is the local (x, q, P, Q) block of an array of
+     * global extent (nx, nq, NP, NP) starting at `origin`. Collective: every rank enters the final all_reduce
+     * and gets the full (nx, n, n, n, n) result, also with an empty block.
+     * replicated = true: W_block is the whole array on every rank, and the (x, q) pairs are dealt round-robin.
+     */
+    template<nda::ArrayOfRank<5> B_t>
+    auto lr_downfold_DeltaW_block(nda::array_view<ComplexType, 4> W_block, std::array<long, 4> origin, long nx,
+                                  const B_t &B_qIPab, const nda::array<long, 1> &kpq_map, bool replicated)
+    -> nda::array<ComplexType, 5>;
+
     template<THC_ERI thc_t, nda::ArrayOfRank<5> B_t>
     void V_div_correction(nda::array<ComplexType, 4> &V_cdab, const B_t &B_qIPab, thc_t &thc);
 

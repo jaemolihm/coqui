@@ -22,6 +22,9 @@
 #ifndef COQUI_LR_DRIVER_HPP
 #define COQUI_LR_DRIVER_HPP
 
+#include <functional>
+#include <optional>
+
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
 
@@ -99,6 +102,22 @@ struct lr_diis_hist_t {
 };
 
 /**
+ * GW+EDMFT local terms of an LR run, as operations on the distributed ΔΠ and ΔW.
+ * They are callbacks because the projectors and the local downfold live in the
+ * embedding library, which depends on this one.
+ */
+struct lr_local_terms {
+  using dArr_4D_t = memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>;
+  /// ΔΠ(τ) += the frozen local source B^{q+Q}(δΠ_imp - δΠ_dc)B^{q†} on ΔΠ's own blocks,
+  /// without communication. Empty: no source.
+  std::function<void(dArr_4D_t&)> add_pi_source;
+  /// δW^loc(τ) = (1/N_q) Σ_q B^{q+Q†} ΔW_c B^q, (nt_half, n, n, n, n), from the distributed
+  /// ΔW_c(τ). Collective: every rank enters and gets the full result. Called after every
+  /// ΔW solve of the kernel; ΔW_c is not modified.
+  std::function<nda::array<ComplexType, 5>(dArr_4D_t&)> downfold_W;
+};
+
+/**
  * Everything an LR solve needs that does not depend on the perturbation ΔH0:
  * which terms are active, how the SCF iterates, and the optional inputs shared
  * by every perturbation at this q.
@@ -113,6 +132,7 @@ struct lr_diis_hist_t {
  */
 struct lr_params {
   using sArray_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+  using sArray_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
 
   // --- Active terms ---
   /// The operator's kernel K_total, applied every iteration.
@@ -180,6 +200,13 @@ struct lr_params {
   const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr;  ///< δV^q in the aux basis
   /// Non-null puts the driver in LR-qpGW static-map mode.
   const lr_qp_static_params* qp_static = nullptr;
+  /// Frozen external ΔΣ(τ) (nt, ns, nk, nb, nb), (k+Q, k) blocks: added to the ΔΣ of
+  /// every Dyson RHS, never mixed or written to the ΔΣ output. GW+EDMFT: the upfolded
+  /// local response C^{k+Q†}(δΣ_imp - δΣ_dc)C^k, plus any band-basis source.
+  const sArray_5D_t* DeltaSigma_ext_tskij = nullptr;
+  /// GW+EDMFT local terms (nullptr: none). The driver then also forms the local
+  /// responses δG^loc and δW^loc; see lr_local_terms.
+  const lr_local_terms* local = nullptr;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -393,6 +420,9 @@ public:
   /// exchange_static_W is set.
   double hsex_head_factor() const { return _hsex_head_factor; }
 
+  /// δW^loc of the last kernel evaluation (lr_local_terms::downfold_W), empty if none ran.
+  const std::optional<nda::array<ComplexType, 5>>& DeltaWloc() const { return _DeltaWloc_tabcd; }
+
 private:
   /**
    * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
@@ -549,6 +579,11 @@ private:
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
+  /// ΔDm(Δμ=0) of the frozen external ΔΣ (lr_params::DeltaSigma_ext_tskij) alone,
+  /// solved once per perturbation.
+  std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_ext_Sigma;
+  /// δW^loc(τ) of the last kernel evaluation, overwritten at every call.
+  std::optional<nda::array<ComplexType, 5>> _DeltaWloc_tabcd;
 
   // --- Preconditioner buffers (preconditioned runs only): the gathered residual
   //     (r_F, r_Σ), the ΔDm of r_Σ, the inner iterate y_F and its ΔDm.

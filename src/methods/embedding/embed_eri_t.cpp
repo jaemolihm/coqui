@@ -2217,38 +2217,54 @@ namespace methods {
   }
 
   template<nda::ArrayOfRank<5> B_t>
-  auto embed_eri_t::lr_downfold_DeltaW_q(nda::array_view<ComplexType, 4> W_xqPQ, const B_t &B_qIPab,
-                                         const nda::array<long, 1> &kpq_map)
+  auto embed_eri_t::lr_downfold_DeltaW_block(nda::array_view<ComplexType, 4> W_block,
+                                             std::array<long, 4> origin, long nx,
+                                             const B_t &B_qIPab, const nda::array<long, 1> &kpq_map,
+                                             bool replicated)
   -> nda::array<ComplexType, 5> {
     auto [nqpts, nImps, NP, nImpOrbs, nImpOrbs2] = B_qIPab.shape();
     utils::check(nImps == 1, "embed_eri_t::lr_downfold_DeltaW_q: only a single impurity is supported (nImps = {}).", nImps);
-    auto [nx, nq, NP_W, NQ_W] = W_xqPQ.shape();
-    utils::check(_MF->nqpts_ibz() == _MF->nqpts() and nqpts == _MF->nqpts() and nq == nqpts,
-                 "embed_eri_t::lr_downfold_DeltaW_q: requires the full q mesh (nqpts_ibz = {}, nqpts = {}, B nq = {}, W nq = {}).",
-                 _MF->nqpts_ibz(), _MF->nqpts(), nqpts, nq);
-    utils::check(NP_W == NP and NQ_W == NP and kpq_map.shape(0) == nqpts,
-                 "embed_eri_t::lr_downfold_DeltaW_q: shape mismatch (W: NP = {}, NQ = {}; B: NP = {}; kpq_map: {}).",
-                 NP_W, NQ_W, NP, kpq_map.shape(0));
+    utils::check(_MF->nqpts_ibz() == _MF->nqpts() and nqpts == _MF->nqpts() and kpq_map.shape(0) == nqpts,
+                 "embed_eri_t::lr_downfold_DeltaW_q: requires the full q mesh (nqpts_ibz = {}, nqpts = {}, B nq = {}, kpq_map: {}).",
+                 _MF->nqpts_ibz(), _MF->nqpts(), nqpts, kpq_map.shape(0));
+    auto [nx_loc, nq_loc, NP_loc, NQ_loc] = W_block.shape();
+    auto [x_origin, q_origin, P_origin, Q_origin] = origin;
+    utils::check(W_block.size() == 0 or
+                 (x_origin + nx_loc <= nx and q_origin + nq_loc <= nqpts and
+                  P_origin + NP_loc <= NP and Q_origin + NQ_loc <= NP),
+                 "embed_eri_t::lr_downfold_DeltaW_q: the block ({}, {}, {}, {}) at ({}, {}, {}, {}) exceeds (nx, nq, NP, NP) = ({}, {}, {}, {}).",
+                 nx_loc, nq_loc, NP_loc, NQ_loc, x_origin, q_origin, P_origin, Q_origin, nx, nqpts, NP, NP);
 
     nda::array<ComplexType, 5> W_xcdab(nx, nImpOrbs, nImpOrbs, nImpOrbs, nImpOrbs);
     W_xcdab() = ComplexType(0.0);
 
     // W_xcdab = conj(B^{q+Q}_{P,dc}) * [ W_xqPQ ] * B^q_{Q,ab}
-    nda::array<ComplexType, 2> T_P_ab(NP, nImpOrbs*nImpOrbs);
-    nda::array<ComplexType, 3> B_cdP_conj(nImpOrbs, nImpOrbs, NP);
-    nda::array<ComplexType, 2> W_PQ(NP, NP);
+    nda::array<ComplexType, 2> T_P_ab(NP_loc, nImpOrbs*nImpOrbs);
+    nda::array<ComplexType, 3> B_cdP_conj(nImpOrbs, nImpOrbs, NP_loc);
+    nda::array<ComplexType, 2> W_PQ(NP_loc, NQ_loc);
+    nda::range Q_rng(Q_origin, Q_origin + NQ_loc);
 
     auto &comm = _context->comm;
-    for (long xq = comm.rank(); xq < nx*nqpts; xq += comm.size()) {
-      long ix = xq / nqpts; // xq = ix * nqpts + iq
-      long iq = xq % nqpts;
+    // An empty block still enters the all_reduce below
+    for (long xq = 0; xq < (W_block.size() == 0 ? 0 : nx_loc*nq_loc); ++xq) {
+      long ix = x_origin + xq / nq_loc; // xq = ix_loc * nq_loc + iq_loc
+      long iq = q_origin + xq % nq_loc;
+      // A replicated block is dealt out round-robin over the ranks
+      if (replicated and (ix*nqpts + iq) % comm.size() != comm.rank()) continue;
       auto W_cd_ab = nda::reshape(W_xcdab(ix, nda::ellipsis{}), shape_t<2>{nImpOrbs*nImpOrbs, nImpOrbs*nImpOrbs});
-      W_PQ = W_xqPQ(ix, iq, nda::ellipsis{});
-      add_Bdag_W_B(W_PQ, B_qIPab, kpq_map(iq), iq, 0, nda::range(NP), T_P_ab, B_cdP_conj, W_cd_ab);
+      W_PQ = W_block(xq / nq_loc, xq % nq_loc, nda::ellipsis{});
+      add_Bdag_W_B(W_PQ, B_qIPab, kpq_map(iq), iq, P_origin, Q_rng, T_P_ab, B_cdP_conj, W_cd_ab);
     }
     comm.all_reduce_in_place_n(W_xcdab.data(), W_xcdab.size(), std::plus<>{});
     W_xcdab() /= nqpts;
     return W_xcdab;
+  }
+
+  template<nda::ArrayOfRank<5> B_t>
+  auto embed_eri_t::lr_downfold_DeltaW_q(nda::array_view<ComplexType, 4> W_xqPQ, const B_t &B_qIPab,
+                                         const nda::array<long, 1> &kpq_map)
+  -> nda::array<ComplexType, 5> {
+    return lr_downfold_DeltaW_block(W_xqPQ, {0, 0, 0, 0}, W_xqPQ.shape(0), B_qIPab, kpq_map, true);
   }
 
   template<THC_ERI thc_t, nda::ArrayOfRank<5> B_t>
@@ -2373,6 +2389,9 @@ namespace methods {
 
   template nda::array<ComplexType, 5> embed_eri_t::lr_downfold_DeltaW_q(
       nda::array_view<ComplexType, 4>, const nda::array_view<ComplexType, 5>&, const nda::array<long, 1>&);
+  template nda::array<ComplexType, 5> embed_eri_t::lr_downfold_DeltaW_block(
+      nda::array_view<ComplexType, 4>, std::array<long, 4>, long, const nda::array_view<ComplexType, 5>&,
+      const nda::array<long, 1>&, bool);
 
   template void embed_eri_t::downfolding_edmft(thc_reader_t&, MBState&, ptree const&, std::string);
 
