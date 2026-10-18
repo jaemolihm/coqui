@@ -37,6 +37,19 @@ struct mb_eri_t {
   std::optional<std::reference_wrapper<exchange_eri_t>> exchange_eri;
   std::optional<std::reference_wrapper<corr_eri_t>> corr_eri;
 
+  // Frees the redistributed Coulomb matrix that THC Fock builds keep in each reader
+  // (thc_reader_t::dZ cache). Callers of hf_t::evaluate call this once they are done.
+  void release_dZ_cache() {
+    auto release = [](auto &slot) {
+      if constexpr (THC_ERI<std::decay_t<decltype(slot->get())>>)
+        if (slot) slot->get().release_dZ_cache();
+    };
+    release(hf_eri);
+    release(hartree_eri);
+    release(exchange_eri);
+    release(corr_eri);
+  }
+
   mb_eri_t() = default;
 
   // one eri for all

@@ -266,6 +266,7 @@ namespace coqui_py {
     methods::solvers::hf_t hf_solver;
     hf_solver.evaluate(sF_skij, Dm_skij, eri, S_skij,
                        compute_hartree, compute_exchange);
+    if constexpr (methods::THC_ERI<std::decay_t<decltype(eri)>>) eri.release_dZ_cache();
 
     // Shared memory is visible to all ranks on a node
     nda::array<ComplexType, 4> F_skij(ns, nkpts_ibz, nbnd, nbnd);
