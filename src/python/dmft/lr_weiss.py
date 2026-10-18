@@ -140,8 +140,8 @@ def lr_compute_weiss_fields_w(*, iaft, local_gf, d_local_gf, impurity_selfenergi
 
     Defined only for causal_projection = None: fit_local_results_boson and fit_u_weiss are nonlinear bath fits,
     and for set_sigma_infty_to_dc = False: Vhf_imp is the impurity's own Sigma_infty, as in the ground state.
-    With screen_type = "rpa" the ground state takes Pi_imp = eval_pi_rpa(Gloc), so dPi_imp is then
-    tau_to_w_phsym(coqui.embed.lr_eval_pi_rpa(Gloc, dGloc)).
+    Covers screen_type = "gw_edmft" only; the Pi_imp response of screen_type = "rpa" is
+    coqui.embed.lr_eval_pi_rpa_cells with a single cell.
     """
     missing = {"Gloc_t", "Wloc_t", "Vloc"} - local_gf.keys()
     if missing:

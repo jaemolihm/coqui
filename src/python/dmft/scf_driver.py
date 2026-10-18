@@ -408,7 +408,6 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
         Vloc, Wloc_t = [Vloc], [Wloc_t]
         Gloc_t = [Gloc_t[:, s] for s in range(Gloc_t.shape[1])]
         if mf.nspin() == 1:
-            # C++ twin: methods::duplicate_spin (src/methods/embedding/dc_response.cpp)
             Gloc_t = [Gloc_t[0], Gloc_t[0].copy()]
         
         # Extract local Green's function and screened interactions for each impurity
@@ -604,7 +603,6 @@ def _edmft_loop_fixed_gloc_and_wloc(
     # Convert spin axis → list of length nspin
     Gloc_t = [Gloc_t[:, s] for s in range(Gloc_t.shape[1])]
     if mf.nspin() == 1:
-        # C++ twin: methods::duplicate_spin (src/methods/embedding/dc_response.cpp)
         Gloc_t = [Gloc_t[0], Gloc_t[0].copy()]
 
     # Extract local Green's function and screened interactions for each impurity

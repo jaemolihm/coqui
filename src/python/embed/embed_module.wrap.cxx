@@ -222,195 +222,22 @@ static auto const _c2py_fun_9 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "df_params", "projector_ksIai", "band_window", "kpts_crys",
     "DeltaG_tskij", "q_vec")};
 
-// eval_gw_dc_t
-static auto const _c2py_fun_10 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<std::complex<double>, 5> &W_tabcd) {
-      return coqui_py::eval_gw_dc_t(G_tsab, W_tabcd);
-    },
-    "G_tsab", "W_tabcd")};
-
-// lr_eval_gw_dc_t
-static auto const _c2py_fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<std::complex<double>, 4> &dG_tsab,
-       const nda::array<std::complex<double>, 5> &W_tabcd,
-       const nda::array<std::complex<double>, 5> &dW_tabcd) {
-      return coqui_py::lr_eval_gw_dc_t(G_tsab, dG_tsab, W_tabcd, dW_tabcd);
-    },
-    "G_tsab", "dG_tsab", "W_tabcd", "dW_tabcd")};
-
-// eval_pi_rpa_pair
-static auto const _c2py_fun_12 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G1_tsab,
-       const nda::array<std::complex<double>, 4> &G2_tsab) {
-      return coqui_py::eval_pi_rpa_pair(G1_tsab, G2_tsab);
-    },
-    "G1_tsab", "G2_tsab")};
-
-// eval_pi_rpa_density_pair
-static auto const _c2py_fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G1_tsab,
-       const nda::array<std::complex<double>, 4> &G2_tsab) {
-      return coqui_py::eval_pi_rpa_density_pair(G1_tsab, G2_tsab);
-    },
-    "G1_tsab", "G2_tsab")};
-
-// lr_eval_pi_rpa
-static auto const _c2py_fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<std::complex<double>, 4> &dG_tsab) {
-      return coqui_py::lr_eval_pi_rpa(G_tsab, dG_tsab);
-    },
-    "G_tsab", "dG_tsab")};
-
-// lr_eval_pi_rpa_density
-static auto const _c2py_fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<std::complex<double>, 4> &dG_tsab) {
-      return coqui_py::lr_eval_pi_rpa_density(G_tsab, dG_tsab);
-    },
-    "G_tsab", "dG_tsab")};
-
 // chemistry_to_product_basis
-static auto const _c2py_fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &A) {
-      return coqui_py::chemistry_to_product_basis<4>(A);
-    },
-    "A"), c2py::cfun(
+static auto const _c2py_fun_10 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const nda::array<std::complex<double>, 5> &A) {
       return coqui_py::chemistry_to_product_basis<5>(A);
     },
     "A")};
 
 // density_density_to_product_basis
-static auto const _c2py_fun_17 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 2> &A) {
-      return coqui_py::density_density_to_product_basis<2>(A);
-    },
-    "A"), c2py::cfun(
+static auto const _c2py_fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const nda::array<std::complex<double>, 3> &A) {
       return coqui_py::density_density_to_product_basis<3>(A);
     },
     "A")};
 
-// duplicate_spin
-static auto const _c2py_fun_18 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &A,
-       int axis) {
-      return coqui_py::duplicate_spin<4>(A, axis);
-    },
-    "A", "axis"), c2py::cfun(
-    [](const nda::array<std::complex<double>, 5> &A,
-       int axis) {
-      return coqui_py::duplicate_spin<5>(A, axis);
-    },
-    "A", "axis")};
-
-// spin_average
-static auto const _c2py_fun_19 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &A,
-       int axis) {
-      return coqui_py::spin_average<4>(A, axis);
-    },
-    "A", "axis"), c2py::cfun(
-    [](const nda::array<std::complex<double>, 5> &A,
-       int axis) {
-      return coqui_py::spin_average<5>(A, axis);
-    },
-    "A", "axis")};
-
-// extract_impurity_blocks
-static auto const _c2py_fun_20 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const std::vector<nda::array<std::complex<double>, 2>> &X_sigma,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::extract_impurity_blocks<2>(X_sigma, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "X_sigma", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<nda::array<std::complex<double>, 3>> &X_sigma,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::extract_impurity_blocks<3>(X_sigma, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "X_sigma", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<nda::array<std::complex<double>, 4>> &X_sigma,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::extract_impurity_blocks<4>(X_sigma, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "X_sigma", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<nda::array<std::complex<double>, 5>> &X_sigma,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::extract_impurity_blocks<5>(X_sigma, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "X_sigma", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim")};
-
-// embed_impurity_blocks
-static auto const _c2py_fun_21 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const std::vector<std::vector<nda::array<std::complex<double>, 2>>> &blocks,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::embed_impurity_blocks<2>(blocks, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "blocks", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<std::vector<nda::array<std::complex<double>, 3>>> &blocks,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::embed_impurity_blocks<3>(blocks, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "blocks", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<std::vector<nda::array<std::complex<double>, 4>>> &blocks,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::embed_impurity_blocks<4>(blocks, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "blocks", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim"), c2py::cfun(
-    [](const std::vector<std::vector<nda::array<std::complex<double>, 5>>> &blocks,
-       const nda::array<long, 1> &alpha_offset,
-       const nda::array<long, 1> &alpha_size,
-       const nda::array<long, 3> &psi,
-       const nda::array<long, 1> &n_gamma,
-       const std::vector<std::vector<long>> &imp_block_dim) {
-      return coqui_py::embed_impurity_blocks<5>(blocks, alpha_offset, alpha_size, psi, n_gamma, imp_block_dim);
-    },
-    "blocks", "alpha_offset", "alpha_size", "psi", "n_gamma", "imp_block_dim")};
-
-// eval_gw_dc_cells
-static auto const _c2py_fun_22 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<std::complex<double>, 5> &W_tabcd,
-       const nda::array<long, 1> &cell_offset,
-       const nda::array<long, 1> &cell_size,
-       const nda::array<long, 1> &orb_block) {
-      return coqui_py::eval_gw_dc_cells(G_tsab, W_tabcd, cell_offset, cell_size, orb_block);
-    },
-    "G_tsab", "W_tabcd", "cell_offset", "cell_size", "orb_block")};
-
 // lr_eval_gw_dc_cells
-static auto const _c2py_fun_23 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const _c2py_fun_12 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const nda::array<std::complex<double>, 4> &G_tsab,
        const nda::array<std::complex<double>, 4> &dG_tsab,
        const nda::array<std::complex<double>, 5> &W_tabcd,
@@ -422,18 +249,8 @@ static auto const _c2py_fun_23 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "G_tsab", "dG_tsab", "W_tabcd", "dW_tabcd", "cell_offset", "cell_size", "orb_block")};
 
-// eval_pi_rpa_cells
-static auto const _c2py_fun_24 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const nda::array<std::complex<double>, 4> &G_tsab,
-       const nda::array<long, 1> &cell_offset,
-       const nda::array<long, 1> &cell_size,
-       const nda::array<long, 1> &orb_block) {
-      return coqui_py::eval_pi_rpa_cells(G_tsab, cell_offset, cell_size, orb_block);
-    },
-    "G_tsab", "cell_offset", "cell_size", "orb_block")};
-
 // lr_eval_pi_rpa_cells
-static auto const _c2py_fun_25 = c2py::dispatcher_f_kw_t{c2py::cfun(
+static auto const _c2py_fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const nda::array<std::complex<double>, 4> &G_tsab,
        const nda::array<std::complex<double>, 4> &dG_tsab,
        const nda::array<long, 1> &cell_offset,
@@ -457,18 +274,6 @@ static const auto _c2py_doc_10 = _c2py_fun_10.doc(R"DOC()DOC");
 static const auto _c2py_doc_11 = _c2py_fun_11.doc(R"DOC()DOC");
 static const auto _c2py_doc_12 = _c2py_fun_12.doc(R"DOC()DOC");
 static const auto _c2py_doc_13 = _c2py_fun_13.doc(R"DOC()DOC");
-static const auto _c2py_doc_14 = _c2py_fun_14.doc(R"DOC()DOC");
-static const auto _c2py_doc_15 = _c2py_fun_15.doc(R"DOC()DOC");
-static const auto _c2py_doc_16 = _c2py_fun_16.doc(R"DOC()DOC");
-static const auto _c2py_doc_17 = _c2py_fun_17.doc(R"DOC()DOC");
-static const auto _c2py_doc_18 = _c2py_fun_18.doc(R"DOC()DOC");
-static const auto _c2py_doc_19 = _c2py_fun_19.doc(R"DOC()DOC");
-static const auto _c2py_doc_20 = _c2py_fun_20.doc(R"DOC()DOC");
-static const auto _c2py_doc_21 = _c2py_fun_21.doc(R"DOC()DOC");
-static const auto _c2py_doc_22 = _c2py_fun_22.doc(R"DOC()DOC");
-static const auto _c2py_doc_23 = _c2py_fun_23.doc(R"DOC()DOC");
-static const auto _c2py_doc_24 = _c2py_fun_24.doc(R"DOC()DOC");
-static const auto _c2py_doc_25 = _c2py_fun_25.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -494,38 +299,14 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_8.c_str()},
     {"lr_downfold_gloc", (PyCFunction)c2py::pyfkw<_c2py_fun_9>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_9.c_str()},
-    {"eval_gw_dc_t", (PyCFunction)c2py::pyfkw<_c2py_fun_10>,
+    {"chemistry_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_10>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_10.c_str()},
-    {"lr_eval_gw_dc_t", (PyCFunction)c2py::pyfkw<_c2py_fun_11>,
+    {"density_density_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_11>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_11.c_str()},
-    {"eval_pi_rpa_pair", (PyCFunction)c2py::pyfkw<_c2py_fun_12>,
+    {"lr_eval_gw_dc_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_12>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_12.c_str()},
-    {"eval_pi_rpa_density_pair", (PyCFunction)c2py::pyfkw<_c2py_fun_13>,
+    {"lr_eval_pi_rpa_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_13>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_13.c_str()},
-    {"lr_eval_pi_rpa", (PyCFunction)c2py::pyfkw<_c2py_fun_14>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_14.c_str()},
-    {"lr_eval_pi_rpa_density", (PyCFunction)c2py::pyfkw<_c2py_fun_15>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_15.c_str()},
-    {"chemistry_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_16>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_16.c_str()},
-    {"density_density_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_17>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_17.c_str()},
-    {"duplicate_spin", (PyCFunction)c2py::pyfkw<_c2py_fun_18>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_18.c_str()},
-    {"spin_average", (PyCFunction)c2py::pyfkw<_c2py_fun_19>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_19.c_str()},
-    {"extract_impurity_blocks", (PyCFunction)c2py::pyfkw<_c2py_fun_20>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_20.c_str()},
-    {"embed_impurity_blocks", (PyCFunction)c2py::pyfkw<_c2py_fun_21>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_21.c_str()},
-    {"eval_gw_dc_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_22>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_22.c_str()},
-    {"lr_eval_gw_dc_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_23>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_23.c_str()},
-    {"eval_pi_rpa_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_24>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_24.c_str()},
-    {"lr_eval_pi_rpa_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_25>,
-     METH_VARARGS | METH_KEYWORDS, _c2py_doc_25.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
