@@ -30,8 +30,6 @@ namespace methods {
 
     long half_grid(long nts) { return (nts%2==0)? nts/2 : nts/2 + 1; }
 
-    // Slices that keep the full spin axis at index 0 of the impurity axis, to hand rank-4 (t,s,a,b)
-    // views to the kernels.
     template<typename Array_t>
     void check_G_shape(const Array_t &G, std::string_view name) {
       utils::check(G.extent(2) == G.extent(3), "{}: G must be square in the orbital indices.", name);
@@ -286,10 +284,13 @@ namespace methods {
                  X_sigma.size(), map.n_sigma());
     long dim_C = map.dim_C();
     long n_w = 0;
-    for (auto &X : X_sigma)
+    if constexpr (has_frequency<R>) n_w = X_sigma[0].extent(0);
+    for (auto &X : X_sigma) {
       utils::check(X.extent(has_frequency<R> ? 1 : 0) == dim_C,
                    "extract_impurity_blocks: dimension mismatch, expected C-space dimension {}.", dim_C);
-    if constexpr (has_frequency<R>) n_w = X_sigma[0].extent(0);
+      if constexpr (has_frequency<R>)
+        utils::check(X.extent(0) == n_w, "extract_impurity_blocks: spin channels have different frequency extents.");
+    }
 
     std::vector<std::vector<carray_t<R>>> blocks(map.n_impurities());
     for (long imp = 0; imp < map.n_impurities(); ++imp) {
@@ -322,7 +323,9 @@ namespace methods {
     map.check();
     utils::check(long(blocks.size()) == map.n_impurities(),
                  "embed_impurity_blocks: got {} impurities, the embedding has {}.", blocks.size(), map.n_impurities());
+    // Frequency extent of the first block, if any
     long n_w = 0;
+    bool n_w_set = false;
     for (long imp = 0; imp < map.n_impurities(); ++imp) {
       utils::check(blocks[imp].size() == map.imp_block_dim[imp].size(),
                    "embed_impurity_blocks: impurity {} has {} blocks, the embedding expects {}.",
@@ -332,9 +335,14 @@ namespace methods {
         utils::check(d == map.imp_block_dim[imp][b],
                      "embed_impurity_blocks: impurity {} block {} has dimension {}, the embedding expects {}.",
                      imp, b, d, map.imp_block_dim[imp][b]);
+        if constexpr (has_frequency<R>) {
+          if (not n_w_set) { n_w = blocks[imp][b].extent(0); n_w_set = true; }
+          utils::check(blocks[imp][b].extent(0) == n_w,
+                       "embed_impurity_blocks: impurity {} block {} has {} frequency points, expected {}.",
+                       imp, b, blocks[imp][b].extent(0), n_w);
+        }
       }
     }
-    if constexpr (has_frequency<R>) n_w = blocks[0][0].extent(0);
 
     long dim_C = map.dim_C();
     std::vector<carray_t<R>> X_sigma;

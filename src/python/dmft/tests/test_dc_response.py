@@ -239,10 +239,14 @@ def gs_dc_per_imp(emb1, emb2, G_C, W_C):
     return sigma_C, pi_C
 
 
+@pytest.mark.parametrize("spec, swap", [(SPEC_EQUIV, ()), (SPEC_EQUIV, (2, 3)), (SPEC_SPECTATOR, ())],
+                         ids=["equiv", "equiv_swapped", "spectator"])
 @pytest.mark.parametrize("nts", [7, 8])
-def test_cells_equal_gs_when_sites_equivalent(nts):
-    emb1 = make_embedding(**SPEC_EQUIV)
-    emb2 = emb1.merge_embed_block_by_imp.slice_sigma
+def test_cells_equal_gs_when_sites_equivalent(nts, spec, swap):
+    emb1 = make_embedding(**spec, swap=swap)
+    # The swap flips the spin of every alpha of the second site (a cell must keep one spin convention).
+    # The spinless embedding does not depend on the swap; modest cannot merge a swapped embedding.
+    emb2 = make_embedding(**spec).merge_embed_block_by_imp.slice_sigma
     bm = ImpurityBlockMap(emb1, emb2)
     rng = np.random.default_rng(nts)
     nt_half = nts // 2 + nts % 2
