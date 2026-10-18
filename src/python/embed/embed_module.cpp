@@ -22,6 +22,7 @@
 #include <c2py/c2py.hpp>
 #include "IO/app_loggers.h"
 #include "methods/MBPT_drivers.h"
+#include "methods/embedding/dc_response.hpp"
 
 #include "python/mean_field/mf_module.hpp"
 #include "python/mean_field/mf_module.wrap.hxx"
@@ -130,6 +131,107 @@ namespace coqui_py {
     methods::dmft_embed(mf.get_mf(), parser.get_root(),
                         projector_ksIai, band_window, kpts_crys,
                         local_hf_potentials, local_selfenergies);
+  }
+
+
+  // ----- double counting, basis helpers and impurity blocks (methods/embedding/dc_response.hpp) -----
+
+  template<int R> using carr_t = nda::array<ComplexType, R>;
+
+  auto eval_gw_dc_t(const carr_t<4> &G_tsab, const carr_t<5> &W_tabcd) -> carr_t<4> {
+    return methods::eval_gw_dc_t(G_tsab, W_tabcd);
+  }
+
+  auto lr_eval_gw_dc_t(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab,
+                       const carr_t<5> &W_tabcd, const carr_t<5> &dW_tabcd) -> carr_t<4> {
+    return methods::lr_eval_gw_dc_t(G_tsab, dG_tsab, W_tabcd, dW_tabcd);
+  }
+
+  auto eval_pi_rpa_pair(const carr_t<4> &G1_tsab, const carr_t<4> &G2_tsab) -> carr_t<5> {
+    return methods::eval_pi_rpa_pair(G1_tsab, G2_tsab);
+  }
+
+  auto eval_pi_rpa_density_pair(const carr_t<4> &G1_tsab, const carr_t<4> &G2_tsab) -> carr_t<3> {
+    return methods::eval_pi_rpa_density_pair(G1_tsab, G2_tsab);
+  }
+
+  auto lr_eval_pi_rpa(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab) -> carr_t<5> {
+    return methods::lr_eval_pi_rpa(G_tsab, dG_tsab);
+  }
+
+  auto lr_eval_pi_rpa_density(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab) -> carr_t<3> {
+    return methods::lr_eval_pi_rpa_density(G_tsab, dG_tsab);
+  }
+
+  template<int R>
+  auto chemistry_to_product_basis(const carr_t<R> &A) -> carr_t<R> {
+    return methods::chemistry_to_product_basis(A);
+  }
+
+  template<int R>
+  auto density_density_to_product_basis(const carr_t<R> &A) -> carr_t<R+2> {
+    return methods::density_density_to_product_basis(A);
+  }
+
+  template<int R>
+  auto duplicate_spin(const carr_t<R> &A, int axis) -> carr_t<R> {
+    return methods::duplicate_spin<R>(A, axis);
+  }
+
+  template<int R>
+  auto spin_average(const carr_t<R> &A, int axis) -> carr_t<R> {
+    return methods::spin_average<R>(A, axis);
+  }
+
+  inline methods::imp_block_map_t
+  make_imp_block_map(const nda::array<long, 1> &alpha_offset, const nda::array<long, 1> &alpha_size,
+                     const nda::array<long, 3> &psi, const nda::array<long, 1> &n_gamma,
+                     const std::vector<std::vector<long>> &imp_block_dim) {
+    return methods::imp_block_map_t{alpha_offset, alpha_size, psi, n_gamma, imp_block_dim};
+  }
+
+  template<int R>
+  auto extract_impurity_blocks(const std::vector<carr_t<R>> &X_sigma,
+                               const nda::array<long, 1> &alpha_offset, const nda::array<long, 1> &alpha_size,
+                               const nda::array<long, 3> &psi, const nda::array<long, 1> &n_gamma,
+                               const std::vector<std::vector<long>> &imp_block_dim)
+  -> std::vector<std::vector<carr_t<R>>> {
+    return methods::extract_impurity_blocks<R>(
+        make_imp_block_map(alpha_offset, alpha_size, psi, n_gamma, imp_block_dim), X_sigma);
+  }
+
+  template<int R>
+  auto embed_impurity_blocks(const std::vector<std::vector<carr_t<R>>> &blocks,
+                             const nda::array<long, 1> &alpha_offset, const nda::array<long, 1> &alpha_size,
+                             const nda::array<long, 3> &psi, const nda::array<long, 1> &n_gamma,
+                             const std::vector<std::vector<long>> &imp_block_dim)
+  -> std::vector<carr_t<R>> {
+    return methods::embed_impurity_blocks<R>(
+        make_imp_block_map(alpha_offset, alpha_size, psi, n_gamma, imp_block_dim), blocks);
+  }
+
+  auto eval_gw_dc_cells(const carr_t<4> &G_tsab, const carr_t<5> &W_tabcd, const nda::array<long, 1> &cell_offset,
+                        const nda::array<long, 1> &cell_size, const nda::array<long, 1> &orb_block) -> carr_t<4> {
+    return methods::eval_gw_dc_cells(G_tsab, W_tabcd, methods::dc_cells_t{cell_offset, cell_size, orb_block});
+  }
+
+  auto lr_eval_gw_dc_cells(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab,
+                           const carr_t<5> &W_tabcd, const carr_t<5> &dW_tabcd,
+                           const nda::array<long, 1> &cell_offset, const nda::array<long, 1> &cell_size,
+                           const nda::array<long, 1> &orb_block) -> carr_t<4> {
+    return methods::lr_eval_gw_dc_cells(G_tsab, dG_tsab, W_tabcd, dW_tabcd,
+                                        methods::dc_cells_t{cell_offset, cell_size, orb_block});
+  }
+
+  auto eval_pi_rpa_cells(const carr_t<4> &G_tsab, const nda::array<long, 1> &cell_offset,
+                         const nda::array<long, 1> &cell_size, const nda::array<long, 1> &orb_block) -> carr_t<3> {
+    return methods::eval_pi_rpa_cells(G_tsab, methods::dc_cells_t{cell_offset, cell_size, orb_block});
+  }
+
+  auto lr_eval_pi_rpa_cells(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab,
+                            const nda::array<long, 1> &cell_offset, const nda::array<long, 1> &cell_size,
+                            const nda::array<long, 1> &orb_block) -> carr_t<3> {
+    return methods::lr_eval_pi_rpa_cells(G_tsab, dG_tsab, methods::dc_cells_t{cell_offset, cell_size, orb_block});
   }
 
 

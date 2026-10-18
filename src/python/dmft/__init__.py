@@ -29,6 +29,7 @@ try:
   from .chemical_potential import *
   from .weiss import *
   from .lr_weiss import *
+  from .impurity_block_map import ImpurityBlockMap
   from .bath_fit import *
   from .io import *
   from .plot import *

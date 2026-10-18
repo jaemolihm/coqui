@@ -1002,3 +1002,102 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
 
 
 } // bdft_tests
+
+#include <random>
+#include "methods/embedding/dc_response.hpp"
+
+namespace bdft_tests {
+
+  TEST_CASE("dc_response", "[methods][embed][dc]") {
+    std::mt19937 gen(4321);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    auto fill = [&](auto &A) { for (auto &x : A) x = ComplexType(nd(gen), nd(gen)); };
+    auto norm = [](const auto &A) { double s = 0.0; for (auto const &x : A) s += std::norm(x); return std::sqrt(s); };
+    auto diff = [&](const auto &A, const auto &B) { return norm(nda::make_regular(A - B)) / norm(B); };
+
+    for (long nts : {7, 8}) for (long ns : {1, 2}) for (long n : {1, 3}) {
+      long nt_half = (nts%2==0)? nts/2 : nts/2 + 1;
+      nda::array<ComplexType,4> G(nts, ns, n, n), dG(nts, ns, n, n);
+      nda::array<ComplexType,5> W(nt_half, n, n, n, n), dW(nt_half, n, n, n, n);
+      fill(G); fill(dG); fill(W); fill(dW);
+
+      // Sigma_ab(t) = -sum_cd G_cd(t) W(t,c,a,d,b) and its mirror, from the definition
+      auto Sigma = methods::eval_gw_dc_t(G, W);
+      nda::array<ComplexType,4> Sigma_ref(nts, ns, n, n);
+      for (long t = 0; t < nts; ++t) {
+        long it = std::min(t, nts-1-t);
+        for (long s = 0; s < ns; ++s) for (long a = 0; a < n; ++a) for (long b = 0; b < n; ++b) {
+          ComplexType sum = 0.0;
+          for (long c = 0; c < n; ++c) for (long d = 0; d < n; ++d) sum += G(t,s,c,d) * W(it,c,a,d,b);
+          Sigma_ref(t,s,a,b) = -sum;
+        }
+      }
+      REQUIRE(diff(Sigma, Sigma_ref) < 1e-14);
+
+      // The maps are bilinear: S(G+dG, W+dW) - S(G-dG, W-dW) = 2 (S[dG,W] + S[G,dW])
+      auto lr_sigma = methods::lr_eval_gw_dc_t(G, dG, W, dW);
+      nda::array<ComplexType,4> Gp(G + dG), Gm(G - dG);
+      nda::array<ComplexType,5> Wp(W + dW), Wm(W - dW);
+      nda::array<ComplexType,4> fd_sigma((methods::eval_gw_dc_t(Gp, Wp) - methods::eval_gw_dc_t(Gm, Wm)) * 0.5);
+      REQUIRE(diff(lr_sigma, fd_sigma) < 1e-13);
+
+      auto lr_pi = methods::lr_eval_pi_rpa(G, dG);
+      nda::array<ComplexType,5> fd_pi((methods::eval_pi_rpa_pair(Gp, Gp) - methods::eval_pi_rpa_pair(Gm, Gm)) * 0.5);
+      REQUIRE(diff(lr_pi, fd_pi) < 1e-13);
+
+      // The density-only polarizability is the Pi_{aabb} element of the full one
+      auto Pi = methods::eval_pi_rpa_pair(G, dG);
+      auto Pi_dd = methods::eval_pi_rpa_density_pair(G, dG);
+      for (long t = 0; t < nt_half; ++t) for (long a = 0; a < n; ++a) for (long b = 0; b < n; ++b)
+        REQUIRE(std::abs(Pi(t,a,a,b,b) - Pi_dd(t,a,b)) < 1e-14);
+
+      // One cell with a single 1e block is the plain map
+      nda::array<long,1> off{0}, size{n}, blk(n);
+      blk() = 0;
+      methods::dc_cells_t cells{off, size, blk};
+      REQUIRE(diff(methods::eval_gw_dc_cells(G, W, cells), Sigma) < 1e-14);
+      REQUIRE(diff(methods::lr_eval_gw_dc_cells(G, dG, W, dW, cells), lr_sigma) < 1e-14);
+      REQUIRE(diff(methods::eval_pi_rpa_cells(G, cells), methods::eval_pi_rpa_density_pair(G, G)) < 1e-14);
+      REQUIRE(diff(methods::lr_eval_pi_rpa_cells(G, dG, cells), methods::lr_eval_pi_rpa_density(G, dG)) < 1e-14);
+    }
+  }
+
+  TEST_CASE("dc_response_blocks", "[methods][embed][dc]") {
+    // alpha = {2, 1, 2}: alpha 0 and 2 are equivalent sites of impurity 0 (gamma 0), alpha 1 is gamma 1.
+    // tau = sigma, n_sigma = 2.
+    methods::imp_block_map_t map;
+    map.alpha_offset = nda::array<long,1>{0, 2, 3};
+    map.alpha_size = nda::array<long,1>{2, 1, 2};
+    map.n_gamma = nda::array<long,1>{2};
+    map.imp_block_dim = {{2, 1, 2, 1}};
+    map.psi = nda::array<long,3>(3, 2, 3);
+    long spec[3][3] = {{0, 0, 0}, {0, 1, 0}, {0, 0, 0}};
+    for (long a = 0; a < 3; ++a) for (long s = 0; s < 2; ++s) {
+      map.psi(a, s, 0) = spec[a][0];
+      map.psi(a, s, 1) = spec[a][1];
+      map.psi(a, s, 2) = s;
+    }
+    map.check();
+    REQUIRE(map.dim_C() == 5);
+
+    std::mt19937 gen(99);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<std::vector<nda::array<ComplexType,3>>> blocks(1);
+    for (long dim : map.imp_block_dim[0]) {
+      nda::array<ComplexType,3> B(4, dim, dim);
+      for (auto &x : B) x = ComplexType(nd(gen), nd(gen));
+      blocks[0].push_back(B);
+    }
+    // embed copies a block to every equivalent site, extract reads it back
+    auto X = methods::embed_impurity_blocks<3>(map, blocks);
+    REQUIRE(X.size() == 2);
+    auto back = methods::extract_impurity_blocks<3>(map, X);
+    for (size_t b = 0; b < blocks[0].size(); ++b) REQUIRE(back[0][b] == blocks[0][b]);
+    for (long s = 0; s < 2; ++s)
+      for (long t = 0; t < 4; ++t) for (long i = 0; i < 2; ++i) for (long j = 0; j < 2; ++j)
+        REQUIRE(X[s](t, i, j) == X[s](t, 3+i, 3+j));
+    // blocks of different alpha do not couple
+    REQUIRE(X[0](0, 0, 2) == ComplexType(0.0));
+  }
+
+} // bdft_tests

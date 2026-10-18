@@ -80,6 +80,7 @@ def set_n_iw(iaft):
 
 
 def chemistry_to_product_basis(A_abcd_chem):
+    # C++ twin: methods::chemistry_to_product_basis (src/methods/embedding/dc_response.cpp)
     if A_abcd_chem.ndim < 4:
         raise ValueError("chemistry_to_product_basis: "
                          "A_abcd must have at least 4 dimensions (..., norb, norb, norb, norb).")
@@ -112,6 +113,7 @@ def product_basis_to_density_density(A_abcd):
 
 
 def density_density_to_product_basis(A_ab):
+    # C++ twin: methods::density_density_to_product_basis (src/methods/embedding/dc_response.cpp)
     if A_ab.ndim < 2:
         raise ValueError("A_ab must have at least 2 dimensions (..., norb, norb).")
 
@@ -443,6 +445,7 @@ def eval_pi_rpa_pair(G1_tsab, G2_tsab, *, density_only=False):
     Bilinear form behind eval_pi_rpa on the half tau grid (mt = nts-1-t):
     Pi[t]_{abcd} = sf * G1_bd(tau_t) G2_ca(tau_mt), or Pi[t]_{ab} = sf * G1_ab(tau_t) G2_ba(tau_mt) if
     density_only, with sf = -2 (nspin = 1) or -1 and a spin sum.
+    C++ twin: methods::eval_pi_rpa_pair, eval_pi_rpa_density_pair (src/methods/embedding/dc_response.cpp).
     """
     nts, nspin, nbnd = G1_tsab.shape[:3]
     nts_half = nts//2 if nts%2==0 else nts//2 + 1
@@ -466,6 +469,7 @@ def eval_pi_rpa_pair(G1_tsab, G2_tsab, *, density_only=False):
 
 
 def eval_pi_rpa(G_tsab, *, density_only=False):
+    # C++ twin: methods::eval_pi_rpa_pair(G, G) (src/methods/embedding/dc_response.cpp)
     return eval_pi_rpa_pair(G_tsab, G_tsab, density_only=density_only)
 
 
@@ -505,6 +509,8 @@ def eval_gw_dc_t(G_tsab, W_tabcd):
 
     Returns:
     - GW self-energy contribution to the impurity Green's function.
+    C++ twin: methods::eval_gw_dc_t (src/methods/embedding/dc_response.cpp), kernel gw_sigma_dc_kernel in
+    src/methods/embedding/dc_utilities.hpp.
     """
 
     nts, nts_half = G_tsab.shape[0], W_tabcd.shape[0]
@@ -543,6 +549,8 @@ def solve_gw_dc(G_t, V, W_t, u_weiss_iw, iaft, density_only=True,
 
 
 def embed_impurities(embeding_1e, embeding_2e, solver_results, spin_average=False):
+    # C++ twins: methods::spin_average, methods::density_density_to_product_basis and the embedding itself
+    # (methods::embed_impurity_blocks, driven by coqui.dmft.ImpurityBlockMap) in src/methods/embedding/dc_response.cpp
     # A list of 3D arrays (w, i, j) with the length of the list = number of spins
     Sigma_imp_embed = embeding_1e.embed([ Res['Sigma_iw_data'] for Res in solver_results ])
     Vhf_imp_embed   = embeding_1e.embed([ Res['Sigma_infty'] for Res in solver_results ])

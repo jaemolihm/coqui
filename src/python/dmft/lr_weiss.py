@@ -22,34 +22,8 @@ import numpy as np
 
 from coqui import app_log
 
-from .weiss import (eval_gw_dc_t, eval_pi_rpa_pair, compute_weiss_fermion_w, density_density_to_product_basis,
-                    estimate_zero_moment, _hermitize_delta)
-
-
-def lr_sigma_dc_t(G_tsab, dG_tsab, W_tabcd, dW_tabcd):
-    """
-    Linear response of eval_gw_dc_t (bilinear in G and W): dSigma_dc(tau) = Sigma[dG, W] + Sigma[G, dW].
-    W, dW are in the product basis on the half tau grid, as for eval_gw_dc_t: apply chemistry_to_product_basis to
-    the chemistry-order output of downfold_coulomb / lr_downfold_coulomb first, as the GW+EDMFT driver does.
-    The half tau grid (tau <= beta/2) assumes the tau-reflection evenness of the response, which is exact when
-    the perturbation is time-reversal-even (a physical electron-phonon dV in a time-reversal-symmetric crystal,
-    at any Q and any number of orbitals); for a generic perturbation, e.g. a random complex Hermitian dH0, it
-    fails at O(1) even at Q = 0.
-    """
-    return eval_gw_dc_t(dG_tsab, W_tabcd) + eval_gw_dc_t(G_tsab, dW_tabcd)
-
-
-def lr_pi_dc_t(G_tsab, dG_tsab, *, density_only=True):
-    """
-    Linear response of eval_pi_rpa: dPi_dc(tau) = P(dG, G) + P(G, dG), P = eval_pi_rpa_pair. Both factors carry
-    the same momentum transfer (the product is site-diagonal), so no transpose or -Q partner appears.
-    G_tsab, dG_tsab and the result are on the half tau grid (tau <= beta/2), which assumes the tau-reflection
-    evenness of the response. That evenness is exact when the perturbation is time-reversal-even (a physical
-    electron-phonon dV in a time-reversal-symmetric crystal, at any Q and any number of orbitals); for a generic
-    perturbation, e.g. a random complex Hermitian dH0, it fails at O(1) even at Q = 0.
-    """
-    return (eval_pi_rpa_pair(dG_tsab, G_tsab, density_only=density_only)
-            + eval_pi_rpa_pair(G_tsab, dG_tsab, density_only=density_only))
+from .weiss import (compute_weiss_fermion_w, density_density_to_product_basis, estimate_zero_moment,
+                    _hermitize_delta)
 
 
 def lr_weiss_fermion_w(g_wsab, dg_wsab, vhf_sab, dvhf_sab, sigma_wsab, dsigma_wsab):
@@ -167,7 +141,7 @@ def lr_compute_weiss_fields_w(*, iaft, local_gf, d_local_gf, impurity_selfenergi
     Defined only for causal_projection = None: fit_local_results_boson and fit_u_weiss are nonlinear bath fits,
     and for set_sigma_infty_to_dc = False: Vhf_imp is the impurity's own Sigma_infty, as in the ground state.
     With screen_type = "rpa" the ground state takes Pi_imp = eval_pi_rpa(Gloc), so dPi_imp is then
-    tau_to_w_phsym(lr_pi_dc_t(Gloc, dGloc)).
+    tau_to_w_phsym(coqui.embed.lr_eval_pi_rpa(Gloc, dGloc)).
     """
     missing = {"Gloc_t", "Wloc_t", "Vloc"} - local_gf.keys()
     if missing:
