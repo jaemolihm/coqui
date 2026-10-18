@@ -257,6 +257,15 @@ namespace methods {
     auto downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
                       std::string name = "") const
     -> nda::array<ComplexType, 5>;
+    /**
+     * Local projection of a response at momentum transfer Q (full BZ only):
+     * O_tsab = (1/N_k) sum_k C^{k+Q}_{ai} O^k_tsij C^{k*}_{bj}, where kpq_map(k) is the index of k+Q and
+     * O^k is the (k+Q, k) block. The result is not hermitized.
+     */
+    template<typename comm_t>
+    auto lr_downfold_loc(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
+                         const nda::array<long, 1> &kpq_map, std::string name = "") const
+    -> nda::array<ComplexType, 5>;
 
     template<bool force_real=false, nda::ArrayOfRank<4> Array_base_t>
     auto downfold_loc(const sArray_t<Array_base_t> &O_skij, std::string name = "") const
@@ -266,6 +275,17 @@ namespace methods {
     -> nda::array<ComplexType, 5>;
 
   private:
+    // (1/N_k) sum_k C^{kpq_map(k)}_{ai} O^k_tsij C^{k*}_{bj}; kpq_map = nullptr means kpq_map(k) = k
+    template<typename comm_t>
+    auto sum_C_O_Cdag(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
+                      const nda::array<long, 1> *kpq_map) const
+    -> nda::array<ComplexType, 5>;
+
+    // O_ab += C^{ik_l}_{ai} O_ij C^{ik_r*}_{bj} for spin is and impurity imp
+    void add_C_O_Cdag(long is, long ik_l, long ik_r, long imp,
+                      const nda::array<ComplexType, 2> &O_ij_W, nda::array<ComplexType, 2> &buffer_aj,
+                      nda::MemoryArrayOfRank<2> auto &&O_ab) const;
+
     mf::MF* _MF = nullptr;
 
     std::string _C_file;

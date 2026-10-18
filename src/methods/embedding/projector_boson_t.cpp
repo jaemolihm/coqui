@@ -55,6 +55,7 @@ namespace methods {
         long is = isk / nkpts;
         long ik = isk % nkpts;
         long ikmq = _MF->qk_to_k2(iq, ik);
+        // nda's C-layout gerc conjugates its FIRST argument: B^q_{P,ab} = (1/N) sum_k conj(T^k_{Pa}) T^{k+q}_{Pb}
         nda::blas::gerc(ComplexType(1.0),T_skIPa(is, ikmq, I, P, nda::range::all),
                         T_skIPa(is, ik, I, P, nda::range::all), B_qIPab(iq, I, P, nda::ellipsis{}));
       }
@@ -129,6 +130,7 @@ namespace methods {
           long ikmq = _MF->qk_to_k2(iq, ik);
 
           for (long P = 0; P < thc.Np(); ++P)
+            // nda's C-layout gerc conjugates its FIRST argument: B^q_{P,ab} = (1/N) sum_k conj(T^k_{Pa}) T^{k+q}_{Pb}
             nda::blas::gerc(ComplexType(1.0),T_skIPb(is, ikmq, I, P, nda::range::all),
                             T_skIPb(is, ik, I, P, nda::range::all), B_qIPab(iq, I, P,nda::ellipsis{}));
         }

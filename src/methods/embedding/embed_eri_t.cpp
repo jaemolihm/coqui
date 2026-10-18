@@ -2094,6 +2094,26 @@ namespace methods {
     return std::make_tuple(std::move(X_au),std::move(V_uv));
   }
 
+  // W_cd_ab += conj(B^{iq_l}_{P,dc}) W_PQ B^{iq_r}_{Q,ab}, with P = P_origin + [0, NP_loc) and Q in Q_rng
+  template<nda::ArrayOfRank<5> B_t>
+  void add_Bdag_W_B(const nda::array<ComplexType, 2> &W_PQ, const B_t &B_qIPab, long iq_l, long iq_r,
+                    long P_origin, nda::range Q_rng,
+                    nda::array<ComplexType, 2> &T_P_ab, nda::array<ComplexType, 3> &B_cdP_conj,
+                    nda::MemoryArrayOfRank<2> auto &&W_cd_ab) {
+    long nImpOrbs = B_cdP_conj.shape(0);
+    long NP_loc = B_cdP_conj.shape(2);
+    long NQ_loc = Q_rng.size();
+    auto B_Q_ab = nda::reshape(B_qIPab(iq_r, 0, Q_rng, nda::ellipsis{}), std::array<long, 2>{NQ_loc, nImpOrbs*nImpOrbs});
+    math::detail::gemm_guarded(W_PQ, B_Q_ab, T_P_ab);
+
+    for (long P = 0; P < NP_loc; ++P) {
+      auto B_dc = B_qIPab(iq_l, 0, P_origin+P, nda::ellipsis{});
+      B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
+    }
+    auto B_cd_P_conj = nda::reshape(B_cdP_conj, std::array<long, 2>{nImpOrbs*nImpOrbs, NP_loc});
+    math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_cd_ab);
+  }
+
   template<THC_ERI thc_t, nda::MemoryArray Array_4D_t, typename communicator_t,
       nda::ArrayOfRank<5> B_t>
   auto embed_eri_t::downfold_W(thc_t &thc, memory::darray_t<Array_4D_t, communicator_t> &dW_wqPQ,
@@ -2116,7 +2136,6 @@ namespace methods {
     nda::array<ComplexType, 2> T_P_ab(NP_loc, nImpOrbs*nImpOrbs);
     nda::array<ComplexType, 3> B_cdP_conj(nImpOrbs, nImpOrbs, NP_loc);
     nda::array<ComplexType, 2> W_PQ(NP_loc, NQ_loc);
-    auto B_cd_P_conj = nda::reshape(B_cdP_conj, shape_t<2>{nImpOrbs*nImpOrbs, NP_loc});
 
     auto W_loc = dW_wqPQ.local();
     for (size_t iw_loc = 0; iw_loc < nw_loc; ++iw_loc) {
@@ -2128,18 +2147,11 @@ namespace methods {
         // loop over all symmetry-related q-points
         for (size_t iq_full=0; iq_full<nqpts; ++iq_full) {
           if (_MF->qp_to_ibz(iq_full)!=iq) continue;
-          auto B_Q_ab = nda::reshape(B_qIPab(iq_full, 0, Q_rng, nda::ellipsis{}), shape_t<2>{NQ_loc, nImpOrbs*nImpOrbs});
           if (_MF->qp_trev(iq_full))
             W_PQ = nda::conj( W_loc(iw_loc, iq_loc, nda::ellipsis()) );
           else
             W_PQ = W_loc(iw_loc, iq_loc, nda::ellipsis{});
-          math::detail::gemm_guarded(W_PQ, B_Q_ab, T_P_ab);
-
-          for (size_t P = 0; P < NP_loc; ++P) {
-            auto B_dc = B_qIPab(iq_full, 0, P_origin+P, nda::ellipsis{});
-            B_cdP_conj(nda::range::all, nda::range::all, P) = nda::conj(nda::transpose(B_dc));
-          }
-          math::detail::gemm_guarded(ComplexType(1.0), B_cd_P_conj, T_P_ab, ComplexType(1.0), W_cd_ab);
+          add_Bdag_W_B(W_PQ, B_qIPab, iq_full, iq_full, P_origin, Q_rng, T_P_ab, B_cdP_conj, W_cd_ab);
         }
       }
     }
@@ -2202,6 +2214,41 @@ namespace methods {
     dW_wqPQ.communicator()->all_reduce_in_place_n(W_wqcdab.data(), W_wqcdab.size(), std::plus<>{});
 
     return W_wqcdab;
+  }
+
+  template<nda::ArrayOfRank<5> B_t>
+  auto embed_eri_t::lr_downfold_DeltaW_q(nda::array_view<ComplexType, 4> W_xqPQ, const B_t &B_qIPab,
+                                         const nda::array<long, 1> &kpq_map)
+  -> nda::array<ComplexType, 5> {
+    auto [nqpts, nImps, NP, nImpOrbs, nImpOrbs2] = B_qIPab.shape();
+    utils::check(nImps == 1, "embed_eri_t::lr_downfold_DeltaW_q: only a single impurity is supported (nImps = {}).", nImps);
+    auto [nx, nq, NP_W, NQ_W] = W_xqPQ.shape();
+    utils::check(_MF->nqpts_ibz() == _MF->nqpts() and nqpts == _MF->nqpts() and nq == nqpts,
+                 "embed_eri_t::lr_downfold_DeltaW_q: requires the full q mesh (nqpts_ibz = {}, nqpts = {}, B nq = {}, W nq = {}).",
+                 _MF->nqpts_ibz(), _MF->nqpts(), nqpts, nq);
+    utils::check(NP_W == NP and NQ_W == NP and kpq_map.shape(0) == nqpts,
+                 "embed_eri_t::lr_downfold_DeltaW_q: shape mismatch (W: NP = {}, NQ = {}; B: NP = {}; kpq_map: {}).",
+                 NP_W, NQ_W, NP, kpq_map.shape(0));
+
+    nda::array<ComplexType, 5> W_xcdab(nx, nImpOrbs, nImpOrbs, nImpOrbs, nImpOrbs);
+    W_xcdab() = ComplexType(0.0);
+
+    // W_xcdab = conj(B^{q+Q}_{P,dc}) * [ W_xqPQ ] * B^q_{Q,ab}
+    nda::array<ComplexType, 2> T_P_ab(NP, nImpOrbs*nImpOrbs);
+    nda::array<ComplexType, 3> B_cdP_conj(nImpOrbs, nImpOrbs, NP);
+    nda::array<ComplexType, 2> W_PQ(NP, NP);
+
+    auto &comm = _context->comm;
+    for (long xq = comm.rank(); xq < nx*nqpts; xq += comm.size()) {
+      long ix = xq / nqpts; // xq = ix * nqpts + iq
+      long iq = xq % nqpts;
+      auto W_cd_ab = nda::reshape(W_xcdab(ix, nda::ellipsis{}), shape_t<2>{nImpOrbs*nImpOrbs, nImpOrbs*nImpOrbs});
+      W_PQ = W_xqPQ(ix, iq, nda::ellipsis{});
+      add_Bdag_W_B(W_PQ, B_qIPab, kpq_map(iq), iq, 0, nda::range(NP), T_P_ab, B_cdP_conj, W_cd_ab);
+    }
+    comm.all_reduce_in_place_n(W_xcdab.data(), W_xcdab.size(), std::plus<>{});
+    W_xcdab() /= nqpts;
+    return W_xcdab;
   }
 
   template<THC_ERI thc_t, nda::ArrayOfRank<5> B_t>
@@ -2323,6 +2370,9 @@ namespace methods {
   embed_eri_t::compute_downfolded_coulomb_tensors<true>(thc_reader_t&, MBState &, std::string, bool, bool, imag_axes_ft::IAFT *, std::string, long, bool, bool);
   template std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5> >
   embed_eri_t::compute_downfolded_coulomb_tensors<false>(thc_reader_t&, MBState &, std::string, bool, bool, imag_axes_ft::IAFT *, std::string, long, bool, bool);
+
+  template nda::array<ComplexType, 5> embed_eri_t::lr_downfold_DeltaW_q(
+      nda::array_view<ComplexType, 4>, const nda::array_view<ComplexType, 5>&, const nda::array<long, 1>&);
 
   template void embed_eri_t::downfolding_edmft(thc_reader_t&, MBState&, ptree const&, std::string);
 
