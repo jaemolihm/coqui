@@ -26,7 +26,7 @@ import triqs_modest as modest
 import coqui
 from coqui.utils.imag_axes_ft import IAFT
 import coqui.dmft as coqui_dmft
-from coqui.dmft.io import convert_gw_edmft_params, _normalize_solver_params_list
+from coqui.dmft.io import convert_gw_edmft_params, _normalize_solver_params_list, _read_impurity_mu_imp
 
 Hartree_eV = 27.211386245988
 
@@ -176,6 +176,13 @@ def run_gw_edmft(h_int, embedding, inner_loop_alg=1, *, proj_info=None, params: 
                              {"nbath_per_orbital_wloc": 3, "nbath_per_orbital_u_weiss": 3}
                      - ``chemical_potential`` (dict, optional): auxiliary impurity chemical-
                          potential solver controls:
+                         - ``update`` (str, default ``"search"``): ``"search"`` bisects mu_imp
+                           with density-only solves each iteration; ``"predict"`` sets mu_imp
+                           from the previous iteration without extra solves (see
+                           ``_predict_mu_imp``), and the keys below except ``gain`` are unused.
+                         - ``gain`` (float, default ``_mean_density_density_interaction(Vloc)``: the
+                           bare density-density interaction averaged over spin-orbital pairs, U for
+                           one orbital): density feedback gain of ``"predict"``, in energy per electron.
                          - ``tolerance`` (float, default ``0.1``)
                          - ``suppress_solver_output`` (bool, default ``True``)
                          - ``solver_output_file`` (str)
@@ -426,6 +433,7 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
             # Save previous Weiss fields before updating (for convergence check)
             prev_g_weiss_iw = Input.get('g_weiss_iw')
             prev_u_weiss_iw = Input.get('u_weiss_iw')
+            prev_h0 = Input.get('h0')
 
             # Fermionic and bosonic Weiss fields
             Input['g_weiss_iw'], Input['u_weiss_iw'] = _compute_weiss_fields(
@@ -492,9 +500,15 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
                 h_int      = coqui_dmft.symmetrize_h_int_op(h_int, degenerate_blk, Res['gf_struct'])
                 u_weiss_iw = coqui_dmft.symmetrize_blk2_gf(u_weiss_iw, degenerate_blk, Res['gf_struct'])
 
+            mu_params = solver_params.get('chemical_potential')
+            mu_imp_predicted = 0.0
+            if mu_params is not None and mu_params.get('update', 'search') == 'predict':
+                mu_imp_predicted = _predict_mu_imp(Input, Res, prev_h0, prev_u_weiss_iw, mu_params)
+
             # Call impurity solver, and store sigma_imp, vhf_imp, and pi_imp in "Res"
             Res.update(
-                _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'], **solver_params)
+                _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'],
+                                   mu_imp_predicted=mu_imp_predicted, **solver_params)
             )
             # convert from triqs Gf to numpy arrays and ir mesh
             Res.update(coqui_dmft.imp_results_to_raw_data(
@@ -614,6 +628,7 @@ def _edmft_loop_fixed_gloc_and_wloc(
             # Save previous Weiss fields before updating (for convergence check)
             prev_g_weiss_iw = Input.get('g_weiss_iw')
             prev_u_weiss_iw = Input.get('u_weiss_iw')
+            prev_h0 = Input.get('h0')
 
             # Fermionic and bosonic Weiss fields
             Input['g_weiss_iw'], Input['u_weiss_iw'] = _compute_weiss_fields(
@@ -683,9 +698,15 @@ def _edmft_loop_fixed_gloc_and_wloc(
                 h_int      = coqui_dmft.symmetrize_h_int_op(h_int, degenerate_blk, Res['gf_struct'])
                 u_weiss_iw = coqui_dmft.symmetrize_blk2_gf(u_weiss_iw, degenerate_blk, Res['gf_struct'])
 
+            mu_params = solver_params.get('chemical_potential')
+            mu_imp_predicted = 0.0
+            if mu_params is not None and mu_params.get('update', 'search') == 'predict':
+                mu_imp_predicted = _predict_mu_imp(Input, Res, prev_h0, prev_u_weiss_iw, mu_params)
+
             # Call impurity solver, and store sigma_imp, vhf_imp, and pi_imp in "Res"
             Res.update(
-                _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'], **solver_params)
+                _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'],
+                                   mu_imp_predicted=mu_imp_predicted, **solver_params)
             )
             # convert from triqs Gf to numpy arrays and ir mesh
             Res.update(coqui_dmft.imp_results_to_raw_data(
@@ -793,8 +814,94 @@ def _compute_weiss_fields(coqui_mpi, imp_results, imp_inputs, solver_params, iaf
         )
 
 
+def _mean_density_density_interaction(V_abcd):
+    """
+    Bare density-density interaction of the product-basis tensor V_abcd (V_pb[i,j,k,l] <-> c+_j c+_k c_l c_i,
+    see triqs_utils.v_pb_to_triqs_notation) averaged over the n_orb(2 n_orb - 1) spin-orbital pairs:
+        U_bar = [sum_a V_aaaa + sum_{a != b} (2 V_aabb - V_abab)] / (n_orb (2 n_orb - 1)),
+    i.e. [U + (n_orb - 1)(2U' - J)] / (2 n_orb - 1) for Kanamori, and U for one orbital.
+    """
+    norb = V_abcd.shape[0]
+    total = sum(V_abcd[a, a, a, a].real for a in range(norb))
+    total += sum(2 * V_abcd[a, a, b, b].real - V_abcd[a, b, a, b].real
+                 for a in range(norb) for b in range(norb) if a != b)
+    return total / (norb * (2 * norb - 1))
+
+
+def _predict_mu_imp(Input, Res, prev_h0, prev_u_weiss_iw, mu_params):
+    """
+    Impurity level correction mu_imp for chemical_potential.update = "predict", without extra solves.
+
+    The impurity solver sees the level h0^(k) - mu_imp_k. h0 = lim_{w->inf} [iw - G0^{-1}(iw)] is the static
+    level of the Weiss field, G0^{-1} = Gloc^{-1} + Sigma_imp, and already contains the lattice chemical
+    potential. mu_imp is an impurity-only correction, not a chemical potential, defined by
+        N_k(h0^(k) - mu_imp_k) = N_target,
+    with N the total impurity occupation (all spins and orbitals).
+    CT-SEG builds Sigma_imp with the shifted level, so Sigma_imp carries +mu_imp and the next h0 moves by about
+    -alpha*mu_imp (alpha: mixing). At the GW+EDMFT fixed point mu_imp = 0, and it does not change the solution,
+    only the convergence speed: h0 lags changes of U(nu=0) because it carries the previous, damped Sigma_imp.
+
+    "search" solves the equation above by bisection, at several extra solves. Here one Newton step is taken
+    from the previous solve, whose occupation N_{k-1} at the effective level
+        eps_{k-1} = <h0^(k-1)> - mu_imp_{k-1},    <h0> = average of Re diag(h0) over spins and orbitals,
+    is known. To first order in the level, N_k(eps) ~ N_{k-1} - |dN/deps| (eps - eps_{k-1} + d_H), so
+        eps_k = eps_{k-1} - d_H - gain (N_target - N_{k-1}),    mu_imp_k = <h0^(k)> - eps_k,
+        d_H = (1/norb) sum_{a,b} dU_aabb(nu=0) N_{k-1}/norb,    dU = U_k - U_{k-1}  (static Hartree shift),
+    with |dN/deps|^{-1} replaced by a constant gain, which stays finite in a gap.
+    - Expanding in eps, not in mu_imp, cancels the change of h0 between iterations (lattice mu included).
+    - Once U(0) is stationary (dU = 0), a stationary eps requires N = N_target if gain > 0: the fixed point
+      of the bisection. With gain = 0 nothing constrains N: the first density error is carried forward and
+      mu_imp stays nonzero.
+    - The default gain is U_bar = _mean_density_density_interaction(Vloc). The feedback acts on the total
+      density, whose RPA response to a uniform level shift is |dN/deps| = 2 norb chi0 / (1 + chi0 (2 norb - 1) U_bar),
+      so the per-iteration factor 1 - gain |dN/deps| stays above -1/(2 norb - 1): in this estimate the
+      feedback never diverges, and for one orbital it is at most marginally oscillatory (chi0 U >> 1).
+
+    Returns 0 when no previous solve exists, and the stored mu_imp of the previous solve when its h0 or
+    u_weiss_iw is not available (first iteration after a restart, or a restart from results without a stored
+    density).
+    """
+    if prev_h0 is None or prev_u_weiss_iw is None or 'density' not in Res:
+        mu_imp = float(np.real(Res.get('mu_imp', 0.0)))
+        coqui.app_log(1, f"Impurity chemical potential prediction: no previous h0/u_weiss/density, "
+                         f"keeping the previous mu_imp = {mu_imp:.6f}\n")
+        return mu_imp
+    level = lambda h: np.mean([np.diag(h_s).real.mean() for h_s in h])
+    norb = Input['h0'].shape[-1]
+    dU = (Input['u_weiss_iw'][0] - prev_u_weiss_iw[0]).real
+    dU_dd = np.array([[dU[a, a, b, b] for b in range(norb)] for a in range(norb)])
+    n_prev = float(np.real(Res['density']))
+    d_hartree = np.mean(dU_dd.sum(axis=1)) * n_prev / norb
+    gain = mu_params.get('gain', _mean_density_density_interaction(Input['Vloc']))
+    d_feedback = gain * (Input['density'] - n_prev)
+    eps_prev = level(prev_h0) - float(np.real(Res['mu_imp']))
+    eps_new = eps_prev - d_hartree - d_feedback
+    mu_imp = level(Input['h0']) - eps_new
+    coqui.app_log(1, "Impurity chemical potential prediction")
+    coqui.app_log(1, "--------------------------------------")
+    coqui.app_log(1, f"  previous eps_eff = {eps_prev:.6f}, Hartree shift = {-d_hartree:.6f}, "
+                     f"feedback = {-d_feedback:.6f} (gain = {gain:.4f}, n_target - n_imp = {Input['density'] - n_prev:.6f})")
+    coqui.app_log(1, f"  mu_imp = {mu_imp:.6f}\n")
+    return mu_imp
+
+
+def _stored_mu_imp_for_resolve(solver_params, stored_mu_imp, dmft_iteration):
+    """
+    mu_imp for re-solving a stored iteration with chemical_potential.update = "predict": the
+    value that iteration was solved at (its stored results/mu_imp). Returns 0 for other updates.
+    """
+    mu_params = solver_params.get('chemical_potential')
+    if mu_params is None or mu_params.get('update', 'search') != 'predict':
+        return 0.0
+    if stored_mu_imp is None:
+        raise ValueError(f"chemical_potential.update = 'predict': no stored results/mu_imp for DMFT "
+                         f"iteration {dmft_iteration}; re-solve it with update = 'search'")
+    coqui.app_log(1, f"Impurity chemical potential: stored mu_imp = {stored_mu_imp:.6f}\n")
+    return stored_mu_imp
+
+
 def _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int,
-                       target_density, **solver_params):
+                       target_density, mu_imp_predicted=0.0, **solver_params):
 
     solver_params.pop('degenerate_blk_thresh', None)
     solver_params.pop('set_sigma_infty_to_dc', None)
@@ -803,7 +910,13 @@ def _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int,
     solver_params.pop("screen_j", None)
     mu_params = solver_params.pop('chemical_potential', None)
 
-    if mu_params is not None:
+    if mu_params is not None and mu_params.get('update', 'search') == 'predict':
+        mu_imp = mu_imp_predicted
+        gf_struct = [(bl, gf.target_shape[0]) for (bl, gf) in delta_iw]
+        h0_sab = coqui_dmft.h0_operator_to_array(h0, gf_struct)
+        h0_mat_shifted = np.array([ h0_mat - np.eye(h0_mat.shape[0])*mu_imp for h0_mat in h0_sab ])
+        h0 = coqui_dmft.h0_operator(h0_mat_shifted, gf_struct, force_real=True)
+    elif mu_params is not None:
         dens_solver_params = solver_params.copy()
         dens_solver_params['verbosity'] = 0
         dens_solver_params['suppress_solver_output'] = mu_params.get('suppress_solver_output', True)
@@ -971,6 +1084,7 @@ def solve_impurities_from_chkpt(coqui_mpi, *, dmft_iteration=-1, imp_indices=Non
     solver_inputs = coqui_dmft.read_impurity_chkpt(
         imp_params['chkpt_h5'], dmft_iteration, read="inputs", impurity_indices=imp_indices
     )
+    stored_mu_imp = _read_impurity_mu_imp(imp_params['chkpt_h5'], dmft_iteration, imp_indices)
     solver_results = []
     for imp_index, inputs in enumerate(solver_inputs):
         coqui_dmft.print_title_box(f"IMPURITY {imp_index}")
@@ -1030,8 +1144,11 @@ def solve_impurities_from_chkpt(coqui_mpi, *, dmft_iteration=-1, imp_indices=Non
             h_int      = coqui_dmft.symmetrize_h_int_op(h_int, degenerate_blk, Input['gf_struct'])
             u_weiss_iw = coqui_dmft.symmetrize_blk2_gf(u_weiss_iw, degenerate_blk, Input['gf_struct'])
 
+        mu_imp_predicted = _stored_mu_imp_for_resolve(solver_params, stored_mu_imp[imp_index], dmft_iteration)
+
         # Call impurity solver, and store sigma_imp, vhf_imp, and pi_imp in "Res"
-        Res = _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'], **solver_params)
+        Res = _solver_inner_loop(coqui_mpi, h0, delta_iw, u_weiss_iw, h_int, Input['density'],
+                                 mu_imp_predicted=mu_imp_predicted, **solver_params)
 
         # convert from triqs Gf to numpy arrays and ir mesh
         Res.update(coqui_dmft.imp_results_to_raw_data(
