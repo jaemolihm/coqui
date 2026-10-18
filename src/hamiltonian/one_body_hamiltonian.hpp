@@ -110,11 +110,12 @@ auto model_identity_diag_1B(mf::MF& mf, boost::mpi3::communicator& comm,
 /**
  * Build a distributed one-body (rank-4) quantity and scatter it into the shared
  * array `sX`. The distributed array is built over the first `n_active` ranks of
- * sX's internode communicator; any surplus ranks (when the processor grid cannot
- * tile all ranks, see utils::find_proc_grid_capped) stay idle. Correctness relies on the
- * active grid blocks covering the full global shape while every other element of
- * each node's window is zero, so the internode all_reduce assembles the complete
- * array -- hence sX is zeroed first.
+ * sX's communicator; any surplus ranks (when the processor grid cannot tile all
+ * ranks, see utils::find_proc_grid_capped) stay idle. Each rank writes its own
+ * disjoint block into its node's window. Correctness relies on the active grid
+ * blocks covering the full global shape while every other element of each node's
+ * window is zero, so the internode all_reduce assembles the complete array --
+ * hence sX is zeroed first.
  *
  * @param build - callable invoked only on active ranks with their sub-communicator;
  *                must return the distributed array (global shape == sX.shape()).
@@ -123,17 +124,14 @@ template<class Array_4D_t, class Builder>
 void assemble_one_body(math::shm::shared_array<Array_4D_t>& sX, long n_active, Builder&& build)
 {
   sX.set_zero();
-  if (sX.node_comm()->root()) {
-    auto& internode = *sX.internode_comm();
-    int color = (long(internode.rank()) < n_active) ? 0 : 1;
-    auto active = internode.split(color, internode.rank());
-    if (color == 0) {
-      auto dX = build(active);
-      auto Xl = sX.local();
-      Xl(dX.local_range(0), dX.local_range(1), dX.local_range(2), dX.local_range(3)) = dX.local();
-    }
+  auto& comm = *sX.communicator();
+  int color = (long(comm.rank()) < n_active) ? 0 : 1;
+  auto active = comm.split(color, comm.rank());
+  if (color == 0) {
+    auto dX = build(active);
+    auto Xl = sX.local();
+    Xl(dX.local_range(0), dX.local_range(1), dX.local_range(2), dX.local_range(3)) = dX.local();
   }
-  sX.communicator()->barrier();
   sX.all_reduce();
 }
 } // namespace detail
@@ -186,7 +184,7 @@ auto H0(mf::MF &mf, boost::mpi3::communicator &comm, pseudopot *psp,
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_H0(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &sH0_skij) {
-  long np = sH0_skij.internode_comm()->size();
+  long np = sH0_skij.communicator()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
   std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
@@ -438,7 +436,7 @@ void set_fock(mf::MF &mf, pseudopot *psp, math::shm::shared_array<Array_4D_t> &s
     return;
   }
 
-  long np = sF_skij.internode_comm()->size();
+  long np = sF_skij.communicator()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
   std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
@@ -656,7 +654,7 @@ auto ovlp_diagonal(mf::MF& mf, boost::mpi3::communicator& comm,
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_ovlp(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sS_skij) {
-  long np = sS_skij.internode_comm()->size();
+  long np = sS_skij.communicator()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
   std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),
@@ -710,7 +708,7 @@ auto Vxc(mf::MF &mf, boost::mpi3::communicator &comm,
  */
 template<nda::MemoryArrayOfRank<4> Array_4D_t>
 void set_Vxc(mf::MF &mf, math::shm::shared_array<Array_4D_t> &sVxc_skij) {
-  long np = sVxc_skij.internode_comm()->size();
+  long np = sVxc_skij.communicator()->size();
   auto [pgrid, n_active] = utils::find_proc_grid_capped<4>(
       np, {(long)mf.nspin(), (long)mf.nkpts_ibz(), (long)mf.nbnd(), 1l});
   std::array<long, 4> bsize = {1, 1, std::max(1l, std::min(1024l, mf.nbnd()/pgrid[2])),

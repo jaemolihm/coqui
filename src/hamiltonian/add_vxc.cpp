@@ -137,7 +137,7 @@ void read_vxc_h5(MF_t &mf, h5::group& grp0, shared_array<array_t> &svxc)
   if(svxc.node_comm()->root()) {
     svxc.internode_comm()->broadcast_n(svxc.local().data(), svxc.size(), 0);
   }
-  svxc.communicator()->barrier();
+  svxc.node_sync();
 }
 
 

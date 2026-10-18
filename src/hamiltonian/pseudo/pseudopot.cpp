@@ -528,7 +528,8 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
     mpi->internode_comm.broadcast_n(svsc.local().data(),svsc.size(),0);
     mpi->internode_comm.broadcast_n(svloc.local().data(),svloc.size(),0);
   }
-  mpi->comm.barrier();
+  svsc.node_sync();
+  svloc.node_sync();
 
   nh.resize(nsp);
   ityp.resize(nat);
@@ -585,7 +586,7 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
     } else
       utils::check(false,"finish");
   }
-  mpi->node_comm.barrier();
+  Dnn.node_sync();
 
   // calculate projectors
   sarray_t<nda::array_view<long,2>> sk2g(*mpi,{nk,npwx});
@@ -621,10 +622,10 @@ void pseudopot::read_vnl_h5(MF_t &mf, h5::group& grp0)
       }
     }
   }
-  mpi->comm.barrier();
+  Pskna.node_sync();
   if(mpi->node_comm.root())
     mpi->internode_comm.all_reduce_in_place_n(Ploc.data(),Ploc.size(),std::plus<>{});
-  mpi->comm.barrier();
+  Pskna.node_sync();
 
 }
 

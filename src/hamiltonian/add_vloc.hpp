@@ -207,7 +207,7 @@ auto make_wfc_to_rho(utils::mpi_context_t<boost::mpi3::communicator,
     } else if (mpi.node_comm.root()) {
       mpi.internode_comm.broadcast_n(swfc_to_rho.local().data(), ngm, 0);
     }
-    mpi.node_comm.barrier();
+    swfc_to_rho.node_sync();
     return swfc_to_rho;
   } else {
     arr_t swfc_to_rho(std::addressof(mpi.comm), std::addressof(mpi.internode_comm),
