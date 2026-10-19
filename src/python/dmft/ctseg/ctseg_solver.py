@@ -258,13 +258,13 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     solver_interface_params['measure_nn_nu_dlr']     = True
     S.solve(h_loc0=h_loc0, h_int=h_int, **solver_interface_params)
 
-    # post process (Sigma_iw, G_iw end up on the DLR nodes)
+    # post process
     ctseg_utils.post_process(S, **post_proc_params)
 
     return SolverResults(# required
-        G_iw  = S.G_iw,
+        G_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.G_iw, wmax, eps),
         Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = S.Sigma_iw,
+        Sigma_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Sigma_iw, wmax, eps),
         Pi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Pi_iw, wmax, eps),
         W_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.W_iw, wmax, eps),
         Chi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Chi_iw, wmax, eps),

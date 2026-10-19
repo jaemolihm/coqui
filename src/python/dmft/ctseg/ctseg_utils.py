@@ -23,7 +23,7 @@ import numpy as np
 from itertools import product
 
 from triqs.gfs import (iOmega_n, MeshImFreq, MeshImTime, MeshDLRImFreq, Gf, BlockGf,
-                      make_gf_dlr, make_gf_imfreq, make_hermitian, make_gf_dlr_imfreq,
+                      make_gf_dlr, make_gf_imfreq, make_hermitian,
                       make_gf_from_fourier, fit_gf_dlr, fit_hermitian_tail)
 from triqs.gfs.gf_fnt import fit_hermitian_tail_on_window, replace_by_tail
 from triqs.gfs.tools import inverse, make_zero_tail
@@ -45,9 +45,6 @@ def post_process(solver, **post_proc_params):
             deg_blk_2e = None
         post_process_pi(solver, deg_blk_2e,
                         truncate_uchi=post_proc_params['truncate_uchi'])
-
-    if post_proc_params.get('dlr_mesh') is not None:
-        post_process_sigma_dlr(solver, *post_proc_params['dlr_mesh'])
 
 
 def post_process_pi(solver, degenerate_blk=None, output_in_4idx=False,
@@ -300,6 +297,10 @@ def post_process_sigma(solver, **post_proc_params):
     solver.Sigma_iw << make_hermitian(solver.Sigma_iw)
     if post_proc_params['degenerate_blk']:
         solver.Sigma_iw << modest.symmetrize(solver.Sigma_iw, post_proc_params['degenerate_blk'])
+
+    if post_proc_params.get('dlr_mesh') is not None:
+        solver.Sigma_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, *post_proc_params['dlr_mesh'],
+                                            known_moments=solver.Sigma_moments)
 
     # update G(iw) with the fitted self-energy
     solver.G_iw << inverse( inverse(solver.G0_iw) - solver.Sigma_iw )
@@ -634,47 +635,37 @@ def fill_dlr_imfreq_gf(g_iw, wmax, eps):
         raise NotImplemented
 
 
-def fit_dlr_imfreq_gf(g_iw, wmax, eps):
+def fit_dlr_imfreq_gf(g_iw, wmax, eps, known_moments=None):
     """
-    Least-squares DLR fit of a BlockGf that vanishes at infinite frequency (e.g. Sigma - Sigma_infty), returned on the
-    DLR Matsubara nodes of (wmax, eps).
+    Least-squares DLR fit (wmax, eps) of a BlockGf on MeshImFreq, evaluated back on the same mesh.
 
-    Unlike fill_dlr_imfreq_gf, which copies g_iw at the nodes and so passes the Monte Carlo noise of each node value
-    straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to imaginary time
-    with its high-frequency moments, then fitted with fit_gf_dlr. The tail of g_iw must therefore already be smooth
-    (tail-fitted).
+    Unlike fill_dlr_imfreq_gf, which copies g_iw at the DLR nodes and so passes the Monte Carlo noise of each node
+    value straight into the DLR expansion, the fit uses the whole function: the constant part c0 (zeroth moment, e.g.
+    Sigma_infty) is removed, g_iw - c0 is Fourier transformed to imaginary time with its high-frequency moments and
+    fitted with fit_gf_dlr, and c0 is added back. c0 is known_moments[block][0] if given, else fitted from the tail.
+    The tail of g_iw must therefore already be smooth (tail-fitted).
     """
     assert isinstance(g_iw, BlockGf) and isinstance(g_iw.mesh, MeshImFreq), (
         "fit_dlr_imfreq_gf: input should be a BlockGf on MeshImFreq."
     )
 
-    mesh_dlr_iw = MeshDLRImFreq(
-        beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic,
-        w_max=wmax, eps=eps, symmetrize=True
-    )
     tau_mesh = MeshImTime(beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic, n_tau=10 * len(g_iw.mesh) + 1)
 
-    gf_struct = [(bl, gf.target_shape[0]) for (bl, gf) in g_iw]
-    g_dlr_iw = BlockGf(mesh=mesh_dlr_iw, gf_struct=gf_struct)
+    g_fit_iw = g_iw.copy()
     for block, gf in g_iw:
-        tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
-        g_tau = make_gf_from_fourier(gf, tau_mesh, tail)
-        g_dlr_iw[block] << make_gf_dlr_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps))
-    return g_dlr_iw
-
-
-def post_process_sigma_dlr(solver, wmax, eps):
-    """
-    Replace the dense solver.Sigma_iw and solver.G_iw by their values on the DLR Matsubara nodes of (wmax, eps):
-    Sigma by a least-squares DLR fit, G by the Dyson equation with that Sigma, so that G and Sigma stay consistent
-    on the nodes. Call after post_process_sigma.
-    """
-    sigma_dlr_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
-    g_dlr_iw = fill_dlr_imfreq_gf(solver.G0_iw, wmax, eps)
-    for block, g in g_dlr_iw:
-        sigma = sigma_dlr_iw[block].data + solver.Sigma_infty[block]
-        g.data[:] = np.linalg.inv(np.linalg.inv(g.data) - sigma)
-    solver.Sigma_iw, solver.G_iw = sigma_dlr_iw, g_dlr_iw
+        if known_moments is not None:
+            moments = np.asarray(known_moments[block], dtype=complex)
+        else:
+            moments = np.zeros([0] + list(gf.target_shape), dtype=complex)
+        tail, _ = fit_hermitian_tail(gf, moments)
+        c0 = tail[0].copy()
+        tail[0] = 0.0
+        g_dyn = gf.copy()
+        g_dyn.data[:] -= c0
+        g_tau = make_gf_from_fourier(g_dyn, tau_mesh, tail)
+        g_fit_iw[block] << make_gf_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps), n_iw=gf.mesh.n_iw)
+        g_fit_iw[block].data[:] += c0
+    return g_fit_iw
 
 
 def check_spectrum(A, radius=1.0, tol=0.0, truncation=False):

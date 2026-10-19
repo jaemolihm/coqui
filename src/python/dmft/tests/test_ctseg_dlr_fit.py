@@ -29,6 +29,7 @@ from coqui.dmft.ctseg.ctseg_utils import fill_dlr_imfreq_gf, fit_dlr_imfreq_gf
 BETA, WMAX, EPS = 50.0, 3.0, 1e-10
 POLES = np.array([-1.2, -0.3, 0.4, 1.5])
 WEIGHTS = np.array([0.1, 0.3, 0.2, 0.05])
+C0 = 0.7    # constant part, like Sigma_infty
 
 
 def _pole_sum(iw):
@@ -42,53 +43,53 @@ def _dense_mesh():
     return MeshImFreq(beta=BETA, statistic="Fermion", n_iw=int(1.4 * n_max))
 
 
-def _gf(values, mesh):
+def _iw(mesh):
+    return np.array([complex(w) for w in mesh])
+
+
+def _block(values, mesh, name="up"):
     g = Gf(mesh=mesh, target_shape=(1, 1))
     g.data[:, 0, 0] = values
-    return g
+    return BlockGf(name_list=[name], block_list=[g])
 
 
-def _block(g):
-    return BlockGf(name_list=["up"], block_list=[g])
-
-
-def _at_nodes(g):
-    iw = np.array([complex(w) for w in g.mesh])
-    return g.data[:, 0, 0], iw
-
-
-def test_fit_reproduces_pole_sum():
-    # fit_dlr_imfreq_gf of a noise-free pole sum vs the pole sum at the DLR nodes, for both blocks of a BlockGf;
-    # tolerance: the tau-grid Fourier transform (n_tau = 10 n_iw), not the DLR eps
+@pytest.mark.parametrize("known", [True, False])
+def test_fit_reproduces_pole_sum(known):
+    # fit_dlr_imfreq_gf of a noise-free pole sum + constant C0 vs the exact function on the whole dense mesh, for
+    # both blocks of a BlockGf; C0 given as the known zeroth moment, or fitted from the tail. Tolerance: the tau-grid
+    # Fourier transform (n_tau = 10 x mesh points), not the DLR eps
     mesh = _dense_mesh()
-    iw = np.array([complex(w) for w in mesh])
-    blocks = BlockGf(name_list=["up", "dn"], block_list=[_gf(_pole_sum(iw), mesh), _gf(2 * _pole_sum(iw), mesh)])
-    fit = fit_dlr_imfreq_gf(blocks, WMAX, EPS)
-    for scale, bl in ((1, "up"), (2, "dn")):
-        vals, iw_nodes = _at_nodes(fit[bl])
-        exact = scale * _pole_sum(iw_nodes)
-        assert np.linalg.norm(vals - exact) / np.linalg.norm(exact) < 1e-6
-    # same nodes as fill_dlr_imfreq_gf, so the two can be combined node by node
-    sampled = fill_dlr_imfreq_gf(blocks, WMAX, EPS)
-    assert [w.index for w in fit.mesh] == [w.index for w in sampled.mesh]
+    iw = _iw(mesh)
+    exact = {"up": _pole_sum(iw) + C0, "dn": 2 * _pole_sum(iw) + C0}
+    gs = []
+    for bl in ("up", "dn"):
+        g = Gf(mesh=mesh, target_shape=(1, 1))
+        g.data[:, 0, 0] = exact[bl]
+        gs.append(g)
+    blocks = BlockGf(name_list=["up", "dn"], block_list=gs)
+    moments = {bl: np.array([[[C0]]], dtype=complex) for bl in ("up", "dn")} if known else None
+    fit = fit_dlr_imfreq_gf(blocks, WMAX, EPS, known_moments=moments)
+    assert fit.mesh == mesh
+    for bl in ("up", "dn"):
+        assert np.linalg.norm(fit[bl].data[:, 0, 0] - exact[bl]) / np.linalg.norm(exact[bl]) < 1e-6
 
 
 def test_fit_reduces_noise():
-    # fit_dlr_imfreq_gf vs fill_dlr_imfreq_gf (sampling at the nodes) of a pole sum with Hermitian white noise below
-    # |omega_n| = WMAX (above: noise-free, as after a tail fit): the least-squares fit must be closer to the exact
-    # pole sum at the nodes than the sampled values. The margin is small (ratio 0.89 +- 0.04 over 5 seeds): at low
-    # |omega_n| the DLR nodes sit on nearly every Matsubara frequency, so there is little to average over
+    # DLR-node values of fit_dlr_imfreq_gf vs fill_dlr_imfreq_gf (sampling at the nodes) of a pole sum with Hermitian
+    # white noise below |omega_n| = WMAX (above: noise-free, as after a tail fit), both against the exact pole sum: the
+    # least-squares fit must be closer. The margin is small (ratio 0.89 +- 0.04 over 5 seeds): at low |omega_n| the DLR
+    # nodes sit on nearly every Matsubara frequency, so there is little to average over
     mesh = _dense_mesh()
-    iw = np.array([complex(w) for w in mesh])
+    iw = _iw(mesh)
     rng = np.random.default_rng(3)
     noise = 1e-4 * (rng.standard_normal(len(iw)) + 1j * rng.standard_normal(len(iw)))
     noise = 0.5 * (noise + np.conj(noise[::-1]))
     noise[np.abs(iw.imag) > WMAX] = 0.0
-    g = _gf(_pole_sum(iw) + noise, mesh)
+    g = _block(_pole_sum(iw) + noise, mesh)
 
-    vals_fit, iw_nodes = _at_nodes(fit_dlr_imfreq_gf(_block(g), WMAX, EPS)["up"])
-    vals_smp, _ = _at_nodes(fill_dlr_imfreq_gf(g, WMAX, EPS))
-    exact = _pole_sum(iw_nodes)
-    err_fit = np.linalg.norm(vals_fit - exact)
-    err_smp = np.linalg.norm(vals_smp - exact)
+    fit_nodes = fill_dlr_imfreq_gf(fit_dlr_imfreq_gf(g, WMAX, EPS), WMAX, EPS)["up"]
+    smp_nodes = fill_dlr_imfreq_gf(g, WMAX, EPS)["up"]
+    exact = _pole_sum(_iw(smp_nodes.mesh))
+    err_fit = np.linalg.norm(fit_nodes.data[:, 0, 0] - exact)
+    err_smp = np.linalg.norm(smp_nodes.data[:, 0, 0] - exact)
     assert err_fit < err_smp
