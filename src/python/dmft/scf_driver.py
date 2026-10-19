@@ -136,9 +136,9 @@ def run_gw_edmft(h_int, embedding, inner_loop_alg=1, *, proj_info=None, params: 
                     - ``analytic_hf`` (default ``True``): evaluate static self-energy 
                         analytically.
                     - ``dlr_projection_method`` (default ``"fit"``): how the dense self-energy
-                        is projected onto the impurity DLR basis before G is rebuilt by Dyson:
-                        ``"fit"`` (least-squares fit to the whole mesh) or ``"fill"`` (interpolation
-                        from the values at the DLR nodes).
+                        reaches the impurity DLR mesh: ``"fit"`` (least-squares DLR fit of
+                        Σ − Σ∞ to the whole dense mesh, then G by Dyson) or ``"fill"`` (Σ and G
+                        copied at the DLR nodes).
                     - ``truncate_uchi`` (default ``False``): stabilize ``U*Chi`` inversion i
                         n DLR post-processing.
 

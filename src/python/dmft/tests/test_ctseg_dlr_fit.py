@@ -23,8 +23,8 @@ import pytest
 
 pytest.importorskip("triqs_ctseg", reason="coqui.dmft.ctseg needs triqs_ctseg")
 
-from triqs.gfs import BlockGf, Gf, MeshDLRImFreq, MeshImFreq, make_gf_dlr, make_gf_imfreq
-from coqui.dmft.ctseg.ctseg_utils import fill_dlr_imfreq_gf, fit_dlr_imfreq_gf, interp_dlr_imfreq_gf
+from triqs.gfs import BlockGf, Gf, MeshDLRImFreq, MeshImFreq
+from coqui.dmft.ctseg.ctseg_utils import fill_dlr_imfreq_gf, fit_dlr_imfreq_gf
 
 BETA, WMAX, EPS = 50.0, 3.0, 1e-10
 POLES = np.array([-1.2, -0.3, 0.4, 1.5])
@@ -63,34 +63,15 @@ def _two_blocks(mesh):
     return BlockGf(name_list=["up", "dn"], block_list=gs), exact
 
 
-@pytest.mark.parametrize("project", [fit_dlr_imfreq_gf, interp_dlr_imfreq_gf])
-def test_projection_reproduces_pole_sum(project):
-    # fit_dlr_imfreq_gf / interp_dlr_imfreq_gf of a noise-free pole sum vs the exact function on the whole dense mesh,
-    # for both blocks of a BlockGf. Tolerance: the tau-grid Fourier transform of the fit (n_tau = 10 x mesh points),
-    # not the DLR eps
+def test_fit_reproduces_pole_sum():
+    # fit_dlr_imfreq_gf of a noise-free pole sum vs the exact function on the whole dense mesh, for both blocks of a
+    # BlockGf. Tolerance: the tau-grid Fourier transform (n_tau = 10 x mesh points), not the DLR eps
     mesh = _dense_mesh()
     blocks, exact = _two_blocks(mesh)
-    out = project(blocks, WMAX, EPS)
+    fit = fit_dlr_imfreq_gf(blocks, WMAX, EPS)
     for bl in ("up", "dn"):
-        assert out[bl].mesh == mesh
-        assert np.linalg.norm(out[bl].data[:, 0, 0] - exact[bl]) / np.linalg.norm(exact[bl]) < 1e-6
-
-
-def test_interp_matches_node_sampling():
-    # Stage-2 DLR expansion (make_gf_dlr of the DLR-node values, as imp_results_to_raw_data does) of
-    # interp_dlr_imfreq_gf(g) vs of g itself, for a noisy pole sum, on the whole dense mesh: dlr_projection_method="fill"
-    # must reproduce the pre-fit lattice output. The symmetrized mesh has one more node than DLR coefficients, so
-    # make_gf_dlr is a least-squares solve and the node values themselves change; the coefficients do not.
-    # Tolerance: round-off amplified by the conditioning of the eps 1e-10 basis (measured 4e-10)
-    mesh = _dense_mesh()
-    iw = _iw(mesh)
-    rng = np.random.default_rng(5)
-    noise = 1e-4 * (rng.standard_normal(len(iw)) + 1j * rng.standard_normal(len(iw)))
-    g = _block(_pole_sum(iw) + 0.5 * (noise + np.conj(noise[::-1])), mesh)
-    a = make_gf_imfreq(make_gf_dlr(fill_dlr_imfreq_gf(interp_dlr_imfreq_gf(g, WMAX, EPS), WMAX, EPS)["up"]),
-                       n_iw=mesh.n_iw).data
-    b = make_gf_imfreq(make_gf_dlr(fill_dlr_imfreq_gf(g, WMAX, EPS)["up"]), n_iw=mesh.n_iw).data
-    assert np.linalg.norm(a - b) / np.linalg.norm(b) < 1e-8
+        assert fit[bl].mesh == mesh
+        assert np.linalg.norm(fit[bl].data[:, 0, 0] - exact[bl]) / np.linalg.norm(exact[bl]) < 1e-6
 
 
 def test_fit_reduces_noise():

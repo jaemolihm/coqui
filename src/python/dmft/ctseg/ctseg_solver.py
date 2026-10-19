@@ -218,6 +218,10 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     # This should be fine since all measurements of G(tau)/F(tau) scales very mildly with n_tau (~O(1)!?).  
     n_tau = solver_interface_params.pop('n_tau', max(500001, int(2*beta*wmax)+1))
     n_tau_bosonic = solver_interface_params.pop('n_tau_bosonic', n_tau)
+    dlr_projection_method = solver_interface_params.pop('dlr_projection_method', 'fit')
+    if dlr_projection_method not in ('fit', 'fill'):
+        raise ValueError(f"solve_dynamic_dlr_mesh: unknown dlr_projection_method '{dlr_projection_method}' "
+                         "(use 'fit' or 'fill').")
     solver_interface_params.setdefault('dlr_omega_max', wmax)
     solver_interface_params.setdefault('dlr_epsilon', eps)
 
@@ -240,8 +244,6 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     post_proc_params['analytic_hf']      = solver_interface_params.pop('analytic_hf', True)
     post_proc_params['degenerate_blk']   = solver_interface_params.pop('degenerate_blk', None)
     post_proc_params['truncate_uchi']    = solver_interface_params.pop('truncate_uchi', False)
-    post_proc_params['dlr_mesh']         = (wmax, eps)
-    post_proc_params['dlr_projection_method'] = solver_interface_params.pop('dlr_projection_method', 'fit')
     S.n_iw, S.beta, S.gf_struct = n_iw, beta, gf_struct     # useful and necessary for post-processing
     S.h_int = h_int
     S.h_loc0_mat = block_matrix_from_op(h_loc0, gf_struct)
@@ -261,6 +263,8 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
 
     # post process
     ctseg_utils.post_process(S, **post_proc_params)
+    if dlr_projection_method == 'fit':
+        ctseg_utils.fit_sigma_dlr(S, wmax, eps, post_proc_params['degenerate_blk'])
 
     return SolverResults(# required
         G_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.G_iw, wmax, eps),

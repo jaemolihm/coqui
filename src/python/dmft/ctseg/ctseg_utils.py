@@ -298,6 +298,12 @@ def post_process_sigma(solver, **post_proc_params):
     if post_proc_params['degenerate_blk']:
         solver.Sigma_iw << modest.symmetrize(solver.Sigma_iw, post_proc_params['degenerate_blk'])
 
+    # update G(iw) with the fitted self-energy
+    solver.G_iw << inverse( inverse(solver.G0_iw) - solver.Sigma_iw )
+    solver.G_iw << make_hermitian(solver.G_iw)
+    if post_proc_params['degenerate_blk']:
+        solver.G_iw << modest.symmetrize(solver.G_iw, post_proc_params['degenerate_blk'])
+
     if solver.Sigma_infty is None:
         solver.Sigma_infty = {}
         for block, gf in solver.Sigma_iw:
@@ -312,24 +318,6 @@ def post_process_sigma(solver, **post_proc_params):
     # remove the static part of the self-energy
     for blk, sigma_infty_value in solver.Sigma_infty.items():
         solver.Sigma_iw[blk] = solver.Sigma_iw[blk] - sigma_infty_value
-
-    # project Sigma - Sigma_infty (vanishes at infinity) onto the impurity DLR basis, on the same dense mesh
-    if post_proc_params.get('dlr_mesh') is not None:
-        wmax, eps = post_proc_params['dlr_mesh']
-        method = post_proc_params.get('dlr_projection_method', 'fit')
-        if method == 'fit':
-            solver.Sigma_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
-        elif method == 'fill':
-            solver.Sigma_iw = interp_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
-        else:
-            raise ValueError(f"post_process_sigma: unknown dlr_projection_method '{method}' (use 'fit' or 'fill').")
-
-    # update G(iw) with the fitted self-energy
-    for blk, sigma_infty_value in solver.Sigma_infty.items():
-        solver.G_iw[blk] << inverse(inverse(solver.G0_iw[blk]) - solver.Sigma_iw[blk] - sigma_infty_value)
-    solver.G_iw << make_hermitian(solver.G_iw)
-    if post_proc_params['degenerate_blk']:
-        solver.G_iw << modest.symmetrize(solver.G_iw, post_proc_params['degenerate_blk'])
 
     
 def tail_fit(Sigma_iw,
@@ -648,10 +636,10 @@ def fit_dlr_imfreq_gf(g_iw, wmax, eps):
     Least-squares DLR fit (wmax, eps) of a BlockGf on MeshImFreq that vanishes at infinite frequency (e.g.
     Sigma - Sigma_infty), evaluated back on the same mesh.
 
-    Unlike interp_dlr_imfreq_gf, which takes g_iw only at the DLR nodes and so passes the Monte Carlo noise of each
-    node value straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to
-    imaginary time with its high-frequency moments (fitted, zeroth moment fixed to 0), then fitted with fit_gf_dlr.
-    The tail of g_iw must therefore already be smooth (tail-fitted).
+    Unlike fill_dlr_imfreq_gf, which copies g_iw at the DLR nodes and so passes the Monte Carlo noise of each node
+    value straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to imaginary
+    time with its high-frequency moments (fitted, zeroth moment fixed to 0), then fitted with fit_gf_dlr. The tail of
+    g_iw must therefore already be smooth (tail-fitted).
     """
     assert isinstance(g_iw, BlockGf) and isinstance(g_iw.mesh, MeshImFreq), (
         "fit_dlr_imfreq_gf: input should be a BlockGf on MeshImFreq."
@@ -667,15 +655,17 @@ def fit_dlr_imfreq_gf(g_iw, wmax, eps):
     return g_fit_iw
 
 
-def interp_dlr_imfreq_gf(g_iw, wmax, eps):
+def fit_sigma_dlr(solver, wmax, eps, degenerate_blk=None):
     """
-    DLR interpolation (wmax, eps) of a BlockGf on MeshImFreq from its values at the DLR Matsubara nodes
-    (fill_dlr_imfreq_gf + make_gf_dlr), evaluated back on the same mesh.
+    Replace the dense solver.Sigma_iw (Sigma - Sigma_infty, after post_process_sigma) by its least-squares DLR fit
+    (wmax, eps) on the same mesh, and solver.G_iw by the Dyson equation with the fitted Sigma + Sigma_infty.
     """
-    g_interp_iw = g_iw.copy()
-    for block, gf in fill_dlr_imfreq_gf(g_iw, wmax, eps):
-        g_interp_iw[block] << make_gf_imfreq(make_gf_dlr(gf), n_iw=g_iw.mesh.n_iw)
-    return g_interp_iw
+    solver.Sigma_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
+    for blk, sigma_infty_value in solver.Sigma_infty.items():
+        solver.G_iw[blk] << inverse(inverse(solver.G0_iw[blk]) - solver.Sigma_iw[blk] - sigma_infty_value)
+    solver.G_iw << make_hermitian(solver.G_iw)
+    if degenerate_blk:
+        solver.G_iw << modest.symmetrize(solver.G_iw, degenerate_blk)
 
 
 def check_spectrum(A, radius=1.0, tol=0.0, truncation=False):
