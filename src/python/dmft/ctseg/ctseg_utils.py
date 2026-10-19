@@ -22,8 +22,9 @@ import triqs.utility.mpi as mpi
 import numpy as np
 from itertools import product
 
-from triqs.gfs import (iOmega_n, MeshImFreq, MeshDLRImFreq, Gf, BlockGf,
-                      make_gf_dlr, make_gf_imfreq, make_hermitian) 
+from triqs.gfs import (iOmega_n, MeshImFreq, MeshImTime, MeshDLRImFreq, Gf, BlockGf,
+                      make_gf_dlr, make_gf_imfreq, make_hermitian, make_gf_dlr_imfreq,
+                      make_gf_from_fourier, fit_gf_dlr, fit_hermitian_tail)
 from triqs.gfs.gf_fnt import fit_hermitian_tail_on_window, replace_by_tail
 from triqs.gfs.tools import inverse, make_zero_tail
 
@@ -626,6 +627,35 @@ def fill_dlr_imfreq_gf(g_iw, wmax, eps):
             g_dlr_iw[w] = g_iw(w)
         return g_dlr_iw
 
+    else:
+        raise NotImplemented
+
+
+def fit_dlr_imfreq_gf(g_iw, wmax, eps):
+    """
+    Least-squares DLR fit of a Green's function that vanishes at infinite frequency (e.g. Sigma - Sigma_infty),
+    returned on the DLR Matsubara nodes of (wmax, eps).
+
+    Unlike fill_dlr_imfreq_gf, which copies g_iw at the nodes and so passes the Monte Carlo noise of each node value
+    straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to imaginary time
+    with its high-frequency moments, then fitted with fit_gf_dlr. The tail of g_iw must therefore already be smooth
+    (tail-fitted).
+    """
+    assert isinstance(g_iw.mesh, MeshImFreq), (
+        "fit_dlr_imfreq_gf: input Green's function should live on MeshImFreq."
+    )
+
+    def fit_one(gf):
+        tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
+        tau_mesh = MeshImTime(beta=gf.mesh.beta, statistic=gf.mesh.statistic, n_tau=10 * len(gf.mesh) + 1)
+        g_tau = make_gf_from_fourier(gf, tau_mesh, tail)
+        return make_gf_dlr_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps))
+
+    if isinstance(g_iw, BlockGf):
+        names = list(g_iw.indices)
+        return BlockGf(name_list=names, block_list=[fit_one(g_iw[bl]) for bl in names], make_copies=False)
+    elif isinstance(g_iw, Gf):
+        return fit_one(g_iw)
     else:
         raise NotImplemented
 

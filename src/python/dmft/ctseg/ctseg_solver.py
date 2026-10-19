@@ -260,10 +260,18 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     # post process
     ctseg_utils.post_process(S, **post_proc_params)
 
+    # Sigma: least-squares DLR fit rather than sampling at the nodes (the measured Sigma is noisy);
+    # G: Dyson equation with that Sigma, so that G and Sigma stay consistent on the DLR nodes.
+    Sigma_iw = ctseg_utils.fit_dlr_imfreq_gf(S.Sigma_iw, wmax, eps)
+    G_iw = ctseg_utils.fill_dlr_imfreq_gf(S.G0_iw, wmax, eps)
+    for block, g in G_iw:
+        sigma = Sigma_iw[block].data + S.Sigma_infty[block]
+        g.data[:] = np.linalg.inv(np.linalg.inv(g.data) - sigma)
+
     return SolverResults(# required
-        G_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.G_iw, wmax, eps),
+        G_iw  = G_iw,
         Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Sigma_iw, wmax, eps),
+        Sigma_iw = Sigma_iw,
         Pi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Pi_iw, wmax, eps),
         W_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.W_iw, wmax, eps),
         Chi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Chi_iw, wmax, eps),
