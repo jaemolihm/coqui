@@ -251,13 +251,14 @@ def test_lr_weiss_fermion_boson_multiorbital(weiss_lr_inputs):
 
 
 def test_lr_extract_h0_and_delta_multiorbital(weiss_lr_inputs):
-    # dg is not Hermitian in iw: Delta is hermitized as in the ground state.
+    # lr_extract_h0_and_delta against the central difference of extract_h0_and_delta(make_hermitian=False) at a
+    # generic (non-Hermitian in iw) dg, as at Q != 0.
     x, h = weiss_lr_inputs, 1e-4
     g = weiss.compute_weiss_fermion_w(x["G_w"], x["Vhf"], x["Sigma_w"])
     dg, _ = lr_weiss.lr_weiss_fermion_w(x["G_w"], x["dG_w"], x["Vhf"], x["dVhf"], x["Sigma_w"], x["dSigma_w"])
     dh0, ddelta = lr_weiss.lr_extract_h0_and_delta(g, dg, x["iaft"])
     dh0_fd, ddelta_fd = _fd_richardson(
-        lambda e: list(weiss.extract_h0_and_delta(g + e * dg, x["iaft"])), h)
+        lambda e: list(weiss.extract_h0_and_delta(g + e * dg, x["iaft"], make_hermitian=False)), h)
     assert _rel(dh0, dh0_fd) < 1e-8
     assert _rel(ddelta, ddelta_fd) < 1e-8
 
