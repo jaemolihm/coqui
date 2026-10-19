@@ -218,6 +218,10 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     # This should be fine since all measurements of G(tau)/F(tau) scales very mildly with n_tau (~O(1)!?).  
     n_tau = solver_interface_params.pop('n_tau', max(500001, int(2*beta*wmax)+1))
     n_tau_bosonic = solver_interface_params.pop('n_tau_bosonic', n_tau)
+    dlr_projection_method = solver_interface_params.pop('dlr_projection_method', 'fit')
+    if dlr_projection_method not in ('fit', 'fill'):
+        raise ValueError(f"solve_dynamic_dlr_mesh: unknown dlr_projection_method '{dlr_projection_method}' "
+                         "(use 'fit' or 'fill').")
     solver_interface_params.setdefault('dlr_omega_max', wmax)
     solver_interface_params.setdefault('dlr_epsilon', eps)
 
@@ -260,13 +264,19 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     # post process
     ctseg_utils.post_process(S, **post_proc_params)
 
+    # dense mesh -> DLR nodes
+    if dlr_projection_method == 'fit':
+        to_dlr = ctseg_utils.fit_dlr_imfreq_gf
+    else:
+        to_dlr = ctseg_utils.fill_dlr_imfreq_gf
+
     return SolverResults(# required
-        G_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.G_iw, wmax, eps),
+        G_iw  = to_dlr(S.G_iw, wmax, eps),
         Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Sigma_iw, wmax, eps),
-        Pi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Pi_iw, wmax, eps),
-        W_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.W_iw, wmax, eps),
-        Chi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Chi_iw, wmax, eps),
+        Sigma_iw = to_dlr(S.Sigma_iw, wmax, eps),
+        Pi_iw = to_dlr(S.Pi_iw, wmax, eps),
+        W_iw  = to_dlr(S.W_iw, wmax, eps),
+        Chi_iw = to_dlr(S.Chi_iw, wmax, eps),
 
         # optional
         orbital_occupations = S.results.densities,
@@ -320,6 +330,7 @@ def solve_density_dynamic_u_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_in
     solver_interface_params.pop('analytic_hf', False)
     solver_interface_params.pop('degenerate_blk', None)
     solver_interface_params.pop("truncate_uchi", None)
+    solver_interface_params.pop('dlr_projection_method', None)
 
     # call solver
     solver_interface_params['measure_densities'] = True

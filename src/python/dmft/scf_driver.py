@@ -135,6 +135,10 @@ def run_gw_edmft(h_int, embedding, inner_loop_alg=1, *, proj_info=None, params: 
                         (default ``None``): tail-fit window controls.
                     - ``analytic_hf`` (default ``True``): evaluate static self-energy 
                         analytically.
+                    - ``dlr_projection_method`` (default ``"fit"``): how the dense impurity
+                        results (G, Σ − Σ∞, Π, W, χ) reach the impurity DLR mesh: ``"fit"``
+                        (least-squares DLR fit to the whole dense mesh) or ``"fill"`` (values
+                        copied at the DLR nodes).
                     - ``truncate_uchi`` (default ``False``): stabilize ``U*Chi`` inversion i
                         n DLR post-processing.
 
