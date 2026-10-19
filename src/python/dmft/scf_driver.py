@@ -129,10 +129,17 @@ def run_gw_edmft(h_int, embedding, inner_loop_alg=1, *, proj_info=None, params: 
                         mesh size within CT-SEG.
                     - ``n_tau_bosonic`` (default ``n_tau``): Internal bosonic imaginary-time 
                         mesh size within CT-SEG. 
+                    - ``measure_I_tau`` (default ``True``): measure I(tau) and F_R(tau) so that
+                        the self-energy is the symmetric improved estimator; ``False`` gives the
+                        asymmetric improved estimator F G^-1.
                     - ``perform_tail_fit`` (default ``False``): enable self-energy tail fit.
                     - ``fit_max_moment`` (default ``3``): highest fitted self-energy moment.
                     - ``fit_min_w`` / ``fit_max_w`` / ``fit_min_n`` / ``fit_max_n``
                         (default ``None``): tail-fit window controls.
+                    - ``fit_window_fraction`` (default ``None``): if set and none of the
+                        window controls above is given, the tail-fit window is the top
+                        fraction of the Matsubara mesh,
+                        ``n = int((1 - fit_window_fraction) * n_iw) ... n_iw - 1``.
                     - ``analytic_hf`` (default ``True``): evaluate static self-energy 
                         analytically.
                     - ``dlr_projection_method`` (default ``"fit"``): how the dense impurity
