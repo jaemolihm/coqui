@@ -22,6 +22,7 @@
 #include <c2py/c2py.hpp>
 #include "IO/app_loggers.h"
 #include "methods/MBPT_drivers.h"
+#include "methods/embedding/dc_response.hpp"
 
 #include "python/mean_field/mf_module.hpp"
 #include "python/mean_field/mf_module.wrap.hxx"
@@ -130,6 +131,35 @@ namespace coqui_py {
     methods::dmft_embed(mf.get_mf(), parser.get_root(),
                         projector_ksIai, band_window, kpts_crys,
                         local_hf_potentials, local_selfenergies);
+  }
+
+
+  // ----- per-cell double-counting response and basis helpers (methods/embedding/dc_response.hpp) -----
+
+  template<int R> using carr_t = nda::array<ComplexType, R>;
+
+  template<int R>
+  auto chemistry_to_product_basis(const carr_t<R> &A) -> carr_t<R> {
+    return methods::chemistry_to_product_basis(A);
+  }
+
+  template<int R>
+  auto density_density_to_product_basis(const carr_t<R> &A) -> carr_t<R+2> {
+    return methods::density_density_to_product_basis(A);
+  }
+
+  auto lr_eval_gw_dc_cells(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab,
+                           const carr_t<5> &W_tabcd, const carr_t<5> &dW_tabcd,
+                           const nda::array<long, 1> &cell_offset, const nda::array<long, 1> &cell_size,
+                           const nda::array<long, 1> &orb_block) -> carr_t<4> {
+    return methods::lr_eval_gw_dc_cells(G_tsab, dG_tsab, W_tabcd, dW_tabcd,
+                                        methods::dc_cells_t{cell_offset, cell_size, orb_block});
+  }
+
+  auto lr_eval_pi_rpa_cells(const carr_t<4> &G_tsab, const carr_t<4> &dG_tsab,
+                            const nda::array<long, 1> &cell_offset, const nda::array<long, 1> &cell_size,
+                            const nda::array<long, 1> &orb_block) -> carr_t<3> {
+    return methods::lr_eval_pi_rpa_cells(G_tsab, dG_tsab, methods::dc_cells_t{cell_offset, cell_size, orb_block});
   }
 
 

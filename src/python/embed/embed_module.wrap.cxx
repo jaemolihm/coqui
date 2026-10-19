@@ -222,6 +222,44 @@ static auto const _c2py_fun_9 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "df_params", "projector_ksIai", "band_window", "kpts_crys",
     "DeltaG_tskij", "q_vec")};
 
+// chemistry_to_product_basis
+static auto const _c2py_fun_10 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<std::complex<double>, 5> &A) {
+      return coqui_py::chemistry_to_product_basis<5>(A);
+    },
+    "A")};
+
+// density_density_to_product_basis
+static auto const _c2py_fun_11 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<std::complex<double>, 3> &A) {
+      return coqui_py::density_density_to_product_basis<3>(A);
+    },
+    "A")};
+
+// lr_eval_gw_dc_cells
+static auto const _c2py_fun_12 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<std::complex<double>, 4> &G_tsab,
+       const nda::array<std::complex<double>, 4> &dG_tsab,
+       const nda::array<std::complex<double>, 5> &W_tabcd,
+       const nda::array<std::complex<double>, 5> &dW_tabcd,
+       const nda::array<long, 1> &cell_offset,
+       const nda::array<long, 1> &cell_size,
+       const nda::array<long, 1> &orb_block) {
+      return coqui_py::lr_eval_gw_dc_cells(G_tsab, dG_tsab, W_tabcd, dW_tabcd, cell_offset, cell_size, orb_block);
+    },
+    "G_tsab", "dG_tsab", "W_tabcd", "dW_tabcd", "cell_offset", "cell_size", "orb_block")};
+
+// lr_eval_pi_rpa_cells
+static auto const _c2py_fun_13 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const nda::array<std::complex<double>, 4> &G_tsab,
+       const nda::array<std::complex<double>, 4> &dG_tsab,
+       const nda::array<long, 1> &cell_offset,
+       const nda::array<long, 1> &cell_size,
+       const nda::array<long, 1> &orb_block) {
+      return coqui_py::lr_eval_pi_rpa_cells(G_tsab, dG_tsab, cell_offset, cell_size, orb_block);
+    },
+    "G_tsab", "dG_tsab", "cell_offset", "cell_size", "orb_block")};
+
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");
 static const auto _c2py_doc_2 = _c2py_fun_2.doc(R"DOC()DOC");
@@ -232,6 +270,10 @@ static const auto _c2py_doc_6 = _c2py_fun_6.doc(R"DOC()DOC");
 static const auto _c2py_doc_7 = _c2py_fun_7.doc(R"DOC()DOC");
 static const auto _c2py_doc_8 = _c2py_fun_8.doc(R"DOC()DOC");
 static const auto _c2py_doc_9 = _c2py_fun_9.doc(R"DOC()DOC");
+static const auto _c2py_doc_10 = _c2py_fun_10.doc(R"DOC()DOC");
+static const auto _c2py_doc_11 = _c2py_fun_11.doc(R"DOC()DOC");
+static const auto _c2py_doc_12 = _c2py_fun_12.doc(R"DOC()DOC");
+static const auto _c2py_doc_13 = _c2py_fun_13.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -257,6 +299,14 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_8.c_str()},
     {"lr_downfold_gloc", (PyCFunction)c2py::pyfkw<_c2py_fun_9>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_9.c_str()},
+    {"chemistry_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_10>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_10.c_str()},
+    {"density_density_to_product_basis", (PyCFunction)c2py::pyfkw<_c2py_fun_11>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_11.c_str()},
+    {"lr_eval_gw_dc_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_12>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_12.c_str()},
+    {"lr_eval_pi_rpa_cells", (PyCFunction)c2py::pyfkw<_c2py_fun_13>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_13.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 
