@@ -359,7 +359,7 @@ namespace bdft_tests {
     REQUIRE(X_wf.size() == 0);
   }
 
-  // IR check_leakage (comm == nullptr) vs the ratio max|Tct(n-2:n)·A| / max|Tct(0)·A| evaluated directly, bit for bit;
+  // IR check_leakage (comm == nullptr) vs the ratio max|Tct(n-2:n)·A| / max|Tct(0)·A| evaluated directly (rtol 1e-12);
   // the boson group reads its own Tct (equal to the fermion one in the data files).
   TEST_CASE("iaft_ir_check_leakage", "[iaft][ir]") {
     imag_axes_ft::IAFT iaft(1000.0, 12.0, imag_axes_ft::ir_basis, "high");

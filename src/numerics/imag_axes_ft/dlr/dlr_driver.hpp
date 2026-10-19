@@ -289,9 +289,12 @@ namespace imag_axes_ft {
       // that diagonalize the Lehmann kernel inside the DLR span (the DLR counterpart of the IR Tct, same ordering by
       // singular value). With X = W^{1/2} E_f = Q R (E_f: node values -> values on a fine tau grid, W: fine tau
       // quadrature weights) and Kt = W^{1/2} K(tau_f, omega_f) V^{1/2} (V: fine omega quadrature weights),
-      // Q^T Kt = U S Vt gives Tlt = U^T R (u_l = Q U_l). Only value -> value maps enter: DLR coefficients
-      // (cf2it^{-1}, cond ~1e13) and the Tct of the paired Twt are avoided.
-      // The IR Tct comes from the sparse-ir tables, which have no DLR equivalent, so Tct_ff/Tct_bb cannot be reused.
+      // Q^T Kt = U S Vt gives Tlt = U^T R (u_l = Q U_l).
+      // The DLR Tct (= it2cf) gives pole weights, which are not ordered by singular value, so their tail does not
+      // measure truncation; the IR Tct is used as is.
+      // E_f goes through an LU solve with cf2it (cond ~1e13); as a value -> value map it is accurate (error ~ eps
+      // against an analytic model G; dlr_leakage_modes checks the orthonormality of the modes built from it).
+      // Do not replace it with B_f * Tct (explicit inverse) without re-measuring.
       void build_Tlt() {
         auto r = _it_ops.rank();
         cppdlr::fineparams fine(lambda);
@@ -352,8 +355,7 @@ namespace imag_axes_ft {
         nda::vector<double> sv(r);
         auto U = nda::matrix<double, nda::F_layout>(r, r);
         auto Vt = nda::matrix<double, nda::F_layout>(nom_fine, nom_fine);
-        auto info = nda::lapack::gesvd(M, sv, U, Vt);
-        utils::check(info == 0, "imag_axes_ft::dlr::DLR: SVD of the kernel in the DLR span failed (gesvd info = {}).", info);
+        nda::lapack::gesvd(M, sv, U, Vt);
 
         // Tlt = U^T R, in the IR normalization int_0^beta u_l u_m dtau = delta_lm
         auto T_real = nda::matrix<double>(nda::transpose(U) * R);

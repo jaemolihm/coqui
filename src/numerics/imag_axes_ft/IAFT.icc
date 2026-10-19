@@ -280,20 +280,20 @@ double IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::str
 
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
-  auto T_ct = (stats == fermion)? Tlt_ff() : Tlt_bb();
+  auto T_lt = (stats == fermion)? Tlt_ff() : Tlt_bb();
   // an empty local block contributes nothing
   if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
     nda::array<ComplexType, 1> Ac0_i(dim1);
-    auto Tc0_t = T_ct(0, nda::range::all);
+    auto Tc0_t = T_lt(0, nda::range::all);
     nda::blas::gemv(nda::transpose(A_ti_2D), Tc0_t, Ac0_i);
     Ac0_i_abs = Abs(Ac0_i);
     coeff_first = nda::max_element(Ac0_i_abs);
 
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
-    auto nIR = T_ct.shape(0);
-    auto T_cm2_t = T_ct(nda::range(nIR-2, nIR), nda::range::all);
+    auto nl = T_lt.shape(0);
+    auto T_cm2_t = T_lt(nda::range(nl-2, nl), nda::range::all);
     nda::blas::gemm(T_cm2_t, A_ti_2D, A_ci);
     A_ci_abs = Abs(A_ci);
     coeff_last = nda::max_element(A_ci_abs);
@@ -328,7 +328,7 @@ double IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, st
 
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
-  auto T_ct = (stats == fermion)? Tlt_ff() : Tlt_bb();
+  auto T_lt = (stats == fermion)? Tlt_ff() : Tlt_bb();
   // an empty local block contributes nothing
   if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
@@ -336,7 +336,7 @@ double IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, st
     nda::array<ComplexType, 1> Tc0_t_pos(nt_half);
     for (long it = 0; it < nt_half; ++it) {
       long imt = nts - it - 1;
-      Tc0_t_pos(it) = (it == imt)? T_ct(0, it) : T_ct(0, it) + T_ct(0, imt);
+      Tc0_t_pos(it) = (it == imt)? T_lt(0, it) : T_lt(0, it) + T_lt(0, imt);
     }
     nda::blas::gemv(nda::transpose(A_ti_2D), Tc0_t_pos, Ac0_i);
     Ac0_i_abs = Abs(Ac0_i);
@@ -344,12 +344,12 @@ double IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, st
 
     nda::array<RealType, 2> A_ci_abs(2, dim1);
     nda::array<ComplexType, 2> A_ci(2, dim1);
-    auto nIR = T_ct.shape(0);
+    auto nl = T_lt.shape(0);
     nda::array<ComplexType, 2> T_cm2_t_pos(2, nt_half);
     for (long it = 0; it < nt_half; ++it) {
       long imt = nts - it - 1;
-      T_cm2_t_pos(0, it) = (it == imt)? T_ct(nIR-2, it) : T_ct(nIR-2, it) + T_ct(nIR-2, imt);
-      T_cm2_t_pos(1, it) = (it == imt)? T_ct(nIR-1, it) : T_ct(nIR-1, it) + T_ct(nIR-1, imt);
+      T_cm2_t_pos(0, it) = (it == imt)? T_lt(nl-2, it) : T_lt(nl-2, it) + T_lt(nl-2, imt);
+      T_cm2_t_pos(1, it) = (it == imt)? T_lt(nl-1, it) : T_lt(nl-1, it) + T_lt(nl-1, imt);
     }
     nda::blas::gemm(T_cm2_t_pos, A_ti_2D, A_ci);
     A_ci_abs = Abs(A_ci);

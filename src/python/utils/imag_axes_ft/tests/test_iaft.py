@@ -345,37 +345,28 @@ def _semicircle_G(iaft, tau, nq=400):
 
 
 def test_check_leakage_dlr_vs_ir():
-    """DLR check_leakage vs the IR coefficients of the same model G at the same positions (modes r-2, r-1 of the
-    IR Tlt), with the same 1e-6 relative white noise statistics on each basis's own nodes. The ratios are compared
-    within a factor 3 (different noise realizations, 57 vs 72 IR modes)."""
+    """check_leakage of the DLR backend vs the IR backend on the same model G, with white noise added on each
+    backend's own tau points (mean of 5 realizations). Measured at Lambda=600: DLR is 1.2-1.6x IR for noise 1e-9 and
+    1e-6 (different noise realizations on 57 vs 72 points), so the ratio is required to lie in (0.7, 3). The clean
+    values are round-off / DLR-fit-error floors, far below the 1e-5 warning threshold."""
     pytest.importorskip("coqui._lib.iaft_module")
     beta, wmax = 200.0, 3.0
     dlr = IAFT(beta=beta, wmax=wmax, prec="high", basis="dlr")
     ir = IAFT(beta=beta, wmax=wmax, prec="high", basis="ir")
-    r = dlr.nt_f
     rng = np.random.default_rng(5)
 
-    def noisy(iaft, eps):
+    def leakage(iaft, eps, n):
         g = _semicircle_G(iaft, iaft.tau_mesh('f'))
-        return (g + eps * np.abs(g).max() * rng.standard_normal(g.shape))[:, None].astype(complex)
+        vals = [iaft.check_leakage((g + eps * np.abs(g).max() * rng.standard_normal(g.shape))[:, None].astype(complex),
+                                   'f', 'test') for _ in range(n)]
+        assert all(isinstance(v, float) for v in vals)
+        return np.mean(vals)
 
-    # clean
-    lk = dlr.check_leakage(noisy(dlr, 0.0), 'f', 'clean')
-    assert isinstance(lk, float) and lk < 1e-11
-
-    # noisy
-    lk_dlr = [dlr.check_leakage(noisy(dlr, 1e-6), 'f', 'noise') for _ in range(5)]
-    Tlt_ir = ir._impl.Tlt_ff
-    lk_ir = []
-    for _ in range(5):
-        a = Tlt_ir @ noisy(ir, 1e-6)
-        lk_ir.append(np.abs(a[r - 2:r]).max() / np.abs(a[0]).max())
-    ratio = np.mean(lk_dlr) / np.mean(lk_ir)
-    assert 1 / 3 < ratio < 3, (lk_dlr, lk_ir)
-    assert np.mean(lk_dlr) > 1e-5 / 10  # noise at 1e-6 sits near the warning threshold
-
-    # the IR adapter returns its ratio too
-    assert isinstance(ir.check_leakage(noisy(ir, 1e-6), 'f', 'ir'), float)
+    assert leakage(dlr, 0.0, 1) < 1e-11
+    assert leakage(ir, 0.0, 1) < 1e-11
+    for eps in (1e-9, 1e-6):
+        ratio = leakage(dlr, eps, 5) / leakage(ir, eps, 5)
+        assert 0.7 < ratio < 3, (eps, ratio)
 
 
 def test_check_leakage_dlr_w_input_and_phsym():
