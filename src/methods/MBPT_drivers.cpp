@@ -1991,10 +1991,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     utils::check(!needs_W or !has_local_pi or W_recomputed,
                  "run_lr_calc: local_polarizabilities build the GW+EDMFT W in place of a W file; "
                  "they require recompute_W = true.");
-    utils::check(!has_pi_resp or has_local_pi or !W_recomputed,
-                 "run_lr_calc: local_polarizability_response with a recomputed W requires "
+    const bool has_dc_in = local && local->local_dc.has_value();
+    utils::check(!(has_pi_resp or has_dc_in) or has_local_pi or !W_recomputed,
+                 "run_lr_calc: local_polarizability_response / local_dc with a recomputed W requires "
                  "local_polarizabilities: the recomputed W would otherwise be the RPA W, which does not "
-                 "contain the local polarizabilities the response is taken around.");
+                 "contain the local polarizabilities the response and the double counting are taken around.");
 
     if (has_sigma_ext_raw) {
       // Band-basis external ΔΣ
@@ -2026,7 +2027,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
             opt_sB_qIPab->local(), kpq_map_local, false);
       };
       const bool has_dc = local->local_dc.has_value();
-      const long nt_half_b = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+      const long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
       if (has_pi_resp) {
         auto const& r = local->local_polarizability_response.value();
         utils::check(r.count("imp") == 1 and (r.count("dc") == (has_dc ? 0 : 1)) and r.size() == (has_dc ? 1 : 2),
@@ -2043,14 +2044,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         utils::check(dc.Gloc_tsIab.shape() == std::array<long, 5>{ft.nt_f(), mf->nspin(), 1, n, n},
                      "run_lr_calc: local_dc Gloc_t must have the shape (nt, ns, 1, n, n) = ({}, {}, 1, {}, {}).",
                      ft.nt_f(), mf->nspin(), n, n);
-        utils::check(dc.Wloc_tabcd.shape() == std::array<long, 5>{nt_half_b, n, n, n, n},
+        utils::check(dc.Wloc_tabcd.shape() == std::array<long, 5>{nt_half, n, n, n, n},
                      "run_lr_calc: local_dc Wloc_t must have the shape (nt_half, n, n, n, n) = ({}, {}, {}, {}, {}).",
-                     nt_half_b, n, n, n, n);
+                     nt_half, n, n, n, n);
         opt_dc_cells.emplace(dc_cells_t{dc.cell_offset, dc.cell_size, dc.orb_block});
         opt_dc_cells->check(n);
         dc_W_pb = chemistry_to_product_basis(dc.Wloc_tabcd);
         if (!has_pi_resp) {
-          Pi_source_tabcd = nda::array<ComplexType, 5>(nt_half_b, n, n, n, n);
+          Pi_source_tabcd = nda::array<ComplexType, 5>(nt_half, n, n, n, n);
           Pi_source_tabcd() = ComplexType(0.0);
         }
 

@@ -110,6 +110,8 @@ def test_ground_state_flag_checks():
     drv._check_ground_state_flags(good)
     cases = [
         {"wloc": {"screen_type": "rpa"}},
+        {"wloc": {"screen_type": "gw_edmft", "permut_symm": False}},
+        {"wloc": {"screen_type": "gw_edmft", "force_real": False}},
         {"dmft_embed": {"corr_only": False}},
         {"impurity": {"solver": [{"causal_projection": {"nbath_per_orbital_wloc": 3}}]}},
         {"impurity": {"solver": [{"set_sigma_infty_to_dc": True}]}},

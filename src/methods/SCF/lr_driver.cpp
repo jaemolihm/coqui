@@ -175,17 +175,13 @@ void lr_driver::lr_setup(
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
 
-  // The double counting in the kernel needs δW^loc (so ΔW) and the unsplit ΔΣ of the plain kernel, and
-  // the Π_dc half grid is built from nt_f where the lattice ΔΠ uses nt_b.
+  // The double counting in the kernel needs δW^loc (so ΔW) and the unsplit ΔΣ of the plain kernel.
   if (p.local && p.local->has_dc()) {
     utils::check(K.sigma_G_dW,
                  "lr_driver::lr_setup: the double counting in the kernel requires gw_mode = full (it needs δW^loc).");
     utils::check(!qp && !p.hessian() && !p.split_sigma_terms,
                  "lr_driver::lr_setup: the double counting in the kernel is incompatible with qp_static mode, "
                  "the hessian and split_sigma_terms.");
-    utils::check(_dyson.FT()->nt_f() == _dyson.FT()->nt_b(),
-                 "lr_driver::lr_setup: the double counting in the kernel requires nt_f == nt_b (got {}, {}).",
-                 _dyson.FT()->nt_f(), _dyson.FT()->nt_b());
   }
 
   // Frozen external sources: ΔΠ_ext needs a channel that evaluates ΔW; neither is

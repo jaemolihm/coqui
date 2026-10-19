@@ -306,6 +306,10 @@ def _check_ground_state_flags(params):
     if screen_type not in ("gw_edmft", "gw_edmft_density"):
         raise ValueError(f"run_lr_gw_edmft: screen_type = {screen_type!r} is not supported "
                          f"(gw_edmft, gw_edmft_density).")
+    for key in ("permut_symm", "force_real"):
+        if not params["wloc"].get(key, True):
+            raise ValueError(f"run_lr_gw_edmft: wloc {key} = False is not supported: the response of W^loc is "
+                             f"projected like the ground state's, which needs {key} = True.")
     if not params["dmft_embed"].get("corr_only", True):
         raise ValueError("run_lr_gw_edmft: corr_only = False is not supported: the lattice must get the dynamic "
                          "Sigma_imp - Sigma_dc only.")
