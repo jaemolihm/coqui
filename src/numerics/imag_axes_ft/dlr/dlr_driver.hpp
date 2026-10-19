@@ -25,7 +25,6 @@
 
 #include <string>
 #include <map>
-#include <algorithm>
 
 #include "nda/nda.hpp"
 #include "nda/lapack.hpp"
@@ -159,16 +158,6 @@ namespace imag_axes_ft {
       auto nw_in    = static_cast<int>(if_ops.get_ifnodes().size());
       auto nw_out   = static_cast<int>(wn_mesh_out.size());
 
-      if (stats == imag_axes_ft::fermion) {
-        utils::check(std::all_of(wn_mesh_out.begin(), wn_mesh_out.end(), [](long n) { return n % 2 != 0; }),
-                     "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                     "fermionic wn_mesh_out must be odd in IR notation.");
-      } else {
-        utils::check(std::all_of(wn_mesh_out.begin(), wn_mesh_out.end(), [](long n) { return n % 2 == 0; }),
-                     "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                     "bosonic wn_mesh_out must be even in IR notation.");
-      }
-
       // rhs = B_out * Ttw, with B_out = beta * cf2if(wn_out) * cf2it^{-1}: tau_to_w at the output points,
       // composed with the paired w_to_tau. B_out is solved with the LU factors of cf2it as in
       // cppdlr::build_it2if, so that B_out(wn_mesh) = Twt.
@@ -178,8 +167,17 @@ namespace imag_axes_ft {
       auto B_out = nda::matrix<ComplexType>(nw_out, r);
       for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
         long n_ir = wn_mesh_out(iw_out);
+        if (stats == imag_axes_ft::fermion) {
+          utils::check((n_ir % 2) != 0,
+                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
+                       "fermionic wn_mesh_out must be odd in IR notation, got {}.", n_ir);
+        } else {
+          utils::check((n_ir % 2) == 0,
+                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
+                       "bosonic wn_mesh_out must be even in IR notation, got {}.", n_ir);
+        }
         // IR notation -> cppdlr notation: fermion n_ir = 2*n_dlr + 1; boson n_ir = 2*n_dlr
-        long n_dlr = (stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2;
+        int n_dlr = static_cast<int>((stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2);
         B_out(iw_out, nda::range::all) = if_ops.coefs2eval(eye_r, n_dlr);
       }
       auto zlu = _it_ops.get_it2cf_zlu();
@@ -241,7 +239,7 @@ namespace imag_axes_ft {
         utils::check(rank == nt, "imag_axes_ft::dlr::DLR: Twt is rank deficient, rank = {}, nt = {}.", rank, nt);
         auto T = nda::matrix<ComplexType>(rhs(nda::range(nt), nda::range::all));
 
-        // wn_mesh(P(i)) == -wn_mesh(i)
+        // m: index of -wn_mesh(i)
         std::map<long, long> index_of;
         for (long i = 0; i < nw; ++i) index_of[wn_mesh(i)] = i;
         for (long i = 0; i < nw; ++i) {
