@@ -394,7 +394,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            nbnd_save=None,
            method=None,
            precond_method="none",
-           hessian=False):
+           hessian=False,
+           *, projector_info=None):
     """
     Run unified linear response calculation.
 
@@ -537,6 +538,17 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
         Requires the bare-vertex path: rejected together with DeltaX/DeltaV
         (IBC) and with a qpGW static map.
+    projector_info : dict or None, optional
+        Local projector, as run_gw / dmft_embed: "proj_mat", "band_window", "kpts_w90".
+        Given, it switches on the local outputs ``DeltaGloc_tsIab`` (nt, ns, 1, n, n), the
+        (k+Q, k) local projection (1/N_k) sum_k C^{k+Q} dG^k C^{k dagger} of the returned
+        dG(tau), and, with gw_mode="full", ``DeltaWloc_tabcd`` (nt_half, n, n, n, n), the
+        local projection of dW_c(tau) as lr_downfold_coulomb (chemistry order).
+        DeltaWloc_tabcd is the dW^loc of the last kernel evaluation (its input dG is the
+        previous iterate; at convergence it matches the returned dG to within ``tol``).
+        Both go into the mode group of ``linear_response/``. Full BZ and a single
+        impurity only. ``params["translate_home_cell"]`` (bool, default False) is passed
+        to the projector.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -672,8 +684,16 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
 
+    if projector_info is None:
+        proj_args = [None, None, None]
+    else:
+        proj_args = [np.asarray(projector_info["proj_mat"], dtype=np.complex128),
+                     np.asarray(projector_info["band_window"], dtype=np.int64),
+                     np.asarray(projector_info["kpts_w90"], dtype=np.float64)]
+
     niter, delta_mu = run_lr_cpp(
-        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ)
+        json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
+        *proj_args)
     if squeeze:
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu

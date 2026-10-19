@@ -23,6 +23,7 @@
 #include <limits>
 
 #include "methods/SCF/lr_driver.hpp"
+#include "methods/embedding/local_projection.hpp"
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
@@ -475,6 +476,15 @@ void lr_driver::apply_kernel_gw(
   // dDeltaPi_tqPQ now contains ΔW_c(τ) in q-local distribution
   auto& dDeltaW_tqPQ = dDeltaPi_tqPQ;  // alias for clarity
 
+  // δW^loc = (1/N_q) Σ_q B^{q+Q†} ΔW_c B^q on the blocks of the distributed ΔW_c, kept for the output
+  // (overwritten at every call)
+  if (p.embedding) {
+    nda::array<long, 1> kpq_map(_lr_dyson.kpq_map());  // free functions take a 64-bit map
+    _DeltaWloc_tabcd = local_projection::downfold_W_block(
+        dDeltaW_tqPQ.local(), dDeltaW_tqPQ.origin(), dDeltaW_tqPQ.global_shape()[0],
+        p.embedding->B_qIPab, kpq_map, false, _mpi->comm);
+  }
+
   // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
   nda::array<ComplexType, 1> delta_eps_inv_head;
   if (p.div_treatment != "ignore_g0" && is_q_gamma()) {
@@ -655,6 +665,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     nda::array<ComplexType, 4>* DeltaF_PQ_out) {
 
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
+  _DeltaWloc_tabcd.reset();
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
   auto& opt_ibc            = _opt_ibc;
@@ -979,7 +990,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // solve and is reused by the next perturbation, so skipping this would hand the
   // checkpoint the previous perturbation's ΔG next to this one's ΔDm/ΔF. With a Σ
   // every pass has already materialized it.
-  if (p.save_DeltaG) update_DeltaG();
+  // The local projection of ΔG(τ) is a consumer as well.
+  if (p.save_DeltaG || p.embedding) update_DeltaG();
 
   // Hessian: the estimator needs the returned ΔF/ΔΣ to be K of the returned
   // ΔDm/ΔG(τ), but ΔF/ΔΣ are the accelerator's iterate and ΔDm/ΔG(τ) its Dyson

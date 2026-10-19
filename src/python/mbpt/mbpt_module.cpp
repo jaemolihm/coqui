@@ -51,6 +51,9 @@ namespace coqui_py {
    * @param DeltaX_left       - [INPUT] Optional δ^q X collocation perturbation (root only)
    * @param DeltaX_right      - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
    * @param DeltaV_qPQ        - [INPUT] Optional THC Coulomb perturbation δV (root only)
+   * @param proj_mat          - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W) (every rank)
+   * @param band_window       - [INPUT] Optional band window of the projector (every rank)
+   * @param kpts_w90          - [INPUT] Optional k-points of the projector (crystal) (every rank)
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
@@ -60,11 +63,19 @@ namespace coqui_py {
       std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
       std::optional<nda::array<ComplexType, 4>> DeltaX_left,
       std::optional<nda::array<ComplexType, 4>> DeltaX_right,
-      std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
+      std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ,
+      std::optional<nda::array<ComplexType, 5>> proj_mat,
+      std::optional<nda::array<long, 3>> band_window,
+      std::optional<nda::array<double, 2>> kpts_w90) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
+    utils::check(bool(proj_mat) == bool(band_window) and bool(proj_mat) == bool(kpts_w90),
+                 "run_lr: proj_mat, band_window and kpts_w90 must be given together.");
+    std::optional<methods::lr_local_inputs> local;
+    if (proj_mat) local = methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90)};
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
-                                DeltaX_left, DeltaX_right, DeltaV_qPQ);
+                                DeltaX_left, DeltaX_right, DeltaV_qPQ,
+                                local ? &(*local) : nullptr);
   }
 
 

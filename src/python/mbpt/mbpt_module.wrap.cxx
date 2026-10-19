@@ -312,12 +312,16 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
        std::optional<nda::array<ComplexType, 5>> DeltaH0_mskij,
        std::optional<nda::array<ComplexType, 4>> DeltaX_left,
        std::optional<nda::array<ComplexType, 4>> DeltaX_right,
-       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ) {
+       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ,
+       std::optional<nda::array<ComplexType, 5>> proj_mat,
+       std::optional<nda::array<long, 3>> band_window,
+       std::optional<nda::array<double, 2>> kpts_w90) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
-                              DeltaX_left, DeltaX_right, DeltaV_qPQ);
+                              DeltaX_left, DeltaX_right, DeltaV_qPQ, proj_mat,
+                              band_window, kpts_w90);
     },
     "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
-    "DeltaX_right", "DeltaV_qPQ")};
+    "DeltaX_right", "DeltaV_qPQ", "proj_mat", "band_window", "kpts_w90")};
 
 // lr_DeltaH0_from_thc_aux
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -725,6 +729,12 @@ DeltaX_right : {par_5}
    - [INPUT] Optional δ^{-q} X collocation perturbation (root only)
 DeltaV_qPQ : {par_6}
    - [INPUT] Optional THC Coulomb perturbation δV (root only)
+proj_mat : {par_7}
+   - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W) (every rank)
+band_window : {par_8}
+   - [INPUT] Optional band window of the projector (every rank)
+kpts_w90 : {par_9}
+   - [INPUT] Optional k-points of the projector (crystal) (every rank)
 
 Returns
 -------
@@ -737,7 +747,10 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 4>>>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()}},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<double, 2>>>()}},
     {c2py::python_typename<
         std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
 static const auto doc_d_15 = fun_15.doc(
