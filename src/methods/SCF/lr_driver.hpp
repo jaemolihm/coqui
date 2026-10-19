@@ -106,7 +106,7 @@ struct lr_diis_hist_t {
  * Embedding data of an LR run: the projector C and the aux-basis projector B,
  * from which the driver forms δG^loc (by the caller, from the returned ΔG) and
  * δW^loc (after every ΔW solve of the kernel). With dc, the kernel also subtracts
- * the linearized double counting. Plain data; the projection math is
+ * the linearized double counting and adds the impurity response. Plain data; the projection math is
  * methods::local_projection and the double counting methods::lr_dc_*. The k+Q map
  * is lr_dyson::kpq_map().
  */
@@ -123,6 +123,10 @@ struct embedding_info {
   };
   /// Set for a GW+EDMFT ground state: the kernel then includes the linearized double counting.
   std::optional<dc_t> dc;
+
+  /// Response of the impurity (requires dc), zero when not given. The kernel upfolds δΣ_imp - δΣ_dc and δΠ_imp - δΠ_dc.
+  nda::array<ComplexType, 5> Sigma_imp_tsIab;  ///< δΣ_imp(τ) (nt_f, ns, 1, n, n)
+  nda::array<ComplexType, 5> Pi_imp_tabcd;     ///< δΠ_imp(τ) (nt_half, n, n, n, n), product basis; nonzero needs the ΔW solve
 };
 
 /**
@@ -425,6 +429,13 @@ public:
   /// δW^loc(τ) (nt_half, n, n, n, n) of the last kernel evaluation of the current lr_solve_one
   /// (lr_params::embedding); empty if it ran none.
   const std::optional<nda::array<ComplexType, 5>>& DeltaWloc() const { return _DeltaWloc_tabcd; }
+
+  /**
+   * δΣ_dc(τ) of the double counting for the local response `dGloc_tsIab` and, if given, the product-basis
+   * δW^loc `dWloc_pb` (nullptr: δW^loc = 0), after the τ -> iω -> τ round trip the kernel applies.
+   */
+  nda::array<ComplexType, 5> dc_sigma_response(const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
+                                               const nda::array<ComplexType, 5>* dWloc_pb);
 
 private:
   /**

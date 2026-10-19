@@ -395,7 +395,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            method=None,
            precond_method="none",
            hessian=False,
-           *, projector_info=None, local_polarizabilities=None):
+           *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None):
     """
     Run unified linear response calculation.
 
@@ -563,6 +563,23 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         from dPi before the dW solve; gw_mode="fixed_W" subtracts up(dSigma_dc[dG^loc, 0]) from
         dSigma (W is frozen, so dPi_dc has no effect). gw_mode="none", the hessian, qp and
         ``split_sigma_terms`` are rejected. Requires ``projector_info`` with ``"dc_cells"``.
+        Each mode group also gets ``DeltaSigma_dc_tsIab`` (dSigma_dc of the final dG^loc and dW^loc,
+        after the tau -> iw -> tau round trip of the kernel) and ``DeltaSigma_imp_tsIab`` (the dSigma_imp
+        source in tau, zero without a "Sigma" key), both (nt, ns, 1, n, n); dSigma minus
+        up(dSigma_imp - dSigma_dc) is the plain-GW part to the solver tolerance (dSigma is the
+        accelerator's iterate, dSigma_dc is evaluated at the final dG^loc).
+    lr_impurity_response : dict or None, optional
+        Response of the impurity of a GW+EDMFT ground state, keys within {"Sigma", "Pi"}; a missing key
+        is zero. Requires ``local_polarizabilities``, a single perturbation and a kernel with Sigma
+        (gw_mode "fixed_W" or "full"). Given on every rank. Layouts are those of the ground state:
+
+        - ``"Sigma"``: dSigma_imp(iw), shape (nw_f, ns, 1, n, n), on the full fermionic frequency grid.
+        - ``"Pi"``: dPi_imp(inu), shape (nw_half, n, n, n, n), product basis, on the half bosonic grid;
+          requires gw_mode="full".
+
+        The kernel upfolds dSigma_imp - dSigma_dc into dSigma and dPi_imp - dPi_dc into dPi (before
+        the dW solve), so the returned ``DeltaSigma_tskij`` is the linearized embedded lattice Sigma,
+        dSigma_GW - up(dSigma_dc) + up(dSigma_imp).
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -698,10 +715,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
 
+    if lr_impurity_response is not None:
+        bad = set(lr_impurity_response) - {"Sigma", "Pi"}
+        if bad:
+            raise ValueError(f"run_lr: lr_impurity_response keys must be within {{'Sigma', 'Pi'}}, got {sorted(bad)}.")
+        lr_impurity_response = {k: np.asarray(v, dtype=np.complex128) for k, v in lr_impurity_response.items()}
     local_pi = (None if local_polarizabilities is None else
                 {k: np.asarray(local_polarizabilities[k], dtype=np.complex128) for k in ("imp", "dc")})
     if projector_info is None:
-        proj_args = [None, None, None, local_pi, None]
+        proj_args = [None, None, None, local_pi, None, lr_impurity_response]
     else:
         dc_cells = (None if "dc_cells" not in projector_info else
                     {k: np.asarray(projector_info["dc_cells"][k], dtype=np.int64)
@@ -709,7 +731,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         proj_args = [np.asarray(projector_info["proj_mat"], dtype=np.complex128),
                      np.asarray(projector_info["band_window"], dtype=np.int64),
                      np.asarray(projector_info["kpts_w90"], dtype=np.float64),
-                     local_pi, dc_cells]
+                     local_pi, dc_cells, lr_impurity_response]
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,

@@ -241,6 +241,10 @@ struct lr_local_inputs {
   nda::array<RealType, 2> kpts_crys;
   std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities;
   std::optional<dc_cells_t> dc_cells;
+  /// Response of the impurity of a GW+EDMFT ground state, in the layouts of the ground state: "Sigma"
+  /// δΣ_imp(iω) (nw_f, ns, 1, n, n) and "Pi" δΠ_imp(iν) (nw_half, n, n, n, n), product basis. A missing key
+  /// is zero. Requires local_polarizabilities and a single perturbation; "Pi" requires gw_mode = full.
+  std::optional<std::map<std::string, nda::array<ComplexType, 5>>> impurity_response;
 };
 
 /**
@@ -263,7 +267,8 @@ struct lr_local_inputs {
  *                            DeltaWloc_tabcd (nt_half, n, n, n, n) per mode to "linear_response/".
  *                            With local_polarizabilities (GW+EDMFT ground state) it also writes
  *                            Gloc_tsIab, Wloc_tabcd (chemistry order) and Vloc_abcd, and the kernel
- *                            (gw_mode fixed_W or full) includes the linearized double counting.
+ *                            (gw_mode fixed_W or full) includes the linearized double counting; DeltaSigma_dc_tsIab and
+ *                            DeltaSigma_imp_tsIab (nt, ns, 1, n, n) are then written per mode too.
  * Every other option is read from `pt`; the key list is on the definition in MBPT_drivers.cpp.
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */

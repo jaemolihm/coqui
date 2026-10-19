@@ -317,15 +317,17 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
        std::optional<nda::array<long, 3>> band_window,
        std::optional<nda::array<double, 2>> kpts_w90,
        std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
-       std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells) {
+       std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>>
+           lr_impurity_response) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
                               DeltaX_left, DeltaX_right, DeltaV_qPQ, proj_mat,
                               band_window, kpts_w90, local_polarizabilities,
-                              dc_cells);
+                              dc_cells, lr_impurity_response);
     },
     "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ", "proj_mat", "band_window", "kpts_w90",
-    "local_polarizabilities", "dc_cells")};
+    "local_polarizabilities", "dc_cells", "lr_impurity_response")};
 
 // lr_DeltaH0_from_thc_aux
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -744,6 +746,9 @@ local_polarizabilities : {par_10}
      (W from the local polarizabilities, the double counting in the kernel); needs dc_cells
 dc_cells : {par_11}
    - [INPUT] The cells of the correlated space of the double counting: "cell_offset", "cell_size", "orb_block"
+lr_impurity_response : {par_12}
+   - [INPUT] Optional response of the impurity {"Sigma": δΣ_imp(iω), "Pi": δΠ_imp(iν)} in the layouts of the
+     ground state; needs local_polarizabilities
 
 Returns
 -------
@@ -760,6 +765,7 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
      {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
      {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
+     {},
      {},
      {}},
     {c2py::python_typename<

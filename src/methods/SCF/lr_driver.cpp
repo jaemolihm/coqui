@@ -472,6 +472,15 @@ void dc_bose_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>
 
 } // anonymous
 
+nda::array<ComplexType, 5> lr_driver::dc_sigma_response(
+    const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
+    const nda::array<ComplexType, 5>* dWloc_pb) {
+  utils::check(emb.dc.has_value(), "lr_driver::dc_sigma_response: the embedding has no double counting.");
+  auto dSigma_dc_tsIab = lr_dc_sigma(emb.dc->Gloc_tsIab, dGloc_tsIab, emb.dc->Wloc_pb, dWloc_pb, emb.dc->cells);
+  dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
+  return dSigma_dc_tsIab;
+}
+
 void lr_driver::apply_kernel_gw(
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -494,14 +503,15 @@ void lr_driver::apply_kernel_gw(
     gw_solver.evaluate_sigma_DeltaG(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr,
         &S_loc, p.eps_inv_head);
-    // - up_Σ(δΣ_dc[δG^loc, 0]): W is frozen, so δW^loc = 0
+    // up_Σ(δΣ_imp - δΣ_dc[δG^loc, 0]): W is frozen, so δW^loc = 0
     if (dc) {
       auto dGloc_tsIab = local_projection::sum_C_O_Cdag(
           sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
-      auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, nullptr, dc->cells);
-      dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
-      local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_dc_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
-                                          &kpq_map, ComplexType(-1.0));
+      auto dSigma_dc_tsIab = dc_sigma_response(*p.embedding, dGloc_tsIab, nullptr);
+      // ΔΣ_out += up(δΣ_imp - δΣ_dc)
+      nda::array<ComplexType, 5> dSigma_imp_tsIab = p.embedding->Sigma_imp_tsIab - dSigma_dc_tsIab;
+      local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_imp_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
+                                          &kpq_map, ComplexType(1.0));
     }
     _Timer.stop("LR_GW_SIGMA");
     _mpi->comm.barrier();
@@ -513,15 +523,15 @@ void lr_driver::apply_kernel_gw(
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
       sG_tskij.local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
-  // ΔΠ -= upfold(δΠ_dc[δG^loc]), on ΔΠ's own blocks, before the ΔW solve
+  // ΔΠ += upfold(δΠ_imp - δΠ_dc[δG^loc]), on ΔΠ's own blocks, before the ΔW solve
   nda::array<ComplexType, 5> dGloc_tsIab;
   if (dc) {
     dGloc_tsIab = local_projection::sum_C_O_Cdag(
         sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
     auto dPi_dc_tabcd = lr_dc_pi(dc->Gloc_tsIab, dGloc_tsIab, dc->cells);
     dc_bose_round_trip(*_dyson.FT(), dPi_dc_tabcd);
-    dPi_dc_tabcd *= -1.0;
-    local_projection::upfold_pi_block(dPi_dc_tabcd, p.embedding->B_qIPab, dDeltaPi_tqPQ, &kpq_map, true);
+    nda::array<ComplexType, 5> dPi_imp_tabcd = p.embedding->Pi_imp_tabcd - dPi_dc_tabcd;
+    local_projection::upfold_pi_block(dPi_imp_tabcd, p.embedding->B_qIPab, dDeltaPi_tqPQ, &kpq_map, true);
   }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_PI");
@@ -588,13 +598,14 @@ void lr_driver::apply_kernel_gw(
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
         &S_loc, p.eps_inv_head, &delta_eps_inv_head);
   }
-  // - up_Σ(δΣ_dc[δG^loc, δW^loc])
+  // up_Σ(δΣ_imp - δΣ_dc[δG^loc, δW^loc])
   if (dc) {
     auto dWloc_pb = chemistry_to_product_basis(*_DeltaWloc_tabcd);
-    auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, &dWloc_pb, dc->cells);
-    dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
-    local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_dc_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
-                                        &kpq_map, ComplexType(-1.0));
+    auto dSigma_dc_tsIab = dc_sigma_response(*p.embedding, dGloc_tsIab, &dWloc_pb);
+    // ΔΣ_out += up(δΣ_imp - δΣ_dc)
+    nda::array<ComplexType, 5> dSigma_imp_tsIab = p.embedding->Sigma_imp_tsIab - dSigma_dc_tsIab;
+    local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_imp_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
+                                        &kpq_map, ComplexType(1.0));
   }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_SIGMA");
