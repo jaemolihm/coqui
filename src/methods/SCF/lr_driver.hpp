@@ -22,6 +22,9 @@
 #ifndef COQUI_LR_DRIVER_HPP
 #define COQUI_LR_DRIVER_HPP
 
+#include <optional>
+#include <vector>
+
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
 
@@ -96,6 +99,18 @@ struct lr_diis_hist_t {
   long n_vec = 0;     ///< stored vectors, each of n_F ΔF + n_Sigma ΔΣ
   long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities per vector
   long n_Sigma = 0;   ///< # of ΔΣ-sized (nt,ns,nk,nb,nb) quantities per vector
+};
+
+/**
+ * Embedding data of an LR run: the projector C and the aux-basis projector B,
+ * from which the driver forms δG^loc (by the caller, from the returned ΔG) and
+ * δW^loc (after every ΔW solve of the kernel). Plain data; the projection math is
+ * methods::local_projection. The k+Q map is lr_dyson::kpq_map().
+ */
+struct embedding_info {
+  nda::array<ComplexType, 5> C_skIai;       ///< projector, MF k order (full BZ)
+  std::vector<nda::range> W_rng;            ///< band window of the projector
+  nda::array_view<ComplexType, 5> B_qIPab;  ///< bosonic projector B^q (node-shared view)
 };
 
 /**
@@ -180,6 +195,8 @@ struct lr_params {
   const nda::array_view<ComplexType, 3>* DeltaV_qPQ = nullptr;  ///< δV^q in the aux basis
   /// Non-null puts the driver in LR-qpGW static-map mode.
   const lr_qp_static_params* qp_static = nullptr;
+  /// Embedding data (nullptr: none). The driver then also forms δW^loc; see embedding_info.
+  const embedding_info* embedding = nullptr;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -393,6 +410,10 @@ public:
   /// exchange_static_W is set.
   double hsex_head_factor() const { return _hsex_head_factor; }
 
+  /// δW^loc(τ) (nt_half, n, n, n, n) of the last kernel evaluation of the current lr_solve_one
+  /// (lr_params::embedding); empty if it ran none.
+  const std::optional<nda::array<ComplexType, 5>>& DeltaWloc() const { return _DeltaWloc_tabcd; }
+
 private:
   /**
    * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
@@ -549,6 +570,8 @@ private:
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from
   /// it, since the caller's ΔF has been mixed by then.
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaF_dyson_in;
+  /// δW^loc(τ) of the last kernel evaluation of the current lr_solve_one.
+  std::optional<nda::array<ComplexType, 5>> _DeltaWloc_tabcd;
 
   // --- Preconditioner buffers (preconditioned runs only): the gathered residual
   //     (r_F, r_Σ), the ΔDm of r_Σ, the inner iterate y_F and its ΔDm.

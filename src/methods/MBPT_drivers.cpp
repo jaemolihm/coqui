@@ -39,6 +39,7 @@
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
+#include "methods/embedding/local_projection.hpp"
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/lr_gw.hpp"
@@ -1462,6 +1463,8 @@ auto recompute_W_and_eps_inv_head(
  *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
  *                          (default 1e-8)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
+ *   translate_home_cell    translate the local projector to the home cell (default false;
+ *                          read only when the local projection is requested)
  *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
  *                          "DIIS" (default), "damping" or "GCR"; mixing 1.0;
  *                          subspace 10 (GCR: 0 = chosen by lr_setup); warmup 0
@@ -1475,7 +1478,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root,
-                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root) {
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root,
+                                     const lr_local_inputs* local) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -2041,6 +2045,24 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
+  // Embedding data: C and B^q (built once). The bosonic projector is node-shared and outlives the solves.
+  std::optional<projector_boson_t> opt_proj_boson;
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sB_qIPab;
+  std::optional<embedding_info> opt_embedding;
+  if (local) {
+    utils::check(mf->nkpts_ibz() == mf->nkpts() and mf->nqpts_ibz() == mf->nqpts(),
+                 "run_lr_calc: the local projection requires the full BZ (no k/q symmetry reduction).");
+    auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+    opt_proj_boson.emplace(*mf, local->projector_ksIai, local->band_window, local->kpts_crys, trans_home_cell);
+    utils::check(opt_proj_boson->nImps() == 1, "run_lr_calc: only a single impurity is supported (nImps = {}).",
+                 opt_proj_boson->nImps());
+    opt_sB_qIPab.emplace(opt_proj_boson->calc_bosonic_projector(thc));
+    opt_embedding.emplace();
+    opt_embedding->C_skIai = opt_proj_boson->C_skIai();
+    opt_embedding->W_rng = opt_proj_boson->W_rng();
+    opt_embedding->B_qIPab.rebind(opt_sB_qIPab->local());
+  }
+
   lr_params p;
   p.kernel           = total_kernel;
   p.include_xc       = include_xc;
@@ -2060,6 +2082,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.Dm_ab            = Dm_ab_ptr;
   p.DeltaV_qPQ       = pDeltaV_qPQ;
   p.qp_static        = pQpStatic;
+  p.embedding        = opt_embedding ? &(*opt_embedding) : nullptr;
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
@@ -2132,6 +2155,26 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
+
+    // Local responses: δG^loc of the returned ΔG(τ) and δW^loc of the last kernel evaluation.
+    // The projection is collective; only the root writes.
+    if (opt_embedding) {
+      auto const& emb = *opt_embedding;
+      nda::array<long, 1> kpq_map(driver.dyson().kpq_map());
+      auto DeltaGloc_tsIab = methods::local_projection::sum_C_O_Cdag(
+          sDeltaG_tskij.local(), emb.C_skIai, emb.W_rng, nullptr, nullptr, &kpq_map, mpi->comm);
+      if (mpi->comm.root()) {
+        h5::file file(output + ".mbpt.h5", 'a');
+        auto lr_grp = chkpt::lr_group(file, nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt);
+        nda::h5_write(lr_grp, "DeltaGloc_tsIab", DeltaGloc_tsIab, false);
+        app_log(2, "  - DeltaGloc_tsIab written to \"linear_response/\"");
+        if (driver.DeltaWloc()) {
+          nda::h5_write(lr_grp, "DeltaWloc_tabcd", *driver.DeltaWloc(), false);
+          app_log(2, "  - DeltaWloc_tabcd written to \"linear_response/\"");
+        }
+      }
+      mpi->comm.barrier();
+    }
 
     // Store this mode's operands for the stationary hessian estimator. A copy out
     // and nothing else: ΔF/ΔΣ and ΔDm/ΔG live in shm windows, so they have to be
@@ -2241,7 +2284,8 @@ template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     std::optional<nda::array<ComplexType, 5>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
-    std::optional<nda::array<ComplexType, 3>> const&);
+    std::optional<nda::array<ComplexType, 3>> const&,
+    const lr_local_inputs*);
 
 
 

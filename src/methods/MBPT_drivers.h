@@ -226,6 +226,16 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
                 std::optional<std::map<std::string, nda::array<ComplexType, 5> > > local_selfenergies);
 
 /**
+ * Local projection of an LR run: the projector of the ground-state interface (run_gw / dmft_embed).
+ * Given, it switches on the local outputs DeltaGloc_tsIab and, with gw_mode = "full", DeltaWloc_tabcd.
+ */
+struct lr_local_inputs {
+  nda::array<ComplexType, 5> projector_ksIai;
+  nda::array<long, 3> band_window;
+  nda::array<RealType, 2> kpts_crys;
+};
+
+/**
  * @brief Unified linear response calculation
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy:
@@ -240,6 +250,9 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij_root - [INPUT] Perturbations (nmodes, ns, nk, nb, nb) on the
  *                            MPI global root; std::nullopt on every other rank.
+ * @param local            - [INPUT] Optional projector (nullptr: none); full BZ, single impurity.
+ *                            Writes DeltaGloc_tsIab (nt, ns, 1, n, n) and, with gw_mode "full",
+ *                            DeltaWloc_tabcd (nt_half, n, n, n, n) per mode to "linear_response/".
  * Every other option is read from `pt`; the key list is on the definition in MBPT_drivers.cpp.
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
@@ -250,7 +263,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
-                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt);
+                                     std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt,
+                                     const lr_local_inputs* local = nullptr);
 
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)
