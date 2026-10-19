@@ -22,6 +22,7 @@
 #include "methods/SCF/scf_common.hpp"
 #include "numerics/nda_functions.hpp"
 #include "methods/embedding/projector_t.h"
+#include "methods/embedding/local_projection.hpp"
 
 namespace methods {
 
@@ -94,42 +95,7 @@ namespace methods {
                  O_tskij.shape()[2], _MF->nkpts_ibz());
 
     O_tskij.set_zero();
-    auto [nts, ns, nkpts_ibz, nbnd, nbnd_b] = O_tskij.shape();
-
-    nda::array<ComplexType, 2> buffer_ib(_nOrbs_W, _nImpOrbs);
-
-    auto O_buffer = sArray_t<Array_base_t>(
-        O_tskij.communicator(), O_tskij.internode_comm(), O_tskij.node_comm(),
-        {nts, ns, nkpts_ibz, _nOrbs_W, _nOrbs_W});
-
-    auto O_buf = O_buffer.local();
-    int rank = O_buffer.communicator()->rank();
-    int size = O_buffer.communicator()->size();
-    for (long imp = 0; imp < _nImps; ++imp) {
-      O_buffer.set_zero();
-      O_buffer.win().fence();
-      for (long tsk = rank; tsk < nts*ns*nkpts_ibz; tsk += size) {
-        long it = tsk / (ns*nkpts_ibz); // tsk = it * ns*nkpts_ibz + is * nkpts_ibz + ik
-        long is = (tsk / nkpts_ibz) % ns;
-        long ik = tsk % nkpts_ibz;
-
-        nda::blas::gemm(ComplexType(1.0),
-                        nda::dagger(_C_skIai(is,ik,imp,nda::ellipsis{})),
-                        Oloc_tsIab(it,is,imp,nda::ellipsis{}),
-                        ComplexType(0.0),
-                        buffer_ib);
-
-        nda::blas::gemm(buffer_ib, _C_skIai(is,ik,imp,nda::ellipsis{}), O_buf(it,is,ik,nda::ellipsis{}));
-      }
-      O_buffer.win().fence();
-      O_buffer.all_reduce();
-
-      O_tskij.win().fence();
-      if (O_tskij.node_comm()->root()) {
-        O_tskij.local()(nda::range::all, nda::range::all, nda::range::all, _W_rng[imp], _W_rng[imp]) += O_buf;
-      }
-      O_tskij.win().fence();
-    }
+    local_projection::upfold_accumulate(O_tskij, Oloc_tsIab, _C_skIai, _W_rng, nullptr, ComplexType(1.0));
   }
 
   template<nda::ArrayOfRank<5> Array_base_t, nda::ArrayOfRank<6> Ac_t>
@@ -346,15 +312,6 @@ namespace methods {
     return O_tskIab;
   }
 
-  void projector_t::add_C_O_Cdag(long is, long ik_l, long ik_r, long imp,
-                                 const nda::array<ComplexType, 2> &O_ij_W, nda::array<ComplexType, 2> &buffer_aj,
-                                 nda::MemoryArrayOfRank<2> auto &&O_ab) const {
-    nda::blas::gemm(_C_skIai(is, ik_l, imp, nda::ellipsis{}), O_ij_W, buffer_aj);
-
-    nda::blas::gemm(ComplexType(1.0), buffer_aj, nda::dagger(_C_skIai(is, ik_r, imp, nda::ellipsis{})),
-                    ComplexType(1.0), O_ab);
-  }
-
   template<bool force_real, typename comm_t>
   auto projector_t::downfold_loc(const nda::MemoryArrayOfRank<4> auto &O_skij,
                                  comm_t comm, std::string name) const
@@ -389,7 +346,7 @@ namespace methods {
         else
           O_ij_W = O_skij(is, ik_ibz, _W_rng[imp], _W_rng[imp]);
 
-        add_C_O_Cdag(is, ik, ik, imp, O_ij_W, buffer_aj, O_sIab(is, imp, nda::ellipsis{}));
+        local_projection::add_C_O_Cdag(_C_skIai, is, ik, ik, imp, O_ij_W, buffer_aj, O_sIab(is, imp, nda::ellipsis{}));
       }
     }
     comm.all_reduce_in_place_n(O_sIab.data(), O_sIab.size(), std::plus<>{});
@@ -426,44 +383,11 @@ namespace methods {
   auto projector_t::sum_C_O_Cdag(const nda::MemoryArrayOfRank<5> auto &O_tskij, comm_t comm,
                                  const nda::array<long, 1> *kpq_map) const
   -> nda::array<ComplexType, 5> {
-
-    utils::check(O_tskij.shape()[1] == _C_skIai.shape(0), "downfold_loc: ns mismatches.{}, {}",
-                 O_tskij.shape()[1], _C_skIai.shape(0));
     utils::check(O_tskij.shape()[2] == _MF->nkpts_ibz(), "downfold_loc: O_tskij.shape[2]({})!=nkpts_ibz({}).",
                  O_tskij.shape()[2], _MF->nkpts_ibz());
-
-    auto [nts, ns, nkpts_ibz, nbnd, nbnd_b] = O_tskij.shape();
-    auto nImps = _C_skIai.shape(2);
-    auto nImpOrbs = _C_skIai.shape(3);
-    auto nOrbs_W = _C_skIai.shape(4);
-    auto nkpts = _MF->nkpts();
-    auto kp_trev = _MF->kp_trev();
-
-    nda::array<ComplexType, 5> O_tsIab(nts, ns, nImps, nImpOrbs, nImpOrbs);
-    O_tsIab() = 0.0;
-    nda::array<ComplexType, 2> buffer_aj(nImpOrbs, nOrbs_W);
-    nda::array<ComplexType, 2> O_ij_W(nOrbs_W, nOrbs_W);
-
-    int rank = comm.rank();
-    int size = comm.size();
-    for (long tsk = rank; tsk < nts*ns*nkpts; tsk += size) {
-      long it = tsk / (ns*nkpts); // tsk = it * ns*nkpts + is * nkpts + ik
-      long is = (tsk / nkpts) % ns;
-      long ik = tsk % nkpts;
-      auto ik_ibz = _MF->kp_to_ibz(ik);
-      for (long imp = 0; imp < nImps; ++imp) {
-        if (kp_trev(ik))
-          O_ij_W = nda::conj(O_tskij(it, is, ik_ibz, _W_rng[imp], _W_rng[imp]));
-        else
-          O_ij_W = O_tskij(it, is, ik_ibz, _W_rng[imp], _W_rng[imp]);
-
-        long ik_l = (kpq_map == nullptr)? ik : (*kpq_map)(ik);
-        add_C_O_Cdag(is, ik_l, ik, imp, O_ij_W, buffer_aj, O_tsIab(it, is, imp, nda::ellipsis{}));
-      }
-    }
-    comm.all_reduce_in_place_n(O_tsIab.data(), O_tsIab.size(), std::plus<>{});
-    O_tsIab() /= nkpts;
-    return O_tsIab;
+    nda::array<int, 1> kp_to_ibz = _MF->kp_to_ibz();
+    nda::array<bool, 1> kp_trev = _MF->kp_trev();
+    return local_projection::sum_C_O_Cdag(O_tskij, _C_skIai, _W_rng, &kp_to_ibz, &kp_trev, kpq_map, comm);
   }
 
   template<bool force_real, typename comm_t>

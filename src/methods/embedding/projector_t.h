@@ -281,11 +281,6 @@ namespace methods {
                       const nda::array<long, 1> *kpq_map) const
     -> nda::array<ComplexType, 5>;
 
-    // O_ab += C^{ik_l}_{ai} O_ij C^{ik_r*}_{bj} for spin is and impurity imp
-    void add_C_O_Cdag(long is, long ik_l, long ik_r, long imp,
-                      const nda::array<ComplexType, 2> &O_ij_W, nda::array<ComplexType, 2> &buffer_aj,
-                      nda::MemoryArrayOfRank<2> auto &&O_ab) const;
-
     mf::MF* _MF = nullptr;
 
     std::string _C_file;
