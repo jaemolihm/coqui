@@ -176,6 +176,14 @@ void lr_driver::lr_setup(
   const lr_kernel_spec& K = p.kernel;
   const bool qp = (p.qp_static != nullptr);
 
+  // The double counting of a GW+EDMFT ground state needs the plain unsplit ΔΣ (run_lr_calc has already rejected
+  // a kernel without Σ).
+  if (p.embedding && p.embedding->dc) {
+    utils::check(!qp && !p.hessian() && !p.split_sigma_terms,
+                 "lr_driver::lr_setup: the double counting of a GW+EDMFT ground state is incompatible with "
+                 "qp_static mode, the hessian and split_sigma_terms.");
+  }
+
   // GCR's basis stays valid only while the map is one fixed affine operator. qp
   // mode statifies ΔΣ through a Padé continuation, which is not additive in ΔΣ,
   // so neither w = A z nor the recycled pairs would hold.
@@ -438,6 +446,32 @@ void lr_driver::lr_setup(
 }
 
 
+namespace {
+
+// τ -> iω -> τ round trip of the double counting. The ground state does the same: weiss.solve_gw_dc (weiss.py) stores
+// Σ_dc as iaft.tau_to_w(eval_gw_dc_t(...)) and Π_dc as iaft.tau_to_w_phsym(eval_pi_rpa(...)); the embedded Σ returns to τ
+// with w_to_tau in embed_t::add_Sigma_dyn_correction (embed_t.cpp), and Π_imp and Π_dc with w_to_tau_PHsym in
+// scr_coulomb_t::eval_Pi_qdep, reached from scr_coulomb_t::update_w in the GW+EDMFT SCF and from
+// recompute_W_and_eps_inv_head (MBPT_drivers.cpp) in run_lr's W rebuild.
+// The round trip is the identity on an IR grid but not on a DLR grid (white noise: 3e-2 fermion, 2e-3 boson on the
+// Hubbard test grid), so the derivative of the ground-state map includes it.
+void dc_fermi_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>& dSigma_tsIab) {
+  nda::array<ComplexType, 5> dSigma_w(ft.nw_f(), dSigma_tsIab.extent(1), 1, dSigma_tsIab.extent(3),
+                                      dSigma_tsIab.extent(4));
+  ft.tau_to_w(dSigma_tsIab, dSigma_w, imag_axes_ft::fermion);
+  ft.w_to_tau(dSigma_w, dSigma_tsIab, imag_axes_ft::fermion);
+}
+
+void dc_bose_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>& dPi_tabcd) {
+  const long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+  nda::array<ComplexType, 5> dPi_w(nw_half, dPi_tabcd.extent(1), dPi_tabcd.extent(2), dPi_tabcd.extent(3),
+                                   dPi_tabcd.extent(4));
+  ft.tau_to_w_PHsym(dPi_tabcd, dPi_w);
+  ft.w_to_tau_PHsym(dPi_w, dPi_tabcd);
+}
+
+} // anonymous
+
 void lr_driver::apply_kernel_gw(
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -449,6 +483,9 @@ void lr_driver::apply_kernel_gw(
   solvers::lr_gw& gw_solver = *_lr_gw;
   const lr_ibc_DeltaX* ibc_ptr = _opt_ibc ? &(*_opt_ibc) : nullptr;
   auto& sS_skij = _dyson.sS_skij();
+  const auto* dc = (p.embedding && p.embedding->dc) ? &(*p.embedding->dc) : nullptr;
+  nda::array<long, 1> kpq_map;  // the k+Q (= q+Q) map; local_projection takes it 64-bit
+  if (p.embedding) kpq_map = nda::array<long, 1>(_lr_dyson.kpq_map());
   if (!p.kernel.sigma_G_dW) {
     // Term 1 only: ΔΣ = -ΔG ⊙ W_c
     _Timer.start("LR_GW_SIGMA");
@@ -457,6 +494,15 @@ void lr_driver::apply_kernel_gw(
     gw_solver.evaluate_sigma_DeltaG(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr,
         &S_loc, p.eps_inv_head);
+    // - up_Σ(δΣ_dc[δG^loc, 0]): W is frozen, so δW^loc = 0
+    if (dc) {
+      auto dGloc_tsIab = local_projection::sum_C_O_Cdag(
+          sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
+      auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, nullptr, dc->cells);
+      dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
+      local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_dc_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
+                                          &kpq_map, ComplexType(-1.0));
+    }
     _Timer.stop("LR_GW_SIGMA");
     _mpi->comm.barrier();
     return;
@@ -467,6 +513,16 @@ void lr_driver::apply_kernel_gw(
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
       sG_tskij.local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
+  // ΔΠ -= upfold(δΠ_dc[δG^loc]), on ΔΠ's own blocks, before the ΔW solve
+  nda::array<ComplexType, 5> dGloc_tsIab;
+  if (dc) {
+    dGloc_tsIab = local_projection::sum_C_O_Cdag(
+        sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
+    auto dPi_dc_tabcd = lr_dc_pi(dc->Gloc_tsIab, dGloc_tsIab, dc->cells);
+    dc_bose_round_trip(*_dyson.FT(), dPi_dc_tabcd);
+    dPi_dc_tabcd *= -1.0;
+    local_projection::upfold_pi_block(dPi_dc_tabcd, p.embedding->B_qIPab, dDeltaPi_tqPQ, &kpq_map, true);
+  }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_PI");
 
@@ -479,7 +535,6 @@ void lr_driver::apply_kernel_gw(
   // δW^loc = (1/N_q) Σ_q B^{q+Q†} ΔW_c B^q on the blocks of the distributed ΔW_c, kept for the output
   // (overwritten at every call)
   if (p.embedding) {
-    nda::array<long, 1> kpq_map(_lr_dyson.kpq_map());  // free functions take a 64-bit map
     _DeltaWloc_tabcd = local_projection::downfold_W_block(
         dDeltaW_tqPQ.local(), dDeltaW_tqPQ.origin(), dDeltaW_tqPQ.global_shape()[0],
         p.embedding->B_qIPab, kpq_map, false, _mpi->comm);
@@ -532,6 +587,14 @@ void lr_driver::apply_kernel_gw(
         sG_tskij.local(), dDeltaW_tqPQ, thc,
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
         &S_loc, p.eps_inv_head, &delta_eps_inv_head);
+  }
+  // - up_Σ(δΣ_dc[δG^loc, δW^loc])
+  if (dc) {
+    auto dWloc_pb = chemistry_to_product_basis(*_DeltaWloc_tabcd);
+    auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, &dWloc_pb, dc->cells);
+    dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
+    local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_dc_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
+                                        &kpq_map, ComplexType(-1.0));
   }
   _mpi->comm.barrier();
   _Timer.stop("LR_GW_SIGMA");

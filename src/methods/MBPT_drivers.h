@@ -22,6 +22,7 @@
 #ifndef METHODS_MBPT_DRIVERS_H
 #define METHODS_MBPT_DRIVERS_H
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -228,11 +229,18 @@ void dmft_embed(std::shared_ptr<mf::MF> mf, ptree const& pt,
 /**
  * Local projection of an LR run: the projector of the ground-state interface (run_gw / dmft_embed).
  * Given, it switches on the local outputs DeltaGloc_tsIab and, with gw_mode = "full", DeltaWloc_tabcd.
+ *
+ * local_polarizabilities declares a GW+EDMFT ground state: the ground-state Π_imp, Π_dc ({"imp", "dc"},
+ * (nw_half, a, b, c, d), product basis) enter the W of the run (recompute_W), and the linearized double
+ * counting of the local terms is part of the kernel. It requires dc_cells and writes the ground-state local
+ * factors Gloc_tsIab, Wloc_tabcd and Vloc_abcd to "linear_response/".
  */
 struct lr_local_inputs {
   nda::array<ComplexType, 5> projector_ksIai;
   nda::array<long, 3> band_window;
   nda::array<RealType, 2> kpts_crys;
+  std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities;
+  std::optional<dc_cells_t> dc_cells;
 };
 
 /**
@@ -253,6 +261,9 @@ struct lr_local_inputs {
  * @param local            - [INPUT] Optional projector (nullptr: none); full BZ, single impurity.
  *                            Writes DeltaGloc_tsIab (nt, ns, 1, n, n) and, with gw_mode "full",
  *                            DeltaWloc_tabcd (nt_half, n, n, n, n) per mode to "linear_response/".
+ *                            With local_polarizabilities (GW+EDMFT ground state) it also writes
+ *                            Gloc_tsIab, Wloc_tabcd (chemistry order) and Vloc_abcd, and the kernel
+ *                            (gw_mode fixed_W or full) includes the linearized double counting.
  * Every other option is read from `pt`; the key list is on the definition in MBPT_drivers.cpp.
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */

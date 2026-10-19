@@ -2333,6 +2333,14 @@ namespace methods {
   template std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5> >
   embed_eri_t::compute_downfolded_coulomb_tensors<false>(thc_reader_t&, MBState &, std::string, bool, bool, imag_axes_ft::IAFT *, std::string, long, bool, bool);
 
+  // run_lr_calc: ground-state local factors on its own W
+  template nda::array<ComplexType, 4> embed_eri_t::downfold_V<thc_reader_t, nda::array_view<ComplexType, 5> >(
+      thc_reader_t&, const nda::array_view<ComplexType, 5>&);
+  template nda::array<ComplexType, 5> embed_eri_t::downfold_W<
+      thc_reader_t, nda::array<ComplexType, 4>, mpi3::communicator, nda::array_view<ComplexType, 5> >(
+      thc_reader_t&, memory::darray_t<nda::array<ComplexType, 4>, mpi3::communicator>&,
+      const nda::array_view<ComplexType, 5>&, const nda::array<ComplexType, 1>&);
+
   template nda::array<ComplexType, 5> embed_eri_t::lr_downfold_DeltaW_q(
       nda::array_view<ComplexType, 4>, const nda::array_view<ComplexType, 5>&, const nda::array<long, 1>&);
 

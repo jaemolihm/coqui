@@ -40,6 +40,7 @@
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
 #include "methods/embedding/local_projection.hpp"
+#include "methods/embedding/permut_symm.hpp"
 #include "methods/SCF/lr_precompute.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/lr_gw.hpp"
@@ -1365,8 +1366,9 @@ auto lr_load_W_omega(
  * This reuses the exact scGW pipeline (scr_coulomb_t::eval_Pi_qdep +
  * dyson_W_from_Pi_tau + div_utils::eps_inv_head_t), so the recomputed W_c is,
  * by construction, consistent with the currently-loaded THC. RPA screening
- * only (standard GW); cRPA / gw_edmft build W differently and are rejected via
- * the no-symmetry requirement below + the RPA screen_type.
+ * (standard GW), or GW+EDMFT screening when mb_local is given: its projector
+ * and local polarizabilities Π_imp, Π_dc enter through the gw_edmft branch of
+ * scr_coulomb_t::eval_Pi_qdep, as in run_gw. cRPA is not supported.
  *
  * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
  * wants (utils::lr_W_tau_local_dist) — the one layout lr_driver accepts.
@@ -1392,7 +1394,8 @@ auto recompute_W_and_eps_inv_head(
     THC_t& thc,
     imag_axes_ft::IAFT const& ft,
     sArray_5D_t& sG_tskij,
-    const std::string& div_treatment)
+    const std::string& div_treatment,
+    MBState* mb_local = nullptr)
 {
   auto mf = thc.MF();
   long nkpts = mf->nkpts();
@@ -1403,14 +1406,29 @@ auto recompute_W_and_eps_inv_head(
                "nqpts={}, nqpts_ibz={}, nkpts={}",
                mf->nqpts(), mf->nqpts_ibz(), nkpts);
 
-  // Standard GW: W is RPA-screened. cRPA / edmft are not supported here.
-  solvers::scr_coulomb_t scr(&ft, "rpa", div_treatment);
+  // W is RPA-screened, or GW+EDMFT-screened with the local polarizabilities of mb_local.
+  solvers::scr_coulomb_t scr(&ft, (mb_local == nullptr) ? "rpa" : "gw_edmft", div_treatment);
 
   long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
   auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
       mpi.comm.size(), nw_half, nkpts, thc.Np());
 
-  auto dPi_tqPQ = scr.eval_Pi_qdep(sG_tskij.local(), thc);
+  auto dPi_tqPQ = [&]() {
+    if (mb_local == nullptr) {
+      // RPA
+      return scr.eval_Pi_qdep(sG_tskij.local(), thc);
+    } else {
+      // GW+EDMFT: Π_RPA[G] + upfold(Π_imp - Π_dc). G is lent to mb_local for the call and moved back; this
+      // is safe only because no view of sG_tskij exists yet (the Dyson solver and driver are built later).
+      utils::check(mb_local->sPi_imp_wabcd.has_value() and mb_local->sPi_dc_wabcd.has_value(),
+                   "recompute_W_and_eps_inv_head: GW+EDMFT screening requires the local polarizabilities.");
+      mb_local->sG_tskij.emplace(std::move(sG_tskij));
+      auto dPi = scr.eval_Pi_qdep(*mb_local, thc);
+      sG_tskij = std::move(mb_local->sG_tskij.value());
+      mb_local->sG_tskij.reset();
+      return dPi;
+    }
+  }();
   mpi.comm.barrier();
   auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
   mpi.comm.barrier();
@@ -1721,7 +1739,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
-                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_DUMP"}) {
+                  "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_INIT_GS_LOCAL", "LR_DUMP"}) {
     lr_init_timer.add(v);
   }
   lr_init_timer.start("LR_INIT");
@@ -1880,6 +1898,45 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
 
+  // Embedding data: C and B^q (built once). The bosonic projector is node-shared and outlives the solves.
+  // With local_polarizabilities the ground state is GW+EDMFT: its Π_imp, Π_dc enter W (recompute_W) and the
+  // kernel includes the linearized double counting.
+  std::optional<MBState> opt_mb_local;
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sB_qIPab;
+  std::optional<embedding_info> opt_embedding;
+  const bool gw_edmft = local && local->local_polarizabilities.has_value();
+  if (local) {
+    utils::check(mf->nkpts_ibz() == mf->nkpts() and mf->nqpts_ibz() == mf->nqpts(),
+                 "run_lr_calc: the local projection requires the full BZ (no k/q symmetry reduction).");
+    utils::check(gw_edmft or !local->dc_cells.has_value(),
+                 "run_lr_calc: projector_info[\"dc_cells\"] is the cell map of the double counting of a GW+EDMFT "
+                 "ground state and requires local_polarizabilities.");
+    if (gw_edmft) {
+      utils::check(local->dc_cells.has_value(),
+                   "run_lr_calc: local_polarizabilities require projector_info[\"dc_cells\"] (ImpurityBlockMap.cell_args).");
+      utils::check(include_gw_sigma,
+                   "run_lr_calc: the double counting of a GW+EDMFT ground state requires gw_mode = fixed_W or full "
+                   "(gw_mode = none has no Σ).");
+      // The local polarizabilities replace a W file, so W has to be rebuilt from them.
+      utils::check(recompute_W and unperturbed == "checkpoint",
+                   "run_lr_calc: local_polarizabilities build the GW+EDMFT W in place of a W file; "
+                   "they require recompute_W = true and unperturbed = 'checkpoint' (the DFT G0 of 'mf_dft' is not "
+                   "a GW+EDMFT ground state).");
+    }
+    auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+    opt_mb_local.emplace(ft, prefix, mf, local->projector_ksIai, local->band_window, local->kpts_crys,
+                         trans_home_cell, false);
+    auto const& proj_boson = opt_mb_local->proj_boson.value();
+    utils::check(proj_boson.nImps() == 1, "run_lr_calc: only a single impurity is supported (nImps = {}).",
+                 proj_boson.nImps());
+    if (gw_edmft) opt_mb_local->set_local_polarizabilities(*local->local_polarizabilities);
+    opt_sB_qIPab.emplace(proj_boson.calc_bosonic_projector(eri.corr_eri->get()));
+    opt_embedding.emplace();
+    opt_embedding->C_skIai = proj_boson.C_skIai();
+    opt_embedding->W_rng = proj_boson.W_rng();
+    opt_embedding->B_qIPab.rebind(opt_sB_qIPab->local());
+  }
+
   // Load W and eps_inv_head if GW self-energy is requested. W is either read
   // from disk (explicit screened_interaction_file, else the auto-derived path)
   // or recomputed on the fly from the checkpoint Green's function (RPA). Both
@@ -1925,9 +1982,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     }
     if (recompute_W) {
-      app_log(2, "Recomputing W from checkpoint Green's function (RPA)...");
+      app_log(2, "Recomputing W from checkpoint Green's function ({})...",
+              gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
       auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment);
+          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment, gw_edmft ? &(*opt_mb_local) : nullptr);
       opt_dW.emplace(std::move(dW));
       opt_eps_inv.emplace(std::move(eps_inv));
       opt_eps_inv_w.emplace(std::move(eps_inv_w));
@@ -1949,6 +2007,34 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       div_treatment = div_str;
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
+  }
+
+  // Ground-state local factors of the double counting, on run_lr's own G and W as the ground state's
+  // downfold_local_gf / downfold_coulomb: G^loc hermitized in τ with the imaginary part dropped, W^loc and V^loc
+  // with the divergence corrections and the 8-fold permutation symmetry. W^loc is W - V (screened part only); V^loc is the bare term.
+  nda::array<ComplexType, 5> Gloc_gs_tsIab, Wloc_gs_tabcd;
+  nda::array<ComplexType, 4> Vloc_gs_abcd;
+  if (gw_edmft) {
+    lr_init_timer.start("LR_INIT_GS_LOCAL");
+    auto& thc_l = eri.corr_eri->get();
+    auto const& proj_boson = opt_mb_local->proj_boson.value();
+    const long n = proj_boson.nImpOrbs();
+    const long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
+    app_log(2, "Ground-state local factors G^loc, W^loc, V^loc of the double counting...");
+
+    Gloc_gs_tsIab = proj_boson.proj_fermi().downfold_loc<true>(sG_tskij, "Gloc");
+
+    embed_eri_t embed_eri(*mf, div_treatment, hf_div_treatment, "default");
+    auto W_wabcd = embed_eri.downfold_W(thc_l, *opt_dW, opt_sB_qIPab->local(), *opt_eps_inv_w);
+    Wloc_gs_tabcd = nda::array<ComplexType, 5>(nt_half, n, n, n, n);
+    ft.w_to_tau_PHsym(W_wabcd, Wloc_gs_tabcd);
+    apply_permut_symm(Wloc_gs_tabcd, "8-fold", "Wloc");
+    Vloc_gs_abcd = embed_eri.downfold_V(thc_l, opt_sB_qIPab->local());
+    apply_permut_symm(Vloc_gs_abcd, "8-fold", "Vloc");
+
+    local->dc_cells->check(n);
+    opt_embedding->dc.emplace(embedding_info::dc_t{Gloc_gs_tsIab, chemistry_to_product_basis(Wloc_gs_tabcd), *local->dc_cells});
+    lr_init_timer.stop("LR_INIT_GS_LOCAL");
   }
 
   // Bcast presence flag for optional inputs so non-root ranks know whether
@@ -2044,24 +2130,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   nda::array<ComplexType, 4> DeltaF_ibc_skij;
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
-
-  // Embedding data: C and B^q (built once). The bosonic projector is node-shared and outlives the solves.
-  std::optional<projector_boson_t> opt_proj_boson;
-  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sB_qIPab;
-  std::optional<embedding_info> opt_embedding;
-  if (local) {
-    utils::check(mf->nkpts_ibz() == mf->nkpts() and mf->nqpts_ibz() == mf->nqpts(),
-                 "run_lr_calc: the local projection requires the full BZ (no k/q symmetry reduction).");
-    auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
-    opt_proj_boson.emplace(*mf, local->projector_ksIai, local->band_window, local->kpts_crys, trans_home_cell);
-    utils::check(opt_proj_boson->nImps() == 1, "run_lr_calc: only a single impurity is supported (nImps = {}).",
-                 opt_proj_boson->nImps());
-    opt_sB_qIPab.emplace(opt_proj_boson->calc_bosonic_projector(thc));
-    opt_embedding.emplace();
-    opt_embedding->C_skIai = opt_proj_boson->C_skIai();
-    opt_embedding->W_rng = opt_proj_boson->W_rng();
-    opt_embedding->B_qIPab.rebind(opt_sB_qIPab->local());
-  }
 
   lr_params p;
   p.kernel           = total_kernel;
@@ -2264,6 +2332,17 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     }
     mpi->comm.barrier();
   }
+
+  // Ground-state local factors of the double counting: one set for the ground state, not per mode.
+  if (gw_edmft and mpi->comm.root()) {
+    h5::file file(output + ".mbpt.h5", 'a');
+    auto lr_grp = chkpt::lr_group(file);
+    nda::h5_write(lr_grp, "Gloc_tsIab", Gloc_gs_tsIab, false);
+    nda::h5_write(lr_grp, "Wloc_tabcd", Wloc_gs_tabcd, false);
+    nda::h5_write(lr_grp, "Vloc_abcd", Vloc_gs_abcd, false);
+    app_log(2, "  - Gloc_tsIab, Wloc_tabcd, Vloc_abcd written to \"linear_response/\"");
+  }
+  mpi->comm.barrier();
 
   // Reported here, not with the LR_INIT block, because it accumulates over the mode loop.
   app_log(2, "\n  LR checkpoint write: {0:8.3f} sec  {1:4d} calls\n",

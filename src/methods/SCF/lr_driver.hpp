@@ -42,6 +42,7 @@
 #include "methods/scr_coulomb/lr_rpa_pi.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/SCF/qp_params_t.h"
+#include "methods/embedding/dc_response.hpp"
 
 namespace methods {
 
@@ -104,13 +105,24 @@ struct lr_diis_hist_t {
 /**
  * Embedding data of an LR run: the projector C and the aux-basis projector B,
  * from which the driver forms δG^loc (by the caller, from the returned ΔG) and
- * δW^loc (after every ΔW solve of the kernel). Plain data; the projection math is
- * methods::local_projection. The k+Q map is lr_dyson::kpq_map().
+ * δW^loc (after every ΔW solve of the kernel). With dc, the kernel also subtracts
+ * the linearized double counting. Plain data; the projection math is
+ * methods::local_projection and the double counting methods::lr_dc_*. The k+Q map
+ * is lr_dyson::kpq_map().
  */
 struct embedding_info {
   nda::array<ComplexType, 5> C_skIai;       ///< projector, MF k order (full BZ)
   std::vector<nda::range> W_rng;            ///< band window of the projector
   nda::array_view<ComplexType, 5> B_qIPab;  ///< bosonic projector B^q (node-shared view)
+
+  /// Ground-state factors of the double counting of a GW+EDMFT ground state.
+  struct dc_t {
+    nda::array<ComplexType, 5> Gloc_tsIab;  ///< G^loc(τ) (nt, ns, 1, n, n)
+    nda::array<ComplexType, 5> Wloc_pb;     ///< W^loc(τ) (nt_half, n, n, n, n), product basis
+    dc_cells_t cells;
+  };
+  /// Set for a GW+EDMFT ground state: the kernel then includes the linearized double counting.
+  std::optional<dc_t> dc;
 };
 
 /**

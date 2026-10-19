@@ -395,7 +395,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            method=None,
            precond_method="none",
            hessian=False,
-           *, projector_info=None):
+           *, projector_info=None, local_polarizabilities=None):
     """
     Run unified linear response calculation.
 
@@ -548,7 +548,21 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         previous iterate; at convergence it matches the returned dG to within ``tol``).
         Both go into the mode group of ``linear_response/``. Full BZ and a single
         impurity only. ``params["translate_home_cell"]`` (bool, default False) is passed
-        to the projector.
+        to the projector. With ``local_polarizabilities`` it must also carry
+        ``"dc_cells"``, the dict ``ImpurityBlockMap.cell_args`` (``cell_offset``, ``cell_size``,
+        ``orb_block``).
+    local_polarizabilities : dict or None, optional
+        Ground-state {"imp": Pi_imp, "dc": Pi_dc} on the half bosonic grid, product basis
+        (nw_half, a, b, c, d), as run_gw. It declares a GW+EDMFT ground state. run_lr then
+        (i) builds the GW+EDMFT W of the checkpoint G (RPA bubble + upfolded Pi_imp - Pi_dc;
+        requires ``recompute_W``), (ii) computes the ground-state local factors G^loc, W^loc,
+        V^loc from its own G and W and writes them as ``Gloc_tsIab`` (nt, ns, 1, n, n),
+        ``Wloc_tabcd`` (nt_half, n, n, n, n, chemistry order) and ``Vloc_abcd`` (n, n, n, n) to
+        ``linear_response/``, and (iii) includes the linearized double counting in the kernel:
+        gw_mode="full" subtracts up(dSigma_dc[dG^loc, dW^loc]) from dSigma and up(dPi_dc[dG^loc])
+        from dPi before the dW solve; gw_mode="fixed_W" subtracts up(dSigma_dc[dG^loc, 0]) from
+        dSigma (W is frozen, so dPi_dc has no effect). gw_mode="none", the hessian, qp and
+        ``split_sigma_terms`` are rejected. Requires ``projector_info`` with ``"dc_cells"``.
     nbnd_save : int or None, optional
         Keep only the leading nbnd_save x nbnd_save band block of the
         imaginary-time arrays (DeltaG_tskij, DeltaSigma_tskij,
@@ -684,12 +698,18 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
 
+    local_pi = (None if local_polarizabilities is None else
+                {k: np.asarray(local_polarizabilities[k], dtype=np.complex128) for k in ("imp", "dc")})
     if projector_info is None:
-        proj_args = [None, None, None]
+        proj_args = [None, None, None, local_pi, None]
     else:
+        dc_cells = (None if "dc_cells" not in projector_info else
+                    {k: np.asarray(projector_info["dc_cells"][k], dtype=np.int64)
+                     for k in ("cell_offset", "cell_size", "orb_block")})
         proj_args = [np.asarray(projector_info["proj_mat"], dtype=np.complex128),
                      np.asarray(projector_info["band_window"], dtype=np.int64),
-                     np.asarray(projector_info["kpts_w90"], dtype=np.float64)]
+                     np.asarray(projector_info["kpts_w90"], dtype=np.float64),
+                     local_pi, dc_cells]
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,

@@ -223,3 +223,40 @@ def test_cells_lr_handles_broken_equivalence():
 
     # the two equivalent sites of impurity 0 differ
     assert np.linalg.norm(sigma[:, :, :3, :3] - sigma[:, :, 3:6, 3:6]) > 1e-3 * np.linalg.norm(sigma)
+
+
+@pytest.mark.parametrize("spec", [SPEC_EQUIV, SPEC_SPECTATOR], ids=["equiv", "spectator"])
+@pytest.mark.parametrize("ns", [1, 2])
+@pytest.mark.parametrize("nts", [7, 8])
+def test_lr_dc_response_vs_gs_chain(nts, ns, spec):
+    # C++ lr_dc_response (projector layout (nt, ns, 1, n, n), W in chemistry order) vs the central difference of the
+    # ground-state chain extract -> weiss.eval_gw_dc_t / eval_pi_rpa -> embed, with Pi through
+    # density_density_to_product_basis; bilinear maps, so 1e-12 is round-off.
+    emb1 = make_embedding(**spec)
+    emb2 = make_embedding(**spec).merge_embed_block_by_imp.slice_sigma
+    bm = ImpurityBlockMap(emb1, emb2)
+    rng = np.random.default_rng(7 * nts + ns)
+    nt_half = nts // 2 + nts % 2
+    dims1, dims2 = imp_block_dims(emb1), imp_block_dims(emb2)
+
+    def embed_G():
+        C = np.stack(emb1.embed([[rand(rng, nts, d, d) for d in dims] for dims in dims1]), axis=1)
+        return C[:, :1] if ns == 1 else C
+    G_C, dG_C = embed_G(), embed_G()
+    W_chem = emb2.embed([[rand(rng, nt_half, d, d, d, d) for d in dims] for dims in dims2])[0]
+    dW_chem = emb2.embed([[rand(rng, nt_half, d, d, d, d) for d in dims] for dims in dims2])[0]
+
+    dS, dPi = cq_embed.lr_dc_response(G_C[:, :, None], dG_C[:, :, None], W_chem, dW_chem, **bm.cell_args)
+    pb = weiss.chemistry_to_product_basis
+    sp, pp = gs_dc_per_imp(emb1, emb2, G_C + dG_C, pb(W_chem + dW_chem))
+    sm, pm = gs_dc_per_imp(emb1, emb2, G_C - dG_C, pb(W_chem - dW_chem))
+    assert dS.shape == G_C[:, :, None].shape
+    assert rel(dS[:, :, 0], 0.5 * (sp - sm)) < 1e-12
+    assert rel(dPi, weiss.density_density_to_product_basis(0.5 * (pp - pm))) < 1e-12
+
+    # dW = None (W fixed) vs the same central difference with W unchanged; the Pi part does not depend on dW
+    dS0, dPi0 = cq_embed.lr_dc_response(G_C[:, :, None], dG_C[:, :, None], W_chem, None, **bm.cell_args)
+    sp, _ = gs_dc_per_imp(emb1, emb2, G_C + dG_C, pb(W_chem))
+    sm, _ = gs_dc_per_imp(emb1, emb2, G_C - dG_C, pb(W_chem))
+    assert rel(dS0[:, :, 0], 0.5 * (sp - sm)) < 1e-12
+    assert rel(dPi0, dPi) < 1e-15

@@ -47,3 +47,14 @@ def lr_eval_pi_rpa_cells(G_tsab, dG_tsab, *, cell_offset, cell_size, orb_block):
     """Density-only dPi_dc = P(dG, G) + P(G, dG) on every cell, P of coqui.dmft.weiss.eval_pi_rpa(density_only=True);
     (nt_half, nC, nC)."""
     return embed_cxx.lr_eval_pi_rpa_cells(_c(G_tsab), _c(dG_tsab), _i(cell_offset), _i(cell_size), _i(orb_block))
+
+
+def lr_dc_response(G_tsIab, dG_tsIab, W_tabcd, dW_tabcd, *, cell_offset, cell_size, orb_block):
+    """(dSigma_dc, dPi_dc) in tau on the layout the LR kernel works with: G, dG (nt, ns, 1, n, n); W, dW
+    (nt_half, n, n, n, n) in the order lr_downfold_coulomb returns. dSigma_dc (nt, ns, 1, n, n); dPi_dc
+    (nt_half, n, n, n, n), density-only, in the product basis. ns is the number of spins of the lattice
+    (ns = 1 uses the spin factor -2); ns = 2 with the ground state's spin_average = True is not supported.
+    dW_tabcd = None: W fixed, the dW term is skipped. Index arrays: ImpurityBlockMap.cell_args."""
+    dW = () if dW_tabcd is None else (_c(dW_tabcd),)
+    return embed_cxx.lr_dc_response(_c(G_tsIab), _c(dG_tsIab), _c(W_tabcd), *dW,
+                                    _i(cell_offset), _i(cell_size), _i(orb_block))
