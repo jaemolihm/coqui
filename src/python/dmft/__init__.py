@@ -30,6 +30,7 @@ try:
   from .weiss import *
   from .lr_weiss import *
   from .impurity_block_map import ImpurityBlockMap
+  from .lr_scf_driver import *
   from .bath_fit import *
   from .io import *
   from .plot import *
