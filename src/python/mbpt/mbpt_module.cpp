@@ -54,6 +54,10 @@ namespace coqui_py {
    * @param proj_mat          - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W) (every rank)
    * @param band_window       - [INPUT] Optional band window of the projector (every rank)
    * @param kpts_w90          - [INPUT] Optional k-points of the projector (crystal) (every rank)
+   * @param local_polarizabilities - [INPUT] Optional ground-state {"imp", "dc"} Π: declares a GW+EDMFT ground state
+   *                            (W from the local polarizabilities, the double counting in the kernel); needs dc_cells
+   * @param dc_cells          - [INPUT] The cells of the correlated space of the double counting: "cell_offset",
+   *                            "cell_size", "orb_block"
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
@@ -66,13 +70,26 @@ namespace coqui_py {
       std::optional<nda::array<ComplexType, 3>> DeltaV_qPQ,
       std::optional<nda::array<ComplexType, 5>> proj_mat,
       std::optional<nda::array<long, 3>> band_window,
-      std::optional<nda::array<double, 2>> kpts_w90) {
+      std::optional<nda::array<double, 2>> kpts_w90,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
+      std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     utils::check(bool(proj_mat) == bool(band_window) and bool(proj_mat) == bool(kpts_w90),
                  "run_lr: proj_mat, band_window and kpts_w90 must be given together.");
+    utils::check(proj_mat or !(local_polarizabilities or dc_cells),
+                 "run_lr: local_polarizabilities and dc_cells require the projector (proj_mat, band_window, kpts_w90).");
+    std::optional<methods::dc_cells_t> cells;
+    if (dc_cells) {
+      for (auto k : {"cell_offset", "cell_size", "orb_block"})
+        utils::check(dc_cells->count(k) == 1, "run_lr: dc_cells is missing the key {}.", k);
+      cells = methods::dc_cells_t{dc_cells->at("cell_offset"), dc_cells->at("cell_size"),
+                                   dc_cells->at("orb_block")};
+    }
     std::optional<methods::lr_local_inputs> local;
-    if (proj_mat) local = methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90)};
+    if (proj_mat)
+      local = methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90),
+                                       std::move(local_polarizabilities), std::move(cells)};
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ,
                                 local ? &(*local) : nullptr);

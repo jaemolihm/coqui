@@ -22,6 +22,7 @@
 #define COQUI_DC_RESPONSE_HPP
 
 #include <string_view>
+#include <tuple>
 
 #include "configuration.hpp"
 #include "nda/nda.hpp"
@@ -162,16 +163,17 @@ namespace methods {
     }
   }
 
-  // dSigma_dc(t,s) = Sigma[dG, W] + Sigma[G, dW] per cell, Sigma of weiss.eval_gw_dc_t; the half tau grid assumes
+  // dSigma_dc(t,s) = Sigma[dG, W] + Sigma[G, dW] per cell, Sigma of weiss.eval_gw_dc_t; dW_tabcd = nullptr skips
+  // Sigma[G, dW] (W fixed); the half tau grid assumes
   // the tau-reflection evenness of the response, which is exact for a time-reversal-even perturbation at any Q and
   // any number of orbitals (a physical electron-phonon dV in a time-reversal-symmetric crystal) and fails at O(1)
   // for a generic complex dH0. G_tsab, dG_tsab (nt, ns, nC, nC), W_tabcd, dW_tabcd (nt_half, nC, nC, nC, nC).
   inline carray_t<4> lr_eval_gw_dc_cells(const carray_t<4> &G_tsab, const carray_t<4> &dG_tsab,
-                                  const carray_t<5> &W_tabcd, const carray_t<5> &dW_tabcd,
+                                  const carray_t<5> &W_tabcd, const carray_t<5> *dW_tabcd,
                                   const dc_cells_t &cells) {
     dc_detail::check_cells_inputs(G_tsab, W_tabcd, cells, "lr_eval_gw_dc_cells");
     utils::check(dG_tsab.shape() == G_tsab.shape(), "lr_eval_gw_dc_cells: dG and G shapes differ.");
-    utils::check(dW_tabcd.shape() == W_tabcd.shape(), "lr_eval_gw_dc_cells: dW and W shapes differ.");
+    utils::check(!dW_tabcd or dW_tabcd->shape() == W_tabcd.shape(), "lr_eval_gw_dc_cells: dW and W shapes differ.");
     carray_t<4> dSigma_tsab(G_tsab.shape());
     dSigma_tsab() = ComplexType(0.0);
     for (long k = 0; k < cells.cell_size.extent(0); ++k) {
@@ -180,11 +182,13 @@ namespace methods {
       auto Gk = dc_detail::masked_cell_G(G_tsab, cells, k);
       auto dGk = dc_detail::masked_cell_G(dG_tsab, cells, k);
       carray_t<5> Wk = W_tabcd(nda::range::all, r, r, r, r);
-      carray_t<5> dWk = dW_tabcd(nda::range::all, r, r, r, r);
       carray_t<4> Sk(Gk.shape());
       Sk() = ComplexType(0.0);
       gw_sigma_dc_kernel(dGk, Wk, Sk);
-      gw_sigma_dc_kernel(Gk, dWk, Sk);
+      if (dW_tabcd) {
+        carray_t<5> dWk = (*dW_tabcd)(nda::range::all, r, r, r, r);
+        gw_sigma_dc_kernel(Gk, dWk, Sk);
+      }
       dc_detail::scatter_masked_sigma(Sk, cells, k, dSigma_tsab);
     }
     return dSigma_tsab;
@@ -211,6 +215,57 @@ namespace methods {
       dPi_tab(nda::range::all, r, r) = Pk;
     }
     return dPi_tab;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Composed response on the projector layout (the kernel of run_lr and its Python binding)
+  // -------------------------------------------------------------------------------------------
+
+  // The arrays of the projector layout carry the impurity axis, which is 1 (single impurity): G (nt, ns, 1, n, n),
+  // W (nt_half, n, n, n, n). ns is the number of spins of the lattice, passed to the per-cell kernels as it is: ns = 1
+  // uses the spin factor -2 in Pi, which equals the ground state's duplicated spin blocks with spin_average = True. A
+  // lattice with ns = 2 is evaluated per spin; ns = 2 with the ground state's spin_average = True is not supported.
+
+  namespace dc_detail {
+    inline carray_t<4> single_impurity(const carray_t<5> &A_tsIab, std::string_view name) {
+      utils::check(A_tsIab.extent(2) == 1, "{}: only a single impurity is supported (nImps = {}).",
+                   name, A_tsIab.extent(2));
+      carray_t<4> A_tsab = A_tsIab(nda::range::all, nda::range::all, 0, nda::range::all, nda::range::all);
+      return A_tsab;
+    }
+  } // dc_detail
+
+  // Density-only dPi_dc of lr_eval_pi_rpa_cells in the product basis, (nt_half, n, n, n, n):
+  // density_density_to_product_basis of the ground state's Pi_dc embedding.
+  inline carray_t<5> lr_dc_pi(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab, const dc_cells_t &cells) {
+    auto dPi_tab = lr_eval_pi_rpa_cells(dc_detail::single_impurity(G_tsIab, "lr_dc_pi"),
+                                        dc_detail::single_impurity(dG_tsIab, "lr_dc_pi"), cells);
+    return density_density_to_product_basis(dPi_tab);
+  }
+
+  // dSigma_dc of lr_eval_gw_dc_cells, (nt, ns, 1, n, n). W and dW are in the product basis; dW_tabcd = nullptr skips
+  // the dW term.
+  inline carray_t<5> lr_dc_sigma(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                                 const carray_t<5> &W_tabcd, const carray_t<5> *dW_tabcd, const dc_cells_t &cells) {
+    auto dSigma_tsab = lr_eval_gw_dc_cells(dc_detail::single_impurity(G_tsIab, "lr_dc_sigma"),
+                                           dc_detail::single_impurity(dG_tsIab, "lr_dc_sigma"), W_tabcd, dW_tabcd, cells);
+    carray_t<5> dSigma_tsIab(dSigma_tsab.extent(0), dSigma_tsab.extent(1), 1, dSigma_tsab.extent(2),
+                             dSigma_tsab.extent(3));
+    dSigma_tsIab(nda::range::all, nda::range::all, 0, nda::range::all, nda::range::all) = dSigma_tsab;
+    return dSigma_tsIab;
+  }
+
+  // (dSigma_dc, dPi_dc) in tau, the ground state's {dc} arrays of dmft_embed / run_gw before their transforms to
+  // the Matsubara axis. W and dW are in the order lr_downfold_coulomb returns (chemistry); dW_tabcd = nullptr skips
+  // the dW term. Exists for the embed binding and its test, not for the LR kernel: the kernel calls lr_dc_sigma /
+  // lr_dc_pi on arrays already in the product basis, and routing it through here adds two basis conversions per call.
+  inline std::tuple<carray_t<5>, carray_t<5>> lr_dc_response(const carray_t<5> &G_tsIab, const carray_t<5> &dG_tsIab,
+                                                             const carray_t<5> &W_tabcd, const carray_t<5> *dW_tabcd,
+                                                             const dc_cells_t &cells) {
+    auto W_pb = chemistry_to_product_basis(W_tabcd);
+    if (not dW_tabcd) return {lr_dc_sigma(G_tsIab, dG_tsIab, W_pb, nullptr, cells), lr_dc_pi(G_tsIab, dG_tsIab, cells)};
+    auto dW_pb = chemistry_to_product_basis(*dW_tabcd);
+    return {lr_dc_sigma(G_tsIab, dG_tsIab, W_pb, &dW_pb, cells), lr_dc_pi(G_tsIab, dG_tsIab, cells)};
   }
 
 } // methods

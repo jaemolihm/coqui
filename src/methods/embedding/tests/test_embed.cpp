@@ -1053,7 +1053,12 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
       nda::array<ComplexType,4> Gp(G + dG), Gm(G - dG);
       nda::array<ComplexType,5> Wp(W + dW), Wm(W - dW);
       nda::array<ComplexType,4> fd_sigma((sigma(Gp, Wp) - sigma(Gm, Wm)) * 0.5);
-      REQUIRE(diff(methods::lr_eval_gw_dc_cells(G, dG, W, dW, cells), fd_sigma) < 1e-13);
+      REQUIRE(diff(methods::lr_eval_gw_dc_cells(G, dG, W, &dW, cells), fd_sigma) < 1e-13);
+      // dW = nullptr skips Sigma[G, dW]: equals an explicit zero dW
+      nda::array<ComplexType,5> dW_zero(dW.shape());
+      dW_zero() = ComplexType(0.0);
+      REQUIRE(diff(methods::lr_eval_gw_dc_cells(G, dG, W, nullptr, cells),
+                   methods::lr_eval_gw_dc_cells(G, dG, W, &dW_zero, cells)) < 1e-15);
       nda::array<ComplexType,3> fd_pi((pi(Gp, Gp) - pi(Gm, Gm)) * 0.5);
       REQUIRE(diff(methods::lr_eval_pi_rpa_cells(G, dG, cells), fd_pi) < 1e-13);
     }
