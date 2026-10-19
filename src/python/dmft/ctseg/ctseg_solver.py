@@ -29,7 +29,9 @@ from triqs.gfs.tools import make_zero_tail
 from triqs.operators import c_dag, c
 from triqs.operators.util.extractors import block_matrix_from_op
 
+import triqs_modest as modest
 from triqs_ctseg import Solver
+from triqs_ctseg.postprocessing import postprocess
 import coqui.dmft.ctseg.ctseg_utils as ctseg_utils
 
 
@@ -116,6 +118,34 @@ def matrix_to_many_body_operator(h_loc_matrix, gf_struct):
     return sum(c_dag_vec[block]*h_loc0_mat[block]*c_vec[block] for block, bl_size in gf_struct)[0,0]
 
 
+def _pop_post_proc_params(solver_interface_params, n_iw, analytic_hf):
+    """
+    Remove the post-processing parameters from solver_interface_params and return them as a dict for postprocess.
+
+    If fit_window_fraction is given and no explicit window (fit_min_w, fit_max_w, fit_min_n, fit_max_n all None),
+    the tail-fit window is the top fit_window_fraction of the Matsubara mesh:
+    n in [int((1 - fit_window_fraction) * n_iw), n_iw - 1].
+    """
+    post_proc_params = {}
+    post_proc_params['perform_tail_fit'] = solver_interface_params.pop('perform_tail_fit', False)
+    post_proc_params['fit_max_moment']   = solver_interface_params.pop('fit_max_moment', 3)
+    post_proc_params['fit_min_w']        = solver_interface_params.pop('fit_min_w', None)
+    post_proc_params['fit_max_w']        = solver_interface_params.pop('fit_max_w', None)
+    post_proc_params['fit_min_n']        = solver_interface_params.pop('fit_min_n', None)
+    post_proc_params['fit_max_n']        = solver_interface_params.pop('fit_max_n', None)
+    fit_window_fraction                  = solver_interface_params.pop('fit_window_fraction', None)
+    post_proc_params['analytic_hf']      = solver_interface_params.pop('analytic_hf', analytic_hf)
+    post_proc_params['degenerate_blk']   = solver_interface_params.pop('degenerate_blk', None)
+    post_proc_params['truncate_uchi']    = solver_interface_params.pop('truncate_uchi', False)
+    if fit_window_fraction is not None and not 0 < fit_window_fraction <= 1:
+        raise ValueError(f"fit_window_fraction = {fit_window_fraction} must satisfy 0 < fit_window_fraction <= 1.")
+    explicit_window = ('fit_min_w', 'fit_max_w', 'fit_min_n', 'fit_max_n')
+    if fit_window_fraction is not None and all(post_proc_params[k] is None for k in explicit_window):
+        post_proc_params['fit_min_n'] = int((1 - fit_window_fraction) * n_iw)
+        post_proc_params['fit_max_n'] = n_iw - 1
+    return post_proc_params
+
+
 def solve_dynamic_full_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_params):
     """
     Solve the impurity with dynamic interactions 
@@ -134,16 +164,8 @@ def solve_dynamic_full_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_p
     
     S = Solver(gf_struct=gf_struct, beta=beta, n_tau=n_tau, n_tau_bosonic=n_tau_bosonic)
 
-    # initialization for post proccessing 
-    post_proc_params = {}
-    post_proc_params['perform_tail_fit'] = solver_interface_params.pop('perform_tail_fit', False)
-    post_proc_params['fit_max_moment']   = solver_interface_params.pop('fit_max_moment', 3)
-    post_proc_params['fit_min_w']        = solver_interface_params.pop('fit_min_w', None)
-    post_proc_params['fit_max_w']        = solver_interface_params.pop('fit_max_w', None)
-    post_proc_params['fit_min_n']        = solver_interface_params.pop('fit_min_n', None)
-    post_proc_params['fit_max_n']        = solver_interface_params.pop('fit_max_n', None)
-    post_proc_params['analytic_hf']      = solver_interface_params.pop('analytic_hf', False)
-    post_proc_params['degenerate_blk']   = solver_interface_params.pop('degenerate_blk', None)
+    # initialization for post processing
+    post_proc_params = _pop_post_proc_params(solver_interface_params, n_iw, analytic_hf=False)
     S.n_iw, S.beta, S.gf_struct = n_iw, beta, gf_struct     # useful and necessary for post-processing
     S.h_int = h_int
     S.h_loc0_mat = block_matrix_from_op(h_loc0, gf_struct)
@@ -170,17 +192,18 @@ def solve_dynamic_full_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_p
     solver_interface_params['measure_densities'] = True
     solver_interface_params['measure_F_tau']     = True
     solver_interface_params['measure_nn_tau']    = True
+    solver_interface_params.setdefault('measure_I_tau', True)
     S.solve(h_loc0=h_loc0, h_int=h_int, **solver_interface_params)
     
     # post process
-    ctseg_utils.post_process(S, **post_proc_params)
+    pp = postprocess(S, symmetrize_func=modest.symmetrize, **post_proc_params)
     
     return SolverResults(# required
-        G_iw  = S.G_iw,
-        Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = S.Sigma_iw,
-        Pi_iw = S.Pi_iw,
-        W_iw = S.W_iw,
+        G_iw  = pp['G_iw'],
+        Sigma_infty = pp['Sigma_HartreeFock'],
+        Sigma_iw = pp['Sigma_dynamic'],
+        Pi_iw = pp.get('Pi_iw'),
+        W_iw = pp.get('W_iw'),
         # TODO return raw Sigma as well
 
         # optional
@@ -234,16 +257,7 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     S = Solver(gf_struct=gf_struct, beta=beta, n_tau=n_tau, n_tau_bosonic=n_tau_bosonic)
 
     # initialization for post-processing
-    post_proc_params = {}
-    post_proc_params['perform_tail_fit'] = solver_interface_params.pop('perform_tail_fit', False)
-    post_proc_params['fit_max_moment']   = solver_interface_params.pop('fit_max_moment', 3)
-    post_proc_params['fit_min_w']        = solver_interface_params.pop('fit_min_w', None)
-    post_proc_params['fit_max_w']        = solver_interface_params.pop('fit_max_w', None)
-    post_proc_params['fit_min_n']        = solver_interface_params.pop('fit_min_n', None)
-    post_proc_params['fit_max_n']        = solver_interface_params.pop('fit_max_n', None)
-    post_proc_params['analytic_hf']      = solver_interface_params.pop('analytic_hf', True)
-    post_proc_params['degenerate_blk']   = solver_interface_params.pop('degenerate_blk', None)
-    post_proc_params['truncate_uchi']    = solver_interface_params.pop('truncate_uchi', False)
+    post_proc_params = _pop_post_proc_params(solver_interface_params, n_iw, analytic_hf=True)
     S.n_iw, S.beta, S.gf_struct = n_iw, beta, gf_struct     # useful and necessary for post-processing
     S.h_int = h_int
     S.h_loc0_mat = block_matrix_from_op(h_loc0, gf_struct)
@@ -259,10 +273,11 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     solver_interface_params['measure_densities'] = True
     solver_interface_params['measure_F_tau']     = True
     solver_interface_params['measure_nn_nu_dlr']     = True
+    solver_interface_params.setdefault('measure_I_tau', True)
     S.solve(h_loc0=h_loc0, h_int=h_int, **solver_interface_params)
 
     # post process
-    ctseg_utils.post_process(S, **post_proc_params)
+    pp = postprocess(S, symmetrize_func=modest.symmetrize, **post_proc_params)
 
     # dense mesh -> DLR nodes
     if dlr_projection_method == 'fit':
@@ -271,12 +286,12 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
         to_dlr = ctseg_utils.fill_dlr_imfreq_gf
 
     return SolverResults(# required
-        G_iw  = to_dlr(S.G_iw, wmax, eps),
-        Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = to_dlr(S.Sigma_iw, wmax, eps),
-        Pi_iw = to_dlr(S.Pi_iw, wmax, eps),
-        W_iw  = to_dlr(S.W_iw, wmax, eps),
-        Chi_iw = to_dlr(S.Chi_iw, wmax, eps),
+        G_iw  = to_dlr(pp['G_iw'], wmax, eps),
+        Sigma_infty = pp['Sigma_HartreeFock'],
+        Sigma_iw = to_dlr(pp['Sigma_dynamic'], wmax, eps),
+        Pi_iw = to_dlr(pp['Pi_iw'], wmax, eps),
+        W_iw  = to_dlr(pp['W_iw'], wmax, eps),
+        Chi_iw = to_dlr(pp['Chi_iw'], wmax, eps),
 
         # optional
         orbital_occupations = S.results.densities,
@@ -323,6 +338,7 @@ def solve_density_dynamic_u_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_in
     solver_interface_params.pop('n_iw', 1025)
     solver_interface_params.pop('perform_tail_fit', False)
     solver_interface_params.pop('fit_max_moment', 3)
+    solver_interface_params.pop('fit_window_fraction', None)
     solver_interface_params.pop('fit_min_w', None)
     solver_interface_params.pop('fit_max_w', None)
     solver_interface_params.pop('fit_min_n', None)
@@ -336,6 +352,7 @@ def solve_density_dynamic_u_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_in
     solver_interface_params['measure_densities'] = True
     solver_interface_params['measure_G_tau']     = False
     solver_interface_params['measure_F_tau']     = False
+    solver_interface_params['measure_I_tau']     = False
     solver_interface_params['measure_nn_tau']    = False
     with _redirect_solver_output(suppress_solver_output, solver_output_file):
         S.solve(h_loc0=h_loc0, h_int=h_int, **solver_interface_params)
