@@ -1911,7 +1911,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     utils::check(gw_edmft or !local->dc_cells.has_value(),
                  "run_lr_calc: projector_info[\"dc_cells\"] is the cell map of the double counting of a GW+EDMFT "
                  "ground state and requires local_polarizabilities.");
+    utils::check(gw_edmft or !local->impurity_response.has_value(),
+                 "run_lr_calc: lr_impurity_response requires a GW+EDMFT ground state (local_polarizabilities).");
     if (gw_edmft) {
+      utils::check(!local->impurity_response or nmodes == 1,
+                   "run_lr_calc: lr_impurity_response is for a single perturbation (nmodes = {}). Call run_lr once per mode.",
+                   nmodes);
       utils::check(local->dc_cells.has_value(),
                    "run_lr_calc: local_polarizabilities require projector_info[\"dc_cells\"] (ImpurityBlockMap.cell_args).");
       utils::check(include_gw_sigma,
@@ -2034,6 +2039,31 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     local->dc_cells->check(n);
     opt_embedding->dc.emplace(embedding_info::dc_t{Gloc_gs_tsIab, chemistry_to_product_basis(Wloc_gs_tabcd), *local->dc_cells});
+
+    // Impurity response: transformed to τ once; the kernel upfolds it in every pass. Zero when not given.
+    opt_embedding->Sigma_imp_tsIab = nda::zeros<ComplexType>(ft.nt_f(), mf->nspin(), 1, n, n);
+    opt_embedding->Pi_imp_tabcd = nda::zeros<ComplexType>(nt_half, n, n, n, n);
+    if (local->impurity_response) {
+      auto const& resp = *local->impurity_response;
+      if (auto it = resp.find("Sigma"); it != resp.end()) {
+        auto const& Sigma_w = it->second;
+        utils::check(Sigma_w.shape() == std::array<long, 5>{ft.nw_f(), mf->nspin(), 1, n, n},
+                     "run_lr_calc: lr_impurity_response['Sigma'] must have shape (nw_f, ns, 1, n, n) = ({}, {}, 1, {}, {}), "
+                     "got ({}, {}, {}, {}, {}).", ft.nw_f(), mf->nspin(), n, n, Sigma_w.shape(0), Sigma_w.shape(1),
+                     Sigma_w.shape(2), Sigma_w.shape(3), Sigma_w.shape(4));
+        ft.w_to_tau(Sigma_w, opt_embedding->Sigma_imp_tsIab, imag_axes_ft::fermion);
+      }
+      if (auto it = resp.find("Pi"); it != resp.end()) {
+        auto const& Pi_w = it->second;
+        const long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
+        utils::check(Pi_w.shape() == std::array<long, 5>{nw_half, n, n, n, n},
+                     "run_lr_calc: lr_impurity_response['Pi'] must have shape (nw_half, n, n, n, n) = ({}, {}, {}, {}, {}), "
+                     "got ({}, {}, {}, {}, {}).", nw_half, n, n, n, n, Pi_w.shape(0), Pi_w.shape(1), Pi_w.shape(2),
+                     Pi_w.shape(3), Pi_w.shape(4));
+        utils::check(total_kernel.sigma_G_dW, "run_lr_calc: a Π impurity response needs the ΔW solve (gw_mode = full).");
+        ft.w_to_tau_PHsym(Pi_w, opt_embedding->Pi_imp_tabcd);
+      }
+    }
     lr_init_timer.stop("LR_INIT_GS_LOCAL");
   }
 
@@ -2239,6 +2269,16 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         if (driver.DeltaWloc()) {
           nda::h5_write(lr_grp, "DeltaWloc_tabcd", *driver.DeltaWloc(), false);
           app_log(2, "  - DeltaWloc_tabcd written to \"linear_response/\"");
+        }
+        // The impurity and double-counting parts of the kernel's δΣ: ΔΣ_GW = ΔΣ - up(δΣ_imp - δΣ_dc) to the solver
+        // tolerance (ΔΣ is the accelerator's iterate, δΣ_dc is evaluated at the final δG^loc).
+        if (emb.dc) {
+          std::optional<nda::array<ComplexType, 5>> dWloc_pb;
+          if (driver.DeltaWloc()) dWloc_pb = chemistry_to_product_basis(*driver.DeltaWloc());
+          auto DeltaSigma_dc_tsIab = driver.dc_sigma_response(emb, DeltaGloc_tsIab, dWloc_pb ? &(*dWloc_pb) : nullptr);
+          nda::h5_write(lr_grp, "DeltaSigma_dc_tsIab", DeltaSigma_dc_tsIab, false);
+          nda::h5_write(lr_grp, "DeltaSigma_imp_tsIab", emb.Sigma_imp_tsIab, false);
+          app_log(2, "  - DeltaSigma_dc_tsIab, DeltaSigma_imp_tsIab written to \"linear_response/\"");
         }
       }
       mpi->comm.barrier();

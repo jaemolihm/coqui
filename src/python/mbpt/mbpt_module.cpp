@@ -58,6 +58,8 @@ namespace coqui_py {
    *                            (W from the local polarizabilities, the double counting in the kernel); needs dc_cells
    * @param dc_cells          - [INPUT] The cells of the correlated space of the double counting: "cell_offset",
    *                            "cell_size", "orb_block"
+   * @param lr_impurity_response - [INPUT] Optional response of the impurity {"Sigma": δΣ_imp(iω), "Pi": δΠ_imp(iν)} in the
+   *                            layouts of the ground state; needs local_polarizabilities
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
@@ -72,13 +74,15 @@ namespace coqui_py {
       std::optional<nda::array<long, 3>> band_window,
       std::optional<nda::array<double, 2>> kpts_w90,
       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
-      std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells) {
+      std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> lr_impurity_response) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     utils::check(bool(proj_mat) == bool(band_window) and bool(proj_mat) == bool(kpts_w90),
                  "run_lr: proj_mat, band_window and kpts_w90 must be given together.");
-    utils::check(proj_mat or !(local_polarizabilities or dc_cells),
-                 "run_lr: local_polarizabilities and dc_cells require the projector (proj_mat, band_window, kpts_w90).");
+    utils::check(proj_mat or !(local_polarizabilities or dc_cells or lr_impurity_response),
+                 "run_lr: local_polarizabilities, dc_cells and lr_impurity_response require the projector "
+                 "(proj_mat, band_window, kpts_w90).");
     std::optional<methods::dc_cells_t> cells;
     if (dc_cells) {
       for (auto k : {"cell_offset", "cell_size", "orb_block"})
@@ -89,7 +93,8 @@ namespace coqui_py {
     std::optional<methods::lr_local_inputs> local;
     if (proj_mat)
       local = methods::lr_local_inputs{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90),
-                                       std::move(local_polarizabilities), std::move(cells)};
+                                       std::move(local_polarizabilities), std::move(cells),
+                                       std::move(lr_impurity_response)};
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ,
                                 local ? &(*local) : nullptr);
