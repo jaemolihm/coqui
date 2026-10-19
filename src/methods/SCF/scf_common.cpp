@@ -60,7 +60,7 @@ double compute_Nelec(double mu, const nda::array<ComplexType, 4> &spectra,
   FT.tau_to_beta(Xt, nelecs);
 
   ComplexType nelec = scl*std::accumulate(nelecs.begin(),nelecs.end(),ComplexType(0.0));
-  if (nelec.imag() / mf.nelec() >= 1e3*FT.eps()) {
+  if (std::abs(nelec.imag()) / mf.nelec() >= 1e3*FT.eps()) {
     app_log(1, "[WARNING] nelec.imag()/nelec_target = {}", nelec.imag() / mf.nelec());
   }
 

@@ -24,6 +24,8 @@
 #ifdef ENABLE_DLR
 
 #include <string>
+#include <map>
+#include <algorithm>
 
 #include "nda/nda.hpp"
 #include "nda/lapack.hpp"
@@ -44,36 +46,6 @@
 
 namespace imag_axes_ft {
   namespace dlr {
-
-    inline nda::matrix<ComplexType> build_if2it(cppdlr::imfreq_ops const &ifops, cppdlr::imtime_ops const &itops) {
-      auto nw = ifops.get_ifnodes().size();
-      auto dlr_rank = itops.rank();
-
-      auto if2it = nda::matrix<ComplexType>(dlr_rank, nw);
-
-      // Solve cf2if^T C^T = cf2it^T to obtain C = cf2it * cf2if^{-1}
-      
-      // Copy cf2it into output matrix (cast to complex)
-      if2it(nda::range::all, nda::range(dlr_rank)) = itops.get_cf2it();
-
-      if (nw == dlr_rank) {
-        // Square system---use getrs
-        auto lu  = nda::matrix<ComplexType>(ifops.get_if2cf_lu());
-        auto piv = nda::vector<int>(ifops.get_if2cf_piv());
-        nda::lapack::getrs(nda::transpose(lu), nda::transpose(if2it), piv);
-      } else {
-        // Non-square system---use least squares solver
-        auto s       = nda::vector<double>(dlr_rank); // Not needed
-        double rcond = 0;                             // Not needed
-        int rank     = 0;                             // Not needed
-        auto cf2if = nda::matrix<ComplexType>(ifops.get_cf2if());
-        // (cf2if)^T * X = (cf2it)^T -> X = (cf2if^-1)^T * cf2it^T 
-        //                                = (if2cf^T * cf2it^T)
-        nda::lapack::gelss(nda::transpose(cf2if), nda::transpose(if2it), s, rcond, rank);
-      }
-
-      return if2it;
-    }
 
     struct DLR {
     public:
@@ -187,25 +159,36 @@ namespace imag_axes_ft {
       auto nw_in    = static_cast<int>(if_ops.get_ifnodes().size());
       auto nw_out   = static_cast<int>(wn_mesh_out.size());
 
-      // initialize rhs = cf2if_out
-      auto rhs = nda::matrix<ComplexType>(nw_out, nw_in);
-      auto eye_ndlr_in = nda::eye<ComplexType>(_it_ops.rank());
-      for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
-        long n_ir = wn_mesh_out(iw_out);
-        long n_dlr = (stats == imag_axes_ft::fermion) ? 
-            static_cast<int>((n_ir - 1) / 2) : static_cast<int>(n_ir / 2);
-        auto cf2eval = if_ops.coefs2eval(eye_ndlr_in, n_dlr);
-        rhs(iw_out, nda::range::all) = cf2eval;
+      if (stats == imag_axes_ft::fermion) {
+        utils::check(std::all_of(wn_mesh_out.begin(), wn_mesh_out.end(), [](long n) { return n % 2 != 0; }),
+                     "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
+                     "fermionic wn_mesh_out must be odd in IR notation.");
+      } else {
+        utils::check(std::all_of(wn_mesh_out.begin(), wn_mesh_out.end(), [](long n) { return n % 2 == 0; }),
+                     "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
+                     "bosonic wn_mesh_out must be even in IR notation.");
       }
 
-      // Non-square system---use least squares solver
-      auto s       = nda::vector<double>(_it_ops.rank()); // Not needed
-      double rcond = 0;                             // Not needed
-      int rank     = 0;                             // Not needed
-      auto cf2if = nda::matrix<ComplexType>(if_ops.get_cf2if());
-      // (cf2if)^T * X = (cf2if_out)^T -> X = (cf2if^-1)^T * cf2if_out^T
-      nda::lapack::gelss(nda::transpose(cf2if), nda::transpose(rhs), s, rcond, rank);
-      
+      // rhs = B_out * Ttw, with B_out = beta * cf2if(wn_out) * cf2it^{-1}: tau_to_w at the output points,
+      // composed with the paired w_to_tau. B_out is solved with the LU factors of cf2it as in
+      // cppdlr::build_it2if, so that B_out(wn_mesh) = Twt.
+      auto const &Ttw = (stats == imag_axes_ft::fermion) ? Ttw_ff : Ttw_bb;
+      auto r = _it_ops.rank();
+      auto eye_r = nda::eye<ComplexType>(r);
+      auto B_out = nda::matrix<ComplexType>(nw_out, r);
+      for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
+        long n_ir = wn_mesh_out(iw_out);
+        // IR notation -> cppdlr notation: fermion n_ir = 2*n_dlr + 1; boson n_ir = 2*n_dlr
+        long n_dlr = (stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2;
+        B_out(iw_out, nda::range::all) = if_ops.coefs2eval(eye_r, n_dlr);
+      }
+      auto zlu = _it_ops.get_it2cf_zlu();
+      auto piv = _it_ops.get_it2cf_piv();
+      // cf2it^T X = cf2if_out^T -> X = cf2if_out * cf2it^{-1}
+      nda::lapack::getrs(nda::transpose(zlu), nda::transpose(B_out), piv);
+      B_out *= beta;
+      auto rhs = nda::matrix<ComplexType>(B_out * Ttw);
+
       if (not ph_sym) 
         return rhs;
 
@@ -231,67 +214,6 @@ namespace imag_axes_ft {
       return T_ww;
     }
 
-    auto construct_w_interpolate_matrix_old(
-      const nda::MemoryArrayOfRank<1> auto &wn_mesh_out,
-      imag_axes_ft::stats_e stats,
-      bool ph_sym=false) const
-    -> nda::array<ComplexType, 2> {
-
-      auto const &if_ops = (stats == imag_axes_ft::fermion) ? _if_ops_f : _if_ops_b;
-      auto nw_in    = static_cast<int>(if_ops.get_ifnodes().size());
-      auto nw_out   = static_cast<int>(wn_mesh_out.size());
-
-      // Build stable values->coefficients transform on the input iw mesh.
-      // This path uses cppdlr's internal solve strategy and is numerically robust.
-      auto if2cf = if_ops.vals2coefs(nda::eye<ComplexType>(nw_in));
-
-      // Evaluate interpolated values on the output iw mesh (in DLR notation).
-      auto T_ww_full = nda::array<ComplexType, 2>(nw_out, nw_in);
-      for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
-        long n_ir = wn_mesh_out(iw_out);
-        if (stats == imag_axes_ft::fermion) {
-          utils::check((n_ir % 2) != 0,
-                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                       "fermionic wn_mesh_out must be odd in IR notation, got {}.", n_ir);
-        } else {
-          utils::check((n_ir % 2) == 0,
-                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                       "bosonic wn_mesh_out must be even in IR notation, got {}.", n_ir);
-        }
-
-        // Convert from CoQuí IR notation (n_ir) to cppdlr notation (n_dlr):
-        // fermion: n_ir = 2*n_dlr + 1; boson: n_ir = 2*n_dlr
-        auto n_dlr = (stats == imag_axes_ft::fermion) ? static_cast<int>((n_ir - 1) / 2)
-                                            : static_cast<int>(n_ir / 2);
-        T_ww_full(iw_out, nda::range::all) = if_ops.coefs2eval(if2cf, n_dlr);
-      }
-
-      nda::array<ComplexType, 2> T_ww;
-      if (ph_sym) {
-        utils::check(stats == imag_axes_ft::boson,
-                     "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                     "ph_sym=true is only supported for bosons.");
-        // Only keep the positive-frequency half of the input (including w=0),
-        // matching wn_mesh[nw/2:] ordering in the Python ph-sym path.
-        auto nw_half = nw_in / 2 + nw_in % 2;
-        auto iw_zero = nw_in / 2;
-        T_ww = nda::array<ComplexType, 2>(nw_out, nw_half);
-        for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
-          for (int iw_pos = 0; iw_pos < nw_half; ++iw_pos) {
-            int ipw = iw_zero + iw_pos;
-            int imw = iw_zero - iw_pos;
-            T_ww(iw_out, iw_pos) = (ipw == imw)
-              ? T_ww_full(iw_out, ipw)
-              : T_ww_full(iw_out, ipw) + T_ww_full(iw_out, imw);
-          }
-        }
-      } else {
-        T_ww = T_ww_full;
-      }
-
-      return T_ww;
-    }
-
     auto construct_tau_to_zero_and_beta_matrices() 
     -> std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>> {
       nda::array<double, 1> tau_mesh_0beta = {-1.0, 1.0}; // tau = 0, beta
@@ -300,6 +222,47 @@ namespace imag_axes_ft {
     }
 
     private:
+      // Ttw = pinv(Twt), with the exact pairing Ttw(:, -wn) = conj(Ttw(:, wn)).
+      // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
+      // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
+      // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, so Twt(-wn, :) = conj(Twt(wn, :))
+      // holds bitwise and pinv(Twt) = cf2it * cf2if^+ / beta is the same operator in exact arithmetic.
+      static nda::matrix<ComplexType> paired_left_inverse(nda::matrix<ComplexType> const &B,
+                                                          nda::array<long, 1> const &wn_mesh) {
+        long nw = B.extent(0);
+        long nt = B.extent(1);
+        auto Bf = nda::matrix<ComplexType, nda::F_layout>(B);
+        auto rhs = nda::matrix<ComplexType, nda::F_layout>(nw, nw);
+        rhs() = 0.0;
+        for (long i = 0; i < nw; ++i) rhs(i, i) = 1.0;
+        auto s = nda::vector<double>(nt);
+        int rank = 0;
+        nda::lapack::gelss(Bf, rhs, s, -1.0, rank);
+        utils::check(rank == nt, "imag_axes_ft::dlr::DLR: Twt is rank deficient, rank = {}, nt = {}.", rank, nt);
+        auto T = nda::matrix<ComplexType>(rhs(nda::range(nt), nda::range::all));
+
+        // wn_mesh(P(i)) == -wn_mesh(i)
+        std::map<long, long> index_of;
+        for (long i = 0; i < nw; ++i) index_of[wn_mesh(i)] = i;
+        for (long i = 0; i < nw; ++i) {
+          auto it = index_of.find(-wn_mesh(i));
+          utils::check(it != index_of.end(), "imag_axes_ft::dlr::DLR: mirror frequency of wn = {} is not in the mesh.", wn_mesh(i));
+          long m = it->second;
+          if (m < i) continue;
+          if (m == i) {
+            // wn = 0
+            for (long t = 0; t < nt; ++t) T(t, i) = std::real(T(t, i));
+          } else {
+            for (long t = 0; t < nt; ++t) {
+              ComplexType a = 0.5 * (T(t, i) + std::conj(T(t, m)));
+              T(t, i) = a;
+              T(t, m) = std::conj(a);
+            }
+          }
+        }
+        return T;
+      }
+
       void init(bool print_meta_log) {
         lambda = beta * wmax;
         utils::check(lambda > 0.0, "Invalid value of lambda, {}, in imag_axes_ft::dlr::DLR.", lambda);
@@ -341,13 +304,6 @@ namespace imag_axes_ft {
         for (int i = 0; i < nw_f; ++i) wn_mesh_f(i) = long(2.0 * _if_ops_f.get_ifnodes(i) + 1);
         for (int i = 0; i < nw_b; ++i) wn_mesh_b(i) = long(2.0 * _if_ops_b.get_ifnodes(i));
 
-        // Matsubara frequency to imaginary time
-        auto if2it_f = cppdlr::build_if2it(_if_ops_f, _it_ops) / beta;
-        auto if2it_b = cppdlr::build_if2it(_if_ops_b, _it_ops) / beta;
-        Ttw_ff = nda::matrix<ComplexType>(nt_f, nw_f);
-        Ttw_ff() = if2it_f;
-        Ttw_bb = nda::matrix<ComplexType>(nt_b, nw_b);
-        Ttw_bb() = if2it_b;
         // imaginary time to Matsubara frequency
         auto it2if_f = cppdlr::build_it2if(_it_ops, _if_ops_f) * beta;
         auto it2if_b = cppdlr::build_it2if(_it_ops, _if_ops_b) * beta;
@@ -355,6 +311,9 @@ namespace imag_axes_ft {
         Twt_ff() = it2if_f;
         Twt_bb = nda::matrix<ComplexType>(nw_b, nt_b);
         Twt_bb() = it2if_b;
+        // Matsubara frequency to imaginary time
+        Ttw_ff = paired_left_inverse(Twt_ff, wn_mesh_f);
+        Ttw_bb = paired_left_inverse(Twt_bb, wn_mesh_b);
 
         // fermion <-> boson tau interpolation (same DLR tau nodes)
         Ttt_bf = nda::eye<ComplexType>(nt_b);
