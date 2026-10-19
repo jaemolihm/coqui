@@ -25,6 +25,7 @@
 
 #include <string>
 #include <map>
+#include <vector>
 
 #include "nda/nda.hpp"
 #include "nda/lapack.hpp"
@@ -239,13 +240,31 @@ namespace imag_axes_ft {
         utils::check(rank == nt, "imag_axes_ft::dlr::DLR: Twt is rank deficient, rank = {}, nt = {}.", rank, nt);
         auto T = nda::matrix<ComplexType>(rhs(nda::range(nt), nda::range::all));
 
-        // m: index of -wn_mesh(i)
+        // mirror(i): index of -wn_mesh(i)
         std::map<long, long> index_of;
         for (long i = 0; i < nw; ++i) index_of[wn_mesh(i)] = i;
+        std::vector<long> mirror(nw);
         for (long i = 0; i < nw; ++i) {
           auto it = index_of.find(-wn_mesh(i));
           utils::check(it != index_of.end(), "imag_axes_ft::dlr::DLR: mirror frequency of wn = {} is not in the mesh.", wn_mesh(i));
-          long m = it->second;
+          mirror[i] = it->second;
+        }
+
+        // Pair the columns: T(:, -wn) = conj(T(:, wn)), and T(:, wn = 0) real, so that w_to_tau maps
+        // X(-iwn) = conj(X(iwn)) to an exactly real X(tau). The gelss result already satisfies this up to
+        // rounding, ~eps * cond(Twt) relative (the complex SVD rounds rows wn and -wn independently):
+        // 1e-14 at Lambda = 600, 1e-10 at Lambda = 5e5. The averaging only makes it exact. A deviation
+        // above 1e-8 means a wrong Twt or mesh, not rounding.
+        double T_max = nda::max_element(nda::abs(T));
+        double pair_err = 0.0;
+        for (long i = 0; i < nw; ++i)
+          for (long t = 0; t < nt; ++t)
+            pair_err = std::max(pair_err, std::abs(T(t, i) - std::conj(T(t, mirror[i]))));
+        utils::check(pair_err <= 1e-8 * T_max,
+                     "imag_axes_ft::dlr::DLR: pinv(Twt) violates T(:, -wn) = conj(T(:, wn)) by {} (relative), > 1e-8.",
+                     pair_err / T_max);
+        for (long i = 0; i < nw; ++i) {
+          long m = mirror[i];
           if (m < i) continue;
           if (m == i) {
             // wn = 0
