@@ -2055,8 +2055,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
           Pi_source_tabcd() = ComplexType(0.0);
         }
 
-        // ft.nt_f() == ft.nt_b() is asserted in lr_setup; the half-grid round trips mirror the ground state's
-        // iω step of Σ_dc and Π_dc.
+        // The half-grid round trips mirror the ground state's iω step of Σ_dc and Π_dc.
         opt_local_terms->downfold_G = [&](nda::array_view<ComplexType, 5> dG_tskij) {
           return proj_boson.proj_fermi().lr_downfold_loc(dG_tskij, mpi->comm, kpq_map_local);
         };
