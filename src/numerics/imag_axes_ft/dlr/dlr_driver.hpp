@@ -26,9 +26,13 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include "nda/nda.hpp"
 #include "nda/lapack.hpp"
+#include "nda/lapack/gqr.hpp"
 
 #include "numerics/nda_functions.hpp"
 // FIXME hacky solution to updates nda namespace until cppdlr's nda dependency is updated. 
@@ -280,6 +284,83 @@ namespace imag_axes_ft {
         return T;
       }
 
+
+      // Tlt (r x r): DLR tau-node values g -> coefficients a_l = int_0^beta u_l(tau) g(tau) dtau of the modes u_l
+      // that diagonalize the Lehmann kernel inside the DLR span (the DLR counterpart of the IR Tct, same ordering by
+      // singular value). With X = W^{1/2} E_f = Q R (E_f: node values -> values on a fine tau grid, W: fine tau
+      // quadrature weights) and Kt = W^{1/2} K(tau_f, omega_f) V^{1/2} (V: fine omega quadrature weights),
+      // Q^T Kt = U S Vt gives Tlt = U^T R (u_l = Q U_l). Only value -> value maps enter: DLR coefficients
+      // (cf2it^{-1}, cond ~1e13) and the Tct of the paired Twt are avoided.
+      // The IR Tct comes from the sparse-ir tables, which have no DLR equivalent, so Tct_ff/Tct_bb cannot be reused.
+      void build_Tlt() {
+        auto r = _it_ops.rank();
+        cppdlr::fineparams fine(lambda);
+
+        // fine tau grid: relative format, sqrt of quadrature weights
+        auto [t_rel, sqw_t] = cppdlr::build_it_fine(fine);
+        long nt_fine = t_rel.size();
+        nda::array<double, 1> tau_fine(nt_fine); // [-1, 1] notation of construct_tau_interpolate_matrix
+        for (long i = 0; i < nt_fine; ++i) tau_fine(i) = 2.0 * cppdlr::rel2abs(t_rel(i)) - 1.0;
+
+        // fine omega grid: Gauss-Legendre rule on the panels of cppdlr::build_rf_fine, mirrored about 0
+        auto [x_gl, w_gl] = cppdlr::gaussquad(fine.p);
+        long nom_fine = 2 * fine.npom * fine.p;
+        nda::vector<double> om_fine(nom_fine);
+        nda::vector<double> sqw_om(nom_fine);
+        double a = 0.0;
+        for (int ip = 0; ip < fine.npom; ++ip) {
+          double b = fine.lambda / std::pow(2.0, fine.npom - ip - 1);
+          for (int k = 0; k < fine.p; ++k) {
+            double om = a + 0.5 * (b - a) * (x_gl(k) + 1.0);
+            double sw = std::sqrt(0.5 * (b - a) * w_gl(k));
+            long ipos = fine.npom * fine.p + ip * fine.p + k;
+            long ineg = fine.npom * fine.p - 1 - (ip * fine.p + k);
+            om_fine(ipos) = om;
+            om_fine(ineg) = -om;
+            sqw_om(ipos) = sw;
+            sqw_om(ineg) = sw;
+          }
+          a = b;
+        }
+
+        // X = W^{1/2} E_f = Q R
+        auto E_f = construct_tau_interpolate_matrix(tau_fine);
+        auto X = nda::matrix<double, nda::F_layout>(nt_fine, r);
+        for (long i = 0; i < nt_fine; ++i)
+          for (long j = 0; j < r; ++j) X(i, j) = sqw_t(i) * std::real(E_f(i, j));
+        nda::vector<double> tau_qr(r);
+        nda::lapack::geqrf(X, tau_qr);
+        auto R = nda::matrix<double, nda::F_layout>(r, r);
+        R() = 0.0;
+        double rmax = 0.0, rmin = std::numeric_limits<double>::max();
+        for (long i = 0; i < r; ++i) {
+          for (long j = i; j < r; ++j) R(i, j) = X(i, j);
+          rmax = std::max(rmax, std::abs(X(i, i)));
+          rmin = std::min(rmin, std::abs(X(i, i)));
+        }
+        utils::check(rmin > 1e-10 * rmax,
+                     "imag_axes_ft::dlr::DLR: interpolated DLR basis is rank deficient on the fine tau grid "
+                     "(lambda = {}, eps = {}, rank = {}, min|R_ii|/max|R_ii| = {}).", lambda, eps, r, rmin / rmax);
+        nda::lapack::gqr(X, tau_qr); // X <- Q
+
+        // M = Q^T Kt = U S Vt
+        auto Kt = cppdlr::build_k_it(nda::vector_const_view<double>(t_rel), nda::vector_const_view<double>(sqw_t),
+                                     nda::vector_const_view<double>(om_fine));
+        for (long j = 0; j < nom_fine; ++j) Kt(nda::range::all, j) *= sqw_om(j);
+        auto Kt_f = nda::matrix<double, nda::F_layout>(Kt);
+        auto M = nda::matrix<double, nda::F_layout>(nda::transpose(X) * Kt_f);
+        nda::vector<double> sv(r);
+        auto U = nda::matrix<double, nda::F_layout>(r, r);
+        auto Vt = nda::matrix<double, nda::F_layout>(nom_fine, nom_fine);
+        auto info = nda::lapack::gesvd(M, sv, U, Vt);
+        utils::check(info == 0, "imag_axes_ft::dlr::DLR: SVD of the kernel in the DLR span failed (gesvd info = {}).", info);
+
+        // Tlt = U^T R, in the IR normalization int_0^beta u_l u_m dtau = delta_lm
+        auto T_real = nda::matrix<double>(nda::transpose(U) * R);
+        T_real *= std::sqrt(beta);
+        Tlt = nda::matrix<ComplexType>(T_real);
+      }
+
       void init(bool print_meta_log) {
         lambda = beta * wmax;
         utils::check(lambda > 0.0, "Invalid value of lambda, {}, in imag_axes_ft::dlr::DLR.", lambda);
@@ -342,6 +423,7 @@ namespace imag_axes_ft {
         Tct_bb = it2cf;
         
         std::tie(T_zero_t_ff, T_beta_t_ff) = construct_tau_to_zero_and_beta_matrices();
+        build_Tlt();
         if (print_meta_log) metadata_log();
       }
 
@@ -388,6 +470,8 @@ namespace imag_axes_ft {
       // tau to DLR coefficients
       nda::matrix<ComplexType> Tct_ff;
       nda::matrix<ComplexType> Tct_bb;
+      // tau-node values to kernel-SVD mode coefficients (leakage diagnostic), same for fermions and bosons
+      nda::matrix<ComplexType> Tlt;
     };
   } // dlr
 } // imag_axes_ft

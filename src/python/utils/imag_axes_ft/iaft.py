@@ -512,17 +512,25 @@ class _IAFTCppAdapter(object):
 
     def check_leakage(self, Ot, stats: str, name: str="", w_input: bool=False):
         """
-        Check decay of the C++-backend coefficients to assess basis quality.
-        Intentionally no operation until C++ leakage diagnostics in DLR are implemented.
+        Check decay of the kernel-SVD mode coefficients of ``Ot`` in the DLR span (C++ IAFT::check_leakage).
+        Returns max|a_{n-2..n-1}| / max|a_0|; a warning is logged if it exceeds 1e-5.
         """
-        return None
+        return self._check_leakage(Ot, stats, name, w_input, False)
 
     def check_leakage_phsym(self, Ot, stats: str, name: str="", w_input: bool=False):
         """
-        Check decay of the C++-backend coefficients w/ particle-hole symmetry.
-        Intentionally no operation until C++ leakage diagnostics in DLR are implemented.
+        Particle-hole-symmetric variant of :meth:`check_leakage` (C++ IAFT::check_leakage_PHsym). Bosons only.
         """
-        return None
+        return self._check_leakage(Ot, stats, name, w_input, True)
+
+    def _check_leakage(self, Ot, stats: str, name: str, w_input: bool, ph_sym: bool):
+        stats = _normalize_stats(stats)
+        if ph_sym and stats != 'boson':
+            raise ValueError("FT w/ particle-hole symmetry only support bosonic correlation functions")
+        if w_input:
+            Ot = self.w_to_tau_phsym(Ot, stats) if ph_sym else self.w_to_tau(Ot, stats)
+        Ot_2d = np.ascontiguousarray(Ot.reshape(Ot.shape[0], -1), dtype=complex)
+        return self._iaft_cpp.check_leakage_2d(Ot_2d, stats, name, ph_sym)
 
 
 def _read_chkpt_meshes(iaft_grp):
@@ -1097,8 +1105,8 @@ class IAFT(object):
         too large, the basis is not sufficiently converged for the input function, 
         and the user should consider increasing ``wmax`` or decreasing ``eps``.
 
-        Note: For the DLR backend this method is a no-op until C++ leakage
-        diagnostics are implemented.
+        The DLR backend uses the coefficients of the Lehmann-kernel singular modes inside the DLR span,
+        ordered like the IR basis functions.
 
         :param Ot: numpy.ndarray, shape (nt, ...) or (nw, ...)
             Input array on the imaginary-time mesh, or on the Matsubara-frequency
@@ -1110,6 +1118,7 @@ class IAFT(object):
         :param w_input: bool, optional
             If True, ``Ot`` is on the Matsubara-frequency mesh and is transformed
             to imaginary time before the leakage check. Default False.
+        :return: float, ``coeff_last/coeff_first``.
         """
         return self._impl.check_leakage(Ot, stats, name, w_input)
 
@@ -1120,9 +1129,6 @@ class IAFT(object):
         Input ``Ot`` must cover the first half of the imaginary-time mesh (or, when
         ``w_input=True``, the positive Matsubara half-mesh).
 
-        Note: For the DLR backend this method is a no-op until C++ leakage
-        diagnostics are implemented.
-
         :param Ot: numpy.ndarray, shape (nt//2, ...) or (nw//2, ...)
             Bosonic half-mesh input array.
         :param stats: str
@@ -1131,6 +1137,7 @@ class IAFT(object):
             Label printed in the diagnostic output. Default ``""``.
         :param w_input: bool, optional
             If True, ``Ot`` is on the positive Matsubara half-mesh. Default False.
+        :return: float, ``coeff_last/coeff_first``.
         :raises ValueError: if stats is not bosonic.
         """
         return self._impl.check_leakage_phsym(Ot, stats, name, w_input)

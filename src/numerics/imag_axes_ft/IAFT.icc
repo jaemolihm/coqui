@@ -270,12 +270,7 @@ void IAFT::tau_to_zero(ndaArray_A &&A_ti, ndaArray_B &&A_zero_i)  const {
 }
 
 template<nda::MemoryArray Array_A, typename comm_t>
-void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const {
-  if (grid_var.index() == 1) {
-    // leakage checking is not available in DLR basis
-    return;
-  }
-
+double IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const {
   auto Abs = nda::map([](ComplexType x) { return std::abs(x); });
 
   long nts  = (stats == fermion)? nt_f() : nt_b();
@@ -285,7 +280,7 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
 
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
-  auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
+  auto T_ct = (stats == fermion)? Tlt_ff() : Tlt_bb();
   // an empty local block contributes nothing
   if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
@@ -303,10 +298,13 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
     A_ci_abs = Abs(A_ci);
     coeff_last = nda::max_element(A_ci_abs);
   }
-  comm->barrier();
-
-  double coeff_first_max = comm->max(coeff_first);
-  double coeff_last_max  = comm->max(coeff_last);
+  double coeff_first_max = coeff_first;
+  double coeff_last_max  = coeff_last;
+  if (comm != nullptr) {
+    comm->barrier();
+    coeff_first_max = comm->max(coeff_first);
+    coeff_last_max  = comm->max(coeff_last);
+  }
   double leakage = coeff_last_max / coeff_first_max;
   app_log(2, "IAFT leakage of {}: {}", A_name, leakage);
   if (leakage > 1e-5) {
@@ -315,15 +313,11 @@ void IAFT::check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::strin
                "          Considering increasing \"lambda\" of the IR/DLR grid.\n",
             leakage, coeff_last_max, coeff_first_max);
   }
+  return leakage;
 }
 
 template<nda::MemoryArray Array_A, typename comm_t>
-void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const {
-  if (grid_var.index() == 1) {
-    // leakage checking is not available in DLR basis
-    return;
-  }
-
+double IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const {
   auto Abs = nda::map([](ComplexType x) { return std::abs(x); });
 
   long nts  = (stats == fermion)? nt_f() : nt_b();
@@ -334,7 +328,7 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
 
   double coeff_first = -1.0;
   double coeff_last  = -1.0;
-  auto T_ct = (stats == fermion)? Tct_ff() : Tct_bb();
+  auto T_ct = (stats == fermion)? Tlt_ff() : Tlt_bb();
   // an empty local block contributes nothing
   if (dim1 > 0) {
     nda::array<RealType, 1> Ac0_i_abs(dim1);
@@ -361,10 +355,13 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
     A_ci_abs = Abs(A_ci);
     coeff_last = nda::max_element(A_ci_abs);
   }
-  comm->barrier();
-
-  double coeff_first_max = comm->max(coeff_first);
-  double coeff_last_max  = comm->max(coeff_last);
+  double coeff_first_max = coeff_first;
+  double coeff_last_max  = coeff_last;
+  if (comm != nullptr) {
+    comm->barrier();
+    coeff_first_max = comm->max(coeff_first);
+    coeff_last_max  = comm->max(coeff_last);
+  }
   double leakage = coeff_last_max / coeff_first_max;
   app_log(2, "IAFT leakage of {}: {}", A_name, leakage);
   if (leakage > 1e-5) {
@@ -373,14 +370,15 @@ void IAFT::check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std:
                "          Considering increasing \"lambda\" of the IR/DLR grid.\n",
             leakage, coeff_last_max, coeff_first_max);
   }
+  return leakage;
 }
 
 template<typename A_t>
-void IAFT::check_leakage(A_t &&A_ti, stats_e stats, std::string A_name, bool PHsym) const {
+double IAFT::check_leakage(A_t &&A_ti, stats_e stats, std::string A_name, bool PHsym) const {
   if (!PHsym) {
-    check_leakage(A_ti.local(), stats, A_ti.communicator(), A_name);
+    return check_leakage(A_ti.local(), stats, A_ti.communicator(), A_name);
   } else {
-    check_leakage_PHsym(A_ti.local(), stats, A_ti.communicator(), A_name);
+    return check_leakage_PHsym(A_ti.local(), stats, A_ti.communicator(), A_name);
   }
 }
 

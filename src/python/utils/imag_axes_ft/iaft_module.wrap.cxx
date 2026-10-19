@@ -287,6 +287,18 @@ static auto const _c2py_fun_18 = c2py::dispatcher_f_kw_t{c2py::cmethod(
         &imag_axes_ft::construct_w_interpolate_matrix),
     "iaft", "wn_mesh_out", "stats_str", "ph_sym"_a = false)};
 
+// check_leakage_2d
+static auto const _c2py_fun_53 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    c2py::cast<
+        const imag_axes_ft::IAFT &,
+        const nda::basic_array<
+            std::complex<double>, 2, nda::C_layout, 'A',
+            nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+            &,
+        const std::string &, const std::string &, bool>(
+        &imag_axes_ft::check_leakage_2d),
+    "iaft", "X_ti", "stats", "name", "ph_sym")};
+
 // eps
 static auto const _c2py_fun_19 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     [](_c2py_cls_1 const &self) -> decltype(auto) { return self.eps(); },
@@ -524,6 +536,7 @@ static const auto _c2py_doc_42 = _c2py_fun_42.doc(R"DOC()DOC");
 static const auto _c2py_doc_43 = _c2py_fun_43.doc(R"DOC()DOC");
 static const auto _c2py_doc_44 = _c2py_fun_44.doc(R"DOC()DOC");
 static const auto _c2py_doc_45 = _c2py_fun_45.doc(R"DOC()DOC");
+static const auto _c2py_doc_53 = _c2py_fun_53.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -552,6 +565,8 @@ PyMethodDef c2py::tp_methods<_c2py_cls_1>[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_15.c_str()},
     {"beta", (PyCFunction)c2py::pyfkw<_c2py_fun_16>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_16.c_str()},
+    {"check_leakage_2d", (PyCFunction)c2py::pyfkw<_c2py_fun_53>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_53.c_str()},
     {"construct_tau_interpolate_matrix", (PyCFunction)c2py::pyfkw<_c2py_fun_17>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_17.c_str()},
     {"construct_w_interpolate_matrix", (PyCFunction)c2py::pyfkw<_c2py_fun_18>,

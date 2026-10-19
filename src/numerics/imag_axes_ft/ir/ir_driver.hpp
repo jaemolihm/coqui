@@ -76,7 +76,7 @@ namespace imag_axes_ft {
         nda::h5_read(b_grp, "Ttw", Ttw_bb);
         nda::h5_read(b_grp, "Twt", Twt_bb);
         nda::h5_read(b_grp, "Ttt_fb", Ttt_fb);
-        nda::h5_read(f_grp, "Tct", Tct_bb);
+        nda::h5_read(b_grp, "Tct", Tct_bb);
 
         // Rescale IR bases
         Ttw_ff *= (std::sqrt(2)/beta);

@@ -359,4 +359,27 @@ namespace bdft_tests {
     REQUIRE(X_wf.size() == 0);
   }
 
+  // IR check_leakage (comm == nullptr) vs the ratio max|Tct(n-2:n)·A| / max|Tct(0)·A| evaluated directly, bit for bit;
+  // the boson group reads its own Tct (equal to the fermion one in the data files).
+  TEST_CASE("iaft_ir_check_leakage", "[iaft][ir]") {
+    imag_axes_ft::IAFT iaft(1000.0, 12.0, imag_axes_ft::ir_basis, "high");
+    for (auto stats : {imag_axes_ft::fermion, imag_axes_ft::boson}) {
+      long nt = (stats == imag_axes_ft::fermion) ? iaft.nt_f() : iaft.nt_b();
+      auto T = nda::matrix<ComplexType>((stats == imag_axes_ft::fermion) ? iaft.Tct_ff() : iaft.Tct_bb());
+      nda::array<ComplexType, 2> X(nt, 2);
+      for (long t = 0; t < nt; ++t) { X(t, 0) = std::exp(-0.01 * t); X(t, 1) = ComplexType(std::cos(0.3 * t), 1e-3 * std::sin(t)) / (1.0 + t); }
+      auto nl = T.extent(0);
+      double first = 0.0, last = 0.0;
+      for (long i = 0; i < 2; ++i) {
+        ComplexType a0 = 0.0, a1 = 0.0, a2 = 0.0;
+        for (long t = 0; t < nt; ++t) { a0 += T(0, t) * X(t, i); a1 += T(nl - 2, t) * X(t, i); a2 += T(nl - 1, t) * X(t, i); }
+        first = std::max(first, std::abs(a0));
+        last = std::max({last, std::abs(a1), std::abs(a2)});
+      }
+      boost::mpi3::communicator *no_comm = nullptr;
+      double lk = iaft.check_leakage(X, stats, no_comm, "ir test");
+      REQUIRE(lk == Approx(last / first).epsilon(1e-12));
+    }
+  }
+
 } // bdft_tests

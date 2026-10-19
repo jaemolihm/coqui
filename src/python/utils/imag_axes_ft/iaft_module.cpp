@@ -21,6 +21,7 @@
 
 #include <c2py/c2py.hpp>
 
+#include "mpi3/communicator.hpp"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 
 namespace imag_axes_ft {
@@ -150,6 +151,20 @@ namespace imag_axes_ft {
 		nda::array<ComplexType, 1> A_zero_i(A_ti.shape(1));
 		iaft.tau_to_zero(A_ti, A_zero_i);
 		return A_zero_i;
+	}
+
+	// X_ti has nt rows, or the first nt/2 + nt%2 rows if ph_sym.
+	C2PY_WRAP_AS_METHOD
+	double check_leakage_2d(
+		const IAFT &iaft,
+		const nda::array<ComplexType, 2> &X_ti,
+		const std::string &stats,
+		const std::string &name,
+		bool ph_sym) {
+		auto stats_e_ = string_to_stats_enum(stats);
+		boost::mpi3::communicator *no_comm = nullptr;
+		return ph_sym ? iaft.check_leakage_PHsym(X_ti, stats_e_, no_comm, name)
+		              : iaft.check_leakage(X_ti, stats_e_, no_comm, name);
 	}
 
 	C2PY_WRAP_AS_METHOD

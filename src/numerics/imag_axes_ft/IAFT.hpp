@@ -199,13 +199,13 @@ namespace imag_axes_ft {
     void tau_to_zero(ndaArray_A &&A_ti, ndaArray_B &&A_zero_i)  const;
  
     template<nda::MemoryArray Array_A, typename comm_t>
-    void check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const;
+    double check_leakage(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const;
  
     template<nda::MemoryArray Array_A, typename comm_t>
-    void check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const;
+    double check_leakage_PHsym(Array_A &&A_ti, stats_e stats, comm_t *comm, std::string A_name) const;
  
     template<typename A_t>
-    void check_leakage(A_t &&A_ti, stats_e stats, std::string A_name, bool PHsym=false) const;
+    double check_leakage(A_t &&A_ti, stats_e stats, std::string A_name, bool PHsym=false) const;
 
   private:
     static std::optional<std::string> read_prec_option(ptree const& pt, std::string const& key,
@@ -379,6 +379,25 @@ namespace imag_axes_ft {
     }
     decltype(auto) Tct_bb() const {
       return std::visit( [&](auto&& v) { return v.Tct_bb(); }, grid_var);
+    }
+    // coefficients of the singular-value-ordered modes: IR Tct, DLR Tlt
+    decltype(auto) Tlt_ff() const {
+      return std::visit( [&](auto&& v) -> decltype(auto) {
+#ifdef ENABLE_DLR
+        if constexpr (std::is_same_v<std::decay_t<decltype(v)>, dlr::DLR>) return v.Tlt();
+        else
+#endif
+        return v.Tct_ff();
+      }, grid_var);
+    }
+    decltype(auto) Tlt_bb() const {
+      return std::visit( [&](auto&& v) -> decltype(auto) {
+#ifdef ENABLE_DLR
+        if constexpr (std::is_same_v<std::decay_t<decltype(v)>, dlr::DLR>) return v.Tlt();
+        else
+#endif
+        return v.Tct_bb();
+      }, grid_var);
     }
     decltype(auto) construct_tau_interpolate_matrix(const nda::MemoryArrayOfRank<1> auto &tau_mesh_out, bool ph_sym=false) const {
       return std::visit( [&](auto&& v) { return v.construct_tau_interpolate_matrix(tau_mesh_out, ph_sym); }, grid_var);
