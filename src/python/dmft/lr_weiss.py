@@ -22,8 +22,7 @@ import numpy as np
 
 from coqui import app_log
 
-from .weiss import (compute_weiss_fermion_w, density_density_to_product_basis, estimate_zero_moment,
-                    _hermitize_delta)
+from .weiss import compute_weiss_fermion_w, density_density_to_product_basis, estimate_zero_moment
 
 
 def lr_weiss_fermion_w(g_wsab, dg_wsab, vhf_sab, dvhf_sab, sigma_wsab, dsigma_wsab):
@@ -88,17 +87,17 @@ def lr_weiss_boson_w(V_abcd, W_wabcd, dW_wabcd, Pi_wabcd, dPi_wabcd):
 
 def lr_extract_h0_and_delta(g_weiss_wsab, dg_weiss_wsab, iaft, high_freq_multiplier=10):
     """
-    Linear response of extract_h0_and_delta for a Q = 0 perturbation. The ground state builds
+    Linear response of extract_h0_and_delta (make_hermitian=False) for a perturbation of any momentum Q. The ground
+    state builds
         g_weiss^{-1}(iw) = iw - h0 - Delta(iw),
     so the response is
         d(g_weiss^{-1})(iw) = -dh0 - dDelta(iw),   d(g_weiss^{-1}) = -g_weiss^{-1} dg_weiss g_weiss^{-1}.
-      dh0 = Hermitian part of -estimate_zero_moment of d(g_weiss^{-1})(+-iw) at the same interpolated
-            frequencies +-iw as the ground state (g_weiss and dg_weiss are interpolated, then inverted there),
-      dDelta(iw) = -dh0 - d(g_weiss^{-1})(iw) on the mesh, hermitized against dDelta(-iw) by _hermitize_delta
-            as Delta is in the ground state.
-    estimate_zero_moment and both Hermitian projections are real-linear, so this is the exact linearization
-    of the ground-state map (make_hermitian=True).
-    Q = 0 only: at Q != 0, dDelta(-iw) pairs with the response at -Q, not with dDelta(iw)^dagger.
+      dh0 = -estimate_zero_moment of d(g_weiss^{-1})(+-iw) at the same interpolated frequencies +-iw as the
+            ground state (g_weiss and dg_weiss are interpolated, then inverted there),
+      dDelta(iw) = -dh0 - d(g_weiss^{-1})(iw) on the mesh.
+    No Hermitian projection of dh0 and no pairing of dDelta(iw) with dDelta(-iw): at Q != 0 the response is complex
+    and dDelta(-iw) is not dDelta(iw)^dagger. estimate_zero_moment is real-linear, so this is the exact linearization
+    of the ground-state map without projections.
 
     Returns (dh0_sab, ddelta_wsab).
     """
@@ -117,7 +116,6 @@ def lr_extract_h0_and_delta(g_weiss_wsab, dg_weiss_wsab, iaft, high_freq_multipl
         dg_weiss_inv_interp.append(dg_weiss_inv)
     iwn_interp = (2*iwn_interp.astype(float) + 1) * np.pi / iaft.beta
     dh0_sab = -estimate_zero_moment(dg_weiss_inv_interp[0], dg_weiss_inv_interp[1], iwn_interp)
-    dh0_sab = 0.5 * (dh0_sab + np.swapaxes(dh0_sab, -1, -2).conj())
 
     ddelta_wsab = np.zeros(g_weiss_wsab.shape, dtype=complex)
     for n in range(g_weiss_wsab.shape[0]):
@@ -125,7 +123,6 @@ def lr_extract_h0_and_delta(g_weiss_wsab, dg_weiss_wsab, iaft, high_freq_multipl
             g_inv = np.linalg.inv(g_weiss_wsab[n, s])
             dg_weiss_inv = -g_inv @ dg_weiss_wsab[n, s] @ g_inv
             ddelta_wsab[n, s] = -dh0_sab[s] - dg_weiss_inv
-    _hermitize_delta(ddelta_wsab)
 
     return dh0_sab, ddelta_wsab
 
