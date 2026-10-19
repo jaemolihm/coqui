@@ -48,6 +48,10 @@ def _gf(values, mesh):
     return g
 
 
+def _block(g):
+    return BlockGf(name_list=["up"], block_list=[g])
+
+
 def _at_nodes(g):
     iw = np.array([complex(w) for w in g.mesh])
     return g.data[:, 0, 0], iw
@@ -82,7 +86,7 @@ def test_fit_reduces_noise():
     noise[np.abs(iw.imag) > WMAX] = 0.0
     g = _gf(_pole_sum(iw) + noise, mesh)
 
-    vals_fit, iw_nodes = _at_nodes(fit_dlr_imfreq_gf(g, WMAX, EPS))
+    vals_fit, iw_nodes = _at_nodes(fit_dlr_imfreq_gf(_block(g), WMAX, EPS)["up"])
     vals_smp, _ = _at_nodes(fill_dlr_imfreq_gf(g, WMAX, EPS))
     exact = _pole_sum(iw_nodes)
     err_fit = np.linalg.norm(vals_fit - exact)

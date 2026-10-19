@@ -46,6 +46,9 @@ def post_process(solver, **post_proc_params):
         post_process_pi(solver, deg_blk_2e,
                         truncate_uchi=post_proc_params['truncate_uchi'])
 
+    if post_proc_params.get('dlr_mesh') is not None:
+        post_process_sigma_dlr(solver, *post_proc_params['dlr_mesh'])
+
 
 def post_process_pi(solver, degenerate_blk=None, output_in_4idx=False,
                     truncate_uchi=False):
@@ -633,31 +636,45 @@ def fill_dlr_imfreq_gf(g_iw, wmax, eps):
 
 def fit_dlr_imfreq_gf(g_iw, wmax, eps):
     """
-    Least-squares DLR fit of a Green's function that vanishes at infinite frequency (e.g. Sigma - Sigma_infty),
-    returned on the DLR Matsubara nodes of (wmax, eps).
+    Least-squares DLR fit of a BlockGf that vanishes at infinite frequency (e.g. Sigma - Sigma_infty), returned on the
+    DLR Matsubara nodes of (wmax, eps).
 
     Unlike fill_dlr_imfreq_gf, which copies g_iw at the nodes and so passes the Monte Carlo noise of each node value
     straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to imaginary time
     with its high-frequency moments, then fitted with fit_gf_dlr. The tail of g_iw must therefore already be smooth
     (tail-fitted).
     """
-    assert isinstance(g_iw.mesh, MeshImFreq), (
-        "fit_dlr_imfreq_gf: input Green's function should live on MeshImFreq."
+    assert isinstance(g_iw, BlockGf) and isinstance(g_iw.mesh, MeshImFreq), (
+        "fit_dlr_imfreq_gf: input should be a BlockGf on MeshImFreq."
     )
 
-    def fit_one(gf):
-        tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
-        tau_mesh = MeshImTime(beta=gf.mesh.beta, statistic=gf.mesh.statistic, n_tau=10 * len(gf.mesh) + 1)
-        g_tau = make_gf_from_fourier(gf, tau_mesh, tail)
-        return make_gf_dlr_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps))
+    mesh_dlr_iw = MeshDLRImFreq(
+        beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic,
+        w_max=wmax, eps=eps, symmetrize=True
+    )
+    tau_mesh = MeshImTime(beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic, n_tau=10 * len(g_iw.mesh) + 1)
 
-    if isinstance(g_iw, BlockGf):
-        names = list(g_iw.indices)
-        return BlockGf(name_list=names, block_list=[fit_one(g_iw[bl]) for bl in names], make_copies=False)
-    elif isinstance(g_iw, Gf):
-        return fit_one(g_iw)
-    else:
-        raise NotImplemented
+    gf_struct = [(bl, gf.target_shape[0]) for (bl, gf) in g_iw]
+    g_dlr_iw = BlockGf(mesh=mesh_dlr_iw, gf_struct=gf_struct)
+    for block, gf in g_iw:
+        tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
+        g_tau = make_gf_from_fourier(gf, tau_mesh, tail)
+        g_dlr_iw[block] << make_gf_dlr_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps))
+    return g_dlr_iw
+
+
+def post_process_sigma_dlr(solver, wmax, eps):
+    """
+    Replace the dense solver.Sigma_iw and solver.G_iw by their values on the DLR Matsubara nodes of (wmax, eps):
+    Sigma by a least-squares DLR fit, G by the Dyson equation with that Sigma, so that G and Sigma stay consistent
+    on the nodes. Call after post_process_sigma.
+    """
+    sigma_dlr_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
+    g_dlr_iw = fill_dlr_imfreq_gf(solver.G0_iw, wmax, eps)
+    for block, g in g_dlr_iw:
+        sigma = sigma_dlr_iw[block].data + solver.Sigma_infty[block]
+        g.data[:] = np.linalg.inv(np.linalg.inv(g.data) - sigma)
+    solver.Sigma_iw, solver.G_iw = sigma_dlr_iw, g_dlr_iw
 
 
 def check_spectrum(A, radius=1.0, tol=0.0, truncation=False):

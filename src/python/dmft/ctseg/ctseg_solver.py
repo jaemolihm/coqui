@@ -240,6 +240,7 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     post_proc_params['analytic_hf']      = solver_interface_params.pop('analytic_hf', True)
     post_proc_params['degenerate_blk']   = solver_interface_params.pop('degenerate_blk', None)
     post_proc_params['truncate_uchi']    = solver_interface_params.pop('truncate_uchi', False)
+    post_proc_params['dlr_mesh']         = (wmax, eps)
     S.n_iw, S.beta, S.gf_struct = n_iw, beta, gf_struct     # useful and necessary for post-processing
     S.h_int = h_int
     S.h_loc0_mat = block_matrix_from_op(h_loc0, gf_struct)
@@ -257,21 +258,13 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
     solver_interface_params['measure_nn_nu_dlr']     = True
     S.solve(h_loc0=h_loc0, h_int=h_int, **solver_interface_params)
 
-    # post process
+    # post process (Sigma_iw, G_iw end up on the DLR nodes)
     ctseg_utils.post_process(S, **post_proc_params)
 
-    # Sigma: least-squares DLR fit rather than sampling at the nodes (the measured Sigma is noisy);
-    # G: Dyson equation with that Sigma, so that G and Sigma stay consistent on the DLR nodes.
-    Sigma_iw = ctseg_utils.fit_dlr_imfreq_gf(S.Sigma_iw, wmax, eps)
-    G_iw = ctseg_utils.fill_dlr_imfreq_gf(S.G0_iw, wmax, eps)
-    for block, g in G_iw:
-        sigma = Sigma_iw[block].data + S.Sigma_infty[block]
-        g.data[:] = np.linalg.inv(np.linalg.inv(g.data) - sigma)
-
     return SolverResults(# required
-        G_iw  = G_iw,
+        G_iw  = S.G_iw,
         Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = Sigma_iw,
+        Sigma_iw = S.Sigma_iw,
         Pi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Pi_iw, wmax, eps),
         W_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.W_iw, wmax, eps),
         Chi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Chi_iw, wmax, eps),
