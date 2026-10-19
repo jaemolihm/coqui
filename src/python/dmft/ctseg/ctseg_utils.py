@@ -651,7 +651,7 @@ def fit_dlr_imfreq_gf(g_iw, wmax, eps):
     )
     tau_mesh = MeshImTime(beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic, n_tau=10 * len(g_iw.mesh) + 1)
 
-    def fit_one(gf):
+    def _fit_gf(gf):
         tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
         gf_dlr = fit_gf_dlr(make_gf_from_fourier(gf, tau_mesh, tail), w_max=wmax, eps=eps)
         g_dlr_iw = Gf(mesh=mesh_dlr_iw, target_shape=gf.target_shape)
@@ -660,10 +660,14 @@ def fit_dlr_imfreq_gf(g_iw, wmax, eps):
         return g_dlr_iw
 
     if isinstance(g_iw, BlockGf):
-        return BlockGf(name_list=list(g_iw.indices), block_list=[fit_one(gf) for _, gf in g_iw])
+        gf_struct = [(bl, gf.target_shape[0]) for (bl, gf) in g_iw]
+        g_dlr_iw = BlockGf(mesh=mesh_dlr_iw, gf_struct=gf_struct)
+        for block, gf in g_dlr_iw:
+            gf << _fit_gf(g_iw[block])
+        return g_dlr_iw
 
     elif isinstance(g_iw, Gf):
-        return fit_one(g_iw)
+        return _fit_gf(g_iw)
 
     else:
         raise NotImplemented
