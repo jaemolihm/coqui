@@ -263,16 +263,20 @@ def solve_dynamic_dlr_mesh(Delta_iw, h_loc0, D0_iw, h_int, **solver_interface_pa
 
     # post process
     ctseg_utils.post_process(S, **post_proc_params)
+
+    # dense mesh -> DLR nodes
     if dlr_projection_method == 'fit':
-        ctseg_utils.fit_sigma_dlr(S, wmax, eps, post_proc_params['degenerate_blk'])
+        to_dlr = ctseg_utils.fit_dlr_imfreq_gf
+    else:
+        to_dlr = ctseg_utils.fill_dlr_imfreq_gf
 
     return SolverResults(# required
-        G_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.G_iw, wmax, eps),
+        G_iw  = to_dlr(S.G_iw, wmax, eps),
         Sigma_infty = list(S.Sigma_infty.values()),
-        Sigma_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Sigma_iw, wmax, eps),
-        Pi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Pi_iw, wmax, eps),
-        W_iw  = ctseg_utils.fill_dlr_imfreq_gf(S.W_iw, wmax, eps),
-        Chi_iw = ctseg_utils.fill_dlr_imfreq_gf(S.Chi_iw, wmax, eps),
+        Sigma_iw = to_dlr(S.Sigma_iw, wmax, eps),
+        Pi_iw = to_dlr(S.Pi_iw, wmax, eps),
+        W_iw  = to_dlr(S.W_iw, wmax, eps),
+        Chi_iw = to_dlr(S.Chi_iw, wmax, eps),
 
         # optional
         orbital_occupations = S.results.densities,

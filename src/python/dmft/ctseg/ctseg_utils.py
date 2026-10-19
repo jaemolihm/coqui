@@ -633,39 +633,40 @@ def fill_dlr_imfreq_gf(g_iw, wmax, eps):
 
 def fit_dlr_imfreq_gf(g_iw, wmax, eps):
     """
-    Least-squares DLR fit (wmax, eps) of a BlockGf on MeshImFreq that vanishes at infinite frequency (e.g.
-    Sigma - Sigma_infty), evaluated back on the same mesh.
+    Same as fill_dlr_imfreq_gf (g_iw on MeshImFreq -> values at the DLR Matsubara nodes of (wmax, eps)), but by a
+    least-squares DLR fit to the whole function instead of copying g_iw at the nodes, which passes the Monte Carlo
+    noise of each node value straight into the DLR expansion.
 
-    Unlike fill_dlr_imfreq_gf, which copies g_iw at the DLR nodes and so passes the Monte Carlo noise of each node
-    value straight into the DLR expansion, the fit uses the whole function: g_iw is Fourier transformed to imaginary
-    time with its high-frequency moments (fitted, zeroth moment fixed to 0), then fitted with fit_gf_dlr. The tail of
-    g_iw must therefore already be smooth (tail-fitted).
+    g_iw must vanish at infinite frequency (e.g. G, Sigma - Sigma_infty) and have a smooth tail (tail-fitted): it is
+    Fourier transformed to imaginary time with its high-frequency moments (fitted, zeroth moment fixed to 0), fitted
+    with fit_gf_dlr, and the fit is evaluated at the nodes.
     """
-    assert isinstance(g_iw, BlockGf) and isinstance(g_iw.mesh, MeshImFreq), (
-        "fit_dlr_imfreq_gf: input should be a BlockGf on MeshImFreq."
+    assert isinstance(g_iw.mesh, MeshImFreq), (
+        "fit_dlr_imfreq_gf: input Green's function should live on MeshImFreq."
     )
 
+    mesh_dlr_iw = MeshDLRImFreq(
+        beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic,
+        w_max=wmax, eps=eps, symmetrize=True
+    )
     tau_mesh = MeshImTime(beta=g_iw.mesh.beta, statistic=g_iw.mesh.statistic, n_tau=10 * len(g_iw.mesh) + 1)
 
-    g_fit_iw = g_iw.copy()
-    for block, gf in g_iw:
+    def fit_one(gf):
         tail, _ = fit_hermitian_tail(gf, make_zero_tail(gf, n_moments=1))
-        g_tau = make_gf_from_fourier(gf, tau_mesh, tail)
-        g_fit_iw[block] << make_gf_imfreq(fit_gf_dlr(g_tau, w_max=wmax, eps=eps), n_iw=gf.mesh.n_iw)
-    return g_fit_iw
+        gf_dlr = fit_gf_dlr(make_gf_from_fourier(gf, tau_mesh, tail), w_max=wmax, eps=eps)
+        g_dlr_iw = Gf(mesh=mesh_dlr_iw, target_shape=gf.target_shape)
+        for w in mesh_dlr_iw:
+            g_dlr_iw[w] = gf_dlr(w)
+        return g_dlr_iw
 
+    if isinstance(g_iw, BlockGf):
+        return BlockGf(name_list=list(g_iw.indices), block_list=[fit_one(gf) for _, gf in g_iw])
 
-def fit_sigma_dlr(solver, wmax, eps, degenerate_blk=None):
-    """
-    Replace the dense solver.Sigma_iw (Sigma - Sigma_infty, after post_process_sigma) by its least-squares DLR fit
-    (wmax, eps) on the same mesh, and solver.G_iw by the Dyson equation with the fitted Sigma + Sigma_infty.
-    """
-    solver.Sigma_iw = fit_dlr_imfreq_gf(solver.Sigma_iw, wmax, eps)
-    for blk, sigma_infty_value in solver.Sigma_infty.items():
-        solver.G_iw[blk] << inverse(inverse(solver.G0_iw[blk]) - solver.Sigma_iw[blk] - sigma_infty_value)
-    solver.G_iw << make_hermitian(solver.G_iw)
-    if degenerate_blk:
-        solver.G_iw << modest.symmetrize(solver.G_iw, degenerate_blk)
+    elif isinstance(g_iw, Gf):
+        return fit_one(g_iw)
+
+    else:
+        raise NotImplemented
 
 
 def check_spectrum(A, radius=1.0, tol=0.0, truncation=False):
