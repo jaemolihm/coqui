@@ -107,6 +107,10 @@ namespace imag_axes_ft {
       }
 
 
+    // T(x, :) interpolates the values on the DLR tau nodes to tau = beta (x + 1) / 2, x in [-1, 1].
+    // Each row is solved separately (see solve_cf2it_row) and averaged with the row of the mirror point,
+    //   T(x, t) = (r(x, t) + r(-x, nt - 1 - t)) / 2,   r(x, :) = cf2eval(x) cf2it^{-1},
+    // so that T(-x, t) = T(x, nt - 1 - t) bitwise, as for the exact matrix (cppdlr SYM nodes: tau_{nt-1-t} = beta - tau_t).
     auto construct_tau_interpolate_matrix(
       const nda::MemoryArrayOfRank<1> auto &tau_mesh_out,
       bool ph_sym=false) const
@@ -114,42 +118,33 @@ namespace imag_axes_ft {
       auto nt_out = tau_mesh_out.size();
       auto nt_in = _it_ops.rank();
       auto eye_nt_in = nda::eye<ComplexType>(nt_in);
+      auto zlu = nda::matrix<ComplexType>(_it_ops.get_it2cf_zlu());
+      auto piv = nda::array<int, 1>(_it_ops.get_it2cf_piv());
 
-      auto rhs_f = nda::matrix<ComplexType, nda::F_layout>(nt_in, nt_out);
+      auto solve_tau_row = [&](double x) {
+        auto cf2eval = _it_ops.coefs2eval(eye_nt_in, cppdlr::abs2rel((x + 1.0) * 0.5)); // [-1, 1] -> [0, 1]
+        return solve_cf2it_row(zlu, piv, nda::vector<ComplexType>(cf2eval));
+      };
+
+      auto T_full = nda::array<ComplexType, 2>(nt_out, nt_in);
       for (int it_out = 0; it_out < nt_out; ++it_out) {
-        auto tau = (tau_mesh_out(it_out) + 1.0) * 0.5; // convert from [-1, 1] to [0, 1]
-        auto cf2eval = _it_ops.coefs2eval(eye_nt_in, cppdlr::abs2rel(tau));
-        rhs_f(nda::range::all, it_out) = cf2eval;
+        double x = tau_mesh_out(it_out);
+        auto r_x = solve_tau_row(x);
+        auto r_mx = solve_tau_row(-x);
+        for (int it = 0; it < nt_in; ++it) T_full(it_out, it) = 0.5 * (r_x(it) + r_mx(nt_in - 1 - it));
       }
 
-      auto cf2it_t_lu = nda::matrix<ComplexType>(nda::transpose(_it_ops.get_cf2it()));
+      if (not ph_sym) return T_full;
 
-      nda::array<int, 1> ipiv(nt_in);
-      auto info = nda::lapack::getrf(cf2it_t_lu, ipiv);
-      utils::check(info == 0,
-                   "dlr_driver.hpp::DLR: LU factorization failed for cf2it^T (getrf info = {}).",
-                   info);
-      info = nda::lapack::getrs(cf2it_t_lu, rhs_f, ipiv);
-      utils::check(info == 0,
-                   "dlr_driver.hpp::DLR: Linear solve failed for cf2it^T x = cf2eval (getrs info = {}).",
-                   info);
-
-      nda::array<ComplexType, 2> T_tt;
-      if (ph_sym) {
-        // only keep the first half of the tau points for particle-hole symmetry.
-        auto nt_half = nt_in / 2 + nt_in % 2;
-        T_tt = nda::array<ComplexType, 2>(nt_out, nt_half);
-        for (int it_out = 0; it_out < T_tt.extent(0); ++it_out) {
-          for (int it_in = 0; it_in < nt_half; ++it_in) {
-            int imt = nt_in - it_in - 1;
-            T_tt(it_out, it_in) = (it_in == imt)? rhs_f(it_in, it_out) : rhs_f(it_in, it_out) + rhs_f(imt, it_out);
-          }
+      // only keep the first half of the tau points for particle-hole symmetry.
+      auto nt_half = nt_in / 2 + nt_in % 2;
+      auto T_tt = nda::array<ComplexType, 2>(nt_out, nt_half);
+      for (int it_out = 0; it_out < nt_out; ++it_out) {
+        for (int it_in = 0; it_in < nt_half; ++it_in) {
+          int imt = nt_in - it_in - 1;
+          T_tt(it_out, it_in) = (it_in == imt)? T_full(it_out, it_in) : T_full(it_out, it_in) + T_full(it_out, imt);
         }
-      } else {
-        T_tt = nda::array<ComplexType, 2>(nt_out, nt_in);
-        T_tt() = nda::transpose(rhs_f);
       }
-
       return T_tt;
     }
 
@@ -164,12 +159,10 @@ namespace imag_axes_ft {
       auto nw_out   = static_cast<int>(wn_mesh_out.size());
 
       // rhs = B_out * Ttw, with B_out = beta * cf2if(wn_out) * cf2it^{-1}: tau_to_w at the output points,
-      // composed with the paired w_to_tau. B_out is solved with the LU factors of cf2it as in
-      // cppdlr::build_it2if, so that B_out(wn_mesh) = Twt.
+      // composed with the paired w_to_tau. B_out is built by build_tau_to_w_rows, as Twt, so that
+      // B_out(wn_mesh) = Twt.
       auto const &Ttw = (stats == imag_axes_ft::fermion) ? Ttw_ff : Ttw_bb;
-      auto r = _it_ops.rank();
-      auto eye_r = nda::eye<ComplexType>(r);
-      auto B_out = nda::matrix<ComplexType>(nw_out, r);
+      std::vector<int> n_dlr(nw_out);
       for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
         long n_ir = wn_mesh_out(iw_out);
         if (stats == imag_axes_ft::fermion) {
@@ -182,14 +175,9 @@ namespace imag_axes_ft {
                        "bosonic wn_mesh_out must be even in IR notation, got {}.", n_ir);
         }
         // IR notation -> cppdlr notation: fermion n_ir = 2*n_dlr + 1; boson n_ir = 2*n_dlr
-        int n_dlr = static_cast<int>((stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2);
-        B_out(iw_out, nda::range::all) = if_ops.coefs2eval(eye_r, n_dlr);
+        n_dlr[iw_out] = static_cast<int>((stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2);
       }
-      auto zlu = _it_ops.get_it2cf_zlu();
-      auto piv = _it_ops.get_it2cf_piv();
-      // cf2it^T X = cf2if_out^T -> X = cf2if_out * cf2it^{-1}
-      nda::lapack::getrs(nda::transpose(zlu), nda::transpose(B_out), piv);
-      B_out *= beta;
+      auto B_out = build_tau_to_w_rows(if_ops, n_dlr, stats);
       auto rhs = nda::matrix<ComplexType>(B_out * Ttw);
 
       if (not ph_sym) 
@@ -225,13 +213,67 @@ namespace imag_axes_ft {
     }
 
     private:
-      // Ttw = pinv(Twt), with the exact pairing Ttw(:, -wn) = conj(Ttw(:, wn)).
+      // x^T cf2it^{-1} for one row x (cf2it^T y = x, nrhs = 1). getrs rounds differently for different nrhs, so a
+      // row solved together with other rows depends on them; a single-row solve depends only on x.
+      static nda::vector<ComplexType> solve_cf2it_row(nda::matrix<ComplexType> const &zlu, nda::array<int, 1> const &piv,
+                                                      nda::vector<ComplexType> const &x) {
+        auto y = nda::matrix<ComplexType, nda::F_layout>(x.size(), 1);
+        y(nda::range::all, 0) = x;
+        auto info = nda::lapack::getrs(nda::transpose(zlu), y, piv);
+        utils::check(info == 0, "dlr_driver.hpp::DLR: Linear solve failed for cf2it^T y = x (getrs info = {}).", info);
+        return nda::vector<ComplexType>(y(nda::range::all, 0));
+      }
+
+      // Enforce, per row (tau_axis = 1: M(n, t)) or per column (tau_axis = 0: M(t, n)),
+      //   M(t) = s conj M(nt - 1 - t),   s = +1 boson, -1 fermion,
+      // by M(t) <- (M(t) + s conj M(nt - 1 - t)) / 2 and M(nt-1-t) <- s conj M(t) (bitwise s conj of the same sum).
+      // The exact tau -> iw matrix has it: cppdlr SYM gives poles omega_j = -omega_{r-1-j} and nodes
+      // tau_{nt-1-t} = beta - tau_t, with kernels K(beta - tau, omega) = K(tau, -omega); the LU solve with cf2it
+      // (cond ~1e13) does not keep it (~3e-4 relative). An entry with t = nt - 1 - t becomes Re (boson) or i Im (fermion).
+      static void project_tau_reflection(nda::matrix<ComplexType> &M, int tau_axis, imag_axes_ft::stats_e stats) {
+        double s = (stats == imag_axes_ft::fermion) ? -1.0 : 1.0;
+        long nt = M.extent(tau_axis);
+        long nother = M.extent(1 - tau_axis);
+        auto at = [&](long t, long k) -> ComplexType & { return tau_axis == 1 ? M(k, t) : M(t, k); };
+        for (long k = 0; k < nother; ++k) {
+          for (long t = 0; t <= (nt - 1) / 2; ++t) {
+            long mt = nt - 1 - t;
+            ComplexType a = 0.5 * (at(t, k) + s * std::conj(at(mt, k)));
+            at(t, k) = a;
+            at(mt, k) = s * std::conj(a);
+          }
+        }
+      }
+
+      // Rows B(n, :) = beta * cf2if(n, :) * cf2it^{-1} of the tau -> iw matrix at the cppdlr frequency indices n_dlr,
+      // solved one row at a time (solve_cf2it_row) and reflection-projected (project_tau_reflection(., 1)), so that
+      // a row depends only on its own n and B(-n, :) = conj B(n, :) bitwise.
+      nda::matrix<ComplexType> build_tau_to_w_rows(cppdlr::imfreq_ops const &if_ops, std::vector<int> const &n_dlr,
+                                                   imag_axes_ft::stats_e stats) const {
+        auto r = _it_ops.rank();
+        auto eye_r = nda::eye<ComplexType>(r);
+        auto zlu = nda::matrix<ComplexType>(_it_ops.get_it2cf_zlu());
+        auto piv = nda::array<int, 1>(_it_ops.get_it2cf_piv());
+        auto B = nda::matrix<ComplexType>(n_dlr.size(), r);
+        for (long i = 0; i < long(n_dlr.size()); ++i) {
+          auto cf2if = nda::vector<ComplexType>(if_ops.coefs2eval(eye_r, n_dlr[i]));
+          B(i, nda::range::all) = beta * solve_cf2it_row(zlu, piv, cf2if);
+        }
+        project_tau_reflection(B, 1, stats);
+        return B;
+      }
+
+      // Ttw = pinv(Twt), with the exact pairing Ttw(:, -wn) = conj(Ttw(:, wn)) and the exact reflection
+      // Ttw(nt - 1 - t, :) = s conj Ttw(t, :) (project_tau_reflection(., 0)).
       // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
       // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
       // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, so Twt(-wn, :) = conj(Twt(wn, :))
       // holds bitwise and pinv(Twt) = cf2it * cf2if^+ / beta is the same operator in exact arithmetic.
+      // The reflection of the projected Twt carries over to its pinv up to rounding of the SVD solve,
+      // which the projection makes exact.
       static nda::matrix<ComplexType> paired_left_inverse(nda::matrix<ComplexType> const &B,
-                                                          nda::array<long, 1> const &wn_mesh) {
+                                                          nda::array<long, 1> const &wn_mesh,
+                                                          imag_axes_ft::stats_e stats) {
         long nw = B.extent(0);
         long nt = B.extent(1);
         auto Bf = nda::matrix<ComplexType, nda::F_layout>(B);
@@ -281,6 +323,18 @@ namespace imag_axes_ft {
             }
           }
         }
+
+        // The projection acts per column and conj distributes over its average, so the pairing is kept.
+        // A reflection defect above 1e-8 means a wrong Twt or mesh, not rounding.
+        double refl_err = 0.0;
+        double sgn = (stats == imag_axes_ft::fermion) ? -1.0 : 1.0;
+        for (long i = 0; i < nw; ++i)
+          for (long t = 0; t < nt; ++t)
+            refl_err = std::max(refl_err, std::abs(T(t, i) - sgn * std::conj(T(nt - 1 - t, i))));
+        utils::check(refl_err <= 1e-8 * T_max,
+                     "imag_axes_ft::dlr::DLR: pinv(Twt) violates T(nt-1-t, :) = s conj(T(t, :)) by {} (relative), > 1e-8.",
+                     refl_err / T_max);
+        project_tau_reflection(T, 0, stats);
         return T;
       }
 
@@ -404,16 +458,24 @@ namespace imag_axes_ft {
         for (int i = 0; i < nw_f; ++i) wn_mesh_f(i) = long(2.0 * _if_ops_f.get_ifnodes(i) + 1);
         for (int i = 0; i < nw_b; ++i) wn_mesh_b(i) = long(2.0 * _if_ops_b.get_ifnodes(i));
 
+        // The reflections enforced below need mirror-symmetric meshes: wn(i) = -wn(nw-1-i), tau(i) = -tau(nt-1-i)
+        for (int i = 0; i < nw_f; ++i)
+          utils::check(wn_mesh_f(i) == -wn_mesh_f(nw_f - 1 - i), "imag_axes_ft::dlr::DLR: fermionic wn mesh is not mirror symmetric.");
+        for (int i = 0; i < nw_b; ++i)
+          utils::check(wn_mesh_b(i) == -wn_mesh_b(nw_b - 1 - i), "imag_axes_ft::dlr::DLR: bosonic wn mesh is not mirror symmetric.");
+        for (int i = 0; i < nt_f; ++i)
+          utils::check(std::abs(tau_mesh_f(i) + tau_mesh_f(nt_f - 1 - i)) <= 1e-12,
+                       "imag_axes_ft::dlr::DLR: tau mesh is not mirror symmetric.");
+
         // imaginary time to Matsubara frequency
-        auto it2if_f = cppdlr::build_it2if(_it_ops, _if_ops_f) * beta;
-        auto it2if_b = cppdlr::build_it2if(_it_ops, _if_ops_b) * beta;
-        Twt_ff = nda::matrix<ComplexType>(nw_f, nt_f);
-        Twt_ff() = it2if_f;
-        Twt_bb = nda::matrix<ComplexType>(nw_b, nt_b);
-        Twt_bb() = it2if_b;
+        std::vector<int> n_dlr_f(nw_f), n_dlr_b(nw_b);
+        for (int i = 0; i < nw_f; ++i) n_dlr_f[i] = _if_ops_f.get_ifnodes(i);
+        for (int i = 0; i < nw_b; ++i) n_dlr_b[i] = _if_ops_b.get_ifnodes(i);
+        Twt_ff = build_tau_to_w_rows(_if_ops_f, n_dlr_f, imag_axes_ft::fermion);
+        Twt_bb = build_tau_to_w_rows(_if_ops_b, n_dlr_b, imag_axes_ft::boson);
         // Matsubara frequency to imaginary time
-        Ttw_ff = paired_left_inverse(Twt_ff, wn_mesh_f);
-        Ttw_bb = paired_left_inverse(Twt_bb, wn_mesh_b);
+        Ttw_ff = paired_left_inverse(Twt_ff, wn_mesh_f, imag_axes_ft::fermion);
+        Ttw_bb = paired_left_inverse(Twt_bb, wn_mesh_b, imag_axes_ft::boson);
 
         // fermion <-> boson tau interpolation (same DLR tau nodes)
         Ttt_bf = nda::eye<ComplexType>(nt_b);
