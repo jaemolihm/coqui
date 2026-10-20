@@ -440,20 +440,23 @@ nda::array<ComplexType, 4> lr_gw_Pi_calc(
     std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt);
 
 /**
- * @brief Evaluate standard RPA polarization P[G] (FD helper)
+ * @brief Evaluate the polarization P[G] (FD helper)
  *
- * Computes the standard RPA polarization from a given G. Used for
- * finite-difference testing: P[G+εΔG] computed by passing G+εΔG.
+ * Computes the RPA polarization from a given G. Used for finite-difference testing: P[G+εΔG] computed by
+ * passing G+εΔG. With a projector and local_polarizabilities {"imp", "dc"} (iν, product basis, as run_lr), the
+ * GW+EDMFT polarization P_RPA[G] + upfold(Π_imp − Π_dc) of the GW+EDMFT ground state (screen type "gw_edmft").
  *
  * @param eri      - [INPUT] THC ERI handler
  * @param pt       - [INPUT] Parameters as property tree (prefix)
  * @param G_tskij  - [INPUT] Green's function (nt, ns, nk, nb, nb)
+ * @param local    - [INPUT] Optional projector and local_polarizabilities (dc_cells, impurity_response unused)
  * @return P(τ,q,P,Q) as (nt_half, nkpts, NP, NP)
  */
 template<typename eri_t>
 nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     eri_t &eri, ptree const& pt,
-    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root);
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    lr_local_inputs const* local = nullptr);
 
 /**
  * @brief Linear response screened interaction ΔW = (Z+W_c) · ΔΠ · (Z+W_c)

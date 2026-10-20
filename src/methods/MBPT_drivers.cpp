@@ -2792,7 +2792,8 @@ nda::array<ComplexType, 5> lr_downfold_coulomb(
 template<typename eri_t>
 nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     eri_t &eri, ptree const& pt,
-    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root) {
+    std::optional<nda::array<ComplexType, 5>> const& G_tskij_root,
+    lr_local_inputs const* local) {
 
   auto& thc = eri.corr_eri->get();
   auto mf = thc.MF();
@@ -2823,12 +2824,24 @@ nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
                "gw_evaluate_Pi_calc: G tau dimension {} != IAFT nt_f {}",
                sG_tskij.shape()[0], nt);
 
-  // Use standard scr_coulomb_t to compute P
-  solvers::scr_coulomb_t scr_eri(&ft, "rpa");
+  if (local == nullptr) {
+    solvers::scr_coulomb_t scr_eri(&ft, "rpa");
+    auto dPi_tqPQ = scr_eri.eval_Pi_qdep(sG_tskij.local(), thc);
+    mpi->comm.barrier();
+    return gather_to_root(*mpi, dPi_tqPQ);
+  }
 
-  auto dPi_tqPQ = scr_eri.eval_Pi_qdep(sG_tskij.local(), thc);
+  // GW+EDMFT: the MBState and screen type of run_lr's recompute_W_and_eps_inv_head
+  utils::check(local->local_polarizabilities.has_value(),
+               "gw_evaluate_Pi_calc: a projector without local_polarizabilities has no GW+EDMFT term.");
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  MBState mb_local(ft, prefix, mf, local->projector_ksIai, local->band_window, local->kpts_crys, trans_home_cell,
+                   false);
+  mb_local.set_local_polarizabilities(*local->local_polarizabilities);
+  solvers::scr_coulomb_t scr_eri(&ft, "gw_edmft");
+  mb_local.sG_tskij.emplace(std::move(sG_tskij));
+  auto dPi_tqPQ = scr_eri.eval_Pi_qdep(mb_local, thc);
   mpi->comm.barrier();
-
   return gather_to_root(*mpi, dPi_tqPQ);
 }
 
@@ -3236,7 +3249,8 @@ template nda::array<ComplexType, 5> lr_downfold_coulomb(
 template nda::array<ComplexType, 4> gw_evaluate_Pi_calc(
     mb_eri_t<thc_reader_t, thc_reader_t, thc_reader_t, thc_reader_t>&,
     ptree const&,
-    std::optional<nda::array<ComplexType, 5>> const&);
+    std::optional<nda::array<ComplexType, 5>> const&,
+    lr_local_inputs const*);
 
 // lr_gw_W_calc instantiations (THC only)
 template nda::array<ComplexType, 4> lr_gw_W_calc(

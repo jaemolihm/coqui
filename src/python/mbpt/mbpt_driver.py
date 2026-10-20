@@ -1146,9 +1146,10 @@ def run_lr_gw_Pi(h_int, q_pert, G_tskij, DeltaG_tskij,
                        DeltaX_left=DeltaX_left, DeltaX_right=DeltaX_right)
     return arr if arr.size else None
 
-def gw_evaluate_Pi(params, h_int, G_tskij):
+def gw_evaluate_Pi(params, h_int, G_tskij, *, projector_info=None, local_polarizabilities=None):
     """
-    Evaluate standard RPA polarization P[G].
+    Evaluate standard RPA polarization P[G], or with projector_info and local_polarizabilities the GW+EDMFT
+    polarization P_RPA[G] + upfold(Pi_imp - Pi_dc) that run_lr builds its W from.
 
     Computes the RPA polarization from a given Green's function.
     Used for finite-difference testing of LR polarization.
@@ -1163,6 +1164,10 @@ def gw_evaluate_Pi(params, h_int, G_tskij):
     G_tskij : np.ndarray or None
         Green's function, shape (nt, ns, nk, nb, nb). Required on the MPI
         global root; ignored on non-root ranks.
+    projector_info : dict or None, optional
+        "proj_mat", "band_window", "kpts_w90", as run_lr. Given together with local_polarizabilities.
+    local_polarizabilities : dict or None, optional
+        {"imp": Pi_imp, "dc": Pi_dc} on the half bosonic grid, product basis (nw_half, a, b, c, d), as run_lr.
 
     Returns
     -------
@@ -1180,7 +1185,16 @@ def gw_evaluate_Pi(params, h_int, G_tskij):
     else:
         G_tskij = None
 
-    arr = gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
+    if (projector_info is None) != (local_polarizabilities is None):
+        raise ValueError("gw_evaluate_Pi: projector_info and local_polarizabilities must be given together")
+    if projector_info is None:
+        arr = gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij)
+    else:
+        arr = gw_evaluate_Pi_cpp(json.dumps(params), h_int, G_tskij,
+                                 np.asarray(projector_info["proj_mat"], dtype=np.complex128),
+                                 np.asarray(projector_info["band_window"], dtype=np.int64),
+                                 np.asarray(projector_info["kpts_w90"], dtype=np.float64),
+                                 {k: np.asarray(v, dtype=np.complex128) for k, v in local_polarizabilities.items()})
     return arr if arr.size else None
 
 def gw_evaluate_sigma(params, h_int, G_tskij, div_corr=True):

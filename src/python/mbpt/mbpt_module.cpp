@@ -409,15 +409,30 @@ namespace coqui_py {
    * @param lr_params  - [INPUT] JSON string with params (prefix)
    * @param h_int      - [INPUT] THC ERI handler
    * @param G_tskij    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+   * @param proj_mat   - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W) (every rank)
+   * @param band_window - [INPUT] Optional band window of the projector (every rank)
+   * @param kpts_w90   - [INPUT] Optional k-points of the projector (crystal) (every rank)
+   * @param local_polarizabilities - [INPUT] Optional {"imp", "dc"} Π (nw_half, n, n, n, n), product basis: with the
+   *                     projector, P_RPA[G] + upfold(Π_imp − Π_dc) of a GW+EDMFT ground state
    * @return           - [OUTPUT] P (nt_half, nkpts, NP, NP)
    */
   nda::array<ComplexType, 4> gw_evaluate_Pi(
       const std::string &lr_params,
       ThcCoulomb &h_int,
-      std::optional<nda::array<ComplexType, 5>> G_tskij) {
+      std::optional<nda::array<ComplexType, 5>> G_tskij,
+      std::optional<nda::array<ComplexType, 5>> proj_mat,
+      std::optional<nda::array<long, 3>> band_window,
+      std::optional<nda::array<double, 2>> kpts_w90,
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
-    return methods::gw_evaluate_Pi_calc(mb_eri, parser.get_root(), G_tskij);
+    utils::check(bool(proj_mat) == bool(band_window) and bool(proj_mat) == bool(kpts_w90) and
+                 bool(proj_mat) == bool(local_polarizabilities),
+                 "gw_evaluate_Pi: proj_mat, band_window, kpts_w90 and local_polarizabilities must be given together.");
+    if (!proj_mat) return methods::gw_evaluate_Pi_calc(mb_eri, parser.get_root(), G_tskij);
+    methods::lr_local_inputs local{std::move(*proj_mat), std::move(*band_window), std::move(*kpts_w90),
+                                   std::move(local_polarizabilities), std::nullopt, std::nullopt};
+    return methods::gw_evaluate_Pi_calc(mb_eri, parser.get_root(), G_tskij, &local);
   }
 
 

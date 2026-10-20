@@ -45,10 +45,16 @@ static auto const fun_1 = c2py::dispatcher_f_kw_t{c2py::cfun(
 // gw_evaluate_Pi
 static auto const fun_2 = c2py::dispatcher_f_kw_t{c2py::cfun(
     [](const std::string &lr_params, coqui_py::ThcCoulomb &h_int,
-       std::optional<nda::array<ComplexType, 5>> G_tskij) {
-      return coqui_py::gw_evaluate_Pi(lr_params, h_int, G_tskij);
+       std::optional<nda::array<ComplexType, 5>> G_tskij,
+       std::optional<nda::array<ComplexType, 5>> proj_mat,
+       std::optional<nda::array<long, 3>> band_window,
+       std::optional<nda::array<double, 2>> kpts_w90,
+       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities) {
+      return coqui_py::gw_evaluate_Pi(lr_params, h_int, G_tskij, proj_mat, band_window, kpts_w90,
+                                      local_polarizabilities);
     },
-    "lr_params", "h_int", "G_tskij")};
+    "lr_params", "h_int", "G_tskij", "proj_mat"_a = std::nullopt, "band_window"_a = std::nullopt,
+    "kpts_w90"_a = std::nullopt, "local_polarizabilities"_a = std::nullopt)};
 
 // gw_evaluate_W_from_Pi
 static auto const fun_3 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -390,6 +396,15 @@ h_int : {par_1}
    - [INPUT] THC ERI handler
 G_tskij : {par_2}
    - [INPUT] Green's function (nt, ns, nk, nb, nb)
+proj_mat : {par_3}
+   - [INPUT] Optional projector C (nk, ns, nImps, nImpOrbs, nOrbs_W) (every rank)
+band_window : {par_4}
+   - [INPUT] Optional band window of the projector (every rank)
+kpts_w90 : {par_5}
+   - [INPUT] Optional k-points of the projector (crystal) (every rank)
+local_polarizabilities : {par_6}
+   - [INPUT] Optional {"imp", "dc"} Pi (nw_half, n, n, n, n), product basis: with the
+     projector, P_RPA[G] + upfold(Pi_imp - Pi_dc) of a GW+EDMFT ground state
 
 Returns
 -------
@@ -398,7 +413,11 @@ Returns
 )DOC",
     {{c2py::python_typename<const std::string &>()},
      {c2py::python_typename<coqui_py::ThcCoulomb &>()},
-     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()}},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 5>>>()},
+     {c2py::python_typename<std::optional<nda::array<long, 3>>>()},
+     {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
+     {c2py::python_typename<std::optional<std::map<std::string, nda::array<ComplexType, 5>>>>()}},
     {c2py::python_typename<nda::array<ComplexType, 4>>()});
 static const auto doc_d_3 = fun_3.doc(
     R"DOC(
