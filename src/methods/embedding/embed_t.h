@@ -85,8 +85,13 @@ namespace methods {
                     iter_scf::iter_scf_t *iter_solver=nullptr,
                     bool qp_approx_mbpt=false, bool corr_only=false);
 
-    auto downfold_gloc(MBState& mb_state, bool force_real, std::string g_grp, long g_tier)
-    -> nda::array<ComplexType, 5>;
+    /**
+     * Local Green's function of {g_grp}/iter{g_iter} and its static one-body term.
+     * @return (Hloc_sIab, Gloc_tsIab), Hloc = P (H0 + F) P^dagger - mu with H0 = system/H0_skij and F, mu of the
+     *         same group: the 1/(iw)^2 moment of Gloc.
+     */
+    auto downfold_gloc(MBState& mb_state, bool force_real, std::string g_grp, long g_iter)
+    -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>;
 
     /**
      * @param context       - [INPUT] mpi communicator

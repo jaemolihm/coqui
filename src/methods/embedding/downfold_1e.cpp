@@ -34,7 +34,7 @@ namespace methods {
 
   auto embed_t::downfold_gloc(MBState& mb_state, bool force_real,
                               std::string g_grp, long g_iter)
-  -> nda::array<ComplexType, 5> {
+  -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
     app_log(1, "\n"
                "╔═╗╔═╗╔═╗ ╦ ╦╦  ┌─┐┌┐┌┌─┐  ┌─┐  ┌┬┐┌─┐┬ ┬┌┐┌┌─┐┌─┐┬  ┌┬┐\n"
                "║  ║ ║║═╬╗║ ║║  │ ││││├┤───├┤    │││ │││││││├┤ │ ││   ││\n"
@@ -98,10 +98,50 @@ namespace methods {
     ft->check_leakage(Gloc_tsIab, imag_axes_ft::fermion, std::addressof(mpi->comm), "Local Green's function");
     _Timer.stop("DF_DOWNFOLD");
 
+    // Hloc = P (H0 + F) P^dagger - mu: the 1/(iw)^2 moment of Gloc. The Dyson equation of G has no other static
+    // term, and H0, F and mu are the ones stored with G.
+    _Timer.start("DF_READ");
+    auto sH0_skij = make_shared_array<Array_view_4D_t>(
+        *mpi, {_MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    auto sF_skij = make_shared_array<Array_view_4D_t>(
+        *mpi, {_MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    chkpt::read_H0(mpi->node_comm, mb_state.coqui_prefix, sH0_skij);
+    double mu = 0.0;
+    if (mpi->node_comm.root()) {
+      h5::file file(filename, 'r');
+      auto iter_grp = h5::group(file).open_group(g_grp).open_group("iter" + std::to_string(g_iter));
+      auto F_loc = sF_skij.local();
+      if (iter_grp.has_dataset("F_skij")) {
+        // Dyson-type group
+        nda::h5_read(iter_grp, "F_skij", F_loc);
+      } else if (iter_grp.has_dataset("Heff_skij")) {
+        // qp-type group: Heff = H0 + F, as in chkpt::read_scf
+        nda::h5_read(iter_grp, "Heff_skij", F_loc);
+        F_loc -= sH0_skij.local();
+      } else {
+        utils::check(false, "embed_t::downfold_gloc: {}/iter{} of {} has neither F_skij nor Heff_skij!",
+                     g_grp, g_iter, filename);
+      }
+      h5::h5_read(iter_grp, "mu", mu);
+    }
+    mpi->node_comm.broadcast_n(&mu, 1, 0);
+    mpi->node_comm.barrier();
+    _Timer.stop("DF_READ");
+
+    _Timer.start("DF_DOWNFOLD");
+    auto Hloc_sIab = (force_real)? proj.downfold_loc<true>(sH0_skij, "H0_loc") : proj.downfold_loc<false>(sH0_skij, "H0_loc");
+    Hloc_sIab += (force_real)? proj.downfold_loc<true>(sF_skij, "F_loc") : proj.downfold_loc<false>(sF_skij, "F_loc");
+    for (long s = 0; s < Hloc_sIab.shape(0); ++s)
+      for (long I = 0; I < Hloc_sIab.shape(1); ++I)
+        for (long a = 0; a < Hloc_sIab.shape(2); ++a)
+          Hloc_sIab(s, I, a, a) -= mu;
+    app_log(2, "  - Local static one-body term Hloc = P (H0 + F) P^dagger - mu, mu = {:.8f}", mu);
+    _Timer.stop("DF_DOWNFOLD");
+
     _Timer.stop("DF_TOTAL");
     print_downfold_mb_timers();
 
-    return Gloc_tsIab;
+    return std::make_tuple(std::move(Hloc_sIab), std::move(Gloc_tsIab));
   }
 
   void embed_t::downfolding(MBState &mb_state, ptree const& pt,

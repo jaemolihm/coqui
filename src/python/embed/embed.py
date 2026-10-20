@@ -58,7 +58,8 @@ def read_proj_info(wannier_h5):
 
 def downfold_local_gf(mf, params, *, projector_info=None):
     """
-    Downfolds the local Green's function (GF) from the Kohn-Sham (KS) basis to the Wannier basis.
+    Downfolds the local Green's function (GF) from the Kohn-Sham (KS) basis to the Wannier basis, together with
+    its static one-body term.
 
     Args:
         mf: Mean-field object.
@@ -69,18 +70,21 @@ def downfold_local_gf(mf, params, *, projector_info=None):
             - "kpts_w90": The k-points in Wannier90 format.
 
     Returns:
-        np.ndarray: The downfolded local Green's function.
+        tuple(np.ndarray, np.ndarray): (Hloc_sab, Gloc_tsab). Gloc_tsab, shape (nt, ns, n, n), is the
+        downfolded local Green's function. Hloc_sab, shape (ns, n, n), is the 1/(i omega)^2 moment of Gloc,
+        the projection of H0 + F - mu of the group the Green's function is read from.
     """
     if projector_info is None:
-        return embed_cxx.downfold_gloc_with_projector_from_h5(mf, json.dumps(params))[:,:,0]
+        Hloc, Gloc = embed_cxx.downfold_gloc_with_projector_from_h5(mf, json.dumps(params))
     else:
         proj_mat = projector_info.get("proj_mat")
         band_window = projector_info.get("band_window")
         kpts_w90 = projector_info.get("kpts_w90")
         # ignore the number of impurities for now
-        return embed_cxx.downfold_gloc(
+        Hloc, Gloc = embed_cxx.downfold_gloc(
             mf, json.dumps(params), proj_mat, band_window, kpts_w90
-        )[:,:,0]
+        )
+    return Hloc[:, 0], Gloc[:, :, 0]
 
 
 

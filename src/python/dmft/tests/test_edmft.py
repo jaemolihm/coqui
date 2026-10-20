@@ -30,7 +30,6 @@ import coqui
 from coqui.utils.tests.test_coqui_env import mpi
 from coqui.dmft.bath_fit import causal_projection_boson
 from coqui.dmft import weiss, lr_weiss
-from coqui.dmft.weiss import extract_h0_and_delta
 from coqui.mean_field.tests.test_qe import construct_qe_mf
 from coqui.utils.imag_axes_ft import IAFT
 
@@ -74,7 +73,7 @@ def downfold_inputs(mpi, request):
         "wannier_file": wan_h5,
         "force_real": True,
     }
-    gloc_t = coqui.downfold_local_gf(mf, gloc_params)
+    hloc, gloc_t = coqui.downfold_local_gf(mf, gloc_params)
 
     wloc_params = {
         "outdir": "./",
@@ -90,6 +89,7 @@ def downfold_inputs(mpi, request):
     yield {
         "basis": iaft_basis,
         "iaft": ir_kernel,
+        "hloc": hloc,
         "gloc_t": gloc_t,
         "wloc_t": wloc_t,
     }
@@ -99,30 +99,73 @@ def downfold_inputs(mpi, request):
     mpi.barrier()
 
 
-def test_extract_h0_and_delta_with_real_downfold_gloc(downfold_inputs):
+# Measured (SVO, IR and DLR): max |Hloc - H0_SAB_REF| = 7.3e-7 (the error of the fit; tolerance twice that),
+# leakage of Delta 4e-11 (IR) and 9e-13 (DLR); a constant 1e-3 in Hloc reads 1.3e-2 (IR) and 2.9e-4 (DLR).
+TOL_HLOC_VS_FIT = 1.5e-6
+TOL_LEAKAGE = 1e-9
+TOL_LEAKAGE_CONTROL = 1e-4
+
+
+def _delta_tail(iaft, hloc, g_iw):
+    """Delta(iw) = iw - Hloc - G_loc^{-1}(iw) of a local Green's function with static term Hloc."""
+    iw = 1j * iaft.wn_mesh('f') * np.pi / iaft.beta
+    nbnd = hloc.shape[-1]
+    return np.array([[iw[n] * np.eye(nbnd) - hloc[s] - np.linalg.inv(g_iw[n, s]) for s in range(g_iw.shape[1])]
+                     for n in range(g_iw.shape[0])])
+
+
+def _tail_ratio(iaft, delta_iw):
+    """|Delta_even(top)| / |Delta_even(previous)| at the two highest positive frequencies, and the 1/w^2 value
+    (w_prev / w_top)^2, where Delta_even(w) = (Delta(iw) + Delta(-iw)) / 2."""
+    w = iaft.wn_mesh('f') * np.pi / iaft.beta
+    nw = len(w)
+    even = lambda n: 0.5 * (delta_iw[n] + delta_iw[nw - 1 - n])
+    return np.linalg.norm(even(nw - 1)) / np.linalg.norm(even(nw - 2)), (w[-2] / w[-1]) ** 2
+
+
+# Analytic Hloc vs reference values of a high-frequency fit of G_loc^{-1}, the Delta tail of the analytic
+# split (leakage and the 1/w^2 decay of the even part), and the M0 = P S P^dagger = 1 precondition of the split.
+def test_hloc_split_svo(downfold_inputs):
     assert downfold_inputs["iaft"].basis == downfold_inputs["basis"]
 
-    ir_kernel = downfold_inputs["iaft"]
+    iaft = downfold_inputs["iaft"]
+    hloc = downfold_inputs["hloc"]
     gloc_t = downfold_inputs["gloc_t"]
-    g_iw = ir_kernel.tau_to_w(gloc_t, stats="f")
+    g_iw = iaft.tau_to_w(gloc_t, stats="f")
 
-    h0_sab, delta_iw = extract_h0_and_delta(g_iw, ir_kernel)
-
+    # (a) Hloc vs the fit reference values; the tolerance is the fit's error, measured
     H0_SAB_REF = np.array([[
-        [ 1.98632457e-01, -3.39822832e-05,  3.27477287e-05], 
+        [ 1.98632457e-01, -3.39822832e-05,  3.27477287e-05],
         [-3.39822832e-05,  1.98823108e-01, -9.76175950e-05],
         [ 3.27477287e-05, -9.76175950e-05,  1.98808918e-01]
-    ]]) 
-    assert h0_sab.shape == g_iw.shape[1:]
-    assert h0_sab.shape == H0_SAB_REF.shape
-    assert delta_iw.shape == g_iw.shape
-    assert np.allclose(h0_sab.real, H0_SAB_REF, atol=1e-8)
-    assert np.allclose(h0_sab.imag, 0.0, atol=1e-12)
+    ]])
+    assert hloc.shape == g_iw.shape[1:] == H0_SAB_REF.shape
+    assert np.allclose(hloc.imag, 0.0, atol=1e-12)
+    assert np.max(np.abs(hloc.real - H0_SAB_REF)) < TOL_HLOC_VS_FIT
+
+    # M0 precondition: -(G(0+) + G(beta-)) = 1
+    g_edges = iaft.tau_interpolate(gloc_t, np.array([0.0, iaft.beta]), stats="f")
+    m0 = -(g_edges[0] + g_edges[1])
+    assert np.linalg.norm(m0 - np.eye(m0.shape[-1])[None]) < 1e-8
+
+    # (b) Delta tail
+    delta_iw = _delta_tail(iaft, hloc, g_iw)
+    assert np.all(np.isfinite(delta_iw))
+    leakage = iaft.check_leakage(delta_iw, 'f', 'delta', w_input=True)
+    assert leakage < TOL_LEAKAGE
+    ratio, ratio_ref = _tail_ratio(iaft, delta_iw)
+    assert abs(ratio / ratio_ref - 1) < 0.1
+
+    # negative control: a constant 1e-3 in Hloc is read as leakage and breaks the 1/w^2 decay
+    delta_bad = _delta_tail(iaft, hloc + 1e-3 * np.eye(hloc.shape[-1]), g_iw)
+    assert iaft.check_leakage(delta_bad, 'f', 'delta', w_input=True) >= TOL_LEAKAGE_CONTROL
+    ratio_bad, _ = _tail_ratio(iaft, delta_bad)
+    assert abs(ratio_bad / ratio_ref - 1) > 0.1
+
     # Causality check
     wzero_idx = delta_iw.shape[0] // 2
     delta_imag_diag = np.diagonal(delta_iw[wzero_idx:,0].imag, axis1=1, axis2=2)
     assert np.all(delta_imag_diag < 1e-12)
-    assert np.all(np.isfinite(delta_iw))
 
 
 def test_causal_projection_boson_with_real_downfold_coulomb(downfold_inputs):
@@ -147,34 +190,6 @@ def test_causal_projection_boson_with_real_downfold_coulomb(downfold_inputs):
 
     assert wloc_fit_iw.shape == wloc_dd_iw.shape
     assert np.allclose(wloc_fit_iw.imag, 0.0, atol=1e-12)
-
-
-def _random_complex(rng, *shape):
-    return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
-
-
-def _hermitian_part(a):
-    return 0.5 * (a + np.swapaxes(a, -1, -2).conj())
-
-
-@pytest.mark.parametrize("basis", ["ir", "dlr"])
-def test_extract_h0_and_delta_hermitian(basis):
-    """G0(iω) = [iω - h]⁻¹ with non-Hermitian h: h0 is h, or exactly Hermitian ½(h + h†)."""
-    if basis == "dlr":
-        pytest.importorskip("coqui._lib.iaft_module")
-    rng = np.random.default_rng(3)
-    h = 0.3 * _random_complex(rng, 2, 3, 3)
-    iaft = IAFT(beta=10.0, wmax=10.0, prec="high", basis=basis)
-    iw = 1j * iaft.wn_mesh('f') * np.pi / iaft.beta
-    g_iw = np.linalg.inv(iw[:, None, None, None] * np.eye(3) - h)
-
-    h0, delta = extract_h0_and_delta(g_iw, iaft, make_hermitian=False)
-    assert np.linalg.norm(h0 - h) / np.linalg.norm(h) < 1e-5
-    assert np.linalg.norm(delta) / np.linalg.norm(h) < 1e-5
-
-    h0, _ = extract_h0_and_delta(g_iw, iaft, make_hermitian=True)
-    assert np.array_equal(h0, np.swapaxes(h0, -1, -2).conj())
-    assert np.linalg.norm(h0 - _hermitian_part(h)) / np.linalg.norm(h) < 1e-5
 
 
 def _rand_c(rng, *shape):
@@ -214,6 +229,7 @@ def weiss_lr_inputs():
     H = np.array([_rand_herm(rng, nbnd) for _ in range(nspin)])
     G_w = np.array([[np.linalg.inv(1j * w * eye - H[s]) for s in range(nspin)] for w in wn_f])
     dH = _rand_c(rng, nspin, nbnd, nbnd)
+    dHloc = _rand_c(rng, nspin, nbnd, nbnd)
     dG_w = np.einsum('wsab,sbc,wscd->wsad', G_w, dH, G_w)
     E = _rand_herm(rng, nbnd)
     B, B2, C2 = (0.5 * _rand_c(rng, nspin, nbnd, nbnd) for _ in range(3))
@@ -231,7 +247,7 @@ def weiss_lr_inputs():
     dW_w = np.einsum('w,ab->wab', lor, _rand_c(rng, nbnd2, nbnd2)).reshape(W_w.shape)
     dPi_w = np.einsum('w,ab->wab', lor, 0.05 * _rand_c(rng, nbnd2, nbnd2)).reshape(W_w.shape)
 
-    return dict(iaft=iaft, G_w=G_w, dG_w=dG_w, Vhf=Vhf, dVhf=dVhf, Sigma_w=Sigma_w, dSigma_w=dSigma_w,
+    return dict(iaft=iaft, G_w=G_w, dG_w=dG_w, Hloc=H, dHloc=dHloc, Vhf=Vhf, dVhf=dVhf, Sigma_w=Sigma_w, dSigma_w=dSigma_w,
                 V=V, W_w=W_w, dW_w=dW_w, Pi_w=Pi_w, dPi_w=dPi_w,
                 G_t=iaft.w_to_tau(G_w, 'f'), dG_t=iaft.w_to_tau(dG_w, 'f'),
                 W_t=iaft.w_to_tau_phsym(W_w, 'b'), dW_t=iaft.w_to_tau_phsym(dW_w, 'b'))
@@ -250,34 +266,24 @@ def test_lr_weiss_fermion_boson_multiorbital(weiss_lr_inputs):
     assert _rel(du, du_fd) < 1e-9
 
 
-def test_lr_extract_h0_and_delta_multiorbital(weiss_lr_inputs):
-    # lr_extract_h0_and_delta against the central difference of extract_h0_and_delta(make_hermitian=False) at a
-    # generic (non-Hermitian in iw) dg, as at Q != 0.
-    x, h = weiss_lr_inputs, 1e-4
-    g = weiss.compute_weiss_fermion_w(x["G_w"], x["Vhf"], x["Sigma_w"])
-    dg, _ = lr_weiss.lr_weiss_fermion_w(x["G_w"], x["dG_w"], x["Vhf"], x["dVhf"], x["Sigma_w"], x["dSigma_w"])
-    dh0, ddelta = lr_weiss.lr_extract_h0_and_delta(g, dg, x["iaft"])
-    dh0_fd, ddelta_fd = _fd_richardson(
-        lambda e: list(weiss.extract_h0_and_delta(g + e * dg, x["iaft"], make_hermitian=False)), h)
-    assert _rel(dh0, dh0_fd) < 1e-8
-    assert _rel(ddelta, ddelta_fd) < 1e-8
-
-
+# lr_compute_weiss_fields_w (all four outputs, dHloc generic) vs the Richardson central difference of
+# compute_weiss_fields_w.
 def test_lr_compute_weiss_fields_multiorbital(weiss_lr_inputs):
     x, h = weiss_lr_inputs, 1e-4
     def gs(e):
         return list(weiss.compute_weiss_fields_w(
             iaft=x["iaft"],
-            local_gf={"Gloc_t": x["G_t"] + e * x["dG_t"], "Wloc_t": x["W_t"] + e * x["dW_t"], "Vloc": x["V"]},
+            local_gf={"Gloc_t": x["G_t"] + e * x["dG_t"], "Hloc": x["Hloc"] + e * x["dHloc"],
+                      "Wloc_t": x["W_t"] + e * x["dW_t"], "Vloc": x["V"]},
             impurity_selfenergies={"Vhf_imp": x["Vhf"] + e * x["dVhf"],
                                    "Sigma_imp_w": x["Sigma_w"] + e * x["dSigma_w"],
                                    "Pi_imp_w": x["Pi_w"] + e * x["dPi_w"]}))
-    dg, du = lr_weiss.lr_compute_weiss_fields_w(
+    out = lr_weiss.lr_compute_weiss_fields_w(
         iaft=x["iaft"],
         local_gf={"Gloc_t": x["G_t"], "Wloc_t": x["W_t"], "Vloc": x["V"]},
-        d_local_gf={"Gloc_t": x["dG_t"], "Wloc_t": x["dW_t"]},
+        d_local_gf={"Gloc_t": x["dG_t"], "Hloc": x["dHloc"], "Wloc_t": x["dW_t"]},
         impurity_selfenergies={"Vhf_imp": x["Vhf"], "Sigma_imp_w": x["Sigma_w"], "Pi_imp_w": x["Pi_w"]},
         d_impurity_selfenergies={"Vhf_imp": x["dVhf"], "Sigma_imp_w": x["dSigma_w"], "Pi_imp_w": x["dPi_w"]})
-    dg_fd, du_fd = _fd_richardson(gs, h)
-    assert _rel(dg, dg_fd) < 1e-9
-    assert _rel(du, du_fd) < 1e-9
+    # outputs: (dg_weiss, du_weiss, dh0, ddelta) vs the derivative of (g_weiss, u_weiss, h0, delta)
+    for name, d, d_fd in zip(("dg_weiss", "du_weiss", "dh0", "ddelta"), out, _fd_richardson(gs, h)):
+        assert _rel(d, d_fd) < 1e-9, name

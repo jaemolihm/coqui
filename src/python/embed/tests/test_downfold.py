@@ -69,8 +69,12 @@ def test_downfold(mpi):
         "wannier_file": mf.outdir() + "/lih_wan.h5",
         "force_real": True
     }
-    Gloc_t = coqui.downfold_local_gf(mf, gloc_params)
+    Hloc, Gloc_t = coqui.downfold_local_gf(mf, gloc_params)
 
+    # Hloc is the real Hermitian static local term of Gloc (force_real)
+    assert Hloc.shape == Gloc_t.shape[1:]
+    assert np.allclose(Hloc.imag, 0.0, atol=1e-12), "Imaginary part of Hloc is not negligible"
+    assert np.allclose(Hloc, np.swapaxes(Hloc, -1, -2).conj(), atol=1e-12), "Hloc is not Hermitian"
     assert np.allclose(Gloc_t.imag, 0.0, atol=1e-10), "Imaginary part of Gloc(t) is not negligible"
     # Reference values at the default wmax = 1.5*[(a+b)+max(a,b)] (a=ef-emin, b=emax-ef), cppdlr 7a0f60c.
     assert Gloc_t[-1,0,0,0] == pytest.approx(-0.9963630709696636, abs=1e-10)

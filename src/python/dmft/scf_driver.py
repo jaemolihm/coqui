@@ -409,7 +409,7 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
         # downfold for G_loc
         gloc_params["greens_func_source"] = greens_func_source
         gloc_params["greens_func_iteration"] = greens_func_iteration
-        Gloc_t = coqui.downfold_local_gf(mf, gloc_params, projector_info=proj_info)
+        Hloc, Gloc_t = coqui.downfold_local_gf(mf, gloc_params, projector_info=proj_info)
 
         if coqui_mpi.root():
             dmft_state.iaft.check_leakage(Gloc_t, stats='f', name='Gloc in the full MLWF space')
@@ -418,22 +418,26 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
         # Convert spin axis → list of length nspin
         Vloc, Wloc_t = [Vloc], [Wloc_t]
         Gloc_t = [Gloc_t[:, s] for s in range(Gloc_t.shape[1])]
+        Hloc = [Hloc[s] for s in range(Hloc.shape[0])]
         if mf.nspin() == 1:
             Gloc_t = [Gloc_t[0], Gloc_t[0].copy()]
-        
+            Hloc = [Hloc[0], Hloc[0].copy()]
+
         # Extract local Green's function and screened interactions for each impurity
         Gloc_C    = dmft_state.embedding['1e'].extract(Gloc_t)   # block matrix
+        Hloc_C    = dmft_state.embedding['1e'].extract(Hloc)     # static local one-body term
         Vloc_C    = dmft_state.embedding['2e'].extract(Vloc)
         Wloc_C    = dmft_state.embedding['2e'].extract(Wloc_t)
         Vloc_C    = [ V[0] for V in Vloc_C ]      # spinless
         Wloc_C    = [ W_t[0] for W_t in Wloc_C ]  # spinless
 
-        for imp_index, (G_t, W_t, V) in enumerate(zip(Gloc_C, Wloc_C, Vloc_C)):
+        for imp_index, (G_t, H, W_t, V) in enumerate(zip(Gloc_C, Hloc_C, Wloc_C, Vloc_C)):
             coqui_dmft.print_title_box(f"IMPURITY {imp_index}")
 
             solver_params = solver_params_list[imp_index]
             Res, Input = dmft_state.solver_results[imp_index], dmft_state.solver_inputs[imp_index]
             Input['Gloc_t'] = G_t
+            Input['Hloc'] = coqui_dmft.blk_arr_to_arr(H, Input['gf_struct'])
             Input['Wloc_t'] = coqui_dmft.chemistry_to_product_basis(W_t)
             Input['Vloc'] = coqui_dmft.chemistry_to_product_basis(V)
 
@@ -447,16 +451,12 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
             prev_h0 = Input.get('h0')
 
             # Fermionic and bosonic Weiss fields
-            Input['g_weiss_iw'], Input['u_weiss_iw'] = _compute_weiss_fields(
+            # h0: (nspin, norb, norb), delta_iw: (niw, nspin, norb, norb)
+            Input['g_weiss_iw'], Input['u_weiss_iw'], Input['h0'], Input['delta_iw'] = _compute_weiss_fields(
                 coqui_mpi, Res, Input, solver_params, dmft_state.iaft
             )
             Input['u_weiss_iw'] = coqui_dmft.fit_u_weiss(
                 Input['u_weiss_iw'], dmft_state.iaft, solver_params.get("causal_projection")
-            )
-
-            # h0: (nspin, norb, norb), delta_iw: (niw, nspin, norb, norb)
-            Input['h0'], Input['delta_iw'] = coqui_dmft.extract_h0_and_delta(
-                Input['g_weiss_iw'], dmft_state.iaft
             )
 
             Ub, Ubp, Jb_spin, Jb_pair = coqui_dmft.hubbard_kanamori_coulomb(Input['Vloc'])
@@ -605,7 +605,7 @@ def _edmft_loop_fixed_gloc_and_wloc(
     # downfold for G_loc
     gloc_params["greens_func_source"] = greens_func_source
     gloc_params["greens_func_iteration"] = greens_func_iteration
-    Gloc_t = coqui.downfold_local_gf(mf, gloc_params, projector_info=proj_info)
+    Hloc, Gloc_t = coqui.downfold_local_gf(mf, gloc_params, projector_info=proj_info)
 
     if coqui_mpi.root():
         dmft_state.iaft.check_leakage(Gloc_t, stats='f', name='Gloc in the full MLWF space')
@@ -613,23 +613,27 @@ def _edmft_loop_fixed_gloc_and_wloc(
 
     # Convert spin axis → list of length nspin
     Gloc_t = [Gloc_t[:, s] for s in range(Gloc_t.shape[1])]
+    Hloc = [Hloc[s] for s in range(Hloc.shape[0])]
     if mf.nspin() == 1:
         Gloc_t = [Gloc_t[0], Gloc_t[0].copy()]
+        Hloc = [Hloc[0], Hloc[0].copy()]
 
     # Extract local Green's function and screened interactions for each impurity
     Gloc_C    = dmft_state.embedding['1e'].extract(Gloc_t)   # block matrix
+    Hloc_C    = dmft_state.embedding['1e'].extract(Hloc)     # static local one-body term
     Vloc_C    = dmft_state.embedding['2e'].extract([Vloc])    # (norb, norb, norb, norb)
     Wloc_C    = dmft_state.embedding['2e'].extract([Wloc_t]) # (nts, norb, norb, norb, norb)
     Vloc_C    = [ V[0] for V in Vloc_C ]      # spinless
     Wloc_C    = [ W_t[0] for W_t in Wloc_C ]  # spinless
 
     for iteration in range(num_iter):
-        for imp_index, (G_t, W_t, V) in enumerate(zip(Gloc_C, Wloc_C, Vloc_C)):
+        for imp_index, (G_t, H, W_t, V) in enumerate(zip(Gloc_C, Hloc_C, Wloc_C, Vloc_C)):
             coqui_dmft.print_title_box(f"IMPURITY {imp_index}")
 
             solver_params = solver_params_list[imp_index]
             Res, Input = dmft_state.solver_results[imp_index], dmft_state.solver_inputs[imp_index]
             Input['Gloc_t'] = G_t
+            Input['Hloc'] = coqui_dmft.blk_arr_to_arr(H, Input['gf_struct'])
             Input['Wloc_t'] = coqui_dmft.chemistry_to_product_basis(W_t)
             Input['Vloc'] = coqui_dmft.chemistry_to_product_basis(V)
 
@@ -642,16 +646,12 @@ def _edmft_loop_fixed_gloc_and_wloc(
             prev_h0 = Input.get('h0')
 
             # Fermionic and bosonic Weiss fields
-            Input['g_weiss_iw'], Input['u_weiss_iw'] = _compute_weiss_fields(
+            # h0: (nspin, norb, norb), delta_iw: (niw, nspin, norb, norb)
+            Input['g_weiss_iw'], Input['u_weiss_iw'], Input['h0'], Input['delta_iw'] = _compute_weiss_fields(
                 coqui_mpi, Res, Input, solver_params, dmft_state.iaft
             )
             Input['u_weiss_iw'] = coqui_dmft.fit_u_weiss(
                 Input['u_weiss_iw'], dmft_state.iaft, solver_params.get("causal_projection")
-            )
-
-            # h0: (nspin, norb, norb), delta_iw: (niw, nspin, norb, norb)
-            Input['h0'], Input['delta_iw'] = coqui_dmft.extract_h0_and_delta(
-                Input['g_weiss_iw'], dmft_state.iaft
             )
 
             Ub, Ubp, Jb_spin, Jb_pair = coqui_dmft.hubbard_kanamori_coulomb(Input['Vloc'])
@@ -799,6 +799,7 @@ def _compute_weiss_fields(coqui_mpi, imp_results, imp_inputs, solver_params, iaf
                 iaft = iaft,
                 local_gf = {
                     "Gloc_t": gloc_t_mat,
+                    "Hloc": imp_inputs['Hloc'],
                     "Wloc_t": imp_inputs['Wloc_t'],
                     "Vloc": imp_inputs['Vloc']
                 },
@@ -816,6 +817,7 @@ def _compute_weiss_fields(coqui_mpi, imp_results, imp_inputs, solver_params, iaf
                 iaft = iaft,
                 local_gf = {
                     "Gloc_t": gloc_t_mat,
+                    "Hloc": imp_inputs['Hloc'],
                     "Wloc_t": imp_inputs['Wloc_t'],
                     "Vloc": imp_inputs['Vloc']
                 },
