@@ -67,9 +67,10 @@ struct lr_iter_params {
  *   vector type with commutator residuals — quite different from LR where
  *   we have a single 4D ΔF with a simple difference residual.
  *
- *   This class reuses the same B-matrix solve algorithm (eigendecomposition
- *   pseudoinverse from diis_alg.hpp::compute_coefs_c1) with in-memory storage
- *   instead of HDF5-backed VSpace.
+ *   This class keeps in-memory storage instead of HDF5-backed VSpace, and
+ *   solves for the coefficients with the bordered (Lagrange) system instead of
+ *   the normalized pseudoinverse of B x = 1 of diis_alg.hpp::compute_coefs_c1
+ *   (see compute_coefs).
  *
  *   SPMD / distributed: next_step_combined is called on every rank of the
  *   supplied communicator. Each rank stores and operates on only its own
@@ -353,64 +354,65 @@ private:
   }
 
   /**
-   * @brief Compute DIIS coefficients via eigendecomposition pseudoinverse
+   * @brief DIIS coefficients: min c^T B c subject to sum_i c_i = 1
    *
-   * Algorithm from diis_alg.hpp::compute_coefs_c1():
-   * 1. Jacobi-scale B (real part) to unit diagonal
-   * 2. Eigendecompose and pseudoinvert with threshold
-   * 3. Solve for B^{-1} * 1, undo the scaling, normalize to sum=1
+   * Solved as the bordered (Lagrange) system on the Jacobi-scaled
+   * Bt = D^(-1/2) B D^(-1/2), D = diag(B), with y = D^(1/2) c and
+   * u = D^(-1/2) 1 / ||D^(-1/2) 1||:
+   *
+   *   [ Bt  u ] [ y ]   [ 0 ]
+   *   [ u^T 0 ] [ l ] = [ 1 ]
+   *
+   * by an eigendecomposition pseudoinverse, then c = D^(-1/2) y normalized to
+   * sum 1. The bordered form keeps a null vector v of B with sum(v) != 0, the
+   * exact zero-residual combination; a pseudoinverse of B x = 1 drops it, and
+   * DIIS then stalls once the residuals span the range of a low-rank kernel
+   * (e.g. Hartree with fewer interacting orbitals than bands).
    */
   nda::array<double, 1> compute_coefs() const {
     auto B_real = nda::make_regular(nda::real(_B));
     const long n = B_real.shape()[0];
 
-    // Solve with the Jacobi-scaled Bt = D^(-1/2) B D^(-1/2), D = diag(B), so that
-    // Bt_ii = 1 and Bt_ij = cos<(r_i, r_j). Exact change of variables, but it is
-    // what makes the cut below meaningful: B_ii = ||r_i||^2 and DIIS residual
-    // norms decay geometrically, so cond(B) is dominated by that decay while
-    // cond(Bt) sees only genuine linear dependence. The scaling is undone on x.
-    nda::array<double, 1> d(n), bb(n);
+    // Jacobi scaling: Bt_ii = 1 and Bt_ij = cos<(r_i, r_j), so the cut below sees
+    // genuine linear dependence, not the geometric decay of ||r_i||. u is
+    // normalized for the same reason: ||D^(-1/2) 1|| grows like 1/min||r_i|| and
+    // would otherwise set max|eig| and the cut. The final normalization to
+    // sum 1 removes the scale of the right-hand side.
+    nda::array<double, 1> d(n), u(n);
     for (long i = 0; i < n; ++i) {
-      d(i)  = (B_real(i, i) > 0.0) ? std::sqrt(B_real(i, i)) : 1.0;
-      bb(i) = 1.0 / d(i);  // rhs D^(-1/2) 1
+      d(i) = (B_real(i, i) > 0.0) ? std::sqrt(B_real(i, i)) : 1.0;
+      u(i) = 1.0 / d(i);
     }
-    for (long i = 0; i < n; ++i)
-      for (long j = 0; j < n; ++j) B_real(i, j) /= d(i) * d(j);
+    const double u_norm = std::sqrt(std::inner_product(u.begin(), u.end(), u.begin(), 0.0));
 
-    auto [eig, evecs] = nda::linalg::eigenelements(B_real);
-    auto evecs_tr = nda::make_regular(nda::transpose(evecs));
+    nda::matrix<double> M(n + 1, n + 1);
+    M() = 0.0;
+    for (long i = 0; i < n; ++i) {
+      for (long j = 0; j < n; ++j) M(i, j) = B_real(i, j) / (d(i) * d(j));
+      M(i, n) = M(n, i) = u(i) / u_norm;
+    }
 
-    nda::matrix<double> Binv(n, n);
-    nda::matrix<double> eig_inv(n, n);
-    nda::matrix<double> I_tmp(n, n);
-    Binv() = 0;
-    eig_inv() = 0;
-
+    auto [eig, evecs] = nda::linalg::eigenelements(M);
     auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
-    double eig_max = nda::max_element(eig);
-    double eig_min_abs = nda::min_element(eig_abs);
-
+    const double eig_max = nda::max_element(eig_abs);
+    const double eig_min_abs = nda::min_element(eig_abs);
     const double eig_thresh = 1E-14;
 
     // Diagnostic only: a zero smallest |eigenvalue| would print inf/nan.
     if (eig_min_abs > 0.0)
-      app_log(3, "    DIIS: Jacobi-scaled B condition number = {:.2e}",
-              nda::max_element(eig_abs) / eig_min_abs);
+      app_log(3, "    DIIS: bordered Jacobi-scaled B condition number = {:.2e}", eig_max / eig_min_abs);
     else
-      app_log(3, "    DIIS: Jacobi-scaled B is singular (smallest |eigenvalue| = 0)");
+      app_log(3, "    DIIS: bordered Jacobi-scaled B is singular (smallest |eigenvalue| = 0)");
 
-    // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
-    for (long i = 0; i < eig.size(); ++i) {
-      if (eig(i) > eig_thresh * eig_max) {
-        eig_inv(i, i) = 1.0 / eig(i);
-      }
-    }
-
-    nda::blas::gemm(evecs, eig_inv, I_tmp);
-    nda::blas::gemm(I_tmp, evecs_tr, Binv);
-
+    // y = M^+ e_n restricted to the first n rows; eigenvalues below
+    // eig_thresh * max|eig| are dropped.
     nda::array<double, 1> x(n);
-    nda::blas::gemv(1.0, Binv, bb, 0.0, x);
+    x() = 0.0;
+    for (long k = 0; k < n + 1; ++k) {
+      if (eig_abs(k) <= eig_thresh * eig_max) continue;
+      const double w = evecs(n, k) / eig(k);
+      for (long i = 0; i < n; ++i) x(i) += w * evecs(i, k);
+    }
     for (long i = 0; i < n; ++i) x(i) /= d(i);
 
     double sum = std::accumulate(x.begin(), x.end(), 0.0);
