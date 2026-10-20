@@ -619,12 +619,12 @@ class _IAFTIRAdapter(object):
         :param w_input: bool, optional
             If True, ``Ot`` is on the Matsubara-frequency mesh and is transformed
             to imaginary time before checking. Default False.
+        :return: float, ``coeff_last/coeff_first``.
         """
         stats = _normalize_stats(stats)
         if w_input:
             Ot_ = self.w_to_tau(Ot, stats)
-            self.check_leakage(Ot_, stats, name, w_input=False)
-            return
+            return self.check_leakage(Ot_, stats, name, w_input=False)
 
         if stats not in self.statistics:
             raise ValueError("Unknown statistics '{}'. "
@@ -646,6 +646,7 @@ class _IAFTIRAdapter(object):
             app_log(1, "[WARNING] check_leakage: coeff_last/coeff_first = {} >= 1e-5; " \
                     "coeff_last = {}, coeff_first = {}".format(leakage, coeff_last, coeff_first))
         sys.stdout.flush()
+        return leakage
 
     def check_leakage_phsym(self, Ot, stats: str, name: str="", w_input: bool=False):
         """
@@ -670,8 +671,7 @@ class _IAFTIRAdapter(object):
 
         if w_input:
             Ot_ = self.w_to_tau_phsym(Ot, stats)
-            self.check_leakage_phsym(Ot_, stats, name, w_input=False)
-            return
+            return self.check_leakage_phsym(Ot_, stats, name, w_input=False)
 
         if stats not in self.statistics:
             raise ValueError("Unknown statistics '{}'. "
@@ -704,3 +704,4 @@ class _IAFTIRAdapter(object):
         if leakage >= 1e-5:
             app_log(1, "[WARNING] check_leakage_phsym: coeff_last/coeff_first = {} >= 1e-5; " \
                        "coeff_last = {}, coeff_first = {}".format(leakage, coeff_last, coeff_first))
+        return leakage

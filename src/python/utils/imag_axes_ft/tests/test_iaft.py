@@ -330,3 +330,67 @@ def test_from_coqui_chkpt_without_meshes_still_loads():
 
         restored = IAFT.from_coqui_chkpt(chkpt, verbose=False)
         assert restored.beta == pytest.approx(5.0)
+
+
+def _semicircle_G(iaft, tau, nq=400):
+    """Fermionic two-semicircle model G(tau) = sum_i w_i K(tau, omega_i), tau in [0, beta]."""
+    lam = iaft.beta * iaft.wmax
+    th = np.pi * np.arange(1, nq + 1) / (nq + 1)
+    w = np.pi / (nq + 1) * np.sin(th) ** 2
+    om = np.concatenate([0.5 * lam + 0.25 * lam * np.cos(th), -0.5 * lam + 0.25 * lam * np.cos(th)])
+    wq = np.concatenate([w, w])
+    t = (np.asarray(tau) / iaft.beta)[:, None]
+    K = np.exp(-t * np.maximum(om, 0) + (1 - t) * np.minimum(om, 0)) / (1 + np.exp(-np.abs(om)))
+    return (K * wq).sum(1)
+
+
+def test_check_leakage_dlr_vs_ir():
+    """check_leakage of the DLR backend vs the IR backend on the same model G, with white noise added on each
+    backend's own tau points (mean of 5 realizations). Both read the noise floor: at Lambda=600 the DLR/IR ratio is
+    ~1 and ranges over 0.36-1.71 for seeds 0-19 at noise 1e-9 and 1e-6 (different noise on 57 vs 72 points), so the
+    ratio is required to lie in (0.2, 5). The clean values are round-off / DLR-fit-error floors, far below the 1e-5
+    warning threshold."""
+    pytest.importorskip("coqui._lib.iaft_module")
+    beta, wmax = 200.0, 3.0
+    dlr = IAFT(beta=beta, wmax=wmax, prec="high", basis="dlr")
+    ir = IAFT(beta=beta, wmax=wmax, prec="high", basis="ir")
+    rng = np.random.default_rng(5)
+
+    def leakage(iaft, eps, n):
+        g = _semicircle_G(iaft, iaft.tau_mesh('f'))
+        vals = [iaft.check_leakage((g + eps * np.abs(g).max() * rng.standard_normal(g.shape))[:, None].astype(complex),
+                                   'f', 'test') for _ in range(n)]
+        assert all(isinstance(v, float) for v in vals)
+        return np.mean(vals)
+
+    assert leakage(dlr, 0.0, 1) < 1e-11
+    assert leakage(ir, 0.0, 1) < 1e-11
+    for eps in (1e-9, 1e-6):
+        ratio = leakage(dlr, eps, 5) / leakage(ir, eps, 5)
+        assert 0.2 < ratio < 5, (eps, ratio)
+
+
+def test_check_leakage_dlr_w_input_and_phsym():
+    """DLR check_leakage(w_input=True) vs check_leakage on tau data (tau -> w -> tau is the identity on the DLR
+    span, rtol 1e-6 on the noisy ratio), and check_leakage_phsym on the first half of a particle-hole symmetric
+    boson function vs check_leakage on the full function (rtol 1e-8; the same coefficients up to round-off)."""
+    pytest.importorskip("coqui._lib.iaft_module")
+    beta, wmax = 200.0, 3.0
+    iaft = IAFT(beta=beta, wmax=wmax, prec="high", basis="dlr")
+    rng = np.random.default_rng(11)
+    g = _semicircle_G(iaft, iaft.tau_mesh('f'))
+    g = (g + 1e-6 * np.abs(g).max() * rng.standard_normal(g.shape))[:, None].astype(complex)
+    lk_tau = iaft.check_leakage(g, 'f', 'tau')
+    lk_w = iaft.check_leakage(iaft.tau_to_w(g, 'f'), 'f', 'w', w_input=True)
+    assert lk_w == pytest.approx(lk_tau, rel=1e-6)
+
+    tau = iaft.tau_mesh('b')
+    om = np.linspace(0.1, 0.8 * wmax, 30)[None, :]
+    gb = (np.cosh(om * (tau[:, None] - beta / 2)) / np.sinh(om * beta / 2)).sum(1)
+    gb = (gb + 1e-6 * np.abs(gb).max() * rng.standard_normal(gb.shape))
+    nt = len(tau)
+    nt_half = nt // 2 + nt % 2
+    gb = 0.5 * (gb + gb[::-1])[:, None].astype(complex)
+    lk_full = iaft.check_leakage(gb, 'b', 'boson')
+    lk_half = iaft.check_leakage_phsym(gb[:nt_half], 'b', 'boson half')
+    assert lk_half == pytest.approx(lk_full, rel=1e-8)

@@ -28,6 +28,7 @@
 
 #include "utilities/test_common.hpp"
 #include "numerics/imag_axes_ft/dlr/dlr_driver.hpp"
+#include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 
 namespace bdft_tests {
@@ -306,6 +307,105 @@ namespace bdft_tests {
             std::abs(dens.imag()) / std::abs(dens));
     REQUIRE(im_max < 1e-13);
     REQUIRE(std::abs(dens.imag()) / std::abs(dens) < 1e-13);
+  }
+
+  // Tlt (DLR tau-node values -> kernel-SVD mode coefficients):
+  //  (1) orthonormality, (Tlt A_tau)^H (Tlt A_tau) vs beta * cppdlr's analytic Gram matrix get_ipmat() of the DLR
+  //      basis functions (A_tau = cf2it). Compared relative to the largest entry: the Gram matrix has condition
+  //      number ~1e27, so only the leading block is meaningful at double precision.
+  //  (2) leakage ratio max|a_{r-2..r-1}| / max|a_0| of a two-semicircle model G (Gauss-Chebyshev quadrature of the
+  //      Lehmann kernel at the node times, independent of the fine-grid construction): ~1e-12 for clean node values
+  //      (DLR error ~ eps, 1e-13), growing with seeded white noise on the node values.
+  TEST_CASE("dlr_leakage_modes", "[iaft][dlr]") {
+    struct Grid { double beta, wmax; std::string prec; };
+    for (auto [beta, wmax, prec] : {Grid{200.0, 3.0, "high"}, Grid{100.0, 1.2, "high"}, Grid{200.0, 3.0, "medium"}}) {
+      imag_axes_ft::dlr::DLR dlr(beta, wmax, prec, false);
+      long r = dlr.nt_f;
+      REQUIRE(dlr.Tlt.shape() == shape_t<2>{r, r});
+
+      // (1)
+      {
+        auto A_tau = nda::matrix<ComplexType>(dlr._it_ops.get_cf2it());
+        nda::matrix<ComplexType> TA = dlr.Tlt * A_tau;
+        nda::matrix<ComplexType> gram = nda::dagger(TA) * TA;
+        auto ipmat = dlr._it_ops.get_ipmat();
+        double max_ref = 0.0, max_err = 0.0;
+        for (long i = 0; i < r; ++i)
+          for (long j = 0; j < r; ++j) {
+            max_ref = std::max(max_ref, std::abs(beta * ipmat(i, j)));
+            max_err = std::max(max_err, std::abs(gram(i, j) - beta * ipmat(i, j)));
+          }
+        app_log(2, "dlr_leakage_modes beta={} wmax={} {}: max|Gram - beta*ipmat|/max|beta*ipmat| = {}", beta, wmax, prec, max_err / max_ref);
+        REQUIRE(max_err < 1e-12 * max_ref);
+      }
+
+      // (2)
+      {
+        double lambda = beta * wmax;
+        long n = 400;
+        nda::vector<double> om(2 * n), wq(2 * n);
+        for (long i = 1; i <= n; ++i) {
+          double th = M_PI * i / (n + 1);
+          double w = M_PI / (n + 1) * std::sin(th) * std::sin(th);
+          om(i - 1) = 0.5 * lambda + 0.25 * lambda * std::cos(th);
+          om(n + i - 1) = -0.5 * lambda + 0.25 * lambda * std::cos(th);
+          wq(i - 1) = wq(n + i - 1) = w;
+        }
+        auto t_rel = nda::vector<double>(dlr._it_ops.get_itnodes());
+        auto K = cppdlr::build_k_it(nda::vector_const_view<double>(t_rel), nda::vector_const_view<double>(om));
+        nda::matrix<ComplexType> G(r, 1);
+        for (long j = 0; j < r; ++j) {
+          double g = 0.0;
+          for (long i = 0; i < 2 * n; ++i) g += wq(i) * K(j, i);
+          G(j, 0) = g;
+        }
+        double gmax = 0.0;
+        for (long j = 0; j < r; ++j) gmax = std::max(gmax, std::abs(G(j, 0)));
+
+        auto leakage = [&](nda::matrix<ComplexType> const &g) {
+          nda::vector<ComplexType> a = dlr.Tlt * g(nda::range::all, 0);
+          return std::max(std::abs(a(r - 2)), std::abs(a(r - 1))) / std::abs(a(0));
+        };
+        double clean = leakage(G);
+        app_log(2, "dlr_leakage_modes beta={} wmax={} {}: clean = {}", beta, wmax, prec, clean);
+        REQUIRE(clean < (prec == "high" ? 1e-11 : 1e-8));
+
+        std::mt19937 gen(7);
+        std::normal_distribution<double> dist(0.0, 1.0);
+        double prev = clean;
+        for (double noise : {1e-9, 1e-6}) {
+          auto Gn = G;
+          for (long j = 0; j < r; ++j) Gn(j, 0) += noise * gmax * dist(gen);
+          double lk = leakage(Gn);
+          app_log(2, "dlr_leakage_modes beta={} wmax={} {}: noise {} -> {}", beta, wmax, prec, noise, lk);
+          REQUIRE(lk > prev);
+          REQUIRE(lk > noise);
+          REQUIRE(lk < 30 * noise);
+          prev = lk;
+        }
+      }
+    }
+  }
+
+  // IAFT::check_leakage on the DLR basis (serial, comm == nullptr) vs the same ratio evaluated directly from Tlt.
+  TEST_CASE("dlr_check_leakage", "[iaft][dlr]") {
+    imag_axes_ft::IAFT iaft(200.0, 3.0, imag_axes_ft::dlr_basis, "high");
+    long r = iaft.nt_f();
+    std::mt19937 gen(3);
+    std::normal_distribution<double> dist(0.0, 1.0);
+    nda::array<ComplexType, 2> X(r, 3);
+    for (auto &x : X) x = ComplexType(dist(gen), dist(gen));
+    auto T = nda::matrix<ComplexType>(iaft.Tlt_ff());
+    nda::matrix<ComplexType> a = T * nda::matrix<ComplexType>(X);
+    double first = 0.0, last = 0.0;
+    for (long i = 0; i < 3; ++i) {
+      first = std::max(first, std::abs(a(0, i)));
+      last = std::max({last, std::abs(a(r - 2, i)), std::abs(a(r - 1, i))});
+    }
+    boost::mpi3::communicator *no_comm = nullptr;
+    double lk = iaft.check_leakage(X, imag_axes_ft::fermion, no_comm, "random");
+    REQUIRE(lk == Approx(last / first).epsilon(1e-12));
+    REQUIRE(lk > 1e-5);
   }
 
 } // bdft_tests
