@@ -507,9 +507,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
           interaction from G0 (recompute_W is forced on) and the checkpoint is
           used only for the IAFT grid + metadata.
     split_sigma_terms : bool, optional
-        If True, store the two one-shot ΔΣ terms separately (default False):
-        DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
-        (G0·dW0). Requires gw_mode="full", max_iter=1 and mixing >= 1. See
+        If True, also store the one-shot G0·dW0 term separately (default False):
+        DeltaSigma_tskij = total ΔΣ = dG0·W_c0 + G0·dW0, DeltaSigma_GdW_tskij =
+        G0·dW0. Requires gw_mode="full", max_iter=1 and mixing >= 1. See
         run_lr_g0w0.
     div_treatment : str or None, optional
         Divergence treatment for the ε⁻¹ head. Accepted only for
