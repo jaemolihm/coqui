@@ -408,7 +408,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Parameters including:
         - prefix: Input checkpoint prefix (reads {prefix}.mbpt.h5)
         - output: Output checkpoint prefix (default: same as prefix).
-          Must refer to an existing .mbpt.h5 checkpoint; results are appended.
+          Must refer to an existing .mbpt.h5 checkpoint. Its "linear_response"
+          group is deleted and rewritten; all other groups are kept.
         - input_type: HDF5 group to read checkpoint from (default: "scf")
         - input_iter: Iteration number to read (default: -1 = use final_iter)
         - include_xc: LR-DFT. Add the semilocal xc kernel to the direct
@@ -628,6 +629,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     -----
     Results are written to {output}.mbpt.h5 under the "linear_response" group,
     or "linear_response/mode{m}" when several perturbations are passed at once.
+    An existing "linear_response" group (e.g. of an earlier call into the same
+    file, including the default output = prefix) is removed first, so the group
+    holds only this call's datasets.
     """
     import numpy as np
     from coqui._lib.mbpt_module import run_lr as run_lr_cpp
