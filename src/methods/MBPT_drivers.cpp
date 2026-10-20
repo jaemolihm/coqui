@@ -2204,6 +2204,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                      mf->nspin(), mf->nkpts_ibz(), mf->nbnd());
   }
 
+  // Each call owns "linear_response/" of its output: the writes below overwrite only the datasets this call
+  // produces, so datasets of an earlier call into the same file would be read back as this call's results.
+  if (mpi->comm.root() and std::filesystem::exists(output + ".mbpt.h5")) {
+    h5::file file(output + ".mbpt.h5", 'a');
+    h5::group(file).unlink("linear_response");
+  }
+  mpi->comm.barrier();
+
   for (long m = 0; m < nmodes; ++m) {
     if (nmodes > 1)
       app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
