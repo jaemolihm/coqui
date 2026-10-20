@@ -58,20 +58,20 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
 
 
 /**
- * @brief Downfolding of the local Green's function
+ * @brief Downfolding of the local Green's function and its static one-body term, (Hloc_sIab, Gloc_tsIab)
  */
 auto downfold_gloc_impl(std::shared_ptr<mf::MF> mf,
                         MBState&& mb_state, ptree const& pt)
--> nda::array<ComplexType, 5>;
+-> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>;
 
 auto downfold_gloc_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& pt)
--> nda::array<ComplexType, 5>;
+-> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>;
 
 auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
                    nda::array<ComplexType, 5> const& projector_ksIai,
                    nda::array<long, 3> const& band_window,
                    nda::array<RealType, 2> const& kpts_crys)
--> nda::array<ComplexType, 5>;
+-> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>;
 
 
 /**

@@ -69,7 +69,7 @@ namespace coqui_py {
 
 
   auto downfold_gloc_with_projector_from_h5(const Mf &mf, const std::string &df_params)
-  -> nda::array<ComplexType, 5> {
+  -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
     auto parser = InputParser(df_params);
     return methods::downfold_gloc_with_projector_from_h5(mf.get_mf(), parser.get_root());
   }
@@ -78,7 +78,7 @@ namespace coqui_py {
                      const nda::array<ComplexType, 5> &projector_ksIai,
                      const nda::array<long, 3> &band_window,
                      const nda::array<RealType, 2> &kpts_crys)
-  -> nda::array<ComplexType, 5> {
+  -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
     auto parser = InputParser(df_params);
     return methods::downfold_gloc(mf.get_mf(), parser.get_root(), projector_ksIai, band_window, kpts_crys);
   }

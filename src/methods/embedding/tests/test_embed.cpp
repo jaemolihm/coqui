@@ -292,7 +292,14 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
 
       MBState mb_state(ft, coqui_prefix, mf, wannier_file, false);
       embed_t embed(*mf);
-      auto gloc_tsIab = embed.downfold_gloc(mb_state, true, "scf", 0);
+      auto [hloc_sIab, gloc_tsIab] = embed.downfold_gloc(mb_state, true, "scf", 0);
+
+      // Hloc is real (force_real) and Hermitian
+      for (long a = 0; a < hloc_sIab.shape(2); ++a)
+        for (long b = 0; b < hloc_sIab.shape(3); ++b) {
+          VALUE_EQUAL(hloc_sIab(0,0,a,b).imag(), 0.0, 1e-12);
+          VALUE_EQUAL(hloc_sIab(0,0,a,b), std::conj(hloc_sIab(0,0,b,a)), 1e-12);
+        }
 
       app_log(2, "gloc: {0:.12f}, {1:.12f}, {2:.12f}",
               gloc_tsIab(ft.nt_f()-1,0,0,0,0).real(),

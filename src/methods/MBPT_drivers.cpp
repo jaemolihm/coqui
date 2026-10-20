@@ -621,7 +621,7 @@ void downfolding_1e(std::shared_ptr<mf::MF> mf, ptree const& pt) {
 auto downfold_gloc_impl(std::shared_ptr<mf::MF> mf,
                         MBState&& mb_state,
                         ptree const& pt)
--> nda::array<ComplexType, 5> {
+-> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
   std::string err = std::string("downfold_gloc_impl - Incorrect input - ");
   auto greens_func_source = io::get_value<std::string>(pt, "greens_func_source", err+"greens_func_source");
   auto greens_func_iteration = io::get_value_with_default<long>(pt, "greens_func_iteration", -1);
@@ -634,7 +634,7 @@ auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
                   nda::array<ComplexType, 5> const& projector_ksIai,
                   nda::array<long, 3> const& band_window,
                   nda::array<RealType, 2> const& kpts_crys)
-  -> nda::array<ComplexType, 5> {
+  -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
   std::string err = std::string("downfold_gloc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err+"prefix");
   auto outdir = io::get_value_with_default<std::string>(pt, "outdir", "./");
@@ -662,7 +662,7 @@ auto lr_downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
 }
 
 auto downfold_gloc_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& pt)
--> nda::array<ComplexType, 5> {
+-> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>> {
   std::string err = std::string("downfold_gloc - Incorrect input - ");
   auto prefix = io::get_value<std::string>(pt, "prefix", err+"prefix");
   auto outdir = io::get_value_with_default<std::string>(pt, "outdir", "./");
@@ -2017,7 +2017,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // Ground-state local factors of the double counting, on run_lr's own G and W as the ground state's
   // downfold_local_gf / downfold_coulomb: G^loc hermitized in τ with the imaginary part dropped, W^loc and V^loc
   // with the divergence corrections and the 8-fold permutation symmetry. W^loc is W - V (screened part only); V^loc is the bare term.
+  // H^loc = P (H0 + F) P^† - μ is the 1/(iω)² moment of G^loc: H0, F and μ are those of the Dyson equation of G.
   nda::array<ComplexType, 5> Gloc_gs_tsIab, Wloc_gs_tabcd;
+  nda::array<ComplexType, 4> Hloc_gs_sIab;
   nda::array<ComplexType, 4> Vloc_gs_abcd;
   if (gw_edmft) {
     lr_init_timer.start("LR_INIT_GS_LOCAL");
@@ -2028,6 +2030,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     app_log(2, "Ground-state local factors G^loc, W^loc, V^loc of the double counting...");
 
     Gloc_gs_tsIab = proj_boson.proj_fermi().downfold_loc<true>(sG_tskij, "Gloc");
+    Hloc_gs_sIab = proj_boson.proj_fermi().downfold_loc<true>(dyson.sH0_skij(), "H0_loc");
+    Hloc_gs_sIab += proj_boson.proj_fermi().downfold_loc<true>(sF_skij, "F_loc");
+    for (long s = 0; s < Hloc_gs_sIab.shape(0); ++s)
+      for (long I = 0; I < Hloc_gs_sIab.shape(1); ++I)
+        for (long a = 0; a < Hloc_gs_sIab.shape(2); ++a)
+          Hloc_gs_sIab(s, I, a, a) -= mu;
 
     embed_eri_t embed_eri(*mf, div_treatment, hf_div_treatment, "default");
     auto W_wabcd = embed_eri.downfold_W(thc_l, *opt_dW, opt_sB_qIPab->local(), *opt_eps_inv_w);
@@ -2261,11 +2269,28 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       nda::array<long, 1> kpq_map(driver.dyson().kpq_map());
       auto DeltaGloc_tsIab = methods::local_projection::sum_C_O_Cdag(
           sDeltaG_tskij.local(), emb.C_skIai, emb.W_rng, nullptr, nullptr, &kpq_map, mpi->comm);
+      // δH^loc = P^Q (ΔH0 + ΔF [+ ΔV_QPGW]) P^† - Δμ: the static source of the LR Dyson equation (lr_dyson.cpp), projected as δG^loc
+      auto as_rank5 = [](auto const& A) {
+        return nda::reshape(A, std::array<long, 5>{1, A.shape(0), A.shape(1), A.shape(2), A.shape(3)});
+      };
+      auto DeltaHloc_tsIab = methods::local_projection::sum_C_O_Cdag(
+          as_rank5(sDeltaH0_skij.local()), emb.C_skIai, emb.W_rng, nullptr, nullptr, &kpq_map, mpi->comm);
+      DeltaHloc_tsIab += methods::local_projection::sum_C_O_Cdag(
+          as_rank5(sDeltaF_skij.local()), emb.C_skIai, emb.W_rng, nullptr, nullptr, &kpq_map, mpi->comm);
+      if (pDeltaVcorr)
+        DeltaHloc_tsIab += methods::local_projection::sum_C_O_Cdag(
+            as_rank5(pDeltaVcorr->local()), emb.C_skIai, emb.W_rng, nullptr, nullptr, &kpq_map, mpi->comm);
+      for (long s = 0; s < DeltaHloc_tsIab.shape(1); ++s)
+        for (long I = 0; I < DeltaHloc_tsIab.shape(2); ++I)
+          for (long a = 0; a < DeltaHloc_tsIab.shape(3); ++a)
+            DeltaHloc_tsIab(0, s, I, a, a) -= Delta_mu;
       if (mpi->comm.root()) {
         h5::file file(output + ".mbpt.h5", 'a');
         auto lr_grp = chkpt::lr_group(file, nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt);
         nda::h5_write(lr_grp, "DeltaGloc_tsIab", DeltaGloc_tsIab, false);
-        app_log(2, "  - DeltaGloc_tsIab written to \"linear_response/\"");
+        nda::array<ComplexType, 4> DeltaHloc_sIab = DeltaHloc_tsIab(0, nda::ellipsis{});
+        nda::h5_write(lr_grp, "DeltaHloc_sIab", DeltaHloc_sIab, false);
+        app_log(2, "  - DeltaGloc_tsIab, DeltaHloc_sIab written to \"linear_response/\"");
         if (driver.DeltaWloc()) {
           nda::h5_write(lr_grp, "DeltaWloc_tabcd", *driver.DeltaWloc(), false);
           app_log(2, "  - DeltaWloc_tabcd written to \"linear_response/\"");
@@ -2378,9 +2403,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     h5::file file(output + ".mbpt.h5", 'a');
     auto lr_grp = chkpt::lr_group(file);
     nda::h5_write(lr_grp, "Gloc_tsIab", Gloc_gs_tsIab, false);
+    nda::h5_write(lr_grp, "Hloc_sIab", Hloc_gs_sIab, false);
     nda::h5_write(lr_grp, "Wloc_tabcd", Wloc_gs_tabcd, false);
     nda::h5_write(lr_grp, "Vloc_abcd", Vloc_gs_abcd, false);
-    app_log(2, "  - Gloc_tsIab, Wloc_tabcd, Vloc_abcd written to \"linear_response/\"");
+    app_log(2, "  - Gloc_tsIab, Hloc_sIab, Wloc_tabcd, Vloc_abcd written to \"linear_response/\"");
   }
   mpi->comm.barrier();
 

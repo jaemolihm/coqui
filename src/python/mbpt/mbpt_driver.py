@@ -546,8 +546,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         local projection of dW_c(tau) as lr_downfold_coulomb (chemistry order).
         DeltaWloc_tabcd is the dW^loc of the last kernel evaluation (its input dG is the
         previous iterate; at convergence it matches the returned dG to within ``tol``).
-        Both go into the mode group of ``linear_response/``. Full BZ and a single
-        impurity only. ``params["translate_home_cell"]`` (bool, default False) is passed
+        Also ``DeltaHloc_sIab`` (ns, 1, n, n), the static part of the same projection,
+        (1/N_k) sum_k C^{k+Q} (dH0 + dF [+ dV_QPGW with qp_static_sigma])^k C^{k dagger} - Delta_mu,
+        with dF the accelerator's iterate (matching the returned dG to within ``tol``, as DeltaWloc_tabcd).
+        These go into the mode group of ``linear_response/``.
+        Full BZ and a single impurity only. ``params["translate_home_cell"]`` (bool, default False) is passed
         to the projector. With ``local_polarizabilities`` it must also carry
         ``"dc_cells"``, the dict ``ImpurityBlockMap.cell_args`` (``cell_offset``, ``cell_size``,
         ``orb_block``).
@@ -557,6 +560,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         (i) builds the GW+EDMFT W of the checkpoint G (RPA bubble + upfolded Pi_imp - Pi_dc;
         requires ``recompute_W``), (ii) computes the ground-state local factors G^loc, W^loc,
         V^loc from its own G and W and writes them as ``Gloc_tsIab`` (nt, ns, 1, n, n),
+        ``Hloc_sIab`` (ns, 1, n, n; the 1/(i w)^2 moment of G^loc, P (H0 + F) P^dagger - mu),
         ``Wloc_tabcd`` (nt_half, n, n, n, n, chemistry order) and ``Vloc_abcd`` (n, n, n, n) to
         ``linear_response/``, and (iii) includes the linearized double counting in the kernel:
         gw_mode="full" subtracts up(dSigma_dc[dG^loc, dW^loc]) from dSigma and up(dPi_dc[dG^loc])
