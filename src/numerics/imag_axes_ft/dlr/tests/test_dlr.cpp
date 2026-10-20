@@ -408,4 +408,102 @@ namespace bdft_tests {
     REQUIRE(lk > 1e-5);
   }
 
+
+  // The DLR tau <-> iw transforms satisfy the exact reflection tau -> beta - tau of the exact matrices
+  // (s = +1 boson, -1 fermion): Twt(n, nt-1-t) = s conj Twt(n, t), Ttw(nt-1-t, n) = s conj Ttw(t, n), compared with ==;
+  // the PHsym round trips on random data vs the identity (round-off, rtol 1e-12);
+  // single-row interpolation rows vs the same rows of a larger request (== where they are one computation).
+  TEST_CASE("dlr_tau_reflection", "[iaft][dlr]") {
+    struct Grid { double beta, wmax; };
+    for (auto [beta, wmax] : {Grid{200.0, 3.0}, Grid{100.0, 1.2}, Grid{1000.0, 12.0}}) {
+      imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
+      long nt = dlr.nt_f;
+
+      for (auto stats : {imag_axes_ft::fermion, imag_axes_ft::boson}) {
+        bool ferm = (stats == imag_axes_ft::fermion);
+        double s = ferm ? -1.0 : 1.0;
+        auto const &Twt = ferm ? dlr.Twt_ff : dlr.Twt_bb;
+        auto const &Ttw = ferm ? dlr.Ttw_ff : dlr.Ttw_bb;
+        long nw = Twt.extent(0);
+
+        // Twt(n, nt-1-t) vs s conj Twt(n, t); Twt(nw-1-n, nt-1-t) vs s Twt(n, t); Ttw(nt-1-t, n) vs s conj Ttw(t, n)
+        bool refl_Twt = true, refl_both = true, refl_Ttw = true;
+        for (long n = 0; n < nw; ++n)
+          for (long t = 0; t < nt; ++t) {
+            refl_Twt = refl_Twt and (Twt(n, nt - 1 - t) == s * std::conj(Twt(n, t)));
+            refl_both = refl_both and (Twt(nw - 1 - n, nt - 1 - t) == s * Twt(n, t));
+            refl_Ttw = refl_Ttw and (Ttw(nt - 1 - t, n) == s * std::conj(Ttw(t, n)));
+          }
+        REQUIRE(refl_Twt);
+        REQUIRE(refl_both);
+        REQUIRE(refl_Ttw);
+
+        // middle node t = nt-1-t: Twt real for bosons, imaginary for fermions
+        long mid = nt / 2;
+        REQUIRE(nt % 2 == 1);
+        bool mid_ok = true;
+        for (long n = 0; n < nw; ++n) mid_ok = mid_ok and ((ferm ? Twt(n, mid).real() : Twt(n, mid).imag()) == 0.0);
+        REQUIRE(mid_ok);
+
+        // construct_w_interpolate_matrix on a single native frequency vs the same row of the full native mesh
+        // (rows depend only on their own frequency; the product with Ttw agrees to rounding)
+        auto const &wn_mesh = ferm ? dlr.wn_mesh_f : dlr.wn_mesh_b;
+        auto M_full = dlr.construct_w_interpolate_matrix(wn_mesh, stats);
+        double err_row = 0.0, scale = nda::max_element(nda::abs(M_full));
+        for (long k : {0L, nw / 3, nw / 2, nw - 1}) {
+          nda::array<long, 1> one = {wn_mesh(k)};
+          auto M_one = dlr.construct_w_interpolate_matrix(one, stats);
+          for (long m = 0; m < nw; ++m) err_row = std::max(err_row, std::abs(M_one(0, m) - M_full(k, m)));
+        }
+        REQUIRE(err_row < 1e-14 * scale);
+      }
+
+      // tau interpolation: row at tau = beta vs T_beta_t_ff (one computation), T_beta vs reversed T_zero,
+      // row(-x) vs reversed row(x) on a mirror-symmetric mesh
+      {
+        nda::array<double, 1> beta_pt = {1.0};
+        auto T_b = dlr.construct_tau_interpolate_matrix(beta_pt);
+        bool one_row = true, beta_zero = true;
+        for (long t = 0; t < nt; ++t) {
+          one_row = one_row and (T_b(0, t) == dlr.T_beta_t_ff(t));
+          beta_zero = beta_zero and (dlr.T_beta_t_ff(t) == dlr.T_zero_t_ff(nt - 1 - t));
+        }
+        REQUIRE(one_row);
+        REQUIRE(beta_zero);
+
+        nda::array<double, 1> mesh = {-0.9, 0.9, -0.31, 0.31, -1.0, 1.0};
+        auto T = dlr.construct_tau_interpolate_matrix(mesh);
+        bool mirror_rows = true;
+        for (long i = 0; i < mesh.size(); i += 2)
+          for (long t = 0; t < nt; ++t) mirror_rows = mirror_rows and (T(i, t) == T(i + 1, nt - 1 - t));
+        REQUIRE(mirror_rows);
+      }
+
+      // PHsym round trips, tau -> iw -> tau and iw -> tau -> iw, vs the identity on random real data
+      {
+        imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+        long nth = nt / 2 + 1, nwh = dlr.nw_b / 2 + 1;
+        std::mt19937 gen(5);
+        std::normal_distribution<double> dist(0.0, 1.0);
+        nda::array<ComplexType, 2> Xt(nth, 4), Xt2(nth, 4), Xw(nwh, 4), Xw2(nwh, 4), Yw(nwh, 4), Yt(nth, 4);
+        for (auto &x : Xt) x = dist(gen);
+        for (auto &x : Yw) x = dist(gen);
+        iaft.tau_to_w_PHsym(Xt, Xw);
+        iaft.w_to_tau_PHsym(Xw, Xt2);
+        iaft.w_to_tau_PHsym(Yw, Yt);
+        iaft.tau_to_w_PHsym(Yt, Xw2);
+        auto fnorm = [](auto const &A) {
+          double sum = 0.0;
+          for (auto const &a : A) sum += std::norm(a);
+          return std::sqrt(sum);
+        };
+        double err_t = fnorm(nda::array<ComplexType, 2>(Xt2 - Xt)) / fnorm(Xt);
+        double err_w = fnorm(nda::array<ComplexType, 2>(Xw2 - Yw)) / fnorm(Yw);
+        app_log(2, "dlr beta={} wmax={}: PHsym round trip tau {}, iw {}", beta, wmax, err_t, err_w);
+        REQUIRE(err_t < 1e-12);
+        REQUIRE(err_w < 1e-12);
+      }
+    }
+  }
+
 } // bdft_tests

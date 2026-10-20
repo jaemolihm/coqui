@@ -432,7 +432,7 @@ public:
 
   /**
    * δΣ_dc(τ) of the double counting for the local response `dGloc_tsIab` and, if given, the product-basis
-   * δW^loc `dWloc_pb` (nullptr: δW^loc = 0), after the τ -> iω -> τ round trip the kernel applies.
+   * δW^loc `dWloc_pb` (nullptr: δW^loc = 0), as the kernel applies it.
    */
   nda::array<ComplexType, 5> dc_sigma_response(const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
                                                const nda::array<ComplexType, 5>* dWloc_pb);

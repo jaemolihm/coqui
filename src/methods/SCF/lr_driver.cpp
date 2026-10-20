@@ -446,39 +446,11 @@ void lr_driver::lr_setup(
 }
 
 
-namespace {
-
-// τ -> iω -> τ round trip of the double counting. The ground state does the same: weiss.solve_gw_dc (weiss.py) stores
-// Σ_dc as iaft.tau_to_w(eval_gw_dc_t(...)) and Π_dc as iaft.tau_to_w_phsym(eval_pi_rpa(...)); the embedded Σ returns to τ
-// with w_to_tau in embed_t::add_Sigma_dyn_correction (embed_t.cpp), and Π_imp and Π_dc with w_to_tau_PHsym in
-// scr_coulomb_t::eval_Pi_qdep, reached from scr_coulomb_t::update_w in the GW+EDMFT SCF and from
-// recompute_W_and_eps_inv_head (MBPT_drivers.cpp) in run_lr's W rebuild.
-// The round trip is the identity on an IR grid but not on a DLR grid (white noise: 3e-2 fermion, 2e-3 boson on the
-// Hubbard test grid), so the derivative of the ground-state map includes it.
-void dc_fermi_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>& dSigma_tsIab) {
-  nda::array<ComplexType, 5> dSigma_w(ft.nw_f(), dSigma_tsIab.extent(1), 1, dSigma_tsIab.extent(3),
-                                      dSigma_tsIab.extent(4));
-  ft.tau_to_w(dSigma_tsIab, dSigma_w, imag_axes_ft::fermion);
-  ft.w_to_tau(dSigma_w, dSigma_tsIab, imag_axes_ft::fermion);
-}
-
-void dc_bose_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>& dPi_tabcd) {
-  const long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  nda::array<ComplexType, 5> dPi_w(nw_half, dPi_tabcd.extent(1), dPi_tabcd.extent(2), dPi_tabcd.extent(3),
-                                   dPi_tabcd.extent(4));
-  ft.tau_to_w_PHsym(dPi_tabcd, dPi_w);
-  ft.w_to_tau_PHsym(dPi_w, dPi_tabcd);
-}
-
-} // anonymous
-
 nda::array<ComplexType, 5> lr_driver::dc_sigma_response(
     const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
     const nda::array<ComplexType, 5>* dWloc_pb) {
   utils::check(emb.dc.has_value(), "lr_driver::dc_sigma_response: the embedding has no double counting.");
-  auto dSigma_dc_tsIab = lr_dc_sigma(emb.dc->Gloc_tsIab, dGloc_tsIab, emb.dc->Wloc_pb, dWloc_pb, emb.dc->cells);
-  dc_fermi_round_trip(*_dyson.FT(), dSigma_dc_tsIab);
-  return dSigma_dc_tsIab;
+  return lr_dc_sigma(emb.dc->Gloc_tsIab, dGloc_tsIab, emb.dc->Wloc_pb, dWloc_pb, emb.dc->cells);
 }
 
 void lr_driver::apply_kernel_gw(
@@ -529,7 +501,6 @@ void lr_driver::apply_kernel_gw(
     dGloc_tsIab = local_projection::sum_C_O_Cdag(
         sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
     auto dPi_dc_tabcd = lr_dc_pi(dc->Gloc_tsIab, dGloc_tsIab, dc->cells);
-    dc_bose_round_trip(*_dyson.FT(), dPi_dc_tabcd);
     nda::array<ComplexType, 5> dPi_imp_tabcd = p.embedding->Pi_imp_tabcd - dPi_dc_tabcd;
     local_projection::upfold_pi_block(dPi_imp_tabcd, p.embedding->B_qIPab, dDeltaPi_tqPQ, &kpq_map, true);
   }

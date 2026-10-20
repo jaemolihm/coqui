@@ -563,9 +563,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         from dPi before the dW solve; gw_mode="fixed_W" subtracts up(dSigma_dc[dG^loc, 0]) from
         dSigma (W is frozen, so dPi_dc has no effect). gw_mode="none", the hessian, qp and
         ``split_sigma_terms`` are rejected. Requires ``projector_info`` with ``"dc_cells"``.
-        Each mode group also gets ``DeltaSigma_dc_tsIab`` (dSigma_dc of the final dG^loc and dW^loc,
-        after the tau -> iw -> tau round trip of the kernel) and ``DeltaSigma_imp_tsIab`` (the dSigma_imp
-        source in tau, zero without a "Sigma" key), both (nt, ns, 1, n, n); dSigma minus
+        Each mode group also gets ``DeltaSigma_dc_tsIab`` (dSigma_dc of the final dG^loc and dW^loc)
+        and ``DeltaSigma_imp_tsIab`` (the dSigma_imp source in tau, zero without a "Sigma" key),
+        both (nt, ns, 1, n, n); dSigma minus
         up(dSigma_imp - dSigma_dc) is the plain-GW part to the solver tolerance (dSigma is the
         accelerator's iterate, dSigma_dc is evaluated at the final dG^loc).
     lr_impurity_response : dict or None, optional
