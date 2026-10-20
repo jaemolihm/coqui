@@ -446,25 +446,6 @@ void lr_driver::lr_setup(
 }
 
 
-namespace {
-
-// τ -> iω -> τ round trip of Π_dc on the half-τ grid. The ground state does the same: weiss.solve_gw_dc (weiss.py) stores
-// Π_dc as iaft.tau_to_w_phsym(eval_pi_rpa(...)), and Π_imp and Π_dc return to τ with w_to_tau_PHsym in
-// scr_coulomb_t::eval_Pi_qdep, reached from scr_coulomb_t::update_w in the GW+EDMFT SCF and from
-// recompute_W_and_eps_inv_head (MBPT_drivers.cpp) in run_lr's W rebuild.
-// On a DLR grid the PHsym round trip is not the identity (it is not a projection either): the iω transform of the
-// PH-even extension of the half-τ data is not exactly even in n. It changes ΔΠ_dc by up to 2e-7 relative on the Hubbard
-// test grid (white noise: 6e-4), so the derivative of the ground-state map includes it.
-void dc_bose_round_trip(const imag_axes_ft::IAFT& ft, nda::array<ComplexType, 5>& dPi_tabcd) {
-  const long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  nda::array<ComplexType, 5> dPi_w(nw_half, dPi_tabcd.extent(1), dPi_tabcd.extent(2), dPi_tabcd.extent(3),
-                                   dPi_tabcd.extent(4));
-  ft.tau_to_w_PHsym(dPi_tabcd, dPi_w);
-  ft.w_to_tau_PHsym(dPi_w, dPi_tabcd);
-}
-
-} // anonymous
-
 nda::array<ComplexType, 5> lr_driver::dc_sigma_response(
     const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
     const nda::array<ComplexType, 5>* dWloc_pb) {
@@ -520,7 +501,6 @@ void lr_driver::apply_kernel_gw(
     dGloc_tsIab = local_projection::sum_C_O_Cdag(
         sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
     auto dPi_dc_tabcd = lr_dc_pi(dc->Gloc_tsIab, dGloc_tsIab, dc->cells);
-    dc_bose_round_trip(*_dyson.FT(), dPi_dc_tabcd);
     nda::array<ComplexType, 5> dPi_imp_tabcd = p.embedding->Pi_imp_tabcd - dPi_dc_tabcd;
     local_projection::upfold_pi_block(dPi_imp_tabcd, p.embedding->B_qIPab, dDeltaPi_tqPQ, &kpq_map, true);
   }
