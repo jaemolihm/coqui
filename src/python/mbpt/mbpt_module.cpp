@@ -59,7 +59,15 @@ namespace coqui_py {
    * @param dc_cells          - [INPUT] The cells of the correlated space of the double counting: "cell_offset",
    *                            "cell_size", "orb_block"
    * @param lr_impurity_response - [INPUT] Optional response of the impurity {"Sigma": δΣ_imp(iω), "Pi": δΠ_imp(iν)} in the
-   *                            layouts of the ground state; needs local_polarizabilities
+   *                            layouts of the ground state; needs local_polarizabilities. With local_polarizabilities
+   *                            run_lr also writes DeltaDelta_wsIab (nw_f, ns, 1, n, n), the response of the Weiss
+   *                            hybridization (formula on run_lr_calc in MBPT_drivers.h) and the pointwise
+   *                            Gloc_wsIab; "Sigma" enters δΔ as given, in iω. The ground-state map applies force_real to G_loc and H^loc
+   *                            (as downfold_local_gf_w with its default); δΔ applies its derivative to δG^pw and δH^loc:
+   *                            P at Q = 0 (real-linear: ΔH0 must be Hermitian there), Sym(X) = (X + Xᵀ)/2 at Q != 0 (formulas on run_lr_calc in
+   *                            MBPT_drivers.h). Gloc_wsIab and δΔ use the H0 of run_lr, so they
+   *                            differentiate the ground-state map of downfold_local_gf_w only for
+   *                            h0_source = "checkpoint" (or an identical computed H0)
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
   std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(

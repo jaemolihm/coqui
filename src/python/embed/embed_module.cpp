@@ -83,6 +83,21 @@ namespace coqui_py {
     return methods::downfold_gloc(mf.get_mf(), parser.get_root(), projector_ksIai, band_window, kpts_crys);
   }
 
+  auto downfold_gloc_w_with_projector_from_h5(const Mf &mf, const std::string &df_params)
+  -> nda::array<ComplexType, 5> {
+    auto parser = InputParser(df_params);
+    return methods::downfold_gloc_w_with_projector_from_h5(mf.get_mf(), parser.get_root());
+  }
+
+  auto downfold_gloc_w(const Mf &mf, const std::string &df_params,
+                       const nda::array<ComplexType, 5> &projector_ksIai,
+                       const nda::array<long, 3> &band_window,
+                       const nda::array<RealType, 2> &kpts_crys)
+  -> nda::array<ComplexType, 5> {
+    auto parser = InputParser(df_params);
+    return methods::downfold_gloc_w(mf.get_mf(), parser.get_root(), projector_ksIai, band_window, kpts_crys);
+  }
+
   auto lr_downfold_gloc(const Mf &mf, const std::string &df_params,
                         const nda::array<ComplexType, 5> &projector_ksIai,
                         const nda::array<long, 3> &band_window,

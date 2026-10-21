@@ -94,6 +94,15 @@ namespace methods {
     -> std::tuple<nda::array<ComplexType, 4>, nda::array<ComplexType, 5>>;
 
     /**
+     * Pointwise local Green's function G_loc(iw) = P <G_k(iw)> P^dagger of {g_grp}/iter{g_iter}, with
+     * G_k(iw) = [(iw + mu) S - H0 - F - B Sigma(tau)(iw)]^-1 the Dyson G of the group's F, Sigma, mu (see
+     * local_G_omega). T Gloc_w = Gloc_tsIab of downfold_gloc, T = w_to_tau.
+     * @return Gloc_wsIab (nw_f, ns, nImps, n, n). A quasiparticle group aborts.
+     */
+    auto downfold_gloc_w(MBState& mb_state, bool force_real, std::string g_grp, long g_iter)
+    -> nda::array<ComplexType, 5>;
+
+    /**
      * @param context       - [INPUT] mpi communicator
      * @param outdir        - [INPUT] director for h5 checkpoint file
      * @param prefix        - [INPUT] prefix for h5 checkpoint file

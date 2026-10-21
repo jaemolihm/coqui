@@ -74,6 +74,7 @@ def downfold_inputs(mpi, request):
         "force_real": True,
     }
     hloc, gloc_t = coqui.downfold_local_gf(mf, gloc_params)
+    gloc_w = coqui.downfold_local_gf_w(mf, gloc_params)
 
     wloc_params = {
         "outdir": "./",
@@ -91,6 +92,7 @@ def downfold_inputs(mpi, request):
         "iaft": ir_kernel,
         "hloc": hloc,
         "gloc_t": gloc_t,
+        "gloc_w": gloc_w,
         "wloc_t": wloc_t,
     }
 
@@ -131,7 +133,7 @@ def test_hloc_split_svo(downfold_inputs):
     iaft = downfold_inputs["iaft"]
     hloc = downfold_inputs["hloc"]
     gloc_t = downfold_inputs["gloc_t"]
-    g_iw = iaft.tau_to_w(gloc_t, stats="f")
+    g_iw = downfold_inputs["gloc_w"]
 
     # (a) Hloc vs the fit reference values; the tolerance is the fit's error, measured
     H0_SAB_REF = np.array([[
@@ -140,6 +142,8 @@ def test_hloc_split_svo(downfold_inputs):
         [ 3.27477287e-05, -9.76175950e-05,  1.98808918e-01]
     ]])
     assert hloc.shape == g_iw.shape[1:] == H0_SAB_REF.shape
+    # the pointwise G_loc(iw) is the transform pair of G_loc(tau): T G_loc(iw) = G_loc(tau) to 1e-10
+    assert _rel(iaft.w_to_tau(g_iw, stats="f"), gloc_t) < 1e-10
     assert np.allclose(hloc.imag, 0.0, atol=1e-12)
     assert np.max(np.abs(hloc.real - H0_SAB_REF)) < TOL_HLOC_VS_FIT
 
@@ -253,13 +257,9 @@ def weiss_lr_inputs():
                 W_t=iaft.w_to_tau_phsym(W_w, 'b'), dW_t=iaft.w_to_tau_phsym(dW_w, 'b'))
 
 
-def test_lr_weiss_fermion_boson_multiorbital(weiss_lr_inputs):
+# lr_weiss_boson_w vs the Richardson central difference of compute_weiss_boson_w.
+def test_lr_weiss_boson_multiorbital(weiss_lr_inputs):
     x, h = weiss_lr_inputs, 1e-4
-    dg, _ = lr_weiss.lr_weiss_fermion_w(x["G_w"], x["dG_w"], x["Vhf"], x["dVhf"], x["Sigma_w"], x["dSigma_w"])
-    dg_fd, = _fd_richardson(lambda e: [weiss.compute_weiss_fermion_w(
-        x["G_w"] + e * x["dG_w"], x["Vhf"] + e * x["dVhf"], x["Sigma_w"] + e * x["dSigma_w"])], h)
-    assert _rel(dg, dg_fd) < 1e-9
-
     du = lr_weiss.lr_weiss_boson_w(x["V"], x["W_w"], x["dW_w"], x["Pi_w"], x["dPi_w"])
     du_fd, = _fd_richardson(lambda e: [weiss.compute_weiss_boson_w(
         x["V"], x["W_w"] + e * x["dW_w"], x["Pi_w"] + e * x["dPi_w"])], h)
@@ -267,23 +267,26 @@ def test_lr_weiss_fermion_boson_multiorbital(weiss_lr_inputs):
 
 
 # lr_compute_weiss_fields_w (all four outputs, dHloc generic) vs the Richardson central difference of
-# compute_weiss_fields_w.
+# compute_weiss_fields_w on the pointwise G_loc(iw); ddelta is built in the test with the formula of C++ lr_hybridization_w,
+# so for it this checks that formula against the FD, not CoQuí code.
 def test_lr_compute_weiss_fields_multiorbital(weiss_lr_inputs):
     x, h = weiss_lr_inputs, 1e-4
     def gs(e):
         return list(weiss.compute_weiss_fields_w(
             iaft=x["iaft"],
-            local_gf={"Gloc_t": x["G_t"] + e * x["dG_t"], "Hloc": x["Hloc"] + e * x["dHloc"],
+            local_gf={"Gloc_w": x["G_w"] + e * x["dG_w"], "Hloc": x["Hloc"] + e * x["dHloc"],
                       "Wloc_t": x["W_t"] + e * x["dW_t"], "Vloc": x["V"]},
             impurity_selfenergies={"Vhf_imp": x["Vhf"] + e * x["dVhf"],
                                    "Sigma_imp_w": x["Sigma_w"] + e * x["dSigma_w"],
                                    "Pi_imp_w": x["Pi_w"] + e * x["dPi_w"]}))
+    g_inv = np.linalg.inv(x["G_w"])
+    ddelta = g_inv @ x["dG_w"] @ g_inv - x["dHloc"][None] - x["dSigma_w"]
     out = lr_weiss.lr_compute_weiss_fields_w(
         iaft=x["iaft"],
-        local_gf={"Gloc_t": x["G_t"], "Wloc_t": x["W_t"], "Vloc": x["V"]},
-        d_local_gf={"Gloc_t": x["dG_t"], "Hloc": x["dHloc"], "Wloc_t": x["dW_t"]},
+        local_gf={"Gloc_w": x["G_w"], "Wloc_t": x["W_t"], "Vloc": x["V"]},
+        d_local_gf={"Hloc": x["dHloc"], "Delta_w": ddelta, "Wloc_t": x["dW_t"]},
         impurity_selfenergies={"Vhf_imp": x["Vhf"], "Sigma_imp_w": x["Sigma_w"], "Pi_imp_w": x["Pi_w"]},
-        d_impurity_selfenergies={"Vhf_imp": x["dVhf"], "Sigma_imp_w": x["dSigma_w"], "Pi_imp_w": x["dPi_w"]})
+        d_impurity_selfenergies={"Vhf_imp": x["dVhf"], "Pi_imp_w": x["dPi_w"]})
     # outputs: (dg_weiss, du_weiss, dh0, ddelta) vs the derivative of (g_weiss, u_weiss, h0, delta)
     for name, d, d_fd in zip(("dg_weiss", "du_weiss", "dh0", "ddelta"), out, _fd_richardson(gs, h)):
         assert _rel(d, d_fd) < 1e-9, name

@@ -559,7 +559,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         (nw_half, a, b, c, d), as run_gw. It declares a GW+EDMFT ground state. run_lr then
         (i) builds the GW+EDMFT W of the checkpoint G (RPA bubble + upfolded Pi_imp - Pi_dc;
         requires ``recompute_W``), (ii) computes the ground-state local factors G^loc, W^loc,
-        V^loc from its own G and W and writes them as ``Gloc_tsIab`` (nt, ns, 1, n, n),
+        V^loc from its own G and W and writes them as ``Gloc_tsIab`` (nt, ns, 1, n, n), the pointwise
+        ``Gloc_wsIab`` = P <G_k(iw)> P^dagger (nw_f, ns, 1, n, n; G_k(iw) = [(iw + mu) S - H0 - F - B Sigma(tau)(iw)]^-1,
+        B = tau -> iw, so that T Gloc_wsIab = Gloc_tsIab with T = iw -> tau),
         ``Hloc_sIab`` (ns, 1, n, n; the 1/(i w)^2 moment of G^loc, P (H0 + F) P^dagger - mu),
         ``Wloc_tabcd`` (nt_half, n, n, n, n, chemistry order) and ``Vloc_abcd`` (n, n, n, n) to
         ``linear_response/``, and (iii) includes the linearized double counting in the kernel:
@@ -572,12 +574,29 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         source in tau, zero without a "Sigma" key), both (nt, ns, 1, n, n); dSigma minus
         up(dSigma_imp - dSigma_dc) is the plain-GW part to the solver tolerance (dSigma is the
         accelerator's iterate, dSigma_dc is evaluated at the final dG^loc).
+        Each mode group also gets ``DeltaDelta_wsIab`` (nw_f, ns, 1, n, n), the response of the Weiss
+        hybridization on the fermionic Matsubara mesh, per 1e alpha block of ``dc_cells["orb_block"]`` and zero
+        off-block:
+        dDelta = Gw^-1 dG^pw Gw^-1 - dH^loc - dSigma_imp, with Gw = ``Gloc_wsIab`` and
+        dG^pw(iw) = (1/N_k) sum_k C^{k+Q} G_{k+Q}(iw) dX_k(iw) G_k(iw) C^{k dagger}, the converged source
+        dX_k(iw) = dH0_k + dF_k - dmu S_k + B dSigma_k (dSigma includes up(dSigma_imp - dSigma_dc)). No transform acts
+        on the product, so dDelta is the derivative of the ground-state Weiss map with the pointwise G^loc
+        (``coqui.downfold_local_gf_w``). lr_dyson's G(iw) is the pointwise Dyson G of the checkpoint F, Sigma, mu (for
+        unperturbed="checkpoint"), so that T dG^pw = ``DeltaGloc_tsIab`` before the projection below, and ``Gloc_wsIab``
+        is built from that same G(iw).
+        The ground-state map applies the force_real projection P to G^loc and H^loc (as ``coqui.downfold_local_gf_w``
+        with its default); dDelta applies its derivative to dG^pw and dH^loc. At Q = 0 it applies
+        P(dX)(iw_n) = [S(iw_n) + conj S(iw_-n)]/2 with S = (dX + dX^T)/2 (static dH^loc: Re (dX + dX^T)/2); at
+        Q != 0 it applies Sym(dX) = (dX + dX^T)/2. P is real-linear, so DeltaH0_skij at Q = 0 must be Hermitian
+        (dDelta[i V] = 0 for Hermitian V). ``DeltaGloc_tsIab`` and ``DeltaHloc_sIab`` are not projected.
+        dSigma_imp = 0 without a "Sigma" key.
     lr_impurity_response : dict or None, optional
         Response of the impurity of a GW+EDMFT ground state, keys within {"Sigma", "Pi"}; a missing key
         is zero. Requires ``local_polarizabilities``, a single perturbation and a kernel with Sigma
         (gw_mode "fixed_W" or "full"). Given on every rank. Layouts are those of the ground state:
 
-        - ``"Sigma"``: dSigma_imp(iw), shape (nw_f, ns, 1, n, n), on the full fermionic frequency grid.
+        - ``"Sigma"``: dSigma_imp(iw), shape (nw_f, ns, 1, n, n), on the full fermionic frequency grid. It is
+          used as given, pointwise in iw, in ``DeltaDelta_wsIab``.
         - ``"Pi"``: dPi_imp(inu), shape (nw_half, n, n, n, n), product basis, on the half bosonic grid;
           requires gw_mode="full".
 

@@ -103,6 +103,16 @@ struct lr_diis_hist_t {
 };
 
 /**
+ * Inputs of the Dyson equation that produced the unperturbed G(τ) = T·G(iω) (T = w_to_tau), besides the
+ * H0 and S of lr_driver's simple_dyson: G(iω) = [(iω + μ) S - H0 - F - (B Σ)(iω)]⁻¹, B = tau_to_w.
+ */
+struct lr_gs_dyson_inputs {
+  const math::shm::shared_array<nda::array_view<ComplexType, 4>>* sF_skij = nullptr;
+  const math::shm::shared_array<nda::array_view<ComplexType, 5>>* sSigma_tskij = nullptr;
+  double mu = 0.0;
+};
+
+/**
  * Embedding data of an LR run: the projector C and the aux-basis projector B,
  * from which the driver forms δG^loc (by the caller, from the returned ΔG) and
  * δW^loc (after every ΔW solve of the kernel). With dc, the kernel also subtracts
@@ -213,6 +223,9 @@ struct lr_params {
   const lr_qp_static_params* qp_static = nullptr;
   /// Embedding data (nullptr: none). The driver then also forms δW^loc; see embedding_info.
   const embedding_info* embedding = nullptr;
+  /// Non-null: lr_dyson's G(iω) is the pointwise Dyson G of these inputs, so that ΔG(τ) = T[G δX G] is the exact
+  /// derivative of the ground-state map. nullptr: B·G(τ) (G0 of unperturbed = "mf_dft" is built directly in τ).
+  const lr_gs_dyson_inputs* gs_dyson = nullptr;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -356,6 +369,12 @@ public:
   lr_dyson& dyson() {
     utils::check(_setup_done, "lr_driver::dyson: call lr_setup first.");
     return _lr_dyson;
+  }
+
+  /// The ground-state G(iω) (nw_f, ns, nk, nb, nb) that lr_dyson applies, node-shared. Requires lr_setup.
+  const sArray_t<Array_view_5D_t>& G_omega() const {
+    utils::check(_setup_done and _sG_wskij.has_value(), "lr_driver::G_omega: call lr_setup first.");
+    return *_sG_wskij;
   }
 
   /**

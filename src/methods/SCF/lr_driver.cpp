@@ -25,6 +25,7 @@
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/embedding/local_projection.hpp"
 #include "methods/SCF/lr_precompute.hpp"
+#include "methods/SCF/dyson_omega.hpp"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/scr_coulomb/scr_coulomb_fourier_t.h"
@@ -370,7 +371,14 @@ void lr_driver::lr_setup(
   // array's address, so a per-call local would invalidate it every solve.
   utils::memlog("lr_driver::lr_setup: before sG_wskij precompute");
   _Timer.start("LR_DRIVER_SETUP_G_OMEGA");
-  _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
+  if (p.gs_dyson) {
+    // Pointwise Dyson G(iω) of the inputs that produced sG_tskij
+    _sG_wskij.emplace(pointwise_G_omega(*_mpi, p.gs_dyson->mu, _dyson.sH0_skij(), _dyson.sS_skij(),
+                                        *p.gs_dyson->sF_skij, *p.gs_dyson->sSigma_tskij, *_dyson.FT()));
+  } else {
+    // B·G(τ)
+    _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
+  }
   _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
   _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
   utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
