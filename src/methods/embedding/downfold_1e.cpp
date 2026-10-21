@@ -27,10 +27,32 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/embedding/dc_utilities.hpp"
 #include "methods/embedding/embed_t.h"
+#include "methods/embedding/hybridization_response.hpp"
 #include "methods/ERI/thc_reader_t.hpp"
 #include "mean_field/model_hamiltonian/model_utils.hpp"
 
 namespace methods {
+
+  namespace {
+    // The iteration of {g_grp} to read: g_iter, or the last one for -1
+    long resolve_g_iter(const std::string& filename, const std::string& g_grp, long g_iter) {
+      app_log(2, "Checking the dataset in the coqui checkpoint file...\n");
+      auto [gw_iter, weiss_f_iter, weiss_b_iter, embed_iter] = chkpt::read_input_iterations(filename);
+      if (g_grp == "scf") {
+        g_iter = (g_iter == -1)? gw_iter : g_iter;
+        utils::check(g_iter <= gw_iter and g_iter >= 0,
+                     "downfold_1e logic fail: the input dataset {}/iter{} does not exist!",
+                     g_grp, g_iter);
+      } else if (g_grp == "embed") {
+        g_iter = (g_iter == -1)? embed_iter : g_iter;
+        utils::check(g_iter <= embed_iter and g_iter > 0,
+                     "downfold_1e logic fail: the input dataset {}/iter{} does not exist!",
+                     g_grp, g_iter);
+      } else
+        utils::check(false, "downfold_1e logic fail: the input dataset {} does not exist!", g_grp);
+      return g_iter;
+    }
+  } // namespace
 
   auto embed_t::downfold_gloc(MBState& mb_state, bool force_real,
                               std::string g_grp, long g_iter)
@@ -57,20 +79,7 @@ namespace methods {
     auto proj = mb_state.proj_boson.value().proj_fermi();
     auto ft = mb_state.ft;
 
-    app_log(2, "Checking the dataset in the coqui checkpoint file...\n");
-    auto [gw_iter, weiss_f_iter, weiss_b_iter, embed_iter] = chkpt::read_input_iterations(filename);
-    if (g_grp == "scf") {
-      g_iter = (g_iter == -1)? gw_iter : g_iter;
-      utils::check(g_iter <= gw_iter and g_iter >= 0,
-                   "downfold_1e logic fail: the input dataset {}/iter{} does not exist!",
-                   g_grp, g_iter);
-    } else if (g_grp == "embed") {
-      g_iter = (g_iter == -1)? embed_iter : g_iter;
-      utils::check(g_iter <= embed_iter and g_iter > 0,
-                   "downfold_1e logic fail: the input dataset {}/iter{} does not exist!",
-                   g_grp, g_iter);
-    } else
-      utils::check(false, "downfold_1e logic fail: the input dataset {} does not exist!", g_grp);
+    g_iter = resolve_g_iter(filename, g_grp, g_iter);
 
     app_log(1, "  - CoQui checkpoint file                     = {}", filename);
     app_log(1, "  - Input Green's function ");
@@ -142,6 +151,53 @@ namespace methods {
     print_downfold_mb_timers();
 
     return std::make_tuple(std::move(Hloc_sIab), std::move(Gloc_tsIab));
+  }
+
+  auto embed_t::downfold_gloc_w(MBState& mb_state, bool force_real, std::string g_grp, long g_iter)
+  -> nda::array<ComplexType, 5> {
+    std::string filename = mb_state.coqui_prefix + ".mbpt.h5";
+    utils::check(std::filesystem::exists(filename),
+                 "embed_t::downfold_gloc_w: checkpoint file, {}, does not exist!", filename);
+    using math::shm::make_shared_array;
+    auto mpi = mb_state.mpi;
+    auto proj = mb_state.proj_boson.value().proj_fermi();
+    auto ft = mb_state.ft;
+    g_iter = resolve_g_iter(filename, g_grp, g_iter);
+
+    // The Dyson equation of {g_grp}/iter{g_iter} is rebuilt from its F, Σ(τ), μ. Only Dyson groups (F_skij, no Vcorr_skij, with Σ(τ)) are
+    // rebuilt; qp groups are not supported (their Dyson inputs differ)
+    int is_dyson_group = 0;
+    if (mpi->node_comm.root()) {
+      h5::file file(filename, 'r');
+      auto iter_grp = h5::group(file).open_group(g_grp).open_group("iter" + std::to_string(g_iter));
+      is_dyson_group = (iter_grp.has_dataset("F_skij") && iter_grp.has_dataset("Sigma_tskij") &&
+                        !iter_grp.has_dataset("Vcorr_skij")) ? 1 : 0;
+    }
+    mpi->node_comm.broadcast_n(&is_dyson_group, 1, 0);
+    utils::check(is_dyson_group == 1,
+                 "embed_t::downfold_gloc_w: {}/iter{} of {} is not a Dyson-type group (no F_skij or Sigma_tskij, or a qp group with Vcorr_skij). "
+                 "The pointwise G_loc(iw) of a quasiparticle group is not implemented.", g_grp, g_iter, filename);
+
+    auto sH0_skij = make_shared_array<Array_view_4D_t>(
+        *mpi, {_MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    auto sS_skij = make_shared_array<Array_view_4D_t>(
+        *mpi, {_MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    auto sF_skij = make_shared_array<Array_view_4D_t>(
+        *mpi, {_MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    auto sSigma_tskij = make_shared_array<Array_view_5D_t>(
+        *mpi, {ft->nt_f(), _MF->nspin(), _MF->nkpts_ibz(), _MF->nbnd(), _MF->nbnd()});
+    chkpt::read_H0(mpi->node_comm, mb_state.coqui_prefix, sH0_skij);
+    chkpt::read_ovlp(mpi->node_comm, mb_state.coqui_prefix, sS_skij);
+    double mu = 0.0;
+    chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu, mb_state.coqui_prefix, g_grp, g_iter);
+    mpi->comm.barrier();
+
+    nda::array<int, 1> kp_to_ibz = _MF->kp_to_ibz();
+    nda::array<bool, 1> kp_trev = _MF->kp_trev();
+    nda::array<ComplexType, 5> C_skIai = proj.C_skIai();
+    auto Gloc_wsIab = local_G_omega(mpi->comm, *ft, mu, sH0_skij, sS_skij, sF_skij, sSigma_tskij,
+                                    C_skIai, proj.W_rng(), &kp_to_ibz, &kp_trev, force_real);
+    return Gloc_wsIab;
   }
 
   void embed_t::downfolding(MBState &mb_state, ptree const& pt,

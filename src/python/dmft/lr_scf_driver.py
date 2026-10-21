@@ -69,7 +69,8 @@ def run_lr_gw_edmft(h_int, embedding, *, proj_info=None, params: dict, q_vec, De
         - G^loc, H^loc, W^loc, V^loc: computed by the first ``run_lr`` call from its own G, F, mu and W
           (``Gloc_tsIab``, ``Hloc_sIab``, ``Wloc_tabcd``, ``Vloc_abcd`` of ``linear_response``), the factors of its
           double counting; H^loc = P (H0 + F) P^dagger - mu is the static local one-body term of G^loc. The Weiss
-          fields follow from them and the impurity results.
+          fields follow from them (with the pointwise G^loc(iw) = P <G_k(iw)> P^dagger, ``Gloc_wsIab``) and the
+          impurity results.
     The distance of G^loc from the stored dmft input of iteration J (one embedding earlier) is logged.
 
     Parameters
@@ -98,12 +99,15 @@ def run_lr_gw_edmft(h_int, embedding, *, proj_info=None, params: dict, q_vec, De
             dg_weiss_w  (nw_f, 2, n, n)         fermionic Weiss field response, spin blocks up/down
             du_weiss_w  (nw_b_half, n, n, n, n) bosonic Weiss field response, product basis
             dh0         (2, n, n)               response of h0 = H^loc - Vhf_imp
-            ddelta_w    (nw_f, 2, n, n)         response of the hybridization
+            ddelta_w    (nw_f, 2, n, n)         response of the hybridization (run_lr's DeltaDelta_wsIab)
         The responses are complex at Q != 0 (the perturbation is Hermitian and time-reversal even, so
         dX^Q_ab = dX^Q_ba is symmetric and complex; real at Q = 0). A solver that is real-only solves Re dX and
         Im dX separately, each a real symmetric perturbation, and recombines by linearity.
+        The perturbation must be time-reversal even and Hermitian: run_lr projects dDelta (P at Q = 0, Sym at Q != 0)
+        but returns dHloc unprojected, and dg_weiss is the derivative of the ground-state map only if the projection
+        leaves dHloc unchanged.
         ``ground_state`` is a dict of the unperturbed impurity quantities in the same layouts (``Gloc_t`` with the
-        shape (nt_f, 2, n, n), ``Wloc_t`` and ``Vloc`` in the product basis, ``g_weiss_w``, ``u_weiss_w``,
+        shape (nt_f, 2, n, n), ``Gloc_w`` (nw_f, 2, n, n), ``Wloc_t`` and ``Vloc`` in the product basis, ``g_weiss_w``, ``u_weiss_w``,
         ``Hloc``, ``h0``, ``delta_w``, ``Vhf_imp``, ``Sigma_imp_w``, ``Pi_imp_w``, ``gf_struct``, ``iaft``). It returns
             {"Vhf_imp": (2, n, n), "Sigma_imp_w": (nw_f, 2, n, n), "Pi_imp_w": (nw_b_half, n, n)}
         the response of the static and dynamic impurity self-energy and of the density-density polarizability,
@@ -201,8 +205,8 @@ def run_lr_gw_edmft(h_int, embedding, *, proj_info=None, params: dict, q_vec, De
         if root:
             with h5py.File(out_prefix + ".mbpt.h5", "r") as f:
                 g = f["linear_response"]
-                keys = ("DeltaGloc_tsIab", "DeltaHloc_sIab", "DeltaWloc_tabcd") + (
-                    ("Gloc_tsIab", "Hloc_sIab", "Wloc_tabcd", "Vloc_abcd") if ground_state else ())
+                keys = ("DeltaGloc_tsIab", "DeltaHloc_sIab", "DeltaWloc_tabcd", "DeltaDelta_wsIab") + (
+                    ("Gloc_tsIab", "Gloc_wsIab", "Hloc_sIab", "Wloc_tabcd", "Vloc_abcd") if ground_state else ())
                 loc = {k: _as_complex(g[k]) for k in keys}
         return int(niter), comm.bcast(loc, root=0)
 
@@ -214,7 +218,8 @@ def run_lr_gw_edmft(h_int, embedding, *, proj_info=None, params: dict, q_vec, De
     niter, tot = solve(DeltaH0_skij, None, work_prefix, False, ground_state=True)
     niters.append(niter)
     imps = _ground_state_impurities(state, embedding, embedding_2e, tot["Gloc_tsIab"][:, :, 0],
-                                    tot["Hloc_sIab"][:, 0], tot["Vloc_abcd"], tot["Wloc_tabcd"])
+                                    tot["Gloc_wsIab"][:, :, 0], tot["Hloc_sIab"][:, 0], tot["Vloc_abcd"],
+                                    tot["Wloc_tabcd"])
     _log_distance_from_fixed_point(state, solver_chkpt, imps)
     y = [_zero_response(imp) for imp in imps]
 
@@ -243,7 +248,8 @@ def run_lr_gw_edmft(h_int, embedding, *, proj_info=None, params: dict, q_vec, De
         niter, inc = solve(zero_H0, _embed_response(embedding, embedding_2e, y_next, y, mf.nspin()),
                            work_prefix, False)
         niters.append(niter)
-        tot = dict(tot, **{k: tot[k] + inc[k] for k in ("DeltaGloc_tsIab", "DeltaHloc_sIab", "DeltaWloc_tabcd")})
+        tot = dict(tot, **{k: tot[k] + inc[k] for k in ("DeltaGloc_tsIab", "DeltaHloc_sIab", "DeltaWloc_tabcd",
+                                                         "DeltaDelta_wsIab")})
         y = y_next
     if not converged:
         app_log(1, f"[WARNING] run_lr_gw_edmft: the impurity response is not converged after {drv['max_outer']} "
@@ -315,11 +321,12 @@ def _static_spin_list(H_sab):
     return H if len(H) == 2 else [H[0], H[0].copy()]
 
 
-def _ground_state_impurities(state, embedding, embedding_2e, Gloc, Hloc, Vloc_chem, Wloc_chem):
+def _ground_state_impurities(state, embedding, embedding_2e, Gloc, Gloc_w, Hloc, Vloc_chem, Wloc_chem):
     """Per impurity: the ground-state local quantities, impurity results and Weiss fields in the dense layouts of the
     impurity callback (spin blocks up/down on axis 1; V, W in the product basis)."""
     iaft = state.iaft
     G_C = embedding.extract(_spin_list(Gloc))
+    Gw_C = embedding.extract(_spin_list(Gloc_w))
     H_C = embedding.extract(_static_spin_list(Hloc))
     V_C = embedding_2e.extract([Vloc_chem])
     W_C = embedding_2e.extract([Wloc_chem])
@@ -329,6 +336,7 @@ def _ground_state_impurities(state, embedding, embedding_2e, Gloc, Hloc, Vloc_ch
         if len(res["Pi_iw_data"]) != 1:
             raise NotImplementedError("run_lr_gw_edmft: an impurity polarizability with several blocks.")
         gs = {"Gloc_t": blk_arr_to_arr(G_C[i], gf_struct),
+              "Gloc_w": blk_arr_to_arr(Gw_C[i], gf_struct),
               "Hloc": blk_arr_to_arr(H_C[i], gf_struct),
               "Wloc_t": chemistry_to_product_basis(W_C[i][0]),
               "Vloc": chemistry_to_product_basis(V_C[i][0]),
@@ -337,7 +345,7 @@ def _ground_state_impurities(state, embedding, embedding_2e, Gloc, Hloc, Vloc_ch
               "Pi_imp_w": res["Pi_iw_data"][0],
               "gf_struct": gf_struct, "iaft": iaft}
         gs["g_weiss_w"], gs["u_weiss_w"], gs["h0"], gs["delta_w"] = compute_weiss_fields_w(
-            iaft=iaft, local_gf={k: gs[k] for k in ("Gloc_t", "Hloc", "Wloc_t", "Vloc")},
+            iaft=iaft, local_gf={k: gs[k] for k in ("Gloc_w", "Hloc", "Wloc_t", "Vloc")},
             impurity_selfenergies={k: gs[k] for k in ("Vhf_imp", "Sigma_imp_w", "Pi_imp_w")}, density_only=True)
         imps.append({"ground_state": gs, "gf_struct": gf_struct})
     return imps
@@ -366,18 +374,18 @@ def _log_distance_from_fixed_point(state, solver_chkpt, imps):
 # ---------------------------------------------------------------------------------------------------------
 
 def _local_responses(tot, embedding, embedding_2e):
-    """Per impurity {"Gloc_t": (nt, 2, n, n), "Hloc": (2, n, n), "Wloc_t": product basis} of the accumulated local
-    responses."""
-    dG = tot["DeltaGloc_tsIab"][:, :, 0]     # (nt, ns, nC, nC)
+    """Per impurity {"Delta_w": (nw_f, 2, n, n), "Hloc": (2, n, n), "Wloc_t": product basis} of the accumulated
+    local responses; Delta_w is run_lr's DeltaDelta_wsIab."""
+    dDelta = tot["DeltaDelta_wsIab"][:, :, 0]  # (nw, ns, nC, nC)
     dH = tot["DeltaHloc_sIab"][:, 0]         # (ns, nC, nC)
     dW = tot["DeltaWloc_tabcd"]              # (nt_half, nC^4), chemistry order
-    G_C = embedding.extract(_spin_list(dG))
+    Delta_C = embedding.extract(_spin_list(dDelta))
     H_C = embedding.extract(_static_spin_list(dH))
     W_C = embedding_2e.extract([dW])
     out = []
-    for i in range(len(G_C)):
+    for i in range(len(Delta_C)):
         gf_struct = embedding.imp_block_structure[i]
-        out.append({"Gloc_t": blk_arr_to_arr(G_C[i], gf_struct), "Hloc": blk_arr_to_arr(H_C[i], gf_struct),
+        out.append({"Delta_w": blk_arr_to_arr(Delta_C[i], gf_struct), "Hloc": blk_arr_to_arr(H_C[i], gf_struct),
                     "Wloc_t": chemistry_to_product_basis(W_C[i][0])})
     return out
 
@@ -388,7 +396,7 @@ def _weiss_response(imp, dloc, y, iaft):
     gs = imp["ground_state"]
     return lr_compute_weiss_fields_w(
         iaft=iaft,
-        local_gf={k: gs[k] for k in ("Gloc_t", "Wloc_t", "Vloc")}, d_local_gf=dloc,
+        local_gf={k: gs[k] for k in ("Gloc_w", "Wloc_t", "Vloc")}, d_local_gf=dloc,
         impurity_selfenergies={k: gs[k] for k in ("Vhf_imp", "Sigma_imp_w", "Pi_imp_w")},
         d_impurity_selfenergies=y)
 
@@ -487,6 +495,7 @@ def _write_outer(out_file, root, n, tot, loc_resp, weiss, y_new, res, niter):
             g = f.require_group("lr_gw_edmft").create_group(f"iter{n}")
             g.attrs.update(residual=res, run_lr_iterations=niter)
             write_complex_dataset(g, "DeltaGloc_tsIab", tot["DeltaGloc_tsIab"])
+            write_complex_dataset(g, "DeltaDelta_wsIab", tot["DeltaDelta_wsIab"])
             write_complex_dataset(g, "DeltaWloc_tabcd", tot["DeltaWloc_tabcd"])
             for i, ((dg, du), y) in enumerate(zip(weiss, y_new)):
                 gi = g.create_group(f"impurity_{i}")

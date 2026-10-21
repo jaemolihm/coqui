@@ -283,6 +283,33 @@ static auto const _c2py_fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "G_tsIab", "dG_tsIab", "W_tabcd", "cell_offset", "cell_size", "orb_block")};
 
+// downfold_gloc_w
+static auto const _c2py_fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const std::string &df_params,
+       const nda::basic_array<
+           std::complex<double>, 5, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &projector_ksIai,
+       const nda::basic_array<
+           long, 3, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &band_window,
+       const nda::basic_array<
+           double, 2, nda::C_layout, 'A',
+           nda::heap_basic<nda::mem::mallocator<nda::mem::AddressSpace::Host>>>
+           &kpts_crys) {
+      return coqui_py::downfold_gloc_w(mf, df_params, projector_ksIai,
+                                       band_window, kpts_crys);
+    },
+    "mf", "df_params", "projector_ksIai", "band_window", "kpts_crys")};
+
+// downfold_gloc_w_with_projector_from_h5
+static auto const _c2py_fun_16 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const std::string &df_params) {
+      return coqui_py::downfold_gloc_w_with_projector_from_h5(mf, df_params);
+    },
+    "mf", "df_params")};
+
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");
 static const auto _c2py_doc_2 = _c2py_fun_2.doc(R"DOC()DOC");
@@ -298,6 +325,8 @@ static const auto _c2py_doc_11 = _c2py_fun_11.doc(R"DOC()DOC");
 static const auto _c2py_doc_12 = _c2py_fun_12.doc(R"DOC()DOC");
 static const auto _c2py_doc_13 = _c2py_fun_13.doc(R"DOC()DOC");
 static const auto _c2py_doc_14 = _c2py_fun_14.doc(R"DOC()DOC");
+static const auto _c2py_doc_15 = _c2py_fun_15.doc(R"DOC()DOC");
+static const auto _c2py_doc_16 = _c2py_fun_16.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -333,6 +362,11 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_13.c_str()},
     {"lr_dc_response", (PyCFunction)c2py::pyfkw<_c2py_fun_14>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_14.c_str()},
+    {"downfold_gloc_w", (PyCFunction)c2py::pyfkw<_c2py_fun_15>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_15.c_str()},
+    {"downfold_gloc_w_with_projector_from_h5",
+     (PyCFunction)c2py::pyfkw<_c2py_fun_16>, METH_VARARGS | METH_KEYWORDS,
+     _c2py_doc_16.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

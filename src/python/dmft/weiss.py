@@ -170,8 +170,8 @@ def init_weiss_fields_w(*, iaft, local_gf, init_imp_results="dc", density_only=F
     Weiss fields (g_weiss_w, u_weiss_w, h0, delta_w) of the initial impurity results: the DC (RPA polarizability,
     local GW self-energy and HF potential evaluated on local_gf) or zero impurity self-energies.
     """
-    # checking inputs
-    missing = {"Gloc_t", "Hloc", "Wloc_t", "Vloc"} - local_gf.keys()
+    # checking inputs: Gloc_t for the double counting, Gloc_w for the Weiss field (compute_weiss_fields_w)
+    missing = {"Gloc_t", "Gloc_w", "Hloc", "Wloc_t", "Vloc"} - local_gf.keys()
     if missing:
         raise ValueError(f"Missing keys in local_gf: {missing}")
 
@@ -206,8 +206,12 @@ def init_weiss_fields_w(*, iaft, local_gf, init_imp_results="dc", density_only=F
 
 def compute_weiss_fields_w(*, iaft, local_gf, impurity_selfenergies, density_only=False):
     """
-    Weiss fields from the local lattice quantities local_gf = {"Gloc_t", "Hloc", "Wloc_t", "Vloc"} and the impurity
+    Weiss fields from the local lattice quantities local_gf = {"Gloc_w", "Hloc", "Wloc_t", "Vloc"} and the impurity
     self-energies {"Vhf_imp", "Sigma_imp_w", "Pi_imp_w"} (each may be None for a zero impurity self-energy).
+
+    Gloc_w (nw_f, nspin, n, n) is the pointwise local Green's function G_loc(iw) = P <G_k(iw)> P^dagger of the lattice
+    Dyson equation (coqui.downfold_local_gf_w), not tau_to_w of G_loc(tau): that is a rank-reducing projection on the
+    DLR grid.
 
     Hloc (nspin, n, n) is the static local one-body term of Gloc, its 1/(i w)^2 moment (-mu included).
     The fermionic Weiss field splits as
@@ -218,7 +222,7 @@ def compute_weiss_fields_w(*, iaft, local_gf, impurity_selfenergies, density_onl
     Returns (g_weiss_w, u_weiss_w, h0_sab, delta_wsab).
     """
     # checking inputs
-    missing = {"Gloc_t", "Hloc", "Wloc_t", "Vloc"} - local_gf.keys()
+    missing = {"Gloc_w", "Hloc", "Wloc_t", "Vloc"} - local_gf.keys()
     if missing:
         raise ValueError(f"Missing keys in local_gf: {missing}")
 
@@ -248,10 +252,7 @@ def compute_weiss_fields_w(*, iaft, local_gf, impurity_selfenergies, density_onl
     vhf_imp = impurity_selfenergies["Vhf_imp"]
     sigma_imp_w = impurity_selfenergies["Sigma_imp_w"]
 
-    g_weiss_w = compute_weiss_fermion_w(
-        iaft.tau_to_w(local_gf["Gloc_t"], stats='f'),
-        vhf_imp, sigma_imp_w
-    )
+    g_weiss_w = compute_weiss_fermion_w(local_gf["Gloc_w"], vhf_imp, sigma_imp_w)
     iaft.check_leakage(g_weiss_w, 'f', 'g_weiss', w_input=True)
     app_log(2, "")
 

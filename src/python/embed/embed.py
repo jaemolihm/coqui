@@ -89,6 +89,25 @@ def downfold_local_gf(mf, params, *, projector_info=None):
 
 
 
+def downfold_local_gf_w(mf, params, *, projector_info=None):
+    """
+    Pointwise local Green's function G_loc(iw) = P <G_k(iw)> P^dagger on the fermionic Matsubara mesh, with
+    G_k(iw) = [(iw + mu) S - H0 - F - B Sigma(tau)(iw)]^-1 the Dyson Green's function of the F, Sigma(tau) and mu of
+    the group the Green's function is read from (B = tau_to_w). T Gloc_w = Gloc_t of downfold_local_gf
+    (T = w_to_tau); Gloc_w has no B T round trip. Dyson-type groups only, a quasiparticle group aborts.
+    The parameters, projector_info and force_real are those of downfold_local_gf.
+
+    Returns:
+        np.ndarray: Gloc_wsab, shape (nw_f, ns, n, n).
+    """
+    if projector_info is None:
+        Gloc = embed_cxx.downfold_gloc_w_with_projector_from_h5(mf, json.dumps(params))
+    else:
+        Gloc = embed_cxx.downfold_gloc_w(mf, json.dumps(params), projector_info.get("proj_mat"),
+                                         projector_info.get("band_window"), projector_info.get("kpts_w90"))
+    return Gloc[:, :, 0]
+
+
 def downfold_coulomb(h_int, params, *, projector_info=None, local_polarizabilities=None):
     """
     Downfolds the local Coulomb interaction matrix.

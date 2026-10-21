@@ -40,8 +40,10 @@
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
 #include "methods/embedding/local_projection.hpp"
+#include "methods/embedding/hybridization_response.hpp"
 #include "methods/embedding/permut_symm.hpp"
 #include "methods/SCF/lr_precompute.hpp"
+#include "methods/SCF/dyson_omega.hpp"
 #include "methods/HF/lr_thc_comm.hpp"
 #include "methods/GW/lr_gw.hpp"
 #include "methods/GW/g0_div_utils.hpp"
@@ -642,6 +644,44 @@ auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(outdir+"/"+prefix+".mbpt.h5", false));
   return downfold_gloc_impl(
       mf, MBState(ft, outdir+"/"+prefix, mf, projector_ksIai, band_window, kpts_crys, trans_home_cell, false), pt);
+}
+
+auto downfold_gloc_w_impl(std::shared_ptr<mf::MF> mf,
+                          MBState&& mb_state,
+                          ptree const& pt)
+-> nda::array<ComplexType, 5> {
+  std::string err = std::string("downfold_gloc_w_impl - Incorrect input - ");
+  auto greens_func_source = io::get_value<std::string>(pt, "greens_func_source", err+"greens_func_source");
+  auto greens_func_iteration = io::get_value_with_default<long>(pt, "greens_func_iteration", -1);
+  auto force_real = io::get_value_with_default<bool>(pt, "force_real", true);
+  embed_t embed(*mf);
+  return embed.downfold_gloc_w(mb_state, force_real, greens_func_source, greens_func_iteration);
+}
+
+auto downfold_gloc_w(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                     nda::array<ComplexType, 5> const& projector_ksIai,
+                     nda::array<long, 3> const& band_window,
+                     nda::array<RealType, 2> const& kpts_crys)
+-> nda::array<ComplexType, 5> {
+  std::string err = std::string("downfold_gloc_w - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err+"prefix");
+  auto outdir = io::get_value_with_default<std::string>(pt, "outdir", "./");
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(outdir+"/"+prefix+".mbpt.h5", false));
+  return downfold_gloc_w_impl(
+      mf, MBState(ft, outdir+"/"+prefix, mf, projector_ksIai, band_window, kpts_crys, trans_home_cell, false), pt);
+}
+
+auto downfold_gloc_w_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& pt)
+-> nda::array<ComplexType, 5> {
+  std::string err = std::string("downfold_gloc_w - Incorrect input - ");
+  auto prefix = io::get_value<std::string>(pt, "prefix", err+"prefix");
+  auto outdir = io::get_value_with_default<std::string>(pt, "outdir", "./");
+  auto wannier_file = io::get_value<std::string>(pt,"wannier_file",err+"wannier_file");
+  auto trans_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
+  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(outdir+"/"+prefix+".mbpt.h5", false));
+  return downfold_gloc_w_impl(
+      mf, MBState(ft, outdir+"/"+prefix, mf, wannier_file, trans_home_cell, false), pt);
 }
 
 auto lr_downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
@@ -2015,12 +2055,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   }
 
   // Ground-state local factors of the double counting, on run_lr's own G and W as the ground state's
-  // downfold_local_gf / downfold_coulomb: G^loc hermitized in τ with the imaginary part dropped, W^loc and V^loc
+  // downfold_local_gf / downfold_coulomb: G^loc hermitized in τ with the imaginary part dropped (force_real), W^loc and V^loc
   // with the divergence corrections and the 8-fold permutation symmetry. W^loc is W - V (screened part only); V^loc is the bare term.
   // H^loc = P (H0 + F) P^† - μ is the 1/(iω)² moment of G^loc: H0, F and μ are those of the Dyson equation of G.
   nda::array<ComplexType, 5> Gloc_gs_tsIab, Wloc_gs_tabcd;
   nda::array<ComplexType, 4> Hloc_gs_sIab;
   nda::array<ComplexType, 4> Vloc_gs_abcd;
+  // G_loc^pw(iω) = P⟨G_k(iω)⟩P† of the pointwise Dyson G, the G^loc of the Weiss field; built from lr_driver::G_omega()
+  // after lr_setup. force_real, as in the ground state's downfold_local_gf_w with its default.
+  nda::array<ComplexType, 5> Gloc_gs_wsIab;
   if (gw_edmft) {
     lr_init_timer.start("LR_INIT_GS_LOCAL");
     auto& thc_l = eri.corr_eri->get();
@@ -2029,9 +2072,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     const long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
     app_log(2, "Ground-state local factors G^loc, W^loc, V^loc of the double counting...");
 
-    Gloc_gs_tsIab = proj_boson.proj_fermi().downfold_loc<true>(sG_tskij, "Gloc");
-    Hloc_gs_sIab = proj_boson.proj_fermi().downfold_loc<true>(dyson.sH0_skij(), "H0_loc");
-    Hloc_gs_sIab += proj_boson.proj_fermi().downfold_loc<true>(sF_skij, "F_loc");
+    auto const& proj_f = proj_boson.proj_fermi();
+    Gloc_gs_tsIab = proj_f.downfold_loc<true>(sG_tskij, "Gloc");
+    Hloc_gs_sIab = proj_f.downfold_loc<true>(dyson.sH0_skij(), "H0_loc");
+    Hloc_gs_sIab += proj_f.downfold_loc<true>(sF_skij, "F_loc");
     for (long s = 0; s < Hloc_gs_sIab.shape(0); ++s)
       for (long I = 0; I < Hloc_gs_sIab.shape(1); ++I)
         for (long a = 0; a < Hloc_gs_sIab.shape(2); ++a)
@@ -2189,6 +2233,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.DeltaV_qPQ       = pDeltaV_qPQ;
   p.qp_static        = pQpStatic;
   p.embedding        = opt_embedding ? &(*opt_embedding) : nullptr;
+  // lr_dyson applies the pointwise Dyson G of (F, Σ, μ) unless G0 was built directly in τ (mf_dft)
+  lr_gs_dyson_inputs gs_dyson_inputs{&sF_skij, &sSigma_tskij, mu};
+  p.gs_dyson         = (unperturbed == "mf_dft") ? nullptr : &gs_dyson_inputs;
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
@@ -2196,6 +2243,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_hsex     = precond_hsex;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
+
+  if (gw_edmft) {
+    lr_init_timer.start("LR_INIT_GS_LOCAL_W");
+    Gloc_gs_wsIab = local_G_omega_from_G(mpi->comm, ft, driver.G_omega(), opt_embedding->C_skIai,
+                                         opt_embedding->W_rng, true);
+    lr_init_timer.stop("LR_INIT_GS_LOCAL_W");
+    app_log(2, "  - G_loc^pw(iw) from lr_driver::G_omega(): {:.3f} sec", lr_init_timer.elapsed("LR_INIT_GS_LOCAL_W"));
+    utils::memlog("run_lr_calc: after G_loc^pw(iw)");
+  }
 
   nda::array<long, 1> niter_m(nmodes);
   nda::array<double, 1> Delta_mu_m(nmodes);
@@ -2284,6 +2340,19 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         for (long I = 0; I < DeltaHloc_tsIab.shape(2); ++I)
           for (long a = 0; a < DeltaHloc_tsIab.shape(3); ++a)
             DeltaHloc_tsIab(0, s, I, a, a) -= Delta_mu;
+      // δG_loc^pw(iω) of the converged source: collective, kept for δΔ below
+      nda::array<ComplexType, 5> DeltaGloc_wsIab;
+      if (emb.dc) {
+        DeltaGloc_wsIab = lr_local_DeltaG_omega(mpi->comm, ft, driver.G_omega(), sDeltaH0_skij, sDeltaF_skij, pDeltaSigma,
+                                                Delta_mu, dyson.sS_skij(), emb.C_skIai, emb.W_rng, kpq_map);
+        nda::array<ComplexType, 5> DeltaGloc_t_check(DeltaGloc_tsIab.shape());
+        ft.w_to_tau(DeltaGloc_wsIab, DeltaGloc_t_check, imag_axes_ft::fermion);
+        if (mpi->comm.root()) {
+          auto nrm = [](auto const& A) { double x = 0; for (auto const& v : A) x += std::norm(v); return std::sqrt(x); };
+          app_log(2, "  - |T dGloc^pw(iw) - DeltaGloc_tsIab| / |DeltaGloc_tsIab| = {:.3e}",
+                  nrm(nda::array<ComplexType, 5>(DeltaGloc_t_check - DeltaGloc_tsIab)) / std::max(nrm(DeltaGloc_tsIab), 1e-300));
+        }
+      }
       if (mpi->comm.root()) {
         h5::file file(output + ".mbpt.h5", 'a');
         auto lr_grp = chkpt::lr_group(file, nmodes > 1 ? std::optional<long>(m + 1) : std::nullopt);
@@ -2304,6 +2373,22 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
           nda::h5_write(lr_grp, "DeltaSigma_dc_tsIab", DeltaSigma_dc_tsIab, false);
           nda::h5_write(lr_grp, "DeltaSigma_imp_tsIab", emb.Sigma_imp_tsIab, false);
           app_log(2, "  - DeltaSigma_dc_tsIab, DeltaSigma_imp_tsIab written to \"linear_response/\"");
+          // δΔ of the Weiss field; δΣ_imp = 0 without lr_impurity_response["Sigma"]
+          nda::array<ComplexType, 5> dSigma_imp_wsIab =
+              nda::zeros<ComplexType>(ft.nw_f(), mf->nspin(), 1, DeltaGloc_tsIab.shape(3), DeltaGloc_tsIab.shape(3));
+          if (local->impurity_response)
+            if (auto it = local->impurity_response->find("Sigma"); it != local->impurity_response->end())
+              dSigma_imp_wsIab = it->second;
+          // The ground-state map applies force_real to G_loc and H^loc: P at Q = 0, Sym at Q != 0
+          bool q_zero = driver.is_q_gamma();
+          nda::array<ComplexType, 4> DeltaHloc_proj = DeltaHloc_sIab;
+          auto asym = project_lr_local_response(DeltaGloc_wsIab, DeltaHloc_proj, q_zero);
+          app_log(2, "  - |{}(dGloc^pw) - dGloc^pw| / |dGloc^pw| = {:.3e}, same for dHloc: {:.3e}",
+                  q_zero ? "P" : "Sym", asym[0], asym[1]);
+          auto DeltaDelta_wsIab = lr_hybridization_w(Gloc_gs_wsIab, DeltaGloc_wsIab, DeltaHloc_proj, dSigma_imp_wsIab,
+                                                     emb.dc->cells);
+          nda::h5_write(lr_grp, "DeltaDelta_wsIab", DeltaDelta_wsIab, false);
+          app_log(2, "  - DeltaDelta_wsIab written to \"linear_response/\"");
         }
       }
       mpi->comm.barrier();
@@ -2403,10 +2488,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     h5::file file(output + ".mbpt.h5", 'a');
     auto lr_grp = chkpt::lr_group(file);
     nda::h5_write(lr_grp, "Gloc_tsIab", Gloc_gs_tsIab, false);
+    nda::h5_write(lr_grp, "Gloc_wsIab", Gloc_gs_wsIab, false);
     nda::h5_write(lr_grp, "Hloc_sIab", Hloc_gs_sIab, false);
     nda::h5_write(lr_grp, "Wloc_tabcd", Wloc_gs_tabcd, false);
     nda::h5_write(lr_grp, "Vloc_abcd", Vloc_gs_abcd, false);
-    app_log(2, "  - Gloc_tsIab, Hloc_sIab, Wloc_tabcd, Vloc_abcd written to \"linear_response/\"");
+    app_log(2, "  - Gloc_tsIab, Gloc_wsIab, Hloc_sIab, Wloc_tabcd, Vloc_abcd written to \"linear_response/\"");
   }
   mpi->comm.barrier();
 

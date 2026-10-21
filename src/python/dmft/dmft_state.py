@@ -129,6 +129,7 @@ class DMFTState(object):
         self.solver_inputs = [ {
             'gf_struct': self.embedding['1e'].imp_block_structure[imp],
             'Gloc_t': None,
+            'Gloc_w': None,
             'Wloc_t': None,
             'Vloc': None,
             'u_weiss_iw': None,

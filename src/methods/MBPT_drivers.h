@@ -75,6 +75,25 @@ auto downfold_gloc(std::shared_ptr<mf::MF> mf, ptree const& pt,
 
 
 /**
+ * @brief Pointwise local Green's function of a ground state, Gloc_wsIab (nw_f, ns, nImps, n, n)
+ *
+ * G_loc(iw) = P <G_k(iw)> P^dagger with G_k(iw) the Dyson G of the F, Sigma(tau), mu of
+ * greens_func_source/greens_func_iteration (see local_G_omega); T Gloc_w = Gloc_tsIab of downfold_gloc, T = w_to_tau.
+ */
+auto downfold_gloc_w_impl(std::shared_ptr<mf::MF> mf,
+                          MBState&& mb_state, ptree const& pt)
+-> nda::array<ComplexType, 5>;
+
+auto downfold_gloc_w_with_projector_from_h5(std::shared_ptr<mf::MF> mf, ptree const& pt)
+-> nda::array<ComplexType, 5>;
+
+auto downfold_gloc_w(std::shared_ptr<mf::MF> mf, ptree const& pt,
+                     nda::array<ComplexType, 5> const& projector_ksIai,
+                     nda::array<long, 3> const& band_window,
+                     nda::array<RealType, 2> const& kpts_crys)
+-> nda::array<ComplexType, 5>;
+
+/**
  * @brief LR of the local Green's function at momentum transfer Q
  *
  * ΔG_loc = (1/N_k) Σ_k C^{k+Q} ΔG^k C^{k†}, with ΔG^k the (k+Q, k) block. Full BZ only, no hermitization.
@@ -268,7 +287,16 @@ struct lr_local_inputs {
  *                            With local_polarizabilities (GW+EDMFT ground state) it also writes
  *                            Gloc_tsIab, Wloc_tabcd (chemistry order) and Vloc_abcd, and the kernel
  *                            (gw_mode fixed_W or full) includes the linearized double counting; DeltaSigma_dc_tsIab and
- *                            DeltaSigma_imp_tsIab (nt, ns, 1, n, n) are then written per mode too.
+ *                            DeltaSigma_imp_tsIab (nt, ns, 1, n, n) are then written per mode too, and the Weiss
+ *                            hybridization response DeltaDelta_wsIab (nw_f, ns, 1, n, n) on the fermionic iω mesh:
+ *                              δΔ = Gw⁻¹ δG^pw Gw⁻¹ - δH^loc - δΣ_imp, with Gw = Gloc_wsIab = P⟨G_k(iω)⟩P† (G_k(iω) the
+ *                              Dyson G of F, Σ, μ, written per ground state next to Gloc_tsIab) and
+ *                              δG^pw = P⟨G_{k+Q}(iω) δX_k(iω) G_k(iω)⟩P† with δX_k = ΔH0 + ΔF - Δμ S + B ΔΣ (B = tau_to_w),
+ *                              the inverses taken per 1e alpha block of dc_cells.orb_block and δΔ zero off-block. δG^pw and δH^loc are first
+ *                              projected as the force_real ground-state map projects G_loc and H^loc: P at Q = 0 (real-linear in ΔH0, which
+ *                              must be Hermitian there), Sym(X) = (X + Xᵀ)/2 at Q != 0 (project_lr_local_response);
+ *                              DeltaGloc_tsIab and DeltaHloc_sIab are not.
+ *                              δΣ_imp = 0 without lr_impurity_response["Sigma"].
  * Every other option is read from `pt`; the key list is on the definition in MBPT_drivers.cpp.
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
