@@ -21,7 +21,9 @@ limitations under the License.
 import json
 import numpy as np
 
+import h5py
 from h5 import HDFArchive
+from mpi4py import MPI
 import coqui._lib.embed_module as embed_cxx
 
 
@@ -213,7 +215,15 @@ def downfold_2e(h_int, params, *, local_polarizabilities=None):
 
 
 def dmft_embed(mf, params, *, local_hf_potentials=None, local_sigma_dynamic=None,
-               projector_info=None):
+               projector_info=None, dmft_iter=None):
+    """
+    Embed the impurity results into the lattice: the new iteration ``embed/iter{embed/final_iter}`` of
+    ``{outdir}/{prefix}.mbpt.h5``.
+
+    ``dmft_iter`` (int, optional): the DMFT iteration whose impurity results are embedded. It is stored as
+    ``embed/iter{embed/final_iter}/dmft_iter``, the link that coqui.dmft.run_lr_gw_edmft reads to pair the lattice
+    state with the impurity results.
+    """
 
     if local_sigma_dynamic is not None and local_hf_potentials is not None:
         required_keys = {"imp", "dc"}
@@ -244,3 +254,12 @@ def dmft_embed(mf, params, *, local_hf_potentials=None, local_sigma_dynamic=None
             mf, json.dumps(params), proj_mat, band_window, kpts_w90,
             local_hf_potentials, local_sigma_dynamic,
         )
+
+    if dmft_iter is not None:
+        if MPI.COMM_WORLD.Get_rank() == 0:
+            with h5py.File(f"{params.get('outdir', './')}/{params['prefix']}.mbpt.h5", "a") as f:
+                g = f[f"embed/iter{int(f['embed/final_iter'][()])}"]
+                if "dmft_iter" in g:
+                    del g["dmft_iter"]
+                g["dmft_iter"] = int(dmft_iter)
+        MPI.COMM_WORLD.Barrier()
