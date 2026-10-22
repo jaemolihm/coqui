@@ -195,15 +195,8 @@ class DMFTState(object):
                    iaft, spin_average, screen_type, verbal)
 
 
-    def load(self, solver_chkpt):
-        if not os.path.isfile(solver_chkpt):
-            app_log(2, "No solver checkpoint file found. Will skip loading impurity results.\n")
-            return
-            
-
-        # TODO for "each" impurity, load the previous results if existing, otherwise initialize to empty
-        self.iteration = dmft_io.update_impurity_results_from_chkpt(self.solver_results, solver_chkpt) + 1
-
+    def check_loaded_results(self):
+        """Check the block dimensions and Matsubara meshes of the loaded impurity results."""
         # check dimensions of loaded impurity results
         nw_b_half = self.iaft.nw_b//2 if self.iaft.nw_b%2==0 else self.iaft.nw_b//2 + 1
         for imp_idx, res in enumerate(self.solver_results):
@@ -228,6 +221,17 @@ class DMFTState(object):
                         res['Pi_iw_data'][blk_idx].shape[2] == blk_dim), (
                     "Incompatible block dimension for the loaded impurity Pi"
                 )
+
+    def load(self, solver_chkpt):
+        if not os.path.isfile(solver_chkpt):
+            app_log(2, "No solver checkpoint file found. Will skip loading impurity results.\n")
+            return
+            
+
+        # TODO for "each" impurity, load the previous results if existing, otherwise initialize to empty
+        self.iteration = dmft_io.update_impurity_results_from_chkpt(self.solver_results, solver_chkpt) + 1
+
+        self.check_loaded_results()
 
         self.local_sigma_w, self.local_sigma_infty, self.local_pi_w = embed_impurities(
             self.embedding['1e'], self.embedding['2e'], self.solver_results, self.spin_average

@@ -382,7 +382,8 @@ def _gw_loop(mf, h_int, proj_info,
                 mf, embed_params,
                 projector_info = proj_info,
                 local_hf_potentials = dmft_state.local_sigma_infty,
-                local_sigma_dynamic = dmft_state.local_sigma_w
+                local_sigma_dynamic = dmft_state.local_sigma_w,
+                dmft_iter = dmft_state.iteration - 1 if dmft_state.iteration > 0 else None
             )
             coqui_mpi.barrier()
 
@@ -579,7 +580,8 @@ def _edmft_loop(mf, h_int, proj_info, dmft_state, solver_chkpt_h5, coqui_chkpt_h
             mf, embed_params,
             projector_info = proj_info,
             local_hf_potentials = dmft_state.local_sigma_infty,
-            local_sigma_dynamic = dmft_state.local_sigma_w
+            local_sigma_dynamic = dmft_state.local_sigma_w,
+            dmft_iter = dmft_state.iteration
         )
         dmft_state.iteration += 1
         coqui_mpi.barrier()
@@ -769,7 +771,8 @@ def _edmft_loop_fixed_gloc_and_wloc(
         mf, embed_params,
         projector_info = proj_info,
         local_hf_potentials = dmft_state.local_sigma_infty,
-        local_sigma_dynamic = dmft_state.local_sigma_w
+        local_sigma_dynamic = dmft_state.local_sigma_w,
+        dmft_iter = dmft_state.iteration - 1
     )
     coqui_mpi.barrier()
 
