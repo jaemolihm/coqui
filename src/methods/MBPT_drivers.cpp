@@ -1476,8 +1476,18 @@ auto recompute_W_and_eps_inv_head(
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
  *                          that overrides the three keys above, or "HSEX".
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
- *                          "none") used only as the GCR preconditioner. Requires
- *                          iter_alg GCR and a Σ kernel; changes the rate only.
+ *                          "none") used only as the preconditioner of GCR or
+ *                          damping. Requires a Σ kernel; changes the rate of a
+ *                          converged run, not its answer.
+ *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
+ *   precond_max_iter       0.01) and inner sweep cap (default 10)
+ *   initial_guess          "zero" (default) or "precond": start at the
+ *                          preconditioner solution of ΔH0; needs precond_method
+ *                          and allows max_iter = 0
+ *   fixed_order            run exactly max_iter iterations, no convergence test
+ *                          (default false). Needs iter_alg damping with mixing 1,
+ *                          initial_guess "precond", no DeltaX/DeltaV_qPQ. The plain
+ *                          hessian only is computed under lr_hessian.
  *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
  *                          (default 1e-8)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
@@ -1552,6 +1562,16 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
+  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
+  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
+  auto initial_guess = io::get_value_with_default<std::string>(pt, "initial_guess", "zero");
+  auto fixed_order = io::get_value_with_default<bool>(pt, "fixed_order", false);
+  utils::check(initial_guess == "zero" || initial_guess == "precond",
+               "run_lr_calc: initial_guess must be 'zero' or 'precond', got '{}'.",
+               initial_guess);
+  const bool initial_guess_precond = (initial_guess == "precond");
+  utils::check(precond_max_iter >= 1,
+               "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
   auto gw_mode = io::get_value_with_default<std::string>(pt, "gw_mode", "none");
   utils::check(gw_mode == "none" || gw_mode == "fixed_W" || gw_mode == "full",
@@ -1687,18 +1707,34 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "run_lr_calc: precond_method = '{}' requires a kernel with a "
                  "self-energy; method ({}) is already static, so run it directly.",
                  precond_method, total_kernel.to_string());
-    utils::check(iter_params.alg == "GCR",
-                 "run_lr_calc: precond_method = '{}' requires iter_alg 'GCR', got '{}'.",
-                 precond_method, iter_params.alg);
-    // A one-shot run returns GCR's first probe x + M⁻¹r, whose ΔF and ΔΣ are not
-    // one kernel evaluation of the returned ΔDm/ΔG.
-    utils::check(max_iter > 1,
-                 "run_lr_calc: precond_method = '{}' requires max_iter > 1: a one-shot "
-                 "run would return the preconditioned probe, not a kernel evaluation.",
-                 precond_method);
+    utils::check(iter_params.alg == "GCR" || iter_params.alg == "damping",
+                 "run_lr_calc: precond_method = '{}' requires iter_alg 'GCR' or "
+                 "'damping', got '{}'.", precond_method, iter_params.alg);
     utils::check(!qp_static_sigma,
                  "run_lr_calc: precond_method = '{}' is incompatible with "
                  "qp_static_sigma, which iterates by DIIS only.", precond_method);
+  }
+  utils::check(!initial_guess_precond || precond_method != "none",
+               "run_lr_calc: initial_guess = 'precond' requires a precond_method.");
+  if (fixed_order) {
+    utils::check(iter_params.alg == "damping" && iter_params.mixing == 1.0,
+                 "run_lr_calc: fixed_order requires iter_alg 'damping' with mixing 1, "
+                 "got '{}' with mixing {}: other iterations do not give the order-n "
+                 "partial sum.", iter_params.alg, iter_params.mixing);
+    utils::check(initial_guess_precond,
+                 "run_lr_calc: fixed_order requires initial_guess = 'precond': a zero "
+                 "start reaches only order n-1 after n iterations.");
+    // The static inputs add a constant term to every kernel evaluation that the
+    // preconditioner never sees, which costs the start one order.
+    int has_static_inputs = 0;
+    if (mpi->comm.root())
+      has_static_inputs = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                           DeltaV_qPQ_root.has_value()) ? 1 : 0;
+    mpi->comm.broadcast_n(&has_static_inputs, 1, 0);
+    utils::check(!has_static_inputs,
+                 "run_lr_calc: fixed_order is incompatible with the DeltaX (IBC) and "
+                 "DeltaV_qPQ perturbations: their constant term in the kernel is not seen "
+                 "by the preconditioner, so the start misses one order.");
   }
 
   std::string input_file = prefix + ".mbpt.h5";
@@ -2186,6 +2222,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.hessian_nmodes = hessian ? nmodes : 0;
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
+  p.precond_tol      = precond_tol;
+  p.precond_max_iter = precond_max_iter;
+  p.initial_guess_precond = initial_guess_precond;
+  p.fixed_order      = fixed_order;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
@@ -2201,7 +2241,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     nda::array<double, 1> k_weight(mf->k_weight());
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
     opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
-                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd());
+                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/fixed_order);
   }
 
   for (long m = 0; m < nmodes; ++m) {
@@ -2250,7 +2290,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    total_kernel.sigma_G_dW ? "full"
                        : total_kernel.sigma_dG_W ? "fixed_W" : "none",
                    precond_method != "none" ? precond_method : std::string(),
-                   hsex_head);
+                   hsex_head, initial_guess_precond, fixed_order);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
@@ -2358,15 +2398,20 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       h5::file file(output + ".mbpt.h5", 'a');
       auto lr_grp = chkpt::lr_group(file);
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
-      nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
-      nda::h5_write(lr_grp, "hessian_M", c1.M, false);
-      nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
-      nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
+      // A fixed-order run has the plain block only.
+      if (!fixed_order) {
+        nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
+        nda::h5_write(lr_grp, "hessian_M", c1.M, false);
+        nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
+        nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
+      }
       nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
-      nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
+      if (!fixed_order) nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
-      h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
-      h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
+      if (!fixed_order) {
+        h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
+        h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
+      }
       app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
               nmodes);
     }

@@ -52,12 +52,13 @@ lr_hessian_t::lr_hessian_t(
     imag_axes_ft::IAFT const& FT,
     nda::array<double, 1> const& k_weight,
     double spin_factor, long nmodes, bool has_sigma,
-    long ns, long nk_ibz, long nbnd)
+    long ns, long nk_ibz, long nbnd, bool plain_only)
     : _mpi(std::move(mpi)),
       _FT(&FT),
       _spin_factor(spin_factor),
       _nmodes(nmodes),
-      _has_sigma(has_sigma),
+      _plain_only(plain_only),
+      _has_sigma(has_sigma && !plain_only),
       _nt(FT.nt_f()),
       _nw(FT.nw_f()),
       _nk(nk_ibz),
@@ -127,9 +128,13 @@ lr_hessian_t::lr_hessian_t(
   // The ω stores are the largest allocation the feature makes; they are sized and
   // reported by lr_driver::print_memory_estimate along with every other large LR
   // array, so only the configuration is announced here.
-  app_log(1, "\n  Stationary free-energy-hessian estimator: ON");
-  app_log(1, "    perturbations = {}, dynamic ΔΣ = {}", _nmodes, _has_sigma ? "yes" : "no");
-  app_log(1, "    plus one extra LR Dyson solve per perturbation");
+  if (_plain_only) {
+    app_log(1, "\n  Plain free-energy hessian Tr(ΔH0, ΔDm): ON  (perturbations = {})", _nmodes);
+  } else {
+    app_log(1, "\n  Stationary free-energy-hessian estimator: ON");
+    app_log(1, "    perturbations = {}, dynamic ΔΣ = {}", _nmodes, _has_sigma ? "yes" : "no");
+    app_log(1, "    plus one extra LR Dyson solve per perturbation");
+  }
   app_log(2, "    this rank owns {} of {} elements", _nloc, _nF);
 }
 
@@ -185,7 +190,8 @@ void lr_hessian_t::store_mode(long p,
   // and ΔG always right.
   _Timer.start("LR_HESS_STORE");
   _dH0[p] = pack_static(sDeltaH0, /*weighted=*/false);   // left  of plain, static'
-  _dF[p]  = pack_static(sDeltaF,  /*weighted=*/false);   // left  of M, M'
+  if (!_plain_only)
+    _dF[p] = pack_static(sDeltaF, /*weighted=*/false);   // left  of M, M'
   _dDm[p] = pack_static(sDeltaDm, /*weighted=*/true);    // right of plain, M
   if (_has_sigma) {
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
@@ -295,6 +301,23 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // The accumulators are reduced and rescaled in place, so this is single-shot,
   // after every mode is stored.
   lr_hessian_result_t r;
+
+  // Plain only: Tr(ΔH0_λ, ΔDm_p) from the stores, no Dyson solve.
+  if (_plain_only) {
+    for (long p = 0; p < _nmodes; ++p)
+      for (long l = 0; l < _nmodes; ++l)
+        _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm[p]);
+    _mpi->comm.all_reduce_in_place_n(_plain_stat.data(), _nmodes * _nmodes, std::plus<>{});
+    r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
+    for (long l = 0; l < _nmodes; ++l)
+      for (long p = 0; p < _nmodes; ++p)
+        r.hessian_plain(l, p) = ComplexType(_spin_factor) * _plain_stat(l, p);
+    r.herm_plain = herm_dev(r.hessian_plain);
+    app_log(1, "\n  Plain free-energy-hessian diagnostics");
+    app_log(1, "    ||H_plain - H_plain^dag||/||H_plain|| = {:.3e}\n", r.herm_plain);
+    return r;
+  }
+
   r.Delta_mu_improved = nda::array<double, 1>(_nmodes);
   r.Delta_mu_improved() = 0.0;
 

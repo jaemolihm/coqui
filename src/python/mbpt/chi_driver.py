@@ -58,7 +58,12 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             gw_mode="none",
             recompute_W=False,
             screened_interaction_file=None,
-            div_treatment=None):
+            div_treatment=None,
+            precond_method="none",
+            initial_guess="zero",
+            precond_tol=None,
+            precond_max_iter=None,
+            fixed_order=False):
     r"""
     Charge susceptibility chi_{G G'}(q) and inverse dielectric matrix at nu = 0.
 
@@ -109,6 +114,12 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Forwarded to run_lr unchanged.
     div_treatment : str or None, optional
         Divergence treatment. Accepted only with ``unperturbed="mf_dft"``.
+    precond_method, initial_guess, precond_tol, precond_max_iter, fixed_order : optional
+        Forwarded to run_lr (see there). With ``fixed_order=True`` (damping,
+        mixing 1, ``initial_guess="precond"``; ``max_iter`` is the order n) the
+        stall check is skipped and only the plain hessian is computed, so
+        ``chi = chi_plain = hessian/Omega`` is the order-n partial sum and no
+        ``chi_sym`` is returned.
 
     Returns
     -------
@@ -232,14 +243,17 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         save_DeltaG=False, hessian=True,
         recompute_W=recompute_W,
         screened_interaction_file=screened_interaction_file,
-        div_treatment=div_treatment)
+        div_treatment=div_treatment,
+        precond_method=precond_method, initial_guess=initial_guess,
+        precond_tol=precond_tol, precond_max_iter=precond_max_iter,
+        fixed_order=fixed_order)
     niter = np.atleast_1d(niter).astype(np.int64)
     delta_mu = np.atleast_1d(delta_mu).astype(np.float64)
 
     # A stalled column reports max_iter + 1 (lr_solve_one hands back the loop
     # variable), so max_iter itself is a legitimate last-iteration convergence.
     stalled = np.flatnonzero(niter > max_iter)
-    if stalled.size:
+    if stalled.size and not fixed_order:
         raise RuntimeError(
             f"run_chi: {stalled.size} of {nG} columns hit max_iter = {max_iter} "
             f"without converging to tol = {tol:g}: G = "
@@ -266,8 +280,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     hess = payload[1]
 
     volume = mf.volume()
-    chi = hess["hessian_sym"] / volume
     chi_plain = hess["hessian"] / volume
+    # A fixed-order run has only the plain block, the order-n partial sum.
+    chi = chi_plain if fixed_order else hess["hessian_sym"] / volume
 
     # v is reported as inf exactly where the eps_inv row is NaN, so a caller can
     # select the usable rows on either array and get the same answer.
@@ -305,11 +320,12 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             "max_iter": max_iter,
             "tol": tol,
             "iter_alg": iter_alg,
+            "fixed_order": bool(fixed_order),
             "volume": volume,
             # C++ diagnostics: the antihermitian part of chi (chi_{GG'} =
             # conj(chi_{G'G}) is exact) and of the kernel pairing.
-            "herm_dev": hess["hessian_sym_herm_dev"],
+            "herm_dev": hess.get("hessian_sym_herm_dev"),
             "herm_dev_plain": hess["hessian_herm_dev"],
-            "herm_dev_M": hess["hessian_M_herm_dev"],
+            "herm_dev_M": hess.get("hessian_M_herm_dev"),
         },
     }

@@ -647,7 +647,9 @@ void dump_lr(communicator_t& comm,
              std::optional<long> nbnd_save,
              std::string const& gw_mode,
              std::string const& precond_method,
-             std::optional<double> exchange_static_W_head) {
+             std::optional<double> exchange_static_W_head,
+             bool initial_guess_precond,
+             bool fixed_order) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -719,6 +721,9 @@ void dump_lr(communicator_t& comm,
     }
     // GCR preconditioner kernel; absent for an unpreconditioned run.
     if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
+    // Start and stopping rule of a preconditioned run; absent for the default ones.
+    if (initial_guess_precond) h5::h5_write(lr_grp, "initial_guess", std::string("precond"));
+    if (fixed_order) h5::h5_write(lr_grp, "fixed_order", 1);
 
     app_log(2, "LR results written to \"{}\" in {}",
             imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
@@ -860,7 +865,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&, std::string const&,
-                      std::optional<double>);
+                      std::optional<double>, bool, bool);
 
   } // chkpt
 } // methods
