@@ -1089,7 +1089,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                 iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
       }
     }
-    if (!use_gcr && pc_fn && !_lr_diis)
+    if (!use_gcr && pc_fn)
       app_log(1, "          [precond damping]  precond sweeps {}", _pc_sweeps);
     if (use_gcr) {
       const std::string pc_lbl =

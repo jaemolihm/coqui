@@ -2398,17 +2398,20 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       h5::file file(output + ".mbpt.h5", 'a');
       auto lr_grp = chkpt::lr_group(file);
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
-      // A fixed-order run has the plain block only.
-      if (!fixed_order) {
+      nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
+      h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
+      // A fixed-order run has the plain block only, and removes the stationary
+      // block an earlier run may have left in the same file.
+      if (fixed_order) {
+        for (auto k : {"hessian_sym", "hessian_M", "hessian_M_prime", "hessian_static_prime",
+                       "Delta_mu_improved", "hessian_sym_herm_dev", "hessian_M_herm_dev"})
+          if (lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);
+      } else {
         nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
         nda::h5_write(lr_grp, "hessian_M", c1.M, false);
         nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
         nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
-      }
-      nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
-      if (!fixed_order) nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
-      h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
-      if (!fixed_order) {
+        nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
         h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
         h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
       }

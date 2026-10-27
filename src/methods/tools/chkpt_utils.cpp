@@ -721,7 +721,11 @@ void dump_lr(communicator_t& comm,
     }
     // GCR preconditioner kernel; absent for an unpreconditioned run.
     if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
-    // Start and stopping rule of a preconditioned run; absent for the default ones.
+    // Start and stopping rule of a preconditioned run; absent for the default ones,
+    // including when an earlier run wrote them into the same file.
+    for (auto [k, set] : {std::pair{"initial_guess", initial_guess_precond},
+                          std::pair{"fixed_order", fixed_order}})
+      if (!set && lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);
     if (initial_guess_precond) h5::h5_write(lr_grp, "initial_guess", std::string("precond"));
     if (fixed_order) h5::h5_write(lr_grp, "fixed_order", 1);
 
