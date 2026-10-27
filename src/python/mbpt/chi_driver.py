@@ -60,7 +60,6 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             screened_interaction_file=None,
             div_treatment=None,
             precond_method="none",
-            initial_guess="zero",
             precond_tol=None,
             precond_max_iter=None,
             fixed_order=False):
@@ -114,9 +113,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Forwarded to run_lr unchanged.
     div_treatment : str or None, optional
         Divergence treatment. Accepted only with ``unperturbed="mf_dft"``.
-    precond_method, initial_guess, precond_tol, precond_max_iter, fixed_order : optional
+    precond_method, precond_tol, precond_max_iter, fixed_order : optional
         Forwarded to run_lr (see there). With ``fixed_order=True`` (damping,
-        mixing 1, ``initial_guess="precond"``; ``max_iter`` is the order n) only
+        mixing 1, a ``precond_method``; ``max_iter`` is the order n) only
         the plain hessian is computed, so ``chi = chi_plain = hessian/Omega`` is
         the order-n partial sum (the stationary ``hessian_sym`` is not computed).
 
@@ -243,7 +242,7 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         recompute_W=recompute_W,
         screened_interaction_file=screened_interaction_file,
         div_treatment=div_treatment,
-        precond_method=precond_method, initial_guess=initial_guess,
+        precond_method=precond_method,
         precond_tol=precond_tol, precond_max_iter=precond_max_iter,
         fixed_order=fixed_order)
     niter = np.atleast_1d(niter).astype(np.int64)

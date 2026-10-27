@@ -648,7 +648,6 @@ void dump_lr(communicator_t& comm,
              std::string const& gw_mode,
              std::string const& precond_method,
              std::optional<double> exchange_static_W_head,
-             bool initial_guess_precond,
              bool fixed_order) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
@@ -719,14 +718,13 @@ void dump_lr(communicator_t& comm,
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
     }
-    // GCR preconditioner kernel; absent for an unpreconditioned run.
+    // Preconditioner kernel, whose solution of ΔH0 was the start; absent for an
+    // unpreconditioned run.
     if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
-    // Start and stopping rule of a preconditioned run; absent for the default ones,
-    // including when an earlier run wrote them into the same file.
-    for (auto [k, set] : {std::pair{"initial_guess", initial_guess_precond},
-                          std::pair{"fixed_order", fixed_order}})
-      if (!set && lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);
-    if (initial_guess_precond) h5::h5_write(lr_grp, "initial_guess", std::string("precond"));
+    // Stopping rule of a fixed-order run; absent for the default one, including
+    // when an earlier run wrote it into the same file.
+    if (!fixed_order && lr_grp.has_dataset("fixed_order"))
+      H5Ldelete(h5::hid_t(lr_grp), "fixed_order", H5P_DEFAULT);
     if (fixed_order) h5::h5_write(lr_grp, "fixed_order", 1);
 
     app_log(2, "LR results written to \"{}\" in {}",
@@ -869,7 +867,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&, std::string const&,
-                      std::optional<double>, bool, bool);
+                      std::optional<double>, bool);
 
   } // chkpt
 } // methods

@@ -189,11 +189,10 @@ namespace methods {
    * @param gw_mode        - [INPUT] GW self-energy mode of the kernel that was
    *   applied ("none"/"fixed_W"/"full"). It refines include_gw_sigma, which
    *   cannot tell fixed_W from full.
-   * @param precond_method - [INPUT] static kernel that preconditioned GCR
-   *   ("Hartree"/"HF"/"HSEX"), written as "precond_method" when non-empty. It
-   *   changes the convergence rate only, not the result.
-   * @param initial_guess_precond - [INPUT] the iteration started at the
-   *   preconditioner solution; written as initial_guess = "precond" when true.
+   * @param precond_method - [INPUT] static kernel that preconditioned the
+   *   iteration and gave its start ("Hartree"/"HF"/"HSEX"), written as
+   *   "precond_method" when non-empty. It changes the convergence rate only, not
+   *   the result of a converged run.
    * @param fixed_order - [INPUT] the run was a fixed-order one (exactly niter
    *   iterations, no convergence test); written as fixed_order = 1 when true.
    */
@@ -217,7 +216,6 @@ namespace methods {
                std::string const& gw_mode,
                std::string const& precond_method,
                std::optional<double> exchange_static_W_head,
-               bool initial_guess_precond,
                bool fixed_order);
 
   /// The "linear_response" group of an open checkpoint, or its "mode{imode}"

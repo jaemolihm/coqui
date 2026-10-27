@@ -198,9 +198,9 @@ void lr_driver::lr_setup(
                "Σ-free.", p.precond_kernel.to_string());
 
   // Every output downstream, ΔG(τ) included, is produced by the Dyson pass after
-  // the loop, so zero iterations return the start of the iteration: that is the
-  // preconditioner solution (initial_guess_precond), not the zero iterate.
-  const int min_iter = p.initial_guess_precond ? 0 : 1;
+  // the loop, so zero iterations return the start of the iteration: with a
+  // preconditioner that is its solution of ΔH0, without one the zero iterate.
+  const int min_iter = p.precond_kernel.empty() ? 1 : 0;
   utils::check(p.max_iter >= min_iter,
                "lr_driver::lr_setup: max_iter must be >= {}, got {}.", min_iter, p.max_iter);
   if (p.split_sigma_terms) {
@@ -215,6 +215,11 @@ void lr_driver::lr_setup(
     utils::check(!p.has_deltax(),
                  "lr_driver::lr_setup: split ΔΣ terms do not support the DeltaX IBC "
                  "correction (term 2 has no IBC path).");
+    // The terms are those of one kernel evaluation at V = ΔH0; a preconditioned
+    // run starts at the preconditioner solution and steps along M⁻¹ r.
+    utils::check(p.precond_kernel.empty(),
+                 "lr_driver::lr_setup: split ΔΣ terms do not support a preconditioner "
+                 "({}).", p.precond_kernel.to_string());
   }
   if (p.exchange_static_W) {
     // The IBC ΔX correction is built against the bare V_HF in the aux basis
@@ -247,8 +252,6 @@ void lr_driver::lr_setup(
             p.precond_kernel.to_string(),
             p.precond_hsex ? " with X = V + W_c(iν=0)" : "",
             p.precond_max_iter, p.precond_tol);
-  if (p.initial_guess_precond)
-    app_log(1, "  initial guess = preconditioner solution of ΔH0");
   if (p.fixed_order)
     app_log(1, "  fixed order: exactly max_iter iterations, no convergence test");
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
@@ -741,7 +744,7 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     _pc_sweeps = sweep;
     if (conv) break;
   }
-  if ((p.fixed_order || (r_S == nullptr && p.initial_guess_precond)) && _pc_sweeps == p.precond_max_iter &&
+  if ((p.fixed_order || r_S == nullptr) && _pc_sweeps == p.precond_max_iter &&
       rn > tol_in)
     app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
                "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
@@ -807,9 +810,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.start("LR_SCF");
 
-  // Start at the preconditioner solution of ΔH0: ΔF = y_F, ΔΣ = 0 (zeroed by the
-  // reset above), so that V_0 = ΔH0 + ΔF = M⁻¹ ΔH0.
-  if (p.initial_guess_precond) {
+  // With a preconditioner, start at its solution of ΔH0: ΔF = y_F, ΔΣ = 0 (zeroed
+  // by the reset above), so that V_0 = ΔH0 + ΔF = M⁻¹ ΔH0.
+  if (!p.precond_kernel.empty()) {
     _Timer.start("LR_PRECOND");
     precond_solve(sDeltaH0_skij, nullptr, sG_tskij, thc, p);
     _Timer.stop("LR_PRECOND");

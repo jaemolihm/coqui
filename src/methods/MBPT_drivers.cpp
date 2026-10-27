@@ -1477,16 +1477,15 @@ auto recompute_W_and_eps_inv_head(
  *                          that overrides the three keys above, or "HSEX".
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the preconditioner of GCR or
- *                          damping. Requires a Σ kernel; changes the rate of a
- *                          converged run, not its answer.
+ *                          damping, and its solution of ΔH0 is the start of the
+ *                          iteration (max_iter = 0 returns it). Requires a Σ
+ *                          kernel; changes the rate of a converged run, not its
+ *                          answer.
  *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
  *   precond_max_iter       0.01) and inner sweep cap (default 10)
- *   initial_guess          "zero" (default) or "precond": start at the
- *                          preconditioner solution of ΔH0; needs precond_method
- *                          and allows max_iter = 0
  *   fixed_order            run exactly max_iter iterations, no convergence test
  *                          (default false). Needs iter_alg damping with mixing 1,
- *                          initial_guess "precond", no DeltaX/DeltaV_qPQ. The plain
+ *                          a precond_method, no DeltaX/DeltaV_qPQ. The plain
  *                          hessian only is computed under lr_hessian.
  *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
  *                          (default 1e-8)
@@ -1564,12 +1563,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
   auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
   auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
-  auto initial_guess = io::get_value_with_default<std::string>(pt, "initial_guess", "zero");
   auto fixed_order = io::get_value_with_default<bool>(pt, "fixed_order", false);
-  utils::check(initial_guess == "zero" || initial_guess == "precond",
-               "run_lr_calc: initial_guess must be 'zero' or 'precond', got '{}'.",
-               initial_guess);
-  const bool initial_guess_precond = (initial_guess == "precond");
   utils::check(precond_max_iter >= 1,
                "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
@@ -1714,16 +1708,14 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "run_lr_calc: precond_method = '{}' is incompatible with "
                  "qp_static_sigma, which iterates by DIIS only.", precond_method);
   }
-  utils::check(!initial_guess_precond || precond_method != "none",
-               "run_lr_calc: initial_guess = 'precond' requires a precond_method.");
   if (fixed_order) {
     utils::check(iter_params.alg == "damping" && iter_params.mixing == 1.0,
                  "run_lr_calc: fixed_order requires iter_alg 'damping' with mixing 1, "
                  "got '{}' with mixing {}: other iterations do not give the order-n "
                  "partial sum.", iter_params.alg, iter_params.mixing);
-    utils::check(initial_guess_precond,
-                 "run_lr_calc: fixed_order requires initial_guess = 'precond': a zero "
-                 "start reaches only order n-1 after n iterations.");
+    utils::check(precond_method != "none",
+                 "run_lr_calc: fixed_order requires a precond_method: the order-n sum is "
+                 "in K - K_pc, started at the preconditioner solution.");
     // The static inputs add a constant term to every kernel evaluation that the
     // preconditioner never sees, which costs the start one order.
     int has_static_inputs = 0;
@@ -2224,7 +2216,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
   p.precond_max_iter = precond_max_iter;
-  p.initial_guess_precond = initial_guess_precond;
   p.fixed_order      = fixed_order;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
@@ -2290,7 +2281,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    total_kernel.sigma_G_dW ? "full"
                        : total_kernel.sigma_dG_W ? "fixed_W" : "none",
                    precond_method != "none" ? precond_method : std::string(),
-                   hsex_head, initial_guess_precond, fixed_order);
+                   hsex_head, fixed_order);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 

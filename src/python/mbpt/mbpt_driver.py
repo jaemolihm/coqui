@@ -395,7 +395,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            method=None,
            precond_method="none",
            precond_tol=None, precond_max_iter=None,
-           initial_guess="zero", fixed_order=False,
+           fixed_order=False,
            hessian=False,
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None):
     """
@@ -614,9 +614,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
         are z ≈ M⁻¹ r, and damping takes the step y += mixing · M⁻¹ r, solved
-        inexactly by a few inner sweeps. The iteration still applies the full
-        `method` kernel every step, so a converged run changes only the rate,
-        not the answer. Requires iter_alg {"alg": "GCR"} or {"alg": "damping"}
+        inexactly by a few inner sweeps. The iteration starts at the
+        preconditioner solution of ΔH0, y_0 = (K_pc χ-solve of ΔH0, 0), and
+        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response).
+        The iteration still applies the full `method` kernel every step, so a
+        converged run changes only the rate, not the answer. Requires iter_alg {"alg": "GCR"} or {"alg": "damping"}
         (DIIS is rejected) and a method with a Sigma (GW0 or GW); rejected with
         qp_static_sigma. A preconditioned run writes
         ``linear_response/precond_method``.
@@ -625,21 +627,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         (default 0.01 in C++).
     precond_max_iter : int or None, optional
         Inner sweep cap (default 10 in C++). A hit cap warns at
-        every apply of a ``fixed_order`` run and at the start solve of an
-        ``initial_guess="precond"`` run.
-    initial_guess : {"zero", "precond"}, optional
-        "precond" starts the iteration at the preconditioner solution of ΔH0,
-        i.e. the static-kernel response y_0 = (K_pc χ-solve of ΔH0, 0); it needs
-        ``precond_method``. With it ``max_iter = 0`` is allowed and returns that
-        start (for "HSEX", the HSEX response). A checkpoint written with it
-        carries ``linear_response/initial_guess = "precond"``.
+        every apply of a ``fixed_order`` run and at the start solve.
     fixed_order : bool, optional
         Run exactly ``max_iter`` iterations with no convergence test. With the
         preconditioned damping iteration at mixing 1 started from the
         preconditioner solution, V_n = Σ_{k<=n} (M⁻¹ δK χ)^k M⁻¹ ΔH0 is the GW0
         response to order n in the dynamic part of W, with Hartree and static
         screened exchange summed to all orders (n = ``max_iter``). Requires
-        iter_alg damping with mixing 1, ``initial_guess="precond"`` and no
+        iter_alg damping with mixing 1, a ``precond_method`` and no
         DeltaX_left/DeltaX_right/DeltaV_qPQ. The returned niter is ``max_iter``.
         With ``hessian=True`` only the plain hessian (linear in ΔDm) is
         computed and written. A checkpoint written with it carries
@@ -745,7 +740,6 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         lr_params["precond_tol"] = float(precond_tol)
     if precond_max_iter is not None:
         lr_params["precond_max_iter"] = int(precond_max_iter)
-    lr_params["initial_guess"] = str(initial_guess)
     lr_params["fixed_order"] = bool(fixed_order)
 
     if lr_impurity_response is not None:
