@@ -230,12 +230,16 @@ public:
    * @param nmodes      - [INPUT] perturbations solved in this batch
    * @param has_sigma   - [INPUT] the kernel carries a dynamic ΔΣ, so `Tr_ω` is live
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
+   * @param plain_only  - [INPUT] compute `hessian_plain` only. It reads ΔH0 and ΔDm,
+   *                      so no ΔF/ΔΣ/ΔG is stored, no ω store is allocated and
+   *                      `evaluate` runs no extra Dyson solve; the other matrices of
+   *                      the result stay empty. `has_sigma` is then irrelevant.
    */
   lr_hessian_t(std::shared_ptr<mpi_context_t> mpi,
                         imag_axes_ft::IAFT const& FT,
                         nda::array<double, 1> const& k_weight,
                         double spin_factor, long nmodes, bool has_sigma,
-                        long ns, long nk_ibz, long nbnd);
+                        long ns, long nk_ibz, long nbnd, bool plain_only = false);
 
   lr_hessian_t(lr_hessian_t const&) = delete;
   lr_hessian_t& operator=(lr_hessian_t const&) = delete;
@@ -379,6 +383,7 @@ private:
   imag_axes_ft::IAFT const* _FT;
   double _spin_factor;
   long _nmodes;
+  bool _plain_only;
   bool _has_sigma;
   long _nt, _nw, _nk, _nbnd, _nF;
   long _i0 = 0, _i1 = 0, _nloc = 0;

@@ -323,7 +323,9 @@ def read_lr_hessian(filename: str) -> dict:
         ``hessian_sym = hessian_static_prime + hessian_M_prime - hessian_M``, the
         ``hessian_call_index`` list, ``Delta_mu_improved``, and the scalar
         ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_M_herm_dev``
-        residuals.
+        residuals. A run made with ``fixed_order=True`` writes only the plain
+        block: ``hessian``, ``hessian_call_index`` and ``hessian_herm_dev`` are
+        returned, and the stationary keys are absent.
 
     Raises
     ------
@@ -355,18 +357,23 @@ def read_lr_hessian(filename: str) -> dict:
         if 'linear_response' not in f:
             raise KeyError(f"{filename} holds no 'linear_response' group.")
         lr_grp = f['linear_response']
-        if 'hessian_sym' not in lr_grp:
+        if 'hessian' not in lr_grp:
             raise KeyError(
                 f"{filename} holds no hessian block; rerun with "
                 f"run_lr(..., hessian=True).")
 
+        # The stationary keys are absent from a plain-only (fixed_order) block.
         out = {}
         for key in complex_keys:
+            if key not in lr_grp:
+                continue
             a = lr_grp[key][()]
             # CoQui writes complex as a trailing (..., 2) real/imag axis.
             out[key] = a[..., 0] + 1j * a[..., 1]
         for key in real_keys:
-            out[key] = lr_grp[key][()]
+            if key in lr_grp:
+                out[key] = lr_grp[key][()]
         for key in scalar_keys:
-            out[key] = float(lr_grp[key][()])
+            if key in lr_grp:
+                out[key] = float(lr_grp[key][()])
     return out

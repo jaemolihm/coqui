@@ -189,9 +189,12 @@ namespace methods {
    * @param gw_mode        - [INPUT] GW self-energy mode of the kernel that was
    *   applied ("none"/"fixed_W"/"full"). It refines include_gw_sigma, which
    *   cannot tell fixed_W from full.
-   * @param precond_method - [INPUT] static kernel that preconditioned GCR
-   *   ("Hartree"/"HF"/"HSEX"), written as "precond_method" when non-empty. It
-   *   changes the convergence rate only, not the result.
+   * @param precond_method - [INPUT] static kernel that preconditioned the
+   *   iteration and gave its start ("Hartree"/"HF"/"HSEX"), written as
+   *   "precond_method" when non-empty. It changes the convergence rate only, not
+   *   the result of a converged run.
+   * @param fixed_order - [INPUT] the run was a fixed-order one (exactly niter
+   *   iterations, no convergence test); written as fixed_order = 1 when true.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -212,7 +215,8 @@ namespace methods {
                std::optional<long> nbnd_save,
                std::string const& gw_mode,
                std::string const& precond_method,
-               std::optional<double> exchange_static_W_head);
+               std::optional<double> exchange_static_W_head,
+               bool fixed_order);
 
   /// The "linear_response" group of an open checkpoint, or its "mode{imode}"
   /// subgroup, each created if absent.

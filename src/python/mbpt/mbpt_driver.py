@@ -394,6 +394,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            nbnd_save=None,
            method=None,
            precond_method="none",
+           precond_tol=None, precond_max_iter=None,
+           fixed_order=False,
            hessian=False,
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None):
     """
@@ -451,7 +453,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
     max_iter : int, optional
         Maximum number of SCF iterations (default 50). Use 1 for one-shot: one
-        kernel evaluation, then the Dyson pass at its output.
+        kernel evaluation, then the Dyson pass at its output (with a
+        ``precond_method``, one step from the preconditioner start).
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
@@ -610,13 +613,36 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
-        as the GCR preconditioner: each GCR direction is z ≈ (1 - K_pc χ)⁻¹ r,
-        solved inexactly by a few inner sweeps. The iteration still applies the
-        full `method` kernel every step, so it affects the convergence rate,
-        not the answer. Requires iter_alg {"alg": "GCR"}, max_iter > 1 and a
-        method with a Sigma (GW0 or GW); rejected with qp_static_sigma. A
-        preconditioned run writes
+        as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
+        are z ≈ M⁻¹ r, and damping takes the step y += mixing · M⁻¹ r, solved
+        inexactly by a few inner sweeps. The iteration starts at the
+        preconditioner solution of ΔH0, y_0 = (K_pc χ-solve of ΔH0, 0), and
+        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response;
+        DeltaX_left/DeltaX_right/DeltaV_qPQ do not enter it). The iteration
+        still applies the full `method` kernel every step, so a converged run
+        changes only the rate, not the answer. Requires iter_alg
+        {"alg": "GCR"} or {"alg": "damping"} (DIIS is rejected) and a method
+        with a Sigma (GW0 or GW); rejected with qp_static_sigma and
+        split_sigma_terms. A preconditioned run writes
         ``linear_response/precond_method``.
+    precond_tol : float or None, optional
+        Inner stop of the preconditioner, ‖r_in‖ ≤ precond_tol · ‖K_pc χ r‖
+        (default 0.01 in C++).
+    precond_max_iter : int or None, optional
+        Inner sweep cap (default 10 in C++). A hit cap warns at
+        every apply of a ``fixed_order`` run and at the start solve of a
+        ``max_iter = 0`` run.
+    fixed_order : bool, optional
+        Run exactly ``max_iter`` iterations with no convergence test. With the
+        preconditioned damping iteration at mixing 1 started from the
+        preconditioner solution, V_n = Σ_{k<=n} (M⁻¹ δK χ)^k M⁻¹ ΔH0 is the GW0
+        response to order n in the dynamic part of W, with Hartree and static
+        screened exchange summed to all orders (n = ``max_iter``). Requires
+        iter_alg damping with mixing 1, a ``precond_method`` and no
+        DeltaX_left/DeltaX_right/DeltaV_qPQ. The returned niter is ``max_iter``.
+        With ``hessian=True`` only the plain hessian (linear in ΔDm) is
+        computed and written. A checkpoint written with it carries
+        ``linear_response/fixed_order = 1``.
 
     Returns
     -------
@@ -714,6 +740,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         raise TypeError("precond_method must be one of 'none', 'Hartree', 'HF', "
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
+    if precond_tol is not None:
+        lr_params["precond_tol"] = float(precond_tol)
+    if precond_max_iter is not None:
+        lr_params["precond_max_iter"] = int(precond_max_iter)
+    lr_params["fixed_order"] = bool(fixed_order)
 
     if lr_impurity_response is not None:
         bad = set(lr_impurity_response) - {"Sigma", "Pi"}

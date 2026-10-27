@@ -180,16 +180,28 @@ struct lr_params {
   bool save_DeltaG = true;
   lr_iter_params iter_params{};   ///< damping / DIIS
 
-  // --- GCR preconditioner ---
+  // --- Preconditioner (GCR or damping) ---
   /// Σ-free kernel K_pc whose resolvent z = (I - K_pc Pχ)⁻¹ r preconditions GCR
-  /// on the full equation; empty = no preconditioner. Changes the convergence
-  /// rate, not the answer. Requires iter_params.alg == "GCR" and a Σ kernel.
+  /// or the damping step on the full equation; empty = no preconditioner.
+  /// Changes the convergence rate of a converged run, not the answer. Requires
+  /// iter_params.alg == "GCR" or "damping" and a Σ kernel.
   /// K_pc never takes the static inputs (ΔV_qPQ, Dm_ab, include_xc) or the IBC
   /// correction: it must be linear in the residual.
   lr_kernel_spec precond_kernel{};
   /// K_pc's exchange contracts V + W_c(iν=0) (HSEX), as exchange_static_W does
   /// for the operator.
   bool precond_hsex = false;
+  /// Inner stop of the preconditioner: ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖, with
+  /// K_pc χ r the inner right-hand side at y_F = 0.
+  double precond_tol = 0.01;
+  /// Cap on the preconditioner's inner sweeps. The last sweep takes any residual.
+  int precond_max_iter = 10;
+  /// Run exactly max_iter iterations with no convergence test and report
+  /// niter = max_iter. With damping (mixing 1) and a precond_kernel, iterate n
+  /// is the Neumann partial sum of order n in K - K_pc. The hessian is then the
+  /// plain one only. Rejected together with the static inputs
+  /// (IBC, ΔV_qPQ), whose constant term the preconditioner never sees.
+  bool fixed_order = false;
 
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when the kernel has a Σ.
@@ -498,26 +510,39 @@ private:
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
   /**
-   * The GCR preconditioner z = P_c⁻¹ r. `r` and `z` are this rank's slices of
-   * the concatenated (ΔF, ΔΣ) residual and direction, as lr_gcr holds them.
+   * The preconditioner z = M⁻¹ r, M = 1 - K_pc Pχ. `r` and `z` are this rank's
+   * slices of the concatenated (ΔF, ΔΣ) residual and direction, as lr_gcr holds
+   * them; GCR and the damping iteration both call it.
    *
    * Solves z_F = r_F + K_pc[Pχ(z_F, r_Σ)] for the ΔF part and passes ΔΣ through,
-   * z_Σ = r_Σ: one full Dyson pass gives the ΔDm of r_Σ, then each sweep is a
-   * ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation and one step of the
-   * ΔF-only _pc_gcr on y_F = z_F - r_F. The sweeps stop at
-   * ‖r_in‖ ≤ pc_rel_tol·‖r_in,0‖ or after pc_max_sweeps; the outer GCR is
-   * flexible, so the inner accuracy changes the rate only. The _pc_gcr basis is
-   * recycled across applies (reset_rhs): its operator I - K_pc Pχ is the same
-   * on every call. K_pc runs without the static inputs, so the inner problem has
-   * no constant term.
+   * z_Σ = r_Σ: gather r, then precond_solve(r_F, &r_Σ), then z = (r_F + y_F, r_Σ).
    *
    * Collective on comm.
    */
   void precond_apply(nda::array<ComplexType, 1> const& r, nda::array<ComplexType, 1>& z,
                      const sArray_t<Array_view_5D_t>& sG_tskij, thc_reader_t& thc,
                      const lr_params& p);
-  static constexpr double pc_rel_tol = 0.01;
-  static constexpr int pc_max_sweeps = 10;
+
+  /**
+   * The inner solve of precond_apply on shared arrays: y_F = K_pc[Pχ(r_F + y_F, r_Σ)]
+   * from y_F = 0, left in *_sDeltaF_pc_y. For r_S = null there is no ΔΣ part (the
+   * start y_F = K_pc χ(ΔH0 + y_F)); otherwise one full Dyson pass gives the ΔDm of
+   * r_Σ, and each sweep is a ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation
+   * and one step of the ΔF-only _pc_gcr on y_F. The sweeps stop at
+   * ‖r_in‖ ≤ p.precond_tol·‖r_in,0‖ or after p.precond_max_iter; the outer GCR is
+   * flexible, so there the inner accuracy changes the rate only. The _pc_gcr basis
+   * is recycled across solves (reset_rhs): its operator I - K_pc Pχ is the same on
+   * every call. K_pc runs without the static inputs, so the inner problem has no
+   * constant term. A hit cap warns at every apply of a fixed_order run and at the
+   * start solve (r_Σ == nullptr) of a max_iter = 0 run, where the inner accuracy is
+   * part of the answer; a converged run does not depend on it.
+   *
+   * Collective on comm.
+   */
+  void precond_solve(const sArray_t<Array_view_4D_t>& r_F,
+                     const sArray_t<Array_view_5D_t>* r_S,
+                     const sArray_t<Array_view_5D_t>& sG_tskij, thc_reader_t& thc,
+                     const lr_params& p);
 
   /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or
   /// the preconditioner is HSEX.
