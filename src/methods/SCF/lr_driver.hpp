@@ -537,8 +537,9 @@ private:
    * flexible, so there the inner accuracy changes the rate only. The _pc_gcr basis
    * is recycled across solves (reset_rhs): its operator I - K_pc Pχ is the same on
    * every call. K_pc runs without the static inputs, so the inner problem has no
-   * constant term. A hit cap warns under fixed_order / initial_guess_precond,
-   * where the inner accuracy is part of the answer.
+   * constant term. A hit cap warns at every apply of a fixed_order run and at the
+   * start solve (r_Σ == nullptr) of an initial_guess_precond run, where the inner
+   * accuracy is part of the answer.
    *
    * Collective on comm.
    */

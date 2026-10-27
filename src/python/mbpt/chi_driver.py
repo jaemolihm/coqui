@@ -116,10 +116,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Divergence treatment. Accepted only with ``unperturbed="mf_dft"``.
     precond_method, initial_guess, precond_tol, precond_max_iter, fixed_order : optional
         Forwarded to run_lr (see there). With ``fixed_order=True`` (damping,
-        mixing 1, ``initial_guess="precond"``; ``max_iter`` is the order n) the
-        stall check is skipped and only the plain hessian is computed, so
-        ``chi = chi_plain = hessian/Omega`` is the order-n partial sum and no
-        ``chi_sym`` is returned.
+        mixing 1, ``initial_guess="precond"``; ``max_iter`` is the order n) only
+        the plain hessian is computed, so ``chi = chi_plain = hessian/Omega`` is
+        the order-n partial sum (the stationary ``hessian_sym`` is not computed).
 
     Returns
     -------
@@ -251,9 +250,10 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     delta_mu = np.atleast_1d(delta_mu).astype(np.float64)
 
     # A stalled column reports max_iter + 1 (lr_solve_one hands back the loop
-    # variable), so max_iter itself is a legitimate last-iteration convergence.
+    # variable), so max_iter itself is a legitimate last-iteration convergence;
+    # a fixed_order run reports max_iter.
     stalled = np.flatnonzero(niter > max_iter)
-    if stalled.size and not fixed_order:
+    if stalled.size:
         raise RuntimeError(
             f"run_chi: {stalled.size} of {nG} columns hit max_iter = {max_iter} "
             f"without converging to tol = {tol:g}: G = "

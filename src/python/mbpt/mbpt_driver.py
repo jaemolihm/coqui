@@ -624,8 +624,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Inner stop of the preconditioner, ‖r_in‖ ≤ precond_tol · ‖K_pc χ r‖
         (default 0.01 in C++).
     precond_max_iter : int or None, optional
-        Inner sweep cap (default 10 in C++). A hit cap warns when
-        ``fixed_order`` or ``initial_guess="precond"`` is set.
+        Inner sweep cap (default 10 in C++). A hit cap warns at
+        every apply of a ``fixed_order`` run and at the start solve of an
+        ``initial_guess="precond"`` run.
     initial_guess : {"zero", "precond"}, optional
         "precond" starts the iteration at the preconditioner solution of ΔH0,
         i.e. the static-kernel response y_0 = (K_pc χ-solve of ΔH0, 0); it needs

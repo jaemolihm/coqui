@@ -741,7 +741,7 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     _pc_sweeps = sweep;
     if (conv) break;
   }
-  if ((p.fixed_order || p.initial_guess_precond) && _pc_sweeps == p.precond_max_iter &&
+  if ((p.fixed_order || (r_S == nullptr && p.initial_guess_precond)) && _pc_sweeps == p.precond_max_iter &&
       rn > tol_in)
     app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
                "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
