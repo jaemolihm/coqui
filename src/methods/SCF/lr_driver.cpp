@@ -215,11 +215,6 @@ void lr_driver::lr_setup(
     utils::check(!p.has_deltax(),
                  "lr_driver::lr_setup: split ΔΣ terms do not support the DeltaX IBC "
                  "correction (term 2 has no IBC path).");
-    // The terms are those of one kernel evaluation at V = ΔH0; a preconditioned
-    // run starts at the preconditioner solution and steps along M⁻¹ r.
-    utils::check(p.precond_kernel.empty(),
-                 "lr_driver::lr_setup: split ΔΣ terms do not support a preconditioner "
-                 "({}).", p.precond_kernel.to_string());
   }
   if (p.exchange_static_W) {
     // The IBC ΔX correction is built against the bare V_HF in the aux basis
@@ -744,8 +739,8 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     _pc_sweeps = sweep;
     if (conv) break;
   }
-  if ((p.fixed_order || r_S == nullptr) && _pc_sweeps == p.precond_max_iter &&
-      rn > tol_in)
+  if ((p.fixed_order || (r_S == nullptr && p.max_iter == 0)) &&
+      _pc_sweeps == p.precond_max_iter && rn > tol_in)
     app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
                "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
             p.precond_max_iter, rn / tol_in);
@@ -897,7 +892,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Save the previous iterates, each as this rank's partition slice only.
     _Timer.start("LR_SAVE");
     // The iteration-algorithm step reads the input ΔF/ΔΣ (ΔV_QPGW) of every
-    // iteration, the reset zeros at the first. ΔDm only enters a difference norm.
+    // iteration: at the first, zero or the preconditioner start. ΔDm only enters
+    // a difference norm.
     _DeltaF.prev = _DeltaF.slice(sDeltaF_skij.local());
     if (track_sigma)
       _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());

@@ -197,8 +197,9 @@ struct lr_params {
   /// Cap on the preconditioner's inner sweeps. The last sweep takes any residual.
   int precond_max_iter = 10;
   /// Run exactly max_iter iterations with no convergence test and report
-  /// niter = max_iter. With damping (mixing 1) and a precond_kernel, iterate n is the Neumann partial sum of order n in K - K_pc. The hessian is
-  /// then the plain one only. Rejected together with the static inputs
+  /// niter = max_iter. With damping (mixing 1) and a precond_kernel, iterate n
+  /// is the Neumann partial sum of order n in K - K_pc. The hessian is then the
+  /// plain one only. Rejected together with the static inputs
   /// (IBC, ΔV_qPQ), whose constant term the preconditioner never sees.
   bool fixed_order = false;
 
@@ -533,7 +534,8 @@ private:
    * is recycled across solves (reset_rhs): its operator I - K_pc Pχ is the same on
    * every call. K_pc runs without the static inputs, so the inner problem has no
    * constant term. A hit cap warns at every apply of a fixed_order run and at the
-   * start solve (r_Σ == nullptr), where the inner accuracy is part of the answer.
+   * start solve (r_Σ == nullptr) of a max_iter = 0 run, where the inner accuracy is
+   * part of the answer; a converged run does not depend on it.
    *
    * Collective on comm.
    */

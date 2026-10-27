@@ -1478,9 +1478,9 @@ auto recompute_W_and_eps_inv_head(
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the preconditioner of GCR or
  *                          damping, and its solution of ΔH0 is the start of the
- *                          iteration (max_iter = 0 returns it). Requires a Σ
- *                          kernel; changes the rate of a converged run, not its
- *                          answer.
+ *                          iteration (max_iter = 0 returns it; DeltaX/DeltaV_qPQ
+ *                          do not enter it). Requires a Σ kernel; changes the
+ *                          rate of a converged run, not its answer.
  *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
  *   precond_max_iter       0.01) and inner sweep cap (default 10)
  *   fixed_order            run exactly max_iter iterations, no convergence test
@@ -1707,6 +1707,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     utils::check(!qp_static_sigma,
                  "run_lr_calc: precond_method = '{}' is incompatible with "
                  "qp_static_sigma, which iterates by DIIS only.", precond_method);
+    // The split terms are those of one kernel evaluation at V = ΔH0, while a
+    // preconditioned run evaluates the kernel at its start M⁻¹ ΔH0.
+    utils::check(!split_sigma_terms,
+                 "run_lr_calc: precond_method = '{}' is incompatible with "
+                 "split_sigma_terms, whose terms are one step from V = ΔH0.", precond_method);
   }
   if (fixed_order) {
     utils::check(iter_params.alg == "damping" && iter_params.mixing == 1.0,

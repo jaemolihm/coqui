@@ -453,7 +453,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
     max_iter : int, optional
         Maximum number of SCF iterations (default 50). Use 1 for one-shot: one
-        kernel evaluation, then the Dyson pass at its output.
+        kernel evaluation, then the Dyson pass at its output (with a
+        ``precond_method``, one step from the preconditioner start).
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
@@ -616,18 +617,21 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         are z ≈ M⁻¹ r, and damping takes the step y += mixing · M⁻¹ r, solved
         inexactly by a few inner sweeps. The iteration starts at the
         preconditioner solution of ΔH0, y_0 = (K_pc χ-solve of ΔH0, 0), and
-        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response).
-        The iteration still applies the full `method` kernel every step, so a
-        converged run changes only the rate, not the answer. Requires iter_alg {"alg": "GCR"} or {"alg": "damping"}
-        (DIIS is rejected) and a method with a Sigma (GW0 or GW); rejected with
-        qp_static_sigma. A preconditioned run writes
+        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response;
+        DeltaX_left/DeltaX_right/DeltaV_qPQ do not enter it). The iteration
+        still applies the full `method` kernel every step, so a converged run
+        changes only the rate, not the answer. Requires iter_alg
+        {"alg": "GCR"} or {"alg": "damping"} (DIIS is rejected) and a method
+        with a Sigma (GW0 or GW); rejected with qp_static_sigma and
+        split_sigma_terms. A preconditioned run writes
         ``linear_response/precond_method``.
     precond_tol : float or None, optional
         Inner stop of the preconditioner, ‖r_in‖ ≤ precond_tol · ‖K_pc χ r‖
         (default 0.01 in C++).
     precond_max_iter : int or None, optional
         Inner sweep cap (default 10 in C++). A hit cap warns at
-        every apply of a ``fixed_order`` run and at the start solve.
+        every apply of a ``fixed_order`` run and at the start solve of a
+        ``max_iter = 0`` run.
     fixed_order : bool, optional
         Run exactly ``max_iter`` iterations with no convergence test. With the
         preconditioned damping iteration at mixing 1 started from the
