@@ -25,6 +25,7 @@
 #include "configuration.hpp"
 #include <complex>
 #include "stdio.h"
+#include <filesystem>
 
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
@@ -154,6 +155,55 @@ TEST_CASE("qe_orbs", "[mean_field]") {
   //nda::h5_write(grp, "Orb_k", dPsi_k.local(), false);
   //nda::h5_write(grp, "Orb_g", dPsi_g.local(), false);
   //nda::h5_write(grp, "Orb_r", dPsi_r.local(), false);
+}
+
+TEST_CASE("qe_orbs_pw_split", "[mean_field]") {
+  // read_distributed_orbital_set on PW-split grids (read on spin/k/band, then redistributed) vs
+  // a direct get_orbital_set of each rank's slice; then at most one wfc file left open per rank
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto [outdir,prefix] = utils::utest_filename(mf::qe_source);
+  auto mfobj = mf::make_MF(mpi, mf::qe_source, outdir, prefix);
+  long np = mpi->comm.size();
+  long nspin = mfobj.nspin(), nk = mfobj.nkpts_ibz(), nb = mfobj.nbnd(), npol = mfobj.npol();
+  long ngm = mfobj.wfc_truncated_grid()->size();
+  REQUIRE(npol == 1);
+
+  nda::array<ComplexType,4> Psi(nspin,nk,nb,ngm);
+  for( long s=0; s<nspin; ++s )
+    mfobj.get_orbital_set('w',s,{0,nk},{0,nb},Psi(s,nda::ellipsis{}));
+
+  {
+    auto dPsi = mf::read_distributed_orbital_set<memory::array<HOST_MEMORY,ComplexType,5>>(
+                  mfobj,mpi->comm,'w',{1,1,1,1,np},{0,nspin},{0,nk},{0,nb},{1,1,1,1,1});
+    auto s = dPsi.local_range(0), k = dPsi.local_range(1), b = dPsi.local_range(2), g = dPsi.local_range(4);
+    REQUIRE(dPsi.grid() == std::array<long,5>{1,1,1,1,np});
+    REQUIRE(nda::max_element(nda::abs(dPsi.local()(nda::range::all,nda::range::all,nda::range::all,0,nda::range::all)
+                                       - Psi(s,k,b,g))) == 0.0);
+  }
+  {
+    auto dPsi = mf::read_distributed_orbital_set<memory::array<HOST_MEMORY,ComplexType,4>>(
+                  mfobj,mpi->comm,'w',{1,1,1,np},{0,nspin},{0,nk},{0,nb},{1,1,1,1});
+    auto s = dPsi.local_range(0), k = dPsi.local_range(1), b = dPsi.local_range(2), g = dPsi.local_range(3);
+    REQUIRE(dPsi.grid() == std::array<long,4>{1,1,1,np});
+    REQUIRE(nda::max_element(nda::abs(dPsi.local() - Psi(s,k,b,g))) == 0.0);
+  }
+  {
+    auto dPsi = mf::read_distributed_orbital_set<memory::array<HOST_MEMORY,ComplexType,2>>(
+                  mfobj,mpi->comm,'w',{1,np},{0,nspin},{0,nk},{0,nb},{1,1});
+    auto i = dPsi.local_range(0), g = dPsi.local_range(1);
+    REQUIRE(dPsi.grid() == std::array<long,2>{1,np});
+    auto Psi2D = nda::reshape(Psi, std::array<long,2>{nspin*nk*nb,ngm});
+    REQUIRE(nda::max_element(nda::abs(dPsi.local() - Psi2D(i,g))) == 0.0);
+  }
+
+  long nopen = 0;
+  for( auto const& e : std::filesystem::directory_iterator("/proc/self/fd") ) {
+    std::error_code ec;
+    auto f = std::filesystem::read_symlink(e.path(), ec).filename().string();
+    if( not ec and f.starts_with("wfc") and f.ends_with(".hdf5") ) ++nopen;
+  }
+  REQUIRE(nopen <= 1);
+  mfobj.close();
 }
 
 TEST_CASE("qe_rho", "[mean_field]") {
