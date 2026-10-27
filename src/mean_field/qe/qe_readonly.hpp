@@ -63,7 +63,8 @@ grids::truncated_g_grid wfc_grid_from_h5(qe_system const& sys);
 
  /*
  * Provides interface and read-only access to data in Quantum Espresso's hdf5 checkpoint file.
- * Files are open "on-demand" and closed either at destruction or by a call to close().
+ * Files are open "on-demand", one at a time: opening a k-point file closes the previous one,
+ * and the last one is closed at destruction or by a call to close().
  * Details here...
  */
 class qe_readonly 
@@ -108,7 +109,6 @@ public:
 // add routine to restart from h5 directly without having to reconstruct bz_symm info
     sys( (fmt==xml_input_type) ? read_xml(std::move(mpi),outdir,prefix,n_,false) :
                                  read_h5(std::move(mpi),outdir,prefix,n_) ),
-    h5files(sys.nspin*sys.bz().nkpts_ibz,std::nullopt),
     k2g_list(sys.bz().nkpts,std::nullopt),
     wfc_k2g_list(sys.bz().nkpts,std::nullopt),
     ecut( ecut_>0.0 ? ecut_ : sys.ecutrho ),
@@ -125,7 +125,6 @@ public:
 
   qe_readonly(qe_system const& qes, double ecut_ = 0.0) :
     sys(qes),
-    h5files(sys.nspin*sys.bz().nkpts_ibz,std::nullopt),
     k2g_list(sys.bz().nkpts,std::nullopt),
     wfc_k2g_list(sys.bz().nkpts,std::nullopt),
     ecut( ecut_>0.0 ? ecut_ : sys.ecutrho ),
@@ -142,7 +141,6 @@ public:
 
   qe_readonly(qe_system && qes, double ecut_ = 0.0) :
     sys(std::move(qes)),
-    h5files(sys.nspin*sys.bz().nkpts_ibz,std::nullopt),
     k2g_list(sys.bz().nkpts,std::nullopt),
     wfc_k2g_list(sys.bz().nkpts,std::nullopt),
     ecut( ecut_>0.0 ? ecut_ : sys.ecutrho ),
@@ -159,7 +157,6 @@ public:
 
   qe_readonly(qe_readonly const& other) : 
     sys(other.sys),
-    h5files(sys.nspin*sys.bz().nkpts_ibz,std::nullopt),
     k2g_list(sys.bz().nkpts,std::nullopt),
     wfc_k2g_list(sys.bz().nkpts,std::nullopt),
     ecut(other.ecut),
@@ -170,7 +167,6 @@ public:
 
   qe_readonly(qe_readonly && other) : 
     sys(std::move(other.sys)),
-    h5files(sys.nspin*sys.bz().nkpts_ibz,std::nullopt),
     k2g_list(sys.bz().nkpts,std::nullopt),
     wfc_k2g_list(sys.bz().nkpts,std::nullopt),
     ecut( other.ecut ),
@@ -312,9 +308,8 @@ public:
 
   void close()
   {
-    for(auto& f: h5files)
-      if( f.has_value() )
-        f = std::nullopt;
+    h5file = std::nullopt;
+    open_index = -1;
     for(auto& f: k2g_list)
       if( f.has_value() )
         f = std::nullopt;
@@ -328,8 +323,11 @@ private:
   // qe_system structure
   qe_system sys;    
 
-  // h5 handles for k-point files
-  std::vector<std::optional<h5::file>> h5files;
+  // the one open k-point file and its index (see to_h5_index): every rank may visit every
+  // k-point, and keeping all nspin*nkpts_ibz files open per rank exceeds a node's open-file
+  // limit on large k meshes
+  std::optional<h5::file> h5file;
+  long open_index = -1;
 
 // this should really be long!!!
   // k2g: mapping of G-vectors between "kinetic" and "FFT" grids 
@@ -367,35 +365,38 @@ private:
     return sys.bz().kp_to_ibz(ik) + ispin*sys.bz().nkpts_ibz;
   }
 
-  // Reads the raw /evc coefficients for (h5 index, b_rng) into Ok, of shape
+  // Reads the raw /evc coefficients for b_rng from the open file into Ok, of shape
   // (nb, npol*npw), accumulating the read time into the /evc IO diagnostic.
-  void read_evc(int index, nda::range b_rng, int npw, nda::array<ComplexType,2>& Ok) {
+  void read_evc(nda::range b_rng, int npw, nda::array<ComplexType,2>& Ok) {
     using view = nda::array_view<RealType,2>;
     int nb = b_rng.size();
     view Ok_v{{nb,2*sys.npol*npw},reinterpret_cast<RealType*>(Ok.data())};
     auto t0 = std::chrono::steady_clock::now();
-    h5_read(*(h5files[index]), "/evc", Ok_v, std::tuple{b_rng,nda::range::all});
+    h5_read(*h5file, "/evc", Ok_v, std::tuple{b_rng,nda::range::all});
     evc_io_s += std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
     ++evc_nread;
   }
 
   void open_if_needed(char OT, int index, int ispin, int ik) {
-    if( not h5files[index].has_value() ) { 
+    if( open_index != index ) { 
       utils::check(sys.nspin==1 or sys.nspin==2, "Error: Invalid nspin:{}",sys.nspin);
+      h5file = std::nullopt;
+      open_index = -1;
       if(sys.nspin==1)
-        h5files[index] = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfc"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
+        h5file = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfc"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
       else if(ispin==0)
-        h5files[index] = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfcup"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
+        h5file = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfcup"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
       else if(ispin==1)
-        h5files[index] = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfcdw"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
+        h5file = std::make_optional<h5::file>(sys.outdir+"/"+sys.prefix+".save/wfcdw"+std::to_string(sys.bz().kp_to_ibz(ik)+1)+".hdf5",'r'); 
       else
         APP_ABORT("Error: Invalid ispin: {}",ispin);
+      open_index = index;
     }
     // MAM: assuming that k2g mapping is spin independent, which it should be...
     if( (OT=='r' or OT=='g') and not k2g_list[ik].has_value() ) {
       k2g_list[ik] = std::make_optional<nda::array<int,1>>(sys.npw[ik],0);
       nda::array<int,2> miller(sys.npw[ik],3);
-      h5_read(*(h5files[index]), "/MillerIndices", miller);
+      h5_read(*h5file, "/MillerIndices", miller);
       auto& k2g = *(k2g_list[ik]);
       utils::generate_k2g(miller,k2g,fft_mesh);
       if(ik >= sys.bz().nkpts_ibz) {
@@ -409,7 +410,7 @@ private:
     if( (OT=='w') and not wfc_k2g_list[ik].has_value() ) {
       wfc_k2g_list[ik] = std::make_optional<nda::array<int,1>>(sys.npw[ik],0);
       nda::array<int,2> miller(sys.npw[ik],3);
-      h5_read(*(h5files[index]), "/MillerIndices", miller);
+      h5_read(*h5file, "/MillerIndices", miller);
       auto& k2g = *(wfc_k2g_list[ik]);
       if(ik >= sys.bz().nkpts_ibz) {
         nda::stack_array<double, 3> Gs;
@@ -566,7 +567,7 @@ private:
     { 
       nda::array<ComplexType,1> Ok(sys.npol*sys.npw[ik]);
       view Ok_v{{2*sys.npol*sys.npw[ik]},reinterpret_cast<RealType*>(Ok.data())};
-      h5_read(*(h5files[index]), "/evc", Ok_v, std::tuple{m,all});
+      h5_read(*h5file, "/evc", Ok_v, std::tuple{m,all});
       // MAM: fractional translations!!!
       //if(ik >= sys.bz().nkpts_ibz and ft>0) Ok(all) *= Xft(all);
       if(OT=='w')
@@ -616,7 +617,7 @@ private:
     {
 // use fallback allocator
       nda::array<ComplexType,2> Ok(nb,sys.npol*npw);
-      read_evc(index,b_rng,npw,Ok);
+      read_evc(b_rng,npw,Ok);
       // MAM: fractional translations!!!
       //if(ik >= sys.bz().nkpts_ibz and ft>0) Ok(all) *= Xft(all);
       if(OT=='w')
@@ -672,7 +673,7 @@ private:
 // use fallback allocator
       // reading all polarizations for efficiency, at the expense of more memory
       nda::array<ComplexType,2> Ok(nb,sys.npol*npw);
-      read_evc(index,b_rng,npw,Ok);
+      read_evc(b_rng,npw,Ok);
       // MAM: fractional translations!!!
       //if(ik >= sys.bz().nkpts_ibz and ft>0) Ok(all) *= Xft(all);
       if(OT=='w')

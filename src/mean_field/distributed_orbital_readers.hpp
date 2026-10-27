@@ -85,18 +85,28 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
   long npol = mfobj.npol();
   long nnr = ( OT_in == 'w' ? mfobj.wfc_truncated_grid()->size() :  mfobj.nnr() ); 
 
-  // no distributed FFT (by choice), so always read full PW dimension if OT=='r'  
+  // no distributed FFT (by choice), so always read full PW dimension if OT=='r'.
+  // A requested split of the PW axis is read split over spin/k/band and then redistributed:
+  // a PW-split read makes every rank open and read every k-point file in full. The read grid
+  // splits the PW axis only by the factor of np that the spin/k/band axes do not take
+  // (utils::find_proc_grid_capped), and never for OT=='r' or the default grid.
   long np0 = std::accumulate(pgrid_out.cbegin(), pgrid_out.cend(), long(1), std::multiplies<>{});
   std::array<long,rank> pgrid = pgrid_out;
+  bool pw_split = (np0 != 0) and (OT != 'r');
   if constexpr (rank==2) {
     if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
       pgrid = {comm.size(),1};
-    } 
+    } else if( pgrid[rank-1]!=1 ) {
+      auto [g, n_active] = utils::find_proc_grid_capped<2>(comm.size(), {nspin*nkpts*nbnd*npol, nnr});
+      utils::check(n_active == comm.size(), "read_distributed_orbital_set: cannot tile {} ranks.", comm.size());
+      pgrid = g;
+    }
   } else if constexpr (rank==4){
-    if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
-      // cap spin/k/band at their extents (the trailing PW axis is never split);
-      // spilling stays on the band axis. See utils::find_proc_grid_capped.
-      auto [g, n_active] = utils::find_proc_grid_capped<4>(comm.size(), {nspin, nkpts, nbnd, 1l});
+    if( (np0 == 0) or (pgrid[rank-1]!=1) ) {
+      // cap spin/k/band at their extents; spilling stays on the band axis unless the PW axis
+      // may be split (pw_split). See utils::find_proc_grid_capped.
+      auto [g, n_active] = utils::find_proc_grid_capped<4>(comm.size(),
+                             {nspin, nkpts, nbnd, (pw_split ? npol*nnr : 1l)});
       utils::check(n_active == comm.size(),
         "read_distributed_orbital_set: cannot tile {} ranks onto (nspin={}, nkpts={}, "
         "nbnd={}); pass an explicit processor grid or use fewer ranks.",
@@ -104,8 +114,9 @@ auto read_distributed_orbital_set(MF& mfobj, comm_t& comm, char OT,
       pgrid = g;
     }
   } else if constexpr (rank==5){
-    if( (np0 == 0) or ((OT=='r') and (pgrid[rank-1]!=1)) ) {
-      auto [g, n_active] = utils::find_proc_grid_capped<5>(comm.size(), {nspin, nkpts, nbnd, 1l, 1l});
+    if( (np0 == 0) or (pgrid[rank-1]!=1) ) {
+      auto [g, n_active] = utils::find_proc_grid_capped<5>(comm.size(),
+                             {nspin, nkpts, nbnd, 1l, (pw_split ? nnr : 1l)});
       utils::check(n_active == comm.size(),
         "read_distributed_orbital_set: cannot tile {} ranks onto (nspin={}, nkpts={}, "
         "nbnd={}); pass an explicit processor grid or use fewer ranks.",
