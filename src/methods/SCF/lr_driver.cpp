@@ -197,10 +197,12 @@ void lr_driver::lr_setup(
                "lr_driver::lr_setup: the GCR preconditioner kernel ({}) must be "
                "Σ-free.", p.precond_kernel.to_string());
 
-  // The SCF loop must run at least once: every output downstream, ΔG(τ)
-  // included, is produced by the solve inside it.
-  utils::check(p.max_iter >= 1,
-               "lr_driver::lr_setup: max_iter must be >= 1, got {}.", p.max_iter);
+  // Every output downstream, ΔG(τ) included, is produced by the Dyson pass after
+  // the loop, so zero iterations return the start of the iteration: with a
+  // preconditioner that is its solution of ΔH0 (the preconditioned response),
+  // without one ΔF = ΔΣ = 0 (the non-interacting response χ ΔH0).
+  utils::check(p.max_iter >= 0,
+               "lr_driver::lr_setup: max_iter must be >= 0, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
     utils::check(p.max_iter == 1,
                  "lr_driver::lr_setup: split ΔΣ terms are only meaningful for a "
@@ -241,9 +243,12 @@ void lr_driver::lr_setup(
   if (p.exchange_static_W)
     app_log(1, "  exchange kernel = V + W_c(iν=0)  [static screened exchange]");
   if (!p.precond_kernel.empty())
-    app_log(1, "  GCR preconditioner kernel = {}{}  (rate only; <= {} sweeps to "
-               "{:.0e} relative)", p.precond_kernel.to_string(),
-            p.precond_hsex ? " with X = V + W_c(iν=0)" : "", pc_max_sweeps, pc_rel_tol);
+    app_log(1, "  preconditioner kernel = {}{}  (<= {} sweeps to {:.0e} relative)",
+            p.precond_kernel.to_string(),
+            p.precond_hsex ? " with X = V + W_c(iν=0)" : "",
+            p.precond_max_iter, p.precond_tol);
+  if (p.tol == 0.0)
+    app_log(1, "  tol = 0: no convergence test (runs max_iter iterations)");
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.iter_params.mixing);
@@ -298,7 +303,7 @@ void lr_driver::lr_setup(
                         inner_hist, !p.precond_kernel.empty(),
                         p.fix_density && _lr_dyson.is_q_gamma(),
                         p.exchange_static_W || p.precond_hsex,
-                        p.hessian_nmodes);
+                        p.hessian_stationary ? p.hessian_nmodes : 0);
   print_distribution_summary(thc.Np(), K.has_sigma(), K.sigma_G_dW);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -663,7 +668,6 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               thc_reader_t& thc, const lr_params& p) {
   auto& r_F = *_sDeltaF_pc_r;
   auto& r_S = *_sDeltaSigma_r;
-  auto& y_F = *_sDeltaF_pc_y;
   const long mF = _DeltaF.i1 - _DeltaF.i0;
   const long mS = _DeltaSigma.i1 - _DeltaSigma.i0;
   auto rF = nda::range(0, mF);
@@ -676,14 +680,32 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   _DeltaSigma.slice(r_S.local()) = r(rS);
   utils::complete_shared_slices(*_mpi, _pmap, r_F, r_S);
 
-  // ΔDm of r_Σ alone, at Δμ = 0: the sweeps' ΔDm-only passes apply the
-  // fix_density shift to the sum. y_F = 0 serves as both the zero ΔH0 and ΔF
-  // here, and as the start of the inner solve below.
+  precond_solve(r_F, &r_S, sG_tskij, thc, p);
+
+  // z = (r_F + y_F, r_Σ)
+  z(rF) = r(rF) + _DeltaF.slice(_sDeltaF_pc_y->local());
+  z(rS) = r(rS);
+}
+
+
+void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
+                              const sArray_t<Array_view_5D_t>* r_S,
+                              const sArray_t<Array_view_5D_t>& sG_tskij,
+                              thc_reader_t& thc, const lr_params& p) {
+  auto& y_F = *_sDeltaF_pc_y;
+  const long mF = _DeltaF.i1 - _DeltaF.i0;
+
+  // y_F = 0 serves as both the zero ΔH0 and ΔF of the ΔDm pass below, and as the
+  // start of the inner solve.
   y_F.set_zero();
-  _Timer.start("LR_DYSON");
-  _lr_dyson.solve_lr_dyson(*_sDeltaDm_pc, y_F, y_F, &r_S, /*fix_density=*/false,
-                           static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
-  _Timer.stop("LR_DYSON");
+  if (r_S) {
+    // ΔDm of r_Σ alone, at Δμ = 0: the sweeps' ΔDm-only passes apply the
+    // fix_density shift to the sum.
+    _Timer.start("LR_DYSON");
+    _lr_dyson.solve_lr_dyson(*_sDeltaDm_pc, y_F, y_F, r_S, /*fix_density=*/false,
+                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+    _Timer.stop("LR_DYSON");
+  }
 
   // y_F = K_pc[Pχ(r_F + y_F, r_Σ)], from y_F = 0, by the ΔF-only _pc_gcr.
   _pc_gcr->reset_rhs();
@@ -691,35 +713,43 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   nda::array<ComplexType, 5> empty_sigma;
   nda::array<ComplexType, 1> empty_prev;
   double tol_in = 0.0;
+  double rn = 0.0;
   _pc_sweeps = 0;
-  for (int sweep = 1; sweep <= pc_max_sweeps; ++sweep) {
+  for (int sweep = 1; sweep <= p.precond_max_iter; ++sweep) {
     y_prev = _DeltaF.slice(y_F.local());
     _Timer.start("LR_DYSON");
-    _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F, &(*_sDeltaDm_pc),
-                                     p.fix_density);
+    _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F,
+                                     r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density);
     _Timer.stop("LR_DYSON");
     // K_pc is Σ-free and reads no ΔG; sG_tskij only fills the slot.
     apply_kernel(/*precond=*/true, y_F, nullptr, *_sDeltaDm_pc_y, sG_tskij, sG_tskij,
                  thc, p);
     // ‖r_in,0‖ = ‖K_pc[Pχ(r_F, r_Σ)]‖, the inner residual at y_F = 0.
     if (sweep == 1)
-      tol_in = pc_rel_tol * utils::striped_norm(_mpi->comm, _DeltaF.slice(y_F.local()),
-                                                y_prev, false).first;
+      tol_in = p.precond_tol * utils::striped_norm(_mpi->comm, _DeltaF.slice(y_F.local()),
+                                                   y_prev, false).first;
     // The last sweep takes any residual as converged, so y_F is left at the
     // inner iterate rather than at its next probe.
-    const double tol_s = (sweep == pc_max_sweeps)
+    const double tol_s = (sweep == p.precond_max_iter)
                              ? std::numeric_limits<double>::infinity() : tol_in;
     bool conv = false;
-    _pc_gcr->step(_mpi->comm, _pmap, y_F.local(), y_prev, empty_sigma, empty_prev,
-                  tol_s, conv);
+    rn = _pc_gcr->step(_mpi->comm, _pmap, y_F.local(), y_prev, empty_sigma, empty_prev,
+                       tol_s, conv);
     utils::complete_shared_slices(*_mpi, _pmap, y_F);
     _pc_sweeps = sweep;
     if (conv) break;
   }
-
-  // z = (r_F + y_F, r_Σ)
-  z(rF) = r(rF) + _DeltaF.slice(y_F.local());
-  z(rS) = r(rS);
+  ++_pc_applies;
+  if (_pc_sweeps == p.precond_max_iter && rn > tol_in) {
+    // The start solve of a max_iter = 0 run is the answer: warn at once. Every
+    // other hit is counted and reported after the loop if the run did not converge.
+    if (r_S == nullptr && p.max_iter == 0)
+      app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
+                 "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
+              p.precond_max_iter, rn / tol_in);
+    else
+      ++_pc_cap_hits;
+  }
 }
 
 
@@ -763,6 +793,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (_lr_diis) _lr_diis->reset();
   if (_lr_gcr) _lr_gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
+  _pc_applies = 0;
+  _pc_cap_hits = 0;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
   // the last one is the cost of the whole batch. Each intermediate table is
@@ -781,6 +813,16 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   _Timer.start("LR_SCF");
 
+  // With a preconditioner, start at its solution of ΔH0: ΔF = y_F, ΔΣ = 0 (zeroed
+  // by the reset above), so that V_0 = ΔH0 + ΔF = M⁻¹ ΔH0.
+  if (!p.precond_kernel.empty()) {
+    _Timer.start("LR_PRECOND");
+    precond_solve(sDeltaH0_skij, nullptr, sG_tskij, thc, p);
+    _Timer.stop("LR_PRECOND");
+    copy_shm(sDeltaF_skij, *_sDeltaF_pc_y);
+    app_log(1, "  initial guess: preconditioner solution of ΔH0 ({} sweeps)", _pc_sweeps);
+  }
+
   double Delta_mu = 0.0;
   int iter = 0;
   // An empty kernel has no feedback: the loop is skipped and the Dyson pass after
@@ -789,7 +831,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   bool converged = K.empty();
 
   const bool use_gcr = (_lr_gcr != nullptr);
-  // The GCR direction map z = P_c⁻¹ r, preconditioned runs only.
+  // The preconditioner map z = M⁻¹ r (GCR direction, damping step), preconditioned runs only.
   std::function<void(nda::array<ComplexType, 1> const&, nda::array<ComplexType, 1>&)> pc_fn;
   if (!p.precond_kernel.empty())
     pc_fn = [&](auto const& r, auto& z) {
@@ -855,7 +897,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Save the previous iterates, each as this rank's partition slice only.
     _Timer.start("LR_SAVE");
     // The iteration-algorithm step reads the input ΔF/ΔΣ (ΔV_QPGW) of every
-    // iteration, the reset zeros at the first. ΔDm only enters a difference norm.
+    // iteration: at the first, zero or the preconditioner start. ΔDm only enters
+    // a difference norm.
     _DeltaF.prev = _DeltaF.slice(sDeltaF_skij.local());
     if (track_sigma)
       _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());
@@ -913,19 +956,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
     // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
     // the same two-slot arguments.
-    //
-    // Damping; mixing >= 1 (undamped Picard) is a no-op.
-    const double mixing = p.iter_params.mixing;
-    auto damp = [&](auto A, auto const& A_prev) {
-      if (mixing >= 1.0 || A.size() == 0) return;
-      const long n = A.size();
-      auto [a0, a1] = _pmap.my_slice(n);
-      utils::check(A_prev.size() == a1 - a0,
-                   "lr_driver: damping history slice ({}) != partition slice ({}).",
-                   A_prev.size(), a1 - a0);
-      auto A_loc = nda::reshape(A, std::array<long, 1>{n})(nda::range(a0, a1));
-      A_loc = mixing * A_loc + (1.0 - mixing) * A_prev;
-    };
     auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
       if (use_gcr) {
         // GCR
@@ -935,9 +965,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         // DIIS
         _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
       } else {
-        // Damping
-        damp(F, F_prev);
-        damp(S, S_prev);
+        // Damping, preconditioned with pc_fn when set
+        lr_damping_step(_pmap, F, F_prev, S, S_prev, p.iter_params.mixing,
+                        pc_fn ? &pc_fn : nullptr);
       }
     };
     if (qp) {
@@ -1024,6 +1054,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                 iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
       }
     }
+    if (!use_gcr && pc_fn)  // with GCR, the sweep count is printed on the [GCR] line below
+      app_log(1, "          [precond damping]  precond sweeps {}", _pc_sweeps);
     if (use_gcr) {
       const std::string pc_lbl =
           pc_fn ? fmt::format("  precond sweeps {}", _pc_sweeps) : std::string();
@@ -1046,6 +1078,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     _mpi->comm.barrier();
   }
+
+  // A run without iterations (max_iter = 0, a kernel with feedback) reports 0.
+  if (max_iter == 0 && !K.empty()) iter = 0;
+
+  if (_pc_cap_hits > 0 && !converged)
+    app_log(1, "  [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit in {} "
+               "of {} applies; the run did not converge, so the inner error enters the result.",
+            p.precond_max_iter, _pc_cap_hits, _pc_applies);
 
   // Every exit, converged or at max_iter: the step of the last iteration has
   // replaced ΔF (and ΔΣ / ΔV_QPGW) by its next iterate (a DIIS or damping mix, or
@@ -1071,14 +1111,19 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm/ΔG(τ), but ΔF/ΔΣ are the accelerator's iterate and ΔDm/ΔG(τ) its Dyson
   // response. One kernel evaluation at the returned ΔDm/ΔG(τ) makes the pair exact.
   // After update_DeltaG, whose full pass may have replaced ΔDm.
-  if (p.hessian()) {
+  // The plain hessian reads ΔH0 and ΔDm only, so it needs no such evaluation and
+  // keeps ΔF/ΔΣ as the iterate the final Dyson pass was fed.
+  if (p.hessian() && p.hessian_stationary) {
     apply_kernel(/*precond=*/false, sDeltaF_skij, pDeltaSigma,
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
   }
 
   // Report results
-  if (converged) {
+  if (p.tol == 0.0) {
+    app_log(1, "\n  LR SCF: {} iterations (tol = 0, no convergence test).",
+            converged ? iter : max_iter);
+  } else if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
   } else if (p.max_iter > 1) {
     app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations.", p.max_iter);

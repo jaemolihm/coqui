@@ -717,7 +717,10 @@ void dump_lr(communicator_t& comm,
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
     }
-    // GCR preconditioner kernel; absent for an unpreconditioned run.
+    // Preconditioner kernel, whose solution of ΔH0 was the start; absent when
+    // unset, including when an earlier run wrote it into the same file.
+    if (precond_method.empty() && lr_grp.has_dataset("precond_method"))
+      H5Ldelete(h5::hid_t(lr_grp), "precond_method", H5P_DEFAULT);
     if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
 
     app_log(2, "LR results written to \"{}\" in {}",

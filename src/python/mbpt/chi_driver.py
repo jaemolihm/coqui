@@ -26,7 +26,7 @@ ladder decides which approximation chi is (none = chi0, Hartree = RPA, HF =
 TDHF, HSEX = BSE, GW = dynamical BSE).
 
 Numerics live in C++: this module builds the perturbations
-(mean_field.compute_pw_matrix_elements), calls run_lr(..., hessian=True) and
+(mean_field.compute_pw_matrix_elements), calls run_lr(..., hessian="symmetric") and
 divides by the volume.
 """
 
@@ -58,13 +58,17 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             gw_mode="none",
             recompute_W=False,
             screened_interaction_file=None,
-            div_treatment=None):
+            div_treatment=None,
+            precond_method="none",
+            precond_tol=None,
+            precond_max_iter=None,
+            hessian="symmetric"):
     r"""
     Charge susceptibility chi_{G G'}(q) and inverse dielectric matrix at nu = 0.
 
     One LR perturbation per plane-wave column: the probe of column G' is the bare
     field e^{i(q+G').r} in the band basis. All nG columns are solved in a single
-    run_lr call with ``hessian=True``, and the mode-pair matrix that call returns
+    run_lr call with ``hessian="symmetric"``, and the mode-pair matrix that call returns
     *is* chi:
 
         Omega * chi_{G G'}(q) = Tr(DeltaH0_G, DeltaDm_{G'})
@@ -98,7 +102,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Unperturbed reference, "checkpoint" (default) or "mf_dft".
     max_iter, tol : int, float, optional
         LR SCF iteration cap and tolerance (default 100, 1e-10). A column that
-        reaches the cap is a hard error, not a result.
+        reaches the cap is a hard error, not a result. With ``tol = 0`` every
+        column runs exactly ``max_iter`` iterations by construction and the
+        check is skipped (an order-n chi, see ``hessian``).
     iter_alg : dict or None, optional
         LR accelerator, as in run_lr. None (default) means DEFAULT_ITER_ALG.
     fix_density : bool, optional
@@ -109,6 +115,14 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Forwarded to run_lr unchanged.
     div_treatment : str or None, optional
         Divergence treatment. Accepted only with ``unperturbed="mf_dft"``.
+    precond_method, precond_tol, precond_max_iter : optional
+        Forwarded to run_lr (see there).
+    hessian : {"symmetric", "plain"}, optional
+        "symmetric" (default): ``chi = hessian_sym/Omega`` from the stationary
+        estimator. "plain": ``chi = hessian/Omega`` from the plain contraction
+        only (no stationary block is computed); with it an order-n chi is damping
+        with mixing 1, a ``precond_method``, ``max_iter = n``, ``tol = 0``.
+        ``chi_plain`` is returned either way. "none", bools and other values raise.
 
     Returns
     -------
@@ -188,6 +202,12 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             "run_chi: fix_density must be False. At q = 0 it enforces "
             "DeltaN = 0 and thereby projects out chi_00(q->0) = dn/dmu, the "
             "quantity being measured; at q != 0 it is a silent no-op.")
+    if not isinstance(hessian, str):
+        raise TypeError(
+            f"run_chi: hessian must be 'symmetric' or 'plain', got {hessian!r}.")
+    if hessian not in ("symmetric", "plain"):
+        raise ValueError(
+            f"run_chi: hessian must be 'symmetric' or 'plain', got {hessian!r}.")
     if unperturbed not in ("checkpoint", "mf_dft"):
         raise ValueError(
             f"run_chi: unperturbed must be 'checkpoint' or 'mf_dft', got "
@@ -229,16 +249,19 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         include_hartree=hartree, include_exchange=exchange, gw_mode=gw,
         unperturbed=unperturbed,
         max_iter=max_iter, tol=tol, fix_density=False, iter_alg=iter_alg,
-        save_DeltaG=False, hessian=True,
+        save_DeltaG=False, hessian=hessian,
         recompute_W=recompute_W,
         screened_interaction_file=screened_interaction_file,
-        div_treatment=div_treatment)
+        div_treatment=div_treatment,
+        precond_method=precond_method,
+        precond_tol=precond_tol, precond_max_iter=precond_max_iter)
     niter = np.atleast_1d(niter).astype(np.int64)
     delta_mu = np.atleast_1d(delta_mu).astype(np.float64)
 
     # A stalled column reports max_iter + 1 (lr_solve_one hands back the loop
     # variable), so max_iter itself is a legitimate last-iteration convergence.
-    stalled = np.flatnonzero(niter > max_iter)
+    # At tol = 0 nothing converges: every column runs max_iter iterations by design.
+    stalled = np.flatnonzero(niter > max_iter) if tol != 0 else np.empty(0, dtype=np.int64)
     if stalled.size:
         raise RuntimeError(
             f"run_chi: {stalled.size} of {nG} columns hit max_iter = {max_iter} "
@@ -266,8 +289,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     hess = payload[1]
 
     volume = mf.volume()
-    chi = hess["hessian_sym"] / volume
     chi_plain = hess["hessian"] / volume
+    # hessian="plain" has only the plain block.
+    chi = hess["hessian_sym"] / volume if hessian == "symmetric" else chi_plain
 
     # v is reported as inf exactly where the eps_inv row is NaN, so a caller can
     # select the usable rows on either array and get the same answer.
@@ -305,11 +329,12 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             "max_iter": max_iter,
             "tol": tol,
             "iter_alg": iter_alg,
+            "hessian": hessian,
             "volume": volume,
             # C++ diagnostics: the antihermitian part of chi (chi_{GG'} =
             # conj(chi_{G'G}) is exact) and of the kernel pairing.
-            "herm_dev": hess["hessian_sym_herm_dev"],
+            "herm_dev": hess.get("hessian_sym_herm_dev"),
             "herm_dev_plain": hess["hessian_herm_dev"],
-            "herm_dev_M": hess["hessian_M_herm_dev"],
+            "herm_dev_M": hess.get("hessian_M_herm_dev"),
         },
     }

@@ -1513,10 +1513,20 @@ auto recompute_W_and_eps_inv_head(
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
  *                          that overrides the three keys above, or "HSEX".
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
- *                          "none") used only as the GCR preconditioner. Requires
- *                          iter_alg GCR and a Σ kernel; changes the rate only.
- *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
- *                          (default 1e-8)
+ *                          "none") used only as the preconditioner of GCR or
+ *                          damping, and its solution of ΔH0 is the start of the
+ *                          iteration (it excludes DeltaX/DeltaV_qPQ, which
+ *                          max_iter = 0 rejects). Requires a Σ kernel; changes the
+ *                          rate of a converged run, not its answer.
+ *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
+ *   precond_max_iter       0.01) and inner sweep cap (default 10)
+ *   max_iter, tol          SCF iterations (1 = one-shot, default 50; 0 returns the
+ *                          start: the preconditioner solution of ΔH0, or the
+ *                          non-interacting response without one) and tolerance
+ *                          (default 1e-8; 0 runs exactly max_iter iterations)
+ *   lr_hessian             free-energy hessian: "none" (default), "plain"
+ *                          (hessian only, no extra kernel evaluation) or "symmetric"
+ *                          (plain + the stationary functional)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
@@ -1564,6 +1574,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
   auto max_iter = io::get_value_with_default<int>(pt, "max_iter", 50);
   auto tol = io::get_value_with_default<double>(pt, "tol", 1e-8);
+  utils::check(tol >= 0.0, "run_lr_calc: tol must be >= 0, got {}.", tol);
   auto fix_density = io::get_value_with_default<bool>(pt, "fix_density", false);
 
   lr_iter_params iter_params;
@@ -1589,6 +1600,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
+  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
+  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
+  utils::check(precond_max_iter >= 1,
+               "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
   auto gw_mode = io::get_value_with_default<std::string>(pt, "gw_mode", "none");
   utils::check(gw_mode == "none" || gw_mode == "fixed_W" || gw_mode == "full",
@@ -1620,11 +1635,16 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
   // not do IBC should never pay for them.
   auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
-  // Variationally-stationary (quadratic-error) free-energy hessian, on top of the
-  // plain contraction. Opt-in: one extra Dyson solve per perturbation plus two
-  // striped ω stores, and it adds the top-level linear_response/hessian* datasets
-  // to the checkpoint. Off by default, so the default output is unchanged.
-  auto hessian = io::get_value_with_default<bool>(pt, "lr_hessian", false);
+  // lr_hessian: none | plain (Tr ΔH0 ΔDm only, no extra cost) | symmetric (plain +
+  // stationary functional: one extra Dyson solve per perturbation, two striped ω
+  // stores). Anything but "none" adds the top-level linear_response/hessian*
+  // datasets to the checkpoint; off by default, so the default output is unchanged.
+  auto hessian_mode = io::get_value_with_default<std::string>(pt, "lr_hessian", "none");
+  utils::check(hessian_mode == "none" || hessian_mode == "plain" || hessian_mode == "symmetric",
+               "run_lr_calc: lr_hessian must be 'none', 'plain' or 'symmetric', got '{}'.",
+               hessian_mode);
+  const bool hessian = (hessian_mode != "none");
+  const bool hessian_stationary = (hessian_mode == "symmetric");
 
   // LR output volume. Defaults reproduce the previous checkpoint byte for byte.
   //   save_DeltaG — write DeltaG_tskij at all. It is the biggest LR dataset and
@@ -1671,23 +1691,24 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     recompute_W = true;  // W0 = RPA[G_QP]
   }
 
-  // Scope of the stationary hessian estimator: the bare-vertex path. Both
+  int has_pert_arrays = 0;
+  if (mpi->comm.root())
+    has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                       DeltaV_qPQ_root.has_value()) ? 1 : 0;
+  mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
+
+  // Scope of the LR hessian ("plain" or "symmetric"): the bare-vertex path. Both
   // exclusions are places where its algebra stops holding rather than places it
   // merely has not been tested.
   if (hessian) {
     // IBC / δX / δV: the left vertex handed to the hessian contraction is then
     // not the ΔH0 that drives the equation, so the functional is no longer the
     // second derivative of one functional and would need the adjoint solve.
-    int has_pert_arrays = 0;
-    if (mpi->comm.root())
-      has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
-                         DeltaV_qPQ_root.has_value()) ? 1 : 0;
-    mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
     utils::check(!has_pert_arrays,
-                 "run_lr_calc: lr_hessian is incompatible with the DeltaX "
-                 "(IBC) and DeltaV_qPQ perturbations. With g_left != ΔH0 the "
-                 "stationary functional is not a second derivative of a single "
-                 "functional and the correction formula does not apply.");
+                 "run_lr_calc: lr_hessian ('plain' or 'symmetric') is incompatible "
+                 "with the DeltaX (IBC) and DeltaV_qPQ perturbations: the left "
+                 "vertex is then not the ΔH0 that drives the equation, so the "
+                 "hessian is not a second derivative of a single functional.");
     // qpGW static map: the mixed/tracked quantity is the static ΔV_QPGW rather
     // than ΔΣ(iω), and the effective kernel carries the lr_qp_approx
     // statification, so the raw-ΔΣ algebra does not carry over.
@@ -1697,6 +1718,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "ΔV_QPGW instead of ΔΣ(iω) and the kernel includes the qp "
                  "statification, so the functional's raw-ΔΣ algebra does not hold.");
   }
+
+  // DeltaX / DeltaV_qPQ enter only through the kernel, which max_iter = 0 never evaluates.
+  utils::check(max_iter > 0 || !has_pert_arrays,
+               "run_lr_calc: max_iter = 0 makes no kernel evaluation, so DeltaX (IBC) "
+               "and DeltaV_qPQ would not enter the result.");
 
   // IBC (DeltaX) for spinors: lr_precompute_V_HF_PQ has no npol > 1 Hartree term.
   if (mf->npol() > 1) {
@@ -1724,20 +1750,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "run_lr_calc: precond_method = '{}' requires a kernel with a "
                  "self-energy; method ({}) is already static, so run it directly.",
                  precond_method, total_kernel.to_string());
-    utils::check(iter_params.alg == "GCR",
-                 "run_lr_calc: precond_method = '{}' requires iter_alg 'GCR', got '{}'.",
-                 precond_method, iter_params.alg);
-    // A one-shot run returns GCR's first probe x + M⁻¹r, whose ΔF and ΔΣ are not
-    // one kernel evaluation of the returned ΔDm/ΔG.
-    utils::check(max_iter > 1,
-                 "run_lr_calc: precond_method = '{}' requires max_iter > 1: a one-shot "
-                 "run would return the preconditioned probe, not a kernel evaluation.",
-                 precond_method);
+    utils::check(iter_params.alg == "GCR" || iter_params.alg == "damping",
+                 "run_lr_calc: precond_method = '{}' requires iter_alg 'GCR' or "
+                 "'damping', got '{}'.", precond_method, iter_params.alg);
     utils::check(!qp_static_sigma,
                  "run_lr_calc: precond_method = '{}' is incompatible with "
                  "qp_static_sigma, which iterates by DIIS only.", precond_method);
+    // The split terms are those of one kernel evaluation at V = ΔH0, while a
+    // preconditioned run evaluates the kernel at its start M⁻¹ ΔH0.
+    utils::check(!split_sigma_terms,
+                 "run_lr_calc: precond_method = '{}' is incompatible with "
+                 "split_sigma_terms, whose terms are one step from V = ΔH0.", precond_method);
   }
-
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
                "run_lr_calc: Input checkpoint {} does not exist!", input_file);
@@ -1950,6 +1974,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "ground state and requires local_polarizabilities.");
     utils::check(gw_edmft or !local->impurity_response.has_value(),
                  "run_lr_calc: lr_impurity_response requires a GW+EDMFT ground state (local_polarizabilities).");
+    // Σ_imp and Π_imp of the impurity response enter only through the kernel.
+    utils::check(max_iter > 0 or !local->impurity_response.has_value(),
+                 "run_lr_calc: max_iter = 0 makes no kernel evaluation, so lr_impurity_response "
+                 "would not enter the result.");
     if (gw_edmft) {
       utils::check(!local->impurity_response or nmodes == 1,
                    "run_lr_calc: lr_impurity_response is for a single perturbation (nmodes = {}). Call run_lr once per mode.",
@@ -2223,6 +2251,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.hessian_nmodes = hessian ? nmodes : 0;
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
+  p.precond_tol      = precond_tol;
+  p.precond_max_iter = precond_max_iter;
+  p.hessian_stationary = hessian_stationary;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
@@ -2238,7 +2269,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     nda::array<double, 1> k_weight(mf->k_weight());
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
     opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
-                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd());
+                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/!hessian_stationary);
   }
 
   for (long m = 0; m < nmodes; ++m) {
@@ -2395,17 +2426,25 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       h5::file file(output + ".mbpt.h5", 'a');
       auto lr_grp = chkpt::lr_group(file);
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
-      nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
-      nda::h5_write(lr_grp, "hessian_M", c1.M, false);
-      nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
-      nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
       nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
-      nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
-      h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
-      h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
-      app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
-              nmodes);
+      // A plain run has the plain block only, and removes the stationary
+      // block an earlier run may have left in the same file.
+      if (!hessian_stationary) {
+        for (auto k : {"hessian_sym", "hessian_M", "hessian_M_prime", "hessian_static_prime",
+                       "Delta_mu_improved", "hessian_sym_herm_dev", "hessian_M_herm_dev"})
+          if (lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);
+      } else {
+        nda::h5_write(lr_grp, "hessian_sym", c1.hessian_sym, false);
+        nda::h5_write(lr_grp, "hessian_M", c1.M, false);
+        nda::h5_write(lr_grp, "hessian_M_prime", c1.M_prime, false);
+        nda::h5_write(lr_grp, "hessian_static_prime", c1.static_prime, false);
+        nda::h5_write(lr_grp, "Delta_mu_improved", c1.Delta_mu_improved, false);
+        h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
+        h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
+      }
+      app_log(2, "  - {1} ({0}x{0}) written to \"linear_response/\"", nmodes,
+              hessian_stationary ? "hessian / hessian_sym" : "hessian");
     }
     mpi->comm.barrier();
   }

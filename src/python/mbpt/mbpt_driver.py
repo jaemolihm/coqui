@@ -396,7 +396,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            nbnd_save=None,
            method=None,
            precond_method="none",
-           hessian=False,
+           precond_tol=None, precond_max_iter=None,
+           hessian="none",
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None):
     """
     Run unified linear response calculation.
@@ -453,7 +454,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         - "full": ΔΣ = -ΔG⊙W - G⊙ΔW (full LR-scGW)
     max_iter : int, optional
         Maximum number of SCF iterations (default 50). Use 1 for one-shot: one
-        kernel evaluation, then the Dyson pass at its output.
+        kernel evaluation, then the Dyson pass at its output (with a
+        ``precond_method``, one step from the preconditioner start). 0 skips the
+        loop and returns the start (niter = 0): the preconditioner solution of
+        ΔH0, or without a ``precond_method`` the non-interacting response χ ΔH0.
+        With max_iter = 0 no kernel is evaluated, so DeltaX_left/DeltaX_right,
+        DeltaV_qPQ and lr_impurity_response are rejected. Otherwise a run that does not converge
+        (tol = 0 included) returns niter = max_iter + 1, so niter jumps from 0
+        at max_iter = 0 to 2 at max_iter = 1.
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
@@ -522,14 +530,19 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can
         turn it off.
-    hessian : bool, optional
-        Also evaluate the free-energy hessian through the variationally-stationary
-        (quadratic-error) functional (default False). The error in hessian then
-        falls as the SQUARE of the linear-response solution error instead of
-        linearly in it, at the cost of one extra Dyson solve per perturbation
-        plus two striped omega stores of the per-mode dSigma / dG.
+    hessian : {"none", "plain", "symmetric"}, optional
+        Free-energy hessian (default "none"; a bool raises TypeError).
+        "plain" writes the plain contraction ``hessian`` (linear in ΔDm; its
+        error is linear in the linear-response solution error) and needs no extra
+        kernel evaluation or omega store; it is the one to use for a run
+        of fixed order (max_iter = n, tol = 0), whose ΔF/ΔΣ are the iterate the
+        final Dyson pass was fed. "symmetric" also evaluates it through the
+        variationally-stationary (quadratic-error) functional: the error in
+        hessian_sym then falls as the SQUARE of the solution error, at the cost
+        of one extra kernel evaluation and Dyson solve per perturbation plus two
+        striped omega stores of the per-mode dSigma / dG.
 
-        Writes the mode-PAIR matrices hessian, hessian_sym, hessian_M,
+        "symmetric" writes the mode-PAIR matrices hessian, hessian_sym, hessian_M,
         hessian_M_prime, hessian_static_prime, hessian_call_index,
         Delta_mu_improved and the hessian_*_herm_dev diagnostics into the TOP-LEVEL
         "linear_response/" group; the per-mode subgroups are untouched. Shapes
@@ -538,8 +551,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         inspection rather than a dynamical matrix. Read them with
         coqui.mbpt.read_lr_hessian.
 
-        Requires the bare-vertex path: rejected together with DeltaX/DeltaV
-        (IBC) and with a qpGW static map.
+        A "plain" write removes the stationary datasets an earlier run left in
+        the same file. Requires the bare-vertex path: rejected together with
+        DeltaX/DeltaV (IBC) and with a qpGW static map.
     projector_info : dict or None, optional
         Local projector, as run_gw / dmft_embed: "proj_mat", "band_window", "kpts_w90".
         Given, it switches on the local outputs ``DeltaGloc_tsIab`` (nt, ns, 1, n, n), the
@@ -612,13 +626,24 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
-        as the GCR preconditioner: each GCR direction is z ≈ (1 - K_pc χ)⁻¹ r,
-        solved inexactly by a few inner sweeps. The iteration still applies the
-        full `method` kernel every step, so it affects the convergence rate,
-        not the answer. Requires iter_alg {"alg": "GCR"}, max_iter > 1 and a
-        method with a Sigma (GW0 or GW); rejected with qp_static_sigma. A
-        preconditioned run writes
+        as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
+        are z ≈ M⁻¹ r, and damping takes the step y += mixing · M⁻¹ r, solved
+        inexactly by a few inner sweeps. The iteration starts at the
+        preconditioner solution of ΔH0, y_0 = (K_pc χ-solve of ΔH0, 0), and
+        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response). The iteration
+        still applies the full `method` kernel every step, so a converged run
+        changes only the rate, not the answer. Requires iter_alg
+        {"alg": "GCR"} or {"alg": "damping"} (DIIS is rejected) and a method
+        with a Sigma (GW0 or GW); rejected with qp_static_sigma and
+        split_sigma_terms. A preconditioned run writes
         ``linear_response/precond_method``.
+    precond_tol : float or None, optional
+        Inner stop of the preconditioner, ‖r_in‖ ≤ precond_tol · ‖K_pc χ r‖
+        (default 0.01 in C++).
+    precond_max_iter : int or None, optional
+        Inner sweep cap (default 10 in C++). A hit cap warns at the start solve
+        of a ``max_iter = 0`` run; otherwise the hits are counted and one line is
+        logged after the loop if the run did not converge.
 
     Returns
     -------
@@ -628,6 +653,16 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Notes
     -----
+    Fixed order: ``tol = 0`` never passes the convergence test of damping, so a
+    run with ``max_iter = n`` makes exactly n iterations. With the preconditioned
+    damping iteration at mixing 1 started from the preconditioner solution,
+    V_n = Σ_{k<=n} (M⁻¹ δK χ)^k M⁻¹ ΔH0 is the GW0 response to order n in the
+    dynamic part of W, with Hartree and static screened exchange summed to all
+    orders. The returned niter is n + 1 (the loop variable of an unconverged run).
+    Use ``hessian="plain"`` with it. The static inputs DeltaX_left/DeltaX_right/
+    DeltaV_qPQ add a constant term to every kernel evaluation that the
+    preconditioner never sees, so the start misses one order.
+
     Results are written to {output}.mbpt.h5 under the "linear_response" group,
     or "linear_response/mode{m}" when several perturbations are passed at once.
     """
@@ -707,7 +742,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     lr_params["save_DeltaG"] = bool(save_DeltaG)
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
-    lr_params["lr_hessian"] = bool(hessian)
+    if not isinstance(hessian, str):
+        raise TypeError("run_lr: hessian must be one of 'none', 'plain', 'symmetric', "
+                        f"got {hessian!r}.")
+    if hessian not in ("none", "plain", "symmetric"):
+        raise ValueError("run_lr: hessian must be one of 'none', 'plain', 'symmetric', "
+                         f"got {hessian!r}.")
+    lr_params["lr_hessian"] = hessian
     # Kernel ladder alias, which overrides include_hartree/include_exchange/
     # gw_mode when given, and the GCR preconditioner kernel.
     if method is not None:
@@ -716,6 +757,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         raise TypeError("precond_method must be one of 'none', 'Hartree', 'HF', "
                         f"'HSEX', got {precond_method!r}.")
     lr_params["precond_method"] = precond_method
+    if precond_tol is not None:
+        lr_params["precond_tol"] = float(precond_tol)
+    if precond_max_iter is not None:
+        lr_params["precond_max_iter"] = int(precond_max_iter)
 
     if lr_impurity_response is not None:
         bad = set(lr_impurity_response) - {"Sigma", "Pi"}
