@@ -1537,6 +1537,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto split_sigma_terms = io::get_value_with_default<bool>(pt, "split_sigma_terms", false);
   auto max_iter = io::get_value_with_default<int>(pt, "max_iter", 50);
   auto tol = io::get_value_with_default<double>(pt, "tol", 1e-8);
+  utils::check(tol >= 0.0, "run_lr_calc: tol must be >= 0, got {}.", tol);
   auto fix_density = io::get_value_with_default<bool>(pt, "fix_density", false);
 
   lr_iter_params iter_params;
@@ -1597,10 +1598,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // ΔF_PQ costs one extra lr_hf::evaluate on the converged ΔDm. Runs that do
   // not do IBC should never pay for them.
   auto output_aux_fock = io::get_value_with_default<bool>(pt, "output_aux_fock", false);
-  // Variationally-stationary (quadratic-error) free-energy hessian, on top of the
-  // plain contraction. Opt-in: one extra Dyson solve per perturbation plus two
-  // striped ω stores, and it adds the top-level linear_response/hessian* datasets
-  // to the checkpoint. Off by default, so the default output is unchanged.
+  // lr_hessian: none | plain (Tr ΔH0 ΔDm only, no extra cost) | symmetric (plain +
+  // stationary functional: one extra Dyson solve per perturbation, two striped ω
+  // stores). Anything but "none" adds the top-level linear_response/hessian*
+  // datasets to the checkpoint; off by default, so the default output is unchanged.
   auto hessian_mode = io::get_value_with_default<std::string>(pt, "lr_hessian", "none");
   utils::check(hessian_mode == "none" || hessian_mode == "plain" || hessian_mode == "symmetric",
                "run_lr_calc: lr_hessian must be 'none', 'plain' or 'symmetric', got '{}'.",
@@ -1666,10 +1667,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                          DeltaV_qPQ_root.has_value()) ? 1 : 0;
     mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
     utils::check(!has_pert_arrays,
-                 "run_lr_calc: lr_hessian is incompatible with the DeltaX "
-                 "(IBC) and DeltaV_qPQ perturbations. With g_left != ΔH0 the "
-                 "stationary functional is not a second derivative of a single "
-                 "functional and the correction formula does not apply.");
+                 "run_lr_calc: lr_hessian ('plain' or 'symmetric') is incompatible "
+                 "with the DeltaX (IBC) and DeltaV_qPQ perturbations: the left "
+                 "vertex is then not the ΔH0 that drives the equation, so the "
+                 "hessian is not a second derivative of a single functional.");
     // qpGW static map: the mixed/tracked quantity is the static ΔV_QPGW rather
     // than ΔΣ(iω), and the effective kernel carries the lr_qp_approx
     // statification, so the raw-ΔΣ algebra does not carry over.
@@ -1678,6 +1679,18 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "qp_static_sigma. In qp mode the accelerator tracks the static "
                  "ΔV_QPGW instead of ΔΣ(iω) and the kernel includes the qp "
                  "statification, so the functional's raw-ΔΣ algebra does not hold.");
+  }
+
+  // DeltaX / DeltaV_qPQ enter only through the kernel, which max_iter = 0 never evaluates.
+  if (max_iter == 0) {
+    int has_pert_arrays0 = 0;
+    if (mpi->comm.root())
+      has_pert_arrays0 = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                          DeltaV_qPQ_root.has_value()) ? 1 : 0;
+    mpi->comm.broadcast_n(&has_pert_arrays0, 1, 0);
+    utils::check(!has_pert_arrays0,
+                 "run_lr_calc: max_iter = 0 makes no kernel evaluation, so DeltaX (IBC) "
+                 "and DeltaV_qPQ would not enter the result.");
   }
 
   // IBC (DeltaX) for spinors: lr_precompute_V_HF_PQ has no npol > 1 Hartree term.
@@ -2395,8 +2408,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         h5::h5_write(lr_grp, "hessian_sym_herm_dev", c1.herm_sym);
         h5::h5_write(lr_grp, "hessian_M_herm_dev", c1.herm_M);
       }
-      app_log(2, "  - hessian / hessian_sym ({0}x{0}) written to \"linear_response/\"",
-              nmodes);
+      app_log(2, "  - {1} ({0}x{0}) written to \"linear_response/\"", nmodes,
+              hessian_stationary ? "hessian / hessian_sym" : "hessian");
     }
     mpi->comm.barrier();
   }

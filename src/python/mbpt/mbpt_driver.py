@@ -456,6 +456,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         ``precond_method``, one step from the preconditioner start). 0 skips the
         loop and returns the start (niter = 0): the preconditioner solution of
         ΔH0, or without a ``precond_method`` the non-interacting response χ ΔH0.
+        With max_iter = 0 no kernel is evaluated, so DeltaX_left/DeltaX_right
+        and DeltaV_qPQ are rejected. Otherwise a run that does not converge
+        (tol = 0 included) returns niter = max_iter + 1, so niter jumps from 0
+        at max_iter = 0 to 2 at max_iter = 1.
     tol : float, optional
         Convergence tolerance (default 1e-8). DIIS/damping converge on the
         successive-iterate differences of ΔDm, ΔF and ΔΣ; GCR on the residual
@@ -737,9 +741,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     lr_params["save_DeltaG"] = bool(save_DeltaG)
     if nbnd_save is not None:
         lr_params["nbnd_save"] = int(nbnd_save)
-    if not isinstance(hessian, str) or hessian not in ("none", "plain", "symmetric"):
-        raise (TypeError if not isinstance(hessian, str) else ValueError)(
-            f"hessian must be one of 'none', 'plain', 'symmetric', got {hessian!r}.")
+    if not isinstance(hessian, str):
+        raise TypeError("run_lr: hessian must be one of 'none', 'plain', 'symmetric', "
+                        f"got {hessian!r}.")
+    if hessian not in ("none", "plain", "symmetric"):
+        raise ValueError("run_lr: hessian must be one of 'none', 'plain', 'symmetric', "
+                         f"got {hessian!r}.")
     lr_params["lr_hessian"] = hessian
     # Kernel ladder alias, which overrides include_hartree/include_exchange/
     # gw_mode when given, and the GCR preconditioner kernel.

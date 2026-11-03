@@ -1163,7 +1163,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
   // Report results
   if (p.tol == 0.0) {
-    app_log(1, "\n  LR SCF: {} iterations (tol = 0, no convergence test).", max_iter);
+    app_log(1, "\n  LR SCF: {} iterations (tol = 0, no convergence test).",
+            converged ? iter : max_iter);
   } else if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
   } else if (p.max_iter > 1) {

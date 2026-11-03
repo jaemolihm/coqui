@@ -261,7 +261,7 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     # A stalled column reports max_iter + 1 (lr_solve_one hands back the loop
     # variable), so max_iter itself is a legitimate last-iteration convergence.
     # At tol = 0 nothing converges: every column runs max_iter iterations by design.
-    stalled = np.flatnonzero(niter > max_iter) if tol > 0 else np.empty(0, dtype=np.int64)
+    stalled = np.flatnonzero(niter > max_iter) if tol != 0 else np.empty(0, dtype=np.int64)
     if stalled.size:
         raise RuntimeError(
             f"run_chi: {stalled.size} of {nG} columns hit max_iter = {max_iter} "
