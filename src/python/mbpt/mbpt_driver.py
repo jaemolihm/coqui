@@ -75,7 +75,9 @@ def run_hf(params, h_int, h_int_exchange=None):
         - ``conv_thr`` *(float, optional, default ``1e-8``)* — convergence threshold
           on the self-consistency between iterations.
         - ``restart`` *(bool, optional, default ``False``)* — if ``True``, resumes
-          from an existing checkpoint file.
+          from an existing checkpoint file. ``div_treatment`` and ``hf_div_treatment``
+          are then taken from the checkpoint when it stores them; a value that would
+          run differently is an error.
         - ``const_mu`` *(bool, optional, default ``False``)* — if ``True``, fixes the
           chemical potential throughout the SCF loop.
         - ``mu`` *(float, optional, units: Hartree; ``hf``, ``gw``, ``rpa`` and ``gf2``

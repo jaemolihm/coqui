@@ -69,12 +69,15 @@ namespace methods {
        * @param eps_inv_wq    - [INPUT] inverse dielectric function on frequency axis, shape [niw, nqpts_ibz]
        * @param mf            - [INPUT] mean-field object
        * @param div_treatment - [INPUT] divergence treatment method
+       * @param is_lr         - [INPUT] eps_inv_wq is a linear response Δε⁻¹: the "*_metal" row, pinned to the
+       *                        constant -1 in the ground state, has derivative 0
        * @return - inverse dielectric function at q=0, shape [niw]
        */
       template<nda::ArrayOfRank<2> Array_axis_t>
       static auto extrapolate_eps_inv_q0(const Array_axis_t &eps_inv_wq,
                                           mf::MF &mf,
-                                          std::string div_treatment="gygi")
+                                          std::string div_treatment="gygi",
+                                          bool is_lr=false)
       -> nda::array<ComplexType, 1> {
 
         bool two_dimension = (div_treatment.find("2d") != std::string::npos)? true : false;
@@ -210,9 +213,10 @@ namespace methods {
           eps_inv_q0_w /= static_cast<double>(dim); // average over the number of dimensions extrapolated
 
           if (div_treatment.find("metal") != std::string::npos) {
-            app_log(3, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems.\n");
-            // for metals, set the static limit to -1 manually, i.e. inverse dielectric function goes to 0 at q=0 and w=0
-            eps_inv_q0_w(0) = -1.0;
+            app_log(3, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems{}.\n",
+                    is_lr ? " (linear response: its derivative, 0)" : "");
+            // GS: ε⁻¹(q=0, ω=0) − 1 = −1 (ε⁻¹ → 0 in a metal); LR: the derivative of that constant, 0
+            eps_inv_q0_w(0) = is_lr ? 0.0 : -1.0;
           }
 
         } else {
@@ -232,12 +236,13 @@ namespace methods {
        *                          the imaginary-time or Matsubara frequency axis.
        * @param thc - [INPUT] THC-ERI
        * @param mf - [INPUT] mean-field object
+       * @param is_lr - [INPUT] dW_tqPQ is a linear response ΔW (see extrapolate_eps_inv_q0)
        * @return - inverse of symmetric dielectric function at finite q and q = 0
        */
       template<nda::MemoryArrayOfRank<4> Array_w_t, THC_ERI thc_t, typename communicator_t>
       static auto eps_inv_head_t(memory::darray_t<Array_w_t, communicator_t> &dW_tqPQ, thc_t &thc,
                                  mf::MF &mf, const imag_axes_ft::IAFT *ft,
-                                 std::string div_treatment="gygi")
+                                 std::string div_treatment="gygi", bool is_lr=false)
       -> std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 1> > {
 
         // Compute the head (i.e. G=G'=0 component) of the inverse dielectric function at finite q
@@ -257,7 +262,7 @@ namespace methods {
 
         // Perform q=0 extrapolation on frequency domain data
         nda::array<ComplexType, 1> eps_inv_q0_w = 
-          extrapolate_eps_inv_q0(eps_inv_w, mf, div_treatment);
+          extrapolate_eps_inv_q0(eps_inv_w, mf, div_treatment, is_lr);
 
         // Convert result back to time domain
         nda::array<ComplexType, 1> eps_inv_q0_t(nts);

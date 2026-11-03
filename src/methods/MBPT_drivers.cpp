@@ -205,6 +205,65 @@ inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& out
 }
 
 /**
+ * Read the string dataset `name` of group `input_grp` in `input_file` on the
+ * root and broadcast it. std::nullopt when the group or the dataset is absent.
+ */
+template<typename mpi_context_t>
+std::optional<std::string> read_scf_string(mpi_context_t& mpi,
+                                           const std::string& input_file,
+                                           const std::string& input_grp,
+                                           const std::string& name)
+{
+  char buf[64] = {0};
+  int found = 0;
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    if (root_grp.has_subgroup(input_grp)) {
+      auto scf_grp = root_grp.open_group(input_grp);
+      if (scf_grp.has_dataset(name)) {
+        std::string str;
+        h5::h5_read(scf_grp, name, str);
+        utils::check(str.size() < sizeof(buf), "read_scf_string: {} string too long: {}",
+                     name, str);
+        std::copy(str.begin(), str.end(), buf);
+        found = 1;
+      }
+    }
+  }
+  mpi.comm.broadcast_n(&found, 1, 0);
+  if (!found) return std::nullopt;
+  mpi.comm.broadcast_n(buf, sizeof(buf), 0);
+  return std::string(buf);
+}
+
+/**
+ * The divergence treatment `key` ("div_treatment" or "hf_div_treatment") of a ground-state run that restarts from
+ * `chkpt_file`. scf/<key> is written once, by the first run on the checkpoint that evaluates W (div_treatment) or
+ * the HF term (hf_div_treatment), so a restart inherits it; an explicit value that would run differently runs one
+ * treatment under a checkpoint labelled with another, and is an error. A checkpoint without the dataset leaves the
+ * value to `pt` (default "gygi").
+ */
+template<typename mpi_context_t>
+std::string restart_div_treatment(mpi_context_t& mpi, ptree const& pt, const std::string& chkpt_file,
+                                  const std::string& key)
+{
+  auto value = io::tolower_copy(io::get_value_with_default<std::string>(pt, key, "gygi"));
+  auto stored = read_scf_string(mpi, chkpt_file, "scf", key);
+  if (!stored) return value;
+  *stored = io::tolower_copy(*stored);
+  // hf_t stores the value it runs with: anything but "ignore_g0" is coerced to "gygi"
+  auto as_run = (key == "hf_div_treatment" and value != "ignore_g0") ? std::string("gygi") : value;
+  utils::check(!io::check_child_exists(pt, key) or as_run == *stored,
+               "mbpt: restart from {} with {} = \"{}\", but the checkpoint was run with \"{}\" (scf/{}). "
+               "Pass {} = \"{}\" (or omit it) to continue, or start a new checkpoint to change it.",
+               chkpt_file, key, value, *stored, key, key, *stored);
+  if (*stored != value)
+    app_log(1, "  restart: {} = \"{}\" from {}", key, *stored, chkpt_file);
+  return *stored;
+}
+
+/**
  * Many-body perturbation calculations from a given mean-field and ERI objects with arguments in property tree.
  * Optional arguments (with default values):
  *  - beta: "1000" Inverse temperature (a.u.)
@@ -220,7 +279,8 @@ inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& out
  *  - output: Optional legacy output flag. If present, this is used directly.
  *  - outdir: "./" Output directory used when output is not provided.
  *  - prefix: "bdft.mbpt" Prefix used when output is not provided.
- *  - restart: "false" Restart from a previous bdft.scf calculation.
+ *  - restart: "false" Restart from a previous bdft.scf calculation. div_treatment and hf_div_treatment are taken from
+ *             the checkpoint when it stores them; a value that would run differently is an error.
  *  - t_prescreen_thresh: "0.0" Threshold for prescreening in time (GF2 only for now)
  */
 template<typename eri_t>
@@ -282,6 +342,11 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     app_log(1, "║ overwritten. Considering move the old HDF5 or change the ║");
     app_log(1, "║ prefix next time.                                        ║");
     app_log(1, "╚══════════════════════════════════════════════════════════╝\n");
+  }
+
+  if (restart) {
+    div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
+    hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
   }
 
   imag_axes_ft::IAFT ft(
@@ -546,6 +611,11 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   }
 
   auto trans_home_cell = io::get_value_with_default<bool>(pt,"translate_home_cell",false);
+
+  if (restart) {
+    div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
+    hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
+  }
 
   imag_axes_ft::IAFT ft(
     !restart ? imag_axes_ft::IAFT(pt, false, mf::wmax_from_mf(*mf))
@@ -1097,39 +1167,6 @@ template void mbpt(std::string, \
   MBPT_INST(chol_reader_t, chol_reader_t, chol_reader_t, chol_reader_t)
 
 #undef MBPT_INST
-
-/**
- * Read the string dataset `name` of group `input_grp` in `input_file` on the
- * root and broadcast it. std::nullopt when the group or the dataset is absent.
- */
-template<typename mpi_context_t>
-std::optional<std::string> read_scf_string(mpi_context_t& mpi,
-                                           const std::string& input_file,
-                                           const std::string& input_grp,
-                                           const std::string& name)
-{
-  char buf[64] = {0};
-  int found = 0;
-  if (mpi.comm.root()) {
-    h5::file file(input_file, 'r');
-    auto root_grp = h5::group(file);
-    if (root_grp.has_subgroup(input_grp)) {
-      auto scf_grp = root_grp.open_group(input_grp);
-      if (scf_grp.has_dataset(name)) {
-        std::string str;
-        h5::h5_read(scf_grp, name, str);
-        utils::check(str.size() < sizeof(buf), "read_scf_string: {} string too long: {}",
-                     name, str);
-        std::copy(str.begin(), str.end(), buf);
-        found = 1;
-      }
-    }
-  }
-  mpi.comm.broadcast_n(&found, 1, 0);
-  if (!found) return std::nullopt;
-  mpi.comm.broadcast_n(buf, sizeof(buf), 0);
-  return std::string(buf);
-}
 
 /**
  * Read the fixed chemical potential (a.u.) the ground state was run at, stashed on
@@ -3046,7 +3083,8 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   nda::array<ComplexType, 1> delta_eps_inv_head;
   if (div_corr && utils::is_q_gamma(q_pert)) {
     auto [delta_eps_inv_q, delta_head] =
-        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment);
+        solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment,
+                                           /*is_lr=*/true);
     delta_eps_inv_head = std::move(delta_head);
   }
   bool apply_div = div_corr && utils::is_q_gamma(q_pert);

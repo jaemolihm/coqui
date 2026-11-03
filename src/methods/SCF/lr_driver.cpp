@@ -555,7 +555,7 @@ void lr_driver::apply_kernel_gw(
   if (p.div_treatment != "ignore_g0" && is_q_gamma()) {
     auto [delta_eps_inv_q, delta_head] =
         solvers::div_utils::eps_inv_head_t(
-            dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), p.div_treatment);
+            dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), p.div_treatment, /*is_lr=*/true);
     delta_eps_inv_head = std::move(delta_head);
   }
 
