@@ -248,7 +248,7 @@ void lr_driver::lr_setup(
             p.precond_hsex ? " with X = V + W_c(iν=0)" : "",
             p.precond_max_iter, p.precond_tol);
   if (p.tol == 0.0)
-    app_log(1, "  tol = 0: exactly max_iter iterations, no convergence test");
+    app_log(1, "  tol = 0: no convergence test (runs max_iter iterations)");
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.iter_params.mixing);

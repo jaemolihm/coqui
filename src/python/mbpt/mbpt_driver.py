@@ -456,8 +456,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         ``precond_method``, one step from the preconditioner start). 0 skips the
         loop and returns the start (niter = 0): the preconditioner solution of
         ΔH0, or without a ``precond_method`` the non-interacting response χ ΔH0.
-        With max_iter = 0 no kernel is evaluated, so DeltaX_left/DeltaX_right
-        and DeltaV_qPQ are rejected. Otherwise a run that does not converge
+        With max_iter = 0 no kernel is evaluated, so DeltaX_left/DeltaX_right,
+        DeltaV_qPQ and lr_impurity_response are rejected. Otherwise a run that does not converge
         (tol = 0 included) returns niter = max_iter + 1, so niter jumps from 0
         at max_iter = 0 to 2 at max_iter = 1.
     tol : float, optional
@@ -628,8 +628,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         are z ≈ M⁻¹ r, and damping takes the step y += mixing · M⁻¹ r, solved
         inexactly by a few inner sweeps. The iteration starts at the
         preconditioner solution of ΔH0, y_0 = (K_pc χ-solve of ΔH0, 0), and
-        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response;
-        DeltaX_left/DeltaX_right/DeltaV_qPQ do not enter it). The iteration
+        ``max_iter = 0`` returns that start (for "HSEX", the HSEX response). The iteration
         still applies the full `method` kernel every step, so a converged run
         changes only the rate, not the answer. Requires iter_alg
         {"alg": "GCR"} or {"alg": "damping"} (DIIS is rejected) and a method

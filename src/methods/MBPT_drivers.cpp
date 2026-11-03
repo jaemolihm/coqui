@@ -1478,8 +1478,8 @@ auto recompute_W_and_eps_inv_head(
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the preconditioner of GCR or
  *                          damping, and its solution of ΔH0 is the start of the
- *                          iteration (max_iter = 0 returns it; DeltaX/DeltaV_qPQ
- *                          do not enter it). Requires a Σ kernel; changes the
+ *                          iteration (it excludes DeltaX/DeltaV_qPQ, which
+ *                          max_iter = 0 rejects). Requires a Σ kernel; changes the
  *                          rate of a converged run, not its answer.
  *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
  *   precond_max_iter       0.01) and inner sweep cap (default 10)
@@ -1654,18 +1654,19 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     recompute_W = true;  // W0 = RPA[G_QP]
   }
 
-  // Scope of the stationary hessian estimator: the bare-vertex path. Both
+  int has_pert_arrays = 0;
+  if (mpi->comm.root())
+    has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
+                       DeltaV_qPQ_root.has_value()) ? 1 : 0;
+  mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
+
+  // Scope of the LR hessian ("plain" or "symmetric"): the bare-vertex path. Both
   // exclusions are places where its algebra stops holding rather than places it
   // merely has not been tested.
   if (hessian) {
     // IBC / δX / δV: the left vertex handed to the hessian contraction is then
     // not the ΔH0 that drives the equation, so the functional is no longer the
     // second derivative of one functional and would need the adjoint solve.
-    int has_pert_arrays = 0;
-    if (mpi->comm.root())
-      has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
-                         DeltaV_qPQ_root.has_value()) ? 1 : 0;
-    mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
     utils::check(!has_pert_arrays,
                  "run_lr_calc: lr_hessian ('plain' or 'symmetric') is incompatible "
                  "with the DeltaX (IBC) and DeltaV_qPQ perturbations: the left "
@@ -1682,16 +1683,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   }
 
   // DeltaX / DeltaV_qPQ enter only through the kernel, which max_iter = 0 never evaluates.
-  if (max_iter == 0) {
-    int has_pert_arrays0 = 0;
-    if (mpi->comm.root())
-      has_pert_arrays0 = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
-                          DeltaV_qPQ_root.has_value()) ? 1 : 0;
-    mpi->comm.broadcast_n(&has_pert_arrays0, 1, 0);
-    utils::check(!has_pert_arrays0,
-                 "run_lr_calc: max_iter = 0 makes no kernel evaluation, so DeltaX (IBC) "
-                 "and DeltaV_qPQ would not enter the result.");
-  }
+  utils::check(max_iter > 0 || !has_pert_arrays,
+               "run_lr_calc: max_iter = 0 makes no kernel evaluation, so DeltaX (IBC) "
+               "and DeltaV_qPQ would not enter the result.");
 
   // IBC (DeltaX) for spinors: lr_precompute_V_HF_PQ has no npol > 1 Hartree term.
   if (mf->npol() > 1) {
@@ -1943,6 +1937,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "ground state and requires local_polarizabilities.");
     utils::check(gw_edmft or !local->impurity_response.has_value(),
                  "run_lr_calc: lr_impurity_response requires a GW+EDMFT ground state (local_polarizabilities).");
+    // Σ_imp and Π_imp of the impurity response enter only through the kernel.
+    utils::check(max_iter > 0 or !local->impurity_response.has_value(),
+                 "run_lr_calc: max_iter = 0 makes no kernel evaluation, so lr_impurity_response "
+                 "would not enter the result.");
     if (gw_edmft) {
       utils::check(!local->impurity_response or nmodes == 1,
                    "run_lr_calc: lr_impurity_response is for a single perturbation (nmodes = {}). Call run_lr once per mode.",
