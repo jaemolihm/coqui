@@ -367,6 +367,64 @@ private:
   }
 };
 
+/**
+ * @brief One damping step of the LR fixed point x = g(x), on (ΔF, ΔΣ) laid out as
+ *        in lr_gcr::step, with an optional preconditioner.
+ *
+ *   y = y_prev + mixing · r          (precond null; mixing >= 1 leaves g(y_prev))
+ *   y = y_prev + mixing · M⁻¹ r      (precond),     r = g(y_prev) − y_prev
+ *
+ * @param pmap      - [INPUT]  partition of the flattened F and S across ranks
+ * @param F_inout   - [IN/OUT] the full ΔF: g(y_prev) in, this rank's slice of y out
+ * @param F_prev    - [INPUT]  this rank's slice of y_prev
+ * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
+ * @param S_prev    - [INPUT]  this rank's slice of the ΔΣ y_prev
+ * @param mixing    - [INPUT]  damping factor
+ * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
+ *                            concatenation [F; S]; collective. Null: z = r
+ */
+template<typename FView, typename FPrev, typename SView, typename SPrev>
+void lr_damping_step(utils::part_map const& pmap,
+                     FView F_inout, FPrev const& F_prev,
+                     SView S_inout, SPrev const& S_prev, double mixing,
+                     std::function<void(nda::array<ComplexType, 1> const&,
+                                        nda::array<ComplexType, 1>&)> const* precond) {
+  const long nF = F_inout.size();
+  const long nS = S_inout.size();
+  auto [f0, f1] = pmap.my_slice(nF);
+  long s0 = 0, s1 = 0;
+  if (nS > 0) std::tie(s0, s1) = pmap.my_slice(nS);
+  utils::check(static_cast<long>(F_prev.size()) == f1 - f0 &&
+               static_cast<long>(S_prev.size()) == s1 - s0,
+               "lr_damping_step: history slices ({}, {}) != partition slices ({}, {}).",
+               F_prev.size(), S_prev.size(), f1 - f0, s1 - s0);
+  auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
+  if (precond) {
+    const long mF = f1 - f0, n = mF + (s1 - s0);
+    auto rF = nda::range(0, mF);
+    auto rS = nda::range(mF, n);
+    nda::array<ComplexType, 1> r(n), z(n);
+    r(rF) = F_loc - F_prev;
+    if (nS > 0) {
+      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
+      r(rS) = S_loc - S_prev;
+    }
+    (*precond)(r, z);
+    F_loc = F_prev + mixing * z(rF);
+    if (nS > 0) {
+      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
+      S_loc = S_prev + mixing * z(rS);
+    }
+  } else {
+    if (mixing >= 1.0) return;
+    F_loc = mixing * F_loc + (1.0 - mixing) * F_prev;
+    if (nS > 0) {
+      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
+      S_loc = mixing * S_loc + (1.0 - mixing) * S_prev;
+    }
+  }
+}
+
 } // namespace methods
 
 #endif // COQUI_LR_KRYLOV_HPP

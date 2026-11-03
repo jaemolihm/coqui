@@ -840,9 +840,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       _Timer.stop("LR_PRECOND");
     };
 
-  // Residual and preconditioned step of the damping iteration, sized on first use.
-  nda::array<ComplexType, 1> pc_r, pc_z;
-
   // Fill sDeltaG_tskij with the ΔG(τ) of the current ΔDm, at most once per Dyson solve.
   bool DeltaG_in_shm = false;
   auto update_DeltaG = [&]() {
@@ -959,19 +956,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
     // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
     // the same two-slot arguments.
-    //
-    // Damping; mixing >= 1 (undamped Picard) is a no-op.
-    const double mixing = p.iter_params.mixing;
-    auto damp = [&](auto A, auto const& A_prev) {
-      if (mixing >= 1.0 || A.size() == 0) return;
-      const long n = A.size();
-      auto [a0, a1] = _pmap.my_slice(n);
-      utils::check(A_prev.size() == a1 - a0,
-                   "lr_driver: damping history slice ({}) != partition slice ({}).",
-                   A_prev.size(), a1 - a0);
-      auto A_loc = nda::reshape(A, std::array<long, 1>{n})(nda::range(a0, a1));
-      A_loc = mixing * A_loc + (1.0 - mixing) * A_prev;
-    };
     auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
       if (use_gcr) {
         // GCR
@@ -980,36 +964,10 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       } else if (_lr_diis) {
         // DIIS
         _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
-      } else if (pc_fn) {
-        // Preconditioned damping, y = y_prev + mixing · M⁻¹ r with r = g(y_prev) - y_prev,
-        // on this rank's slices of (ΔF, ΔΣ), laid out as in lr_gcr::step.
-        const long nF = F.size();
-        const long nS = S.size();
-        auto [f0, f1] = _pmap.my_slice(nF);
-        auto [s0, s1] = _pmap.my_slice(nS);
-        utils::check(static_cast<long>(F_prev.size()) == f1 - f0 &&
-                     static_cast<long>(S_prev.size()) == s1 - s0,
-                     "lr_driver: preconditioned damping history slices ({}, {}) != "
-                     "partition slices ({}, {}).", F_prev.size(), S_prev.size(),
-                     f1 - f0, s1 - s0);
-        const long mF = f1 - f0;
-        auto rF = nda::range(0, mF);
-        auto rS = nda::range(mF, mF + (s1 - s0));
-        auto F_loc = nda::reshape(F, std::array<long, 1>{nF})(nda::range(f0, f1));
-        auto S_loc = nda::reshape(S, std::array<long, 1>{nS})(nda::range(s0, s1));
-        if (pc_r.size() != mF + (s1 - s0)) {
-          pc_r = nda::array<ComplexType, 1>(mF + (s1 - s0));
-          pc_z = nda::array<ComplexType, 1>(mF + (s1 - s0));
-        }
-        pc_r(rF) = F_loc - F_prev;
-        pc_r(rS) = S_loc - S_prev;
-        pc_fn(pc_r, pc_z);
-        F_loc = F_prev + mixing * pc_z(rF);
-        S_loc = S_prev + mixing * pc_z(rS);
       } else {
-        // Damping
-        damp(F, F_prev);
-        damp(S, S_prev);
+        // Damping, preconditioned with pc_fn when set
+        lr_damping_step(_pmap, F, F_prev, S, S_prev, p.iter_params.mixing,
+                        pc_fn ? &pc_fn : nullptr);
       }
     };
     if (qp) {
