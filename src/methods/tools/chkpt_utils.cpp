@@ -647,8 +647,7 @@ void dump_lr(communicator_t& comm,
              std::optional<long> nbnd_save,
              std::string const& gw_mode,
              std::string const& precond_method,
-             std::optional<double> exchange_static_W_head,
-             bool fixed_order) {
+             std::optional<double> exchange_static_W_head) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -718,14 +717,11 @@ void dump_lr(communicator_t& comm,
       auto DeltaVcorr_loc = sDeltaVcorr_skij->local();
       nda::h5_write(lr_grp, "DeltaVcorr_skij", DeltaVcorr_loc, false);
     }
-    // Preconditioner kernel, whose solution of ΔH0 was the start, and the stopping
-    // rule of a fixed-order run; each absent when unset, including when an earlier
-    // run wrote it into the same file.
-    for (auto [k, set] : {std::pair{"precond_method", !precond_method.empty()},
-                          std::pair{"fixed_order", fixed_order}})
-      if (!set && lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);
+    // Preconditioner kernel, whose solution of ΔH0 was the start; absent when
+    // unset, including when an earlier run wrote it into the same file.
+    if (precond_method.empty() && lr_grp.has_dataset("precond_method"))
+      H5Ldelete(h5::hid_t(lr_grp), "precond_method", H5P_DEFAULT);
     if (!precond_method.empty()) h5::h5_write(lr_grp, "precond_method", precond_method);
-    if (fixed_order) h5::h5_write(lr_grp, "fixed_order", 1);
 
     app_log(2, "LR results written to \"{}\" in {}",
             imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
@@ -867,7 +863,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&, std::string const&,
-                      std::optional<double>, bool);
+                      std::optional<double>);
 
   } // chkpt
 } // methods

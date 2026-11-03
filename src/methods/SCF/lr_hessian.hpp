@@ -230,7 +230,9 @@ public:
    * @param nmodes      - [INPUT] perturbations solved in this batch
    * @param has_sigma   - [INPUT] the kernel carries a dynamic ΔΣ, so `Tr_ω` is live
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
-   * @param plain_only  - [INPUT] compute `hessian_plain` only. It reads ΔH0 and ΔDm,
+   * @param plain_only  - [INPUT] set by run_lr(hessian="plain"): compute `hessian_plain`
+   *                      only, for a run whose ΔF/ΔΣ are not K of the returned ΔDm/ΔG
+   *                      (an order-n run, max_iter = n at tol = 0). It reads ΔH0 and ΔDm,
    *                      so no ΔF/ΔΣ/ΔG is stored, no ω store is allocated and
    *                      `evaluate` runs no extra Dyson solve; the other matrices of
    *                      the result stay empty. `has_sigma` is then irrelevant.

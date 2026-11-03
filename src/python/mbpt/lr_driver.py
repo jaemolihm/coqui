@@ -306,7 +306,7 @@ def read_lr_hessian(filename: str) -> dict:
     These are mode-PAIR matrices, so they live in the TOP-LEVEL
     ``linear_response/`` group rather than in the per-perturbation ``mode{m}/``
     subgroups, and they are written only by a run made with
-    ``run_lr(..., hessian=True)``.
+    ``run_lr(..., hessian="symmetric")`` or ``hessian="plain"``.
 
     Parameters
     ----------
@@ -323,7 +323,7 @@ def read_lr_hessian(filename: str) -> dict:
         ``hessian_sym = hessian_static_prime + hessian_M_prime - hessian_M``, the
         ``hessian_call_index`` list, ``Delta_mu_improved``, and the scalar
         ``hessian_herm_dev`` / ``hessian_sym_herm_dev`` / ``hessian_M_herm_dev``
-        residuals. A run made with ``fixed_order=True`` writes only the plain
+        residuals. A run made with ``hessian="plain"`` writes only the plain
         block: ``hessian``, ``hessian_call_index`` and ``hessian_herm_dev`` are
         returned, and the stationary keys are absent.
 
@@ -331,7 +331,7 @@ def read_lr_hessian(filename: str) -> dict:
     ------
     KeyError
         If the file carries no hessian block, i.e. the run did not set
-        ``hessian=True``.
+        ``hessian="symmetric"`` or ``"plain"``.
 
     Notes
     -----
@@ -360,9 +360,9 @@ def read_lr_hessian(filename: str) -> dict:
         if 'hessian' not in lr_grp:
             raise KeyError(
                 f"{filename} holds no hessian block; rerun with "
-                f"run_lr(..., hessian=True).")
+                f"run_lr(..., hessian='symmetric' or 'plain').")
 
-        # The stationary keys are absent from a plain-only (fixed_order) block.
+        # The stationary keys are absent from a plain-only block.
         out = {}
         for key in complex_keys:
             if key not in lr_grp:

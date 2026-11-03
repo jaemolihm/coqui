@@ -1483,12 +1483,13 @@ auto recompute_W_and_eps_inv_head(
  *                          rate of a converged run, not its answer.
  *   precond_tol,           inner stop ‖r_in‖ ≤ precond_tol·‖K_pc χ r‖ (default
  *   precond_max_iter       0.01) and inner sweep cap (default 10)
- *   fixed_order            run exactly max_iter iterations, no convergence test
- *                          (default false). Needs iter_alg damping with mixing 1,
- *                          a precond_method, no DeltaX/DeltaV_qPQ. The plain
- *                          hessian only is computed under lr_hessian.
- *   max_iter, tol          SCF iterations (1 = one-shot, default 50) and tolerance
- *                          (default 1e-8)
+ *   max_iter, tol          SCF iterations (1 = one-shot, default 50; 0 returns the
+ *                          start: the preconditioner solution of ΔH0, or the
+ *                          non-interacting response without one) and tolerance
+ *                          (default 1e-8; 0 runs exactly max_iter iterations)
+ *   lr_hessian             free-energy hessian: "none" (default), "plain"
+ *                          (hessian only, no extra kernel evaluation) or "symmetric"
+ *                          (plain + the stationary functional)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
@@ -1563,7 +1564,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
   auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
   auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
-  auto fixed_order = io::get_value_with_default<bool>(pt, "fixed_order", false);
   utils::check(precond_max_iter >= 1,
                "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
@@ -1601,7 +1601,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // plain contraction. Opt-in: one extra Dyson solve per perturbation plus two
   // striped ω stores, and it adds the top-level linear_response/hessian* datasets
   // to the checkpoint. Off by default, so the default output is unchanged.
-  auto hessian = io::get_value_with_default<bool>(pt, "lr_hessian", false);
+  auto hessian_mode = io::get_value_with_default<std::string>(pt, "lr_hessian", "none");
+  utils::check(hessian_mode == "none" || hessian_mode == "plain" || hessian_mode == "symmetric",
+               "run_lr_calc: lr_hessian must be 'none', 'plain' or 'symmetric', got '{}'.",
+               hessian_mode);
+  const bool hessian = (hessian_mode != "none");
+  const bool hessian_stationary = (hessian_mode == "symmetric");
 
   // LR output volume. Defaults reproduce the previous checkpoint byte for byte.
   //   save_DeltaG — write DeltaG_tskij at all. It is the biggest LR dataset and
@@ -1713,27 +1718,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "run_lr_calc: precond_method = '{}' is incompatible with "
                  "split_sigma_terms, whose terms are one step from V = ΔH0.", precond_method);
   }
-  if (fixed_order) {
-    utils::check(iter_params.alg == "damping" && iter_params.mixing == 1.0,
-                 "run_lr_calc: fixed_order requires iter_alg 'damping' with mixing 1, "
-                 "got '{}' with mixing {}: other iterations do not give the order-n "
-                 "partial sum.", iter_params.alg, iter_params.mixing);
-    utils::check(precond_method != "none",
-                 "run_lr_calc: fixed_order requires a precond_method: the order-n sum is "
-                 "in K - K_pc, started at the preconditioner solution.");
-    // The static inputs add a constant term to every kernel evaluation that the
-    // preconditioner never sees, which costs the start one order.
-    int has_static_inputs = 0;
-    if (mpi->comm.root())
-      has_static_inputs = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
-                           DeltaV_qPQ_root.has_value()) ? 1 : 0;
-    mpi->comm.broadcast_n(&has_static_inputs, 1, 0);
-    utils::check(!has_static_inputs,
-                 "run_lr_calc: fixed_order is incompatible with the DeltaX (IBC) and "
-                 "DeltaV_qPQ perturbations: their constant term in the kernel is not seen "
-                 "by the preconditioner, so the start misses one order.");
-  }
-
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file),
                "run_lr_calc: Input checkpoint {} does not exist!", input_file);
@@ -2221,7 +2205,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
   p.precond_max_iter = precond_max_iter;
-  p.fixed_order      = fixed_order;
+  p.hessian_stationary = hessian_stationary;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
@@ -2237,7 +2221,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     nda::array<double, 1> k_weight(mf->k_weight());
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
     opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
-                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/fixed_order);
+                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/!hessian_stationary);
   }
 
   for (long m = 0; m < nmodes; ++m) {
@@ -2286,7 +2270,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    total_kernel.sigma_G_dW ? "full"
                        : total_kernel.sigma_dG_W ? "fixed_W" : "none",
                    precond_method != "none" ? precond_method : std::string(),
-                   hsex_head, fixed_order);
+                   hsex_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 
@@ -2396,9 +2380,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       nda::h5_write(lr_grp, "hessian", c1.hessian_plain, false);
       nda::h5_write(lr_grp, "hessian_call_index", hessian_call_index, false);
       h5::h5_write(lr_grp, "hessian_herm_dev", c1.herm_plain);
-      // A fixed-order run has the plain block only, and removes the stationary
+      // A plain run has the plain block only, and removes the stationary
       // block an earlier run may have left in the same file.
-      if (fixed_order) {
+      if (!hessian_stationary) {
         for (auto k : {"hessian_sym", "hessian_M", "hessian_M_prime", "hessian_static_prime",
                        "Delta_mu_improved", "hessian_sym_herm_dev", "hessian_M_herm_dev"})
           if (lr_grp.has_dataset(k)) H5Ldelete(h5::hid_t(lr_grp), k, H5P_DEFAULT);

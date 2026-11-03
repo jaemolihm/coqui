@@ -199,10 +199,10 @@ void lr_driver::lr_setup(
 
   // Every output downstream, ΔG(τ) included, is produced by the Dyson pass after
   // the loop, so zero iterations return the start of the iteration: with a
-  // preconditioner that is its solution of ΔH0, without one the zero iterate.
-  const int min_iter = p.precond_kernel.empty() ? 1 : 0;
-  utils::check(p.max_iter >= min_iter,
-               "lr_driver::lr_setup: max_iter must be >= {}, got {}.", min_iter, p.max_iter);
+  // preconditioner that is its solution of ΔH0 (the preconditioned response),
+  // without one ΔF = ΔΣ = 0 (the non-interacting response χ ΔH0).
+  utils::check(p.max_iter >= 0,
+               "lr_driver::lr_setup: max_iter must be >= 0, got {}.", p.max_iter);
   if (p.split_sigma_terms) {
     utils::check(p.max_iter == 1,
                  "lr_driver::lr_setup: split ΔΣ terms are only meaningful for a "
@@ -247,8 +247,8 @@ void lr_driver::lr_setup(
             p.precond_kernel.to_string(),
             p.precond_hsex ? " with X = V + W_c(iν=0)" : "",
             p.precond_max_iter, p.precond_tol);
-  if (p.fixed_order)
-    app_log(1, "  fixed order: exactly max_iter iterations, no convergence test");
+  if (p.tol == 0.0)
+    app_log(1, "  tol = 0: exactly max_iter iterations, no convergence test");
   app_log(1, "  qp_static_sigma = {}", qp ? "true" : "false");
   app_log(1, "  iter_alg = {}", p.iter_params.alg);
   app_log(1, "  mixing = {:.2f}", p.iter_params.mixing);
@@ -303,7 +303,7 @@ void lr_driver::lr_setup(
                         inner_hist, !p.precond_kernel.empty(),
                         p.fix_density && _lr_dyson.is_q_gamma(),
                         p.exchange_static_W || p.precond_hsex,
-                        p.fixed_order ? 0 : p.hessian_nmodes);
+                        p.hessian_stationary ? p.hessian_nmodes : 0);
   print_distribution_summary(thc.Np(), K.has_sigma(), K.sigma_G_dW);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -739,11 +739,17 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     _pc_sweeps = sweep;
     if (conv) break;
   }
-  if ((p.fixed_order || (r_S == nullptr && p.max_iter == 0)) &&
-      _pc_sweeps == p.precond_max_iter && rn > tol_in)
-    app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
-               "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
-            p.precond_max_iter, rn / tol_in);
+  ++_pc_applies;
+  if (_pc_sweeps == p.precond_max_iter && rn > tol_in) {
+    // The start solve of a max_iter = 0 run is the answer: warn at once. Every
+    // other hit is counted and reported after the loop if the run did not converge.
+    if (r_S == nullptr && p.max_iter == 0)
+      app_log(1, "    [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit "
+                 "with ||r_in|| / tol_in = {:.3e}; the inner error enters the result.",
+              p.precond_max_iter, rn / tol_in);
+    else
+      ++_pc_cap_hits;
+  }
 }
 
 
@@ -787,6 +793,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (_lr_diis) _lr_diis->reset();
   if (_lr_gcr) _lr_gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
+  _pc_applies = 0;
+  _pc_cap_hits = 0;
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
   // the last one is the cost of the whole batch. Each intermediate table is
@@ -1065,7 +1073,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     bool f_converged = !K.has_F() || norm_DeltaF_diff < p.tol;
     bool sigma_converged = !K.has_sigma() || norm_DeltaSigma_diff < p.tol;
     bool conv_std = (iter > 1) && dm_converged && f_converged && sigma_converged;
-    bool iter_converged = !p.fixed_order && (use_gcr ? gcr_converged : conv_std);
+    bool iter_converged = use_gcr ? gcr_converged : conv_std;
 
     // Log iteration
     _Timer.start("LR_CONVERGENCE");
@@ -1113,8 +1121,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _mpi->comm.barrier();
   }
 
-  // A fixed-order run has no loop exit but the cap; it reports the order.
-  if (p.fixed_order) iter = max_iter;
+  // A run without iterations (max_iter = 0, a kernel with feedback) reports 0.
+  if (max_iter == 0 && !K.empty()) iter = 0;
+
+  if (_pc_cap_hits > 0 && !converged)
+    app_log(1, "  [WARNING] preconditioner: inner sweep cap precond_max_iter = {} hit in {} "
+               "of {} applies; the run did not converge, so the inner error enters the result.",
+            p.precond_max_iter, _pc_cap_hits, _pc_applies);
 
   // Every exit, converged or at max_iter: the step of the last iteration has
   // replaced ΔF (and ΔΣ / ΔV_QPGW) by its next iterate (a DIIS or damping mix, or
@@ -1140,17 +1153,17 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // ΔDm/ΔG(τ), but ΔF/ΔΣ are the accelerator's iterate and ΔDm/ΔG(τ) its Dyson
   // response. One kernel evaluation at the returned ΔDm/ΔG(τ) makes the pair exact.
   // After update_DeltaG, whose full pass may have replaced ΔDm.
-  // A fixed-order run takes the plain hessian only, which reads ΔH0 and ΔDm and so
+  // The plain hessian reads ΔH0 and ΔDm only, so it needs no such evaluation and
   // keeps ΔF/ΔΣ as the iterate the final Dyson pass was fed.
-  if (p.hessian() && !p.fixed_order) {
+  if (p.hessian() && p.hessian_stationary) {
     apply_kernel(/*precond=*/false, sDeltaF_skij, pDeltaSigma,
                  sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
   }
 
   // Report results
-  if (p.fixed_order) {
-    app_log(1, "\n  LR SCF: fixed order n = {} (no convergence test).", max_iter);
+  if (p.tol == 0.0) {
+    app_log(1, "\n  LR SCF: {} iterations (tol = 0, no convergence test).", max_iter);
   } else if (converged) {
     app_log(1, "\n  LR SCF converged in {} iterations!", iter);
   } else if (p.max_iter > 1) {

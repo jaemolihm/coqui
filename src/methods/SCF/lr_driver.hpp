@@ -196,12 +196,6 @@ struct lr_params {
   double precond_tol = 0.01;
   /// Cap on the preconditioner's inner sweeps. The last sweep takes any residual.
   int precond_max_iter = 10;
-  /// Run exactly max_iter iterations with no convergence test and report
-  /// niter = max_iter. With damping (mixing 1) and a precond_kernel, iterate n
-  /// is the Neumann partial sum of order n in K - K_pc. The hessian is then the
-  /// plain one only. Rejected together with the static inputs
-  /// (IBC, ΔV_qPQ), whose constant term the preconditioner never sees.
-  bool fixed_order = false;
 
   // --- Screened interaction ---
   /// Inverse dielectric head on the τ axis; required when the kernel has a Σ.
@@ -243,6 +237,9 @@ struct lr_params {
 
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
   bool hessian() const { return hessian_nmodes > 0; }
+  /// The hessian also takes the stationary (quadratic-error) functional, which
+  /// needs one kernel evaluation at the returned ΔDm/ΔG(τ); false: plain hessian only.
+  bool hessian_stationary = true;
 };
 
 /**
@@ -533,9 +530,10 @@ private:
    * flexible, so there the inner accuracy changes the rate only. The _pc_gcr basis
    * is recycled across solves (reset_rhs): its operator I - K_pc Pχ is the same on
    * every call. K_pc runs without the static inputs, so the inner problem has no
-   * constant term. A hit cap warns at every apply of a fixed_order run and at the
-   * start solve (r_Σ == nullptr) of a max_iter = 0 run, where the inner accuracy is
-   * part of the answer; a converged run does not depend on it.
+   * constant term. A hit cap warns at the start solve (r_Σ == nullptr) of a max_iter = 0
+   * run, where the inner accuracy is part of the answer; every other hit is counted
+   * (_pc_cap_hits of _pc_applies) and reported after the loop if the run did not
+   * converge, since a converged run does not depend on the inner accuracy.
    *
    * Collective on comm.
    */
@@ -628,6 +626,8 @@ private:
   std::optional<sArray_t<Array_view_4D_t>> _sDeltaDm_pc, _sDeltaDm_pc_y;
   /// Sweeps made by the last precond_apply, for the iteration log.
   int _pc_sweeps = 0;
+  int _pc_applies = 0;    ///< precond_solve calls of the current solve
+  int _pc_cap_hits = 0;   ///< of them, those that stopped at precond_max_iter above tolerance
 
   bool _setup_done = false;
 
