@@ -389,7 +389,7 @@ private:
 
 
     void compute_coefs_c1() {
-        // The eigendecomposition/pseudoinverse solve is shared with in_memory_diis
+        // The eigendecomposition/pseudoinverse solve is shared with diis_mixer
         // (diis_coefs.hpp).
         auto C = compute_diis_coefs_c1(m_B);
         if (C) {

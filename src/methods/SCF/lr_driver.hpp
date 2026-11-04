@@ -109,7 +109,7 @@ struct lr_iter_params {
 
 /// Per-node footprint of the accelerator's history (DIIS ring or lr_gcr basis):
 /// n_vec vectors of the quantities the accelerator actually stores.
-struct lr_accel_hist_t {
+struct lr_hist_t {
   long depth = 0;     ///< subspace depth / basis capacity; 0 = accelerator off
   long n_vec = 0;     ///< stored vectors, each of n_F ΔF + n_Sigma ΔΣ
   long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities per vector
@@ -412,7 +412,7 @@ public:
    */
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                              long n_sigma_prev = 0,
-                             lr_accel_hist_t inner_hist = {},
+                             lr_hist_t inner_hist = {},
                              bool precond = false,
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
@@ -580,7 +580,7 @@ private:
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
   /// DIIS, when iter_params.alg == "DIIS" and the kernel is not empty.
-  std::optional<iter_scf::in_memory_diis> _diis;
+  std::optional<iter_scf::diis_mixer> _diis;
   /// GCR in place of _diis when iter_params.alg == "GCR" and the kernel is
   /// not empty.
   std::unique_ptr<lr_gcr> _lr_gcr;
@@ -606,11 +606,11 @@ private:
   /// handles one slice and the whole job stores each of them once instead of once per
   /// node. The second block is ΔΣ(iω) when the kernel carries a Σ, ΔV_QPGW in qp mode,
   /// and absent otherwise.
-  iter_scf::self_energy_slice _slices;
+  iter_scf::hist_vec_layout _layout;
   /// The same slicing of ΔF alone (the preconditioner's inner GCR).
-  iter_scf::self_energy_slice _slices_F;
+  iter_scf::hist_vec_layout _layout_F;
   /// This rank's slices of the previous iterate (ΔF, second block) and of the previous ΔDm.
-  iter_scf::flat_self_energy _prev;
+  iter_scf::hist_vec _prev;
   nda::array<ComplexType, 1> _DeltaDm_prev;
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).

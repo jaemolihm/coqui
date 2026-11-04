@@ -51,7 +51,7 @@
  * Sigma (utils::part_map, node-major parts over the global comm), keeps only its
  * slices of the mixing history, and writes the mixed result in place into its slices
  * of the node-shared windows. The windows are completed afterwards
- * (self_energy_unflatten). The whole job then stores each history vector once.
+ * (utils::complete_shared_slices). The whole job then stores each history vector once.
  *
  * Why not VSpace/diis_alg (disk path of diis_t)? That stack holds whole FockSigma
  * vectors on one rank behind a file-I/O Vector interface (HDF5-backed VSpace), and its
@@ -62,18 +62,21 @@
  */
 namespace iter_scf {
 
-/// One vector of the sliced pair: this rank's slices of F and Sigma (S empty if absent).
-struct flat_self_energy {
+/// Values: this rank's slices of F and Sigma (S empty if absent), one stored vector
+/// (the previous state, a DIIS trial or residual, a GCR vector). Laid out by hist_vec_layout.
+struct hist_vec {
   nda::array<ComplexType, 1> F, S;
 };
 
-/// This rank's cut of the pair (F, Sigma) of flattened sizes nF and nS (nS = 0: F only).
-class self_energy_slice {
+/// Layout, no values: the flat element ranges of F (size nF) and Sigma (size nS; 0: F only)
+/// that this rank owns, one per run. F(full)/S(full) view this rank's slice of a full array;
+/// store() copies it into a hist_vec.
+class hist_vec_layout {
 public:
-  self_energy_slice() = default;
+  hist_vec_layout() = default;
 
   /// Not collective.
-  self_energy_slice(utils::part_map pmap, long nF, long nS)
+  hist_vec_layout(utils::part_map pmap, long nF, long nS)
       : _pmap(std::move(pmap)), _nF(nF), _nS(nS) {
     std::tie(_f0, _f1) = _pmap.my_slice(_nF);
     std::tie(_s0, _s1) = _pmap.my_slice(_nS);
@@ -102,7 +105,7 @@ public:
 
   /// v <- this rank's slices of the full arrays.
   template<typename AF, typename AS>
-  void store(flat_self_energy& v, AF const& F_full, AS const& S_full) const {
+  void store(hist_vec& v, AF const& F_full, AS const& S_full) const {
     v.F = F(F_full);
     v.S = S(S_full);
   }
@@ -113,29 +116,15 @@ private:
   long _f0 = 0, _f1 = 0, _s0 = 0, _s1 = 0;
 };
 
-/**
- * @brief Complete the node-shared arrays after every rank wrote only its slices of
- * them (utils::complete_shared_slices). Collective on mpi.comm.
- *
- * Each node then holds valid data only for the slices of its own ranks; the
- * completed array is exact when the mixing is elementwise with coefficients identical
- * on every rank, and every producer of the arrays ends in an internode all_reduce, so
- * that no node holds a private variant of the input.
- */
-template<typename MPI_Context_t, typename... sArr_t>
-void self_energy_unflatten(MPI_Context_t& mpi, self_energy_slice const& flat, sArr_t&... arrs) {
-  utils::complete_shared_slices(mpi, flat.pmap(), arrs...);
-}
-
 /// x <- mixing * x + (1 - mixing) * prev on this rank's slices; nothing for mixing >= 1.
 template<typename AF, typename AS>
-void damp_slices(self_energy_slice const& lay, double mixing, AF&& F, AS&& S,
-                 flat_self_energy const& prev) {
+void damp_slices(hist_vec_layout const& layout, double mixing, AF&& F, AS&& S,
+                 hist_vec const& prev) {
   if (mixing >= 1.0) return;
-  auto F_loc = lay.F(F);
+  auto F_loc = layout.F(F);
   F_loc = mixing * F_loc + (1.0 - mixing) * prev.F;
-  if (lay.mS() > 0) {
-    auto S_loc = lay.S(S);
+  if (layout.mS() > 0) {
+    auto S_loc = layout.S(S);
     S_loc = mixing * S_loc + (1.0 - mixing) * prev.S;
   }
 }
@@ -151,7 +140,7 @@ void damp_slices(self_energy_slice const& lay, double mixing, AF&& F, AS&& S,
  * Extrapolation needs more than `warmup` steps and at least `min_subsp` stored pairs;
  * otherwise, or when the coefficients do not exist, the step damps.
  */
-class in_memory_diis {
+class diis_mixer {
 public:
   struct config {
     double mixing;       ///< damping factor of the warmup and fallback steps
@@ -162,7 +151,7 @@ public:
   };
 
   /// A max_subsp below min_subsp can never extrapolate: the engine then only damps.
-  explicit in_memory_diis(config c) : _cfg(c), _B(0, 0) {
+  explicit diis_mixer(config c) : _cfg(c), _B(0, 0) {
     if (not active())
       app_log(1, "[WARNING] DIIS: a subspace of depth {} can never reach the {} pairs needed "
                  "to extrapolate; the iteration will only damp (mixing = {}). Raise the "
@@ -185,7 +174,7 @@ public:
     _B = nda::matrix<ComplexType>(0, 0);
   }
 
-  flat_self_energy const& newest_trial() const { return _slots[slot(_n - 1)].x; }
+  hist_vec const& newest_trial() const { return _slots[slot(_n - 1)].x; }
 
   /**
    * @brief Store the trial (F, S) with its residual (rF, rS) in the newest slot,
@@ -195,18 +184,18 @@ public:
    * @param rF, rS   - this rank's slices of the residual; rF may be empty
    */
   template<typename Comm, typename AF, typename AS, typename RF, typename RS>
-  void push(Comm& comm, self_energy_slice const& lay, AF const& F, AS const& S,
+  void push(Comm& comm, hist_vec_layout const& layout, AF const& F, AS const& S,
             RF const& rF, RS const& rS) {
     if (not active()) return;
     diis_timers::inmem_hist_store.start();
     if (_n == _cfg.max_subsp) evict_oldest();
     if (_n == _slots.size()) {
       // Growth happens only before the first eviction, so appending keeps the order.
-      utils::check(_head == 0, "in_memory_diis: ring growth with head = {} != 0", _head);
+      utils::check(_head == 0, "diis_mixer: ring growth with head = {} != 0", _head);
       _slots.emplace_back();
     }
     auto& s = _slots[slot(_n)];
-    lay.store(s.x, F, S);
+    layout.store(s.x, F, S);
     s.res.F = rF;
     s.res.S = rS;
     ++_n;
@@ -220,12 +209,12 @@ public:
    * extrapolated. Every rank takes the same branch.
    */
   template<typename AF, typename AS>
-  bool mix(self_energy_slice const& lay, AF&& F, AS&& S, flat_self_energy const& prev) {
+  bool mix(hist_vec_layout const& layout, AF&& F, AS&& S, hist_vec const& prev) {
     ++_steps;
     const int L = _cfg.log_level;
     auto damp = [&]() {
       diis_timers::inmem_damp_mix.start();
-      damp_slices(lay, _cfg.mixing, F, S, prev);
+      damp_slices(layout, _cfg.mixing, F, S, prev);
       diis_timers::inmem_damp_mix.stop();
     };
     if (_steps <= _cfg.warmup) {
@@ -254,8 +243,8 @@ public:
     log_extrapolation(*C);
 
     diis_timers::inmem_lincomb.start();
-    auto F_loc = lay.F(F);
-    auto S_loc = lay.S(S);
+    auto F_loc = layout.F(F);
+    auto S_loc = layout.S(S);
     F_loc() = ComplexType{0};
     S_loc() = ComplexType{0};
     // Newest pair first.
@@ -271,7 +260,7 @@ public:
 
 private:
   struct slot_t {
-    flat_self_energy x, res;
+    hist_vec x, res;
   };
 
   config _cfg;
@@ -354,20 +343,20 @@ private:
 /// Ground-state Dyson-SCF state of the in-memory mixers (damping, or DIIS with a damping
 /// warmup): the slicing, the previous accepted state, and the DIIS engine for DIIS.
 struct mixing_state {
-  self_energy_slice lay;
-  flat_self_energy prev;     ///< this rank's slices of the previous accepted (post-mix) state
+  hist_vec_layout layout;
+  hist_vec prev;     ///< this rank's slices of the previous accepted (post-mix) state
   bool has_prev = false;
   double mixing = 1.0;       ///< damping factor of the damping algorithm
-  std::optional<in_memory_diis> diis;  ///< DIIS only
+  std::optional<diis_mixer> diis;  ///< DIIS only
 
-  bool initialized() const { return lay.nF() > 0; }
+  bool initialized() const { return layout.nF() > 0; }
 
   /// Cut the slices of F (nF elements) and Sigma (nS); `diis_cfg` selects DIIS over
   /// damping. Collective on mpi.comm.
   template<typename MPI_Context_t>
   void init(MPI_Context_t& mpi, long nF, long nS, double mixing_,
-            std::optional<in_memory_diis::config> diis_cfg) {
-    lay = self_energy_slice(utils::make_part_map(mpi), nF, nS);
+            std::optional<diis_mixer::config> diis_cfg) {
+    layout = hist_vec_layout(utils::make_part_map(mpi), nF, nS);
     mixing = mixing_;
     has_prev = false;
     diis.reset();
@@ -392,26 +381,26 @@ struct mixing_state {
     bool extrapolated = false;
     if (diis) {
       // Only the Sigma block of the commutator is non-zero, so no F block is stored.
-      if (C_t) diis->push(comm, lay, F, S, nda::array<ComplexType, 1>{}, lay.S(*C_t));
-      extrapolated = diis->mix(lay, F, S, prev);
+      if (C_t) diis->push(comm, layout, F, S, nda::array<ComplexType, 1>{}, layout.S(*C_t));
+      extrapolated = diis->mix(layout, F, S, prev);
     } else {
       diis_timers::inmem_damp_mix.start();
-      damp_slices(lay, mixing, F, S, prev);
+      damp_slices(layout, mixing, F, S, prev);
       diis_timers::inmem_damp_mix.stop();
     }
 
     diis_timers::inmem_conv.start();
-    flat_self_energy const& ref = extrapolated ? diis->newest_trial() : prev;
+    hist_vec const& ref = extrapolated ? diis->newest_trial() : prev;
     auto max_absdiff = [](auto const& a, auto const& b) {
       double m = 0.0;
       for (long i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a(i) - b(i)));
       return m;
     };
-    std::array<double, 2> conv{max_absdiff(ref.F, lay.F(F)), max_absdiff(ref.S, lay.S(S))};
+    std::array<double, 2> conv{max_absdiff(ref.F, layout.F(F)), max_absdiff(ref.S, layout.S(S))};
     diis_timers::inmem_conv.stop();
 
     diis_timers::inmem_prev_store.start();
-    lay.store(prev, F, S);
+    layout.store(prev, F, S);
     has_prev = true;
     diis_timers::inmem_prev_store.stop();
     diis_timers::inmem_total.stop();

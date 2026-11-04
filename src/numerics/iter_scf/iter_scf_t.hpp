@@ -53,13 +53,13 @@ namespace iter_scf {
 
     explicit iter_scf_t(const damp_t &damp): _alg_var(damp) {}
     explicit iter_scf_t(damp_t&& damp): _alg_var(std::move(damp)) {}
-    iter_scf_t& operator=(const damp_t& damp) { _alg_var = damp; _state = {}; return *this; }
-    iter_scf_t& operator=(damp_t&& damp) { _alg_var = std::move(damp); _state = {}; return *this; }
+    iter_scf_t& operator=(const damp_t& damp) { _alg_var = damp; _mixing_state = {}; return *this; }
+    iter_scf_t& operator=(damp_t&& damp) { _alg_var = std::move(damp); _mixing_state = {}; return *this; }
 
     explicit iter_scf_t(const diis_t &diis): _alg_var(diis) {}
     explicit iter_scf_t(diis_t&& diis): _alg_var(std::move(diis)) {}
-    iter_scf_t& operator=(const diis_t& diis) { _alg_var = diis; _state = {}; return *this; }
-    iter_scf_t& operator=(diis_t&& diis) { _alg_var = std::move(diis); _state = {}; return *this; }
+    iter_scf_t& operator=(const diis_t& diis) { _alg_var = diis; _mixing_state = {}; return *this; }
+    iter_scf_t& operator=(diis_t&& diis) { _alg_var = std::move(diis); _mixing_state = {}; return *this; }
 
     template<class... Args>
     auto solve(Args&&... args) {
@@ -107,9 +107,9 @@ namespace iter_scf {
     // The element-sliced in-memory state, for damping or DIIS with diis_storage = "memory";
     // nullptr for disk DIIS. Used by the in-memory Dyson-SCF mixing in scf_common.cpp.
     mixing_state* mixing_state_if_in_memory() {
-      if (std::holds_alternative<damp_t>(_alg_var)) return &_state;
+      if (std::holds_alternative<damp_t>(_alg_var)) return &_mixing_state;
       auto* dp = std::get_if<diis_t>(&_alg_var);
-      return (dp and dp->storage == "memory") ? &_state : nullptr;
+      return (dp and dp->storage == "memory") ? &_mixing_state : nullptr;
     }
 
     void metadata_log() const {
@@ -123,7 +123,7 @@ namespace iter_scf {
     ~iter_scf_t() {};
   private:
     std::variant<damp_t,diis_t> _alg_var;
-    mixing_state _state;  // in-memory mixing state of the active algorithm (unused by disk DIIS)
+    mixing_state _mixing_state;  // in-memory mixing state of the active algorithm (unused by disk DIIS)
 
   };
 

@@ -43,7 +43,7 @@ namespace iter_scf {
  * c = B^{-1} 1 / (1^T B^{-1} 1). B is eigendecomposed (real part; the coefs
  * are constrained real) and inverted via a thresholded pseudoinverse, exactly
  * as in the original Pokhilko/Yeh/Zgid scheme. The disk (VSpace/diis_alg) and the
- * in-memory (in_memory_diis) paths compute their coefficients from this one source.
+ * in-memory (diis_mixer) paths compute their coefficients from this one source.
  *
  * @param m_B       residual-overlap matrix (n x n).
  * @param log_level verbosity level of the condition-number message.

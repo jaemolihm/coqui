@@ -76,7 +76,7 @@ namespace methods {
  * The iterate is (ΔF, ΔΣ(τ)), ΔΣ empty for a Σ-free kernel; every vector here
  * is this rank's slice of the concatenation [ΔF; ΔΣ]. The inner product is
  * Re Σ conj(a) b over it, unweighted, the same combined product the
- * B-matrix of iter_scf::in_memory_diis uses: with fix_density at q = Γ the map is
+ * B-matrix of iter_scf::diis_mixer uses: with fix_density at q = Γ the map is
  * ℝ-linear only, and the real inner product is what keeps GCR exact there.
  * The map must be affine for w = A z and the recycled pairs to hold, which rules
  * out the qpGW statification (its Padé continuation is not additive in ΔΣ).
@@ -85,7 +85,7 @@ namespace methods {
  * (ΔF + ΔΣ)-sized slice. With a Σ in the kernel one pair costs a ΔΣ, as one
  * DIIS depth unit does; the pairs are allocated as the basis grows.
  *
- * Every rank of `comm` holds its slice (iter_scf::self_energy_slice) of every vector, and the
+ * Every rank of `comm` holds its slice (iter_scf::hist_vec_layout) of every vector, and the
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
@@ -139,11 +139,11 @@ public:
    * @brief One GCR step on the iterate (ΔF, ΔΣ).
    *
    * Two slots, each a full array plus this rank's slice of the probe. The second
-   * slot may be empty (a ΔF-only iterate, `lay.nS() == 0`). Internally the two
+   * slot may be empty (a ΔF-only iterate, `layout.nS() == 0`). Internally the two
    * slices are concatenated into one vector [F; S], and every inner product is
    * Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *
-   * @param lay       - [INPUT]  slicing of the flattened F and S across ranks
+   * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
    * @param F_inout   - [IN/OUT] the full ΔF (pass .local()); g(y) on entry, and
    *                            this rank's slice of the next probe (x + r,
    *                            x + M⁻¹r, or a kick), or of x once converged, on exit
@@ -156,24 +156,24 @@ public:
    * @return ‖r‖ after the step
    */
   template<typename Comm, typename FView, typename SView>
-  double step(Comm& comm, iter_scf::self_energy_slice const& lay,
-              FView F_inout, SView S_inout, iter_scf::flat_self_energy const& probe,
+  double step(Comm& comm, iter_scf::hist_vec_layout const& layout,
+              FView F_inout, SView S_inout, iter_scf::hist_vec const& probe,
               double tol, bool& converged,
               std::function<void(Vec1D const&, Vec1D&)> const* precond = nullptr) {
-    utils::check(probe.F.size() == lay.mF() and probe.S.size() == lay.mS(),
+    utils::check(probe.F.size() == layout.mF() and probe.S.size() == layout.mS(),
                  "lr_gcr: probe slices ({}, {}) != partition slices ({}, {})",
-                 probe.F.size(), probe.S.size(), lay.mF(), lay.mS());
-    const long n = lay.mF() + lay.mS();
-    auto rF = lay.rF();
-    auto rS = lay.rS();
-    auto F_loc = lay.F(F_inout);
+                 probe.F.size(), probe.S.size(), layout.mF(), layout.mS());
+    const long n = layout.mF() + layout.mS();
+    auto rF = layout.rF();
+    auto rS = layout.rS();
+    auto F_loc = layout.F(F_inout);
 
     // _g <- g(y), _y <- y, both as [F; S]. Sized once per (layout of) solve.
     if (_g.size() != n) { _g = Vec1D(n); _y = Vec1D(n); }
     _g(rF) = F_loc;
     _y(rF) = probe.F;
-    if (lay.nS() > 0) {
-      _g(rS) = lay.S(S_inout);
+    if (layout.nS() > 0) {
+      _g(rS) = layout.S(S_inout);
       _y(rS) = probe.S;
     }
 
@@ -291,7 +291,7 @@ public:
       _y() = _x + _r;
     }
     F_loc = _y(rF);
-    if (lay.nS() > 0) lay.S(S_inout) = _y(rS);
+    if (layout.nS() > 0) layout.S(S_inout) = _y(rS);
     return rn;
   }
 
@@ -359,7 +359,7 @@ private:
  *   y = y_prev + mixing · r          (precond null; mixing >= 1 leaves g(y_prev))
  *   y = y_prev + mixing · M⁻¹ r      (precond),     r = g(y_prev) − y_prev
  *
- * @param lay       - [INPUT]  slicing of the flattened F and S across ranks
+ * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
  * @param F_inout   - [IN/OUT] the full ΔF: g(y_prev) in, this rank's slice of y out
  * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
  * @param prev      - [INPUT]  this rank's slices of y_prev
@@ -368,26 +368,26 @@ private:
  *                            concatenation [F; S]; collective. Null: z = r
  */
 template<typename FView, typename SView>
-void lr_damping_step(iter_scf::self_energy_slice const& lay, FView F_inout, SView S_inout,
-                     iter_scf::flat_self_energy const& prev, double mixing,
+void lr_damping_step(iter_scf::hist_vec_layout const& layout, FView F_inout, SView S_inout,
+                     iter_scf::hist_vec const& prev, double mixing,
                      std::function<void(nda::array<ComplexType, 1> const&,
                                         nda::array<ComplexType, 1>&)> const* precond) {
-  utils::check(prev.F.size() == lay.mF() and prev.S.size() == lay.mS(),
+  utils::check(prev.F.size() == layout.mF() and prev.S.size() == layout.mS(),
                "lr_damping_step: history slices ({}, {}) != partition slices ({}, {}).",
-               prev.F.size(), prev.S.size(), lay.mF(), lay.mS());
+               prev.F.size(), prev.S.size(), layout.mF(), layout.mS());
   if (precond) {
-    const long n = lay.mF() + lay.mS();
-    auto rF = lay.rF();
-    auto rS = lay.rS();
-    auto F_loc = lay.F(F_inout);
+    const long n = layout.mF() + layout.mS();
+    auto rF = layout.rF();
+    auto rS = layout.rS();
+    auto F_loc = layout.F(F_inout);
     nda::array<ComplexType, 1> r(n), z(n);
     r(rF) = F_loc - prev.F;
-    if (lay.nS() > 0) r(rS) = lay.S(S_inout) - prev.S;
+    if (layout.nS() > 0) r(rS) = layout.S(S_inout) - prev.S;
     (*precond)(r, z);
     F_loc = prev.F + mixing * z(rF);
-    if (lay.nS() > 0) lay.S(S_inout) = prev.S + mixing * z(rS);
+    if (layout.nS() > 0) layout.S(S_inout) = prev.S + mixing * z(rS);
   } else {
-    iter_scf::damp_slices(lay, mixing, F_inout, S_inout, prev);
+    iter_scf::damp_slices(layout, mixing, F_inout, S_inout, prev);
   }
 }
 

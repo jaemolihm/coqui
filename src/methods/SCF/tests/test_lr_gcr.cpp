@@ -83,7 +83,7 @@ int solve(mpi3::communicator& comm, utils::part_map const& pmap, methods::lr_gcr
           affine_problem const& P, FArr& F, SArr& S, nda::array<ComplexType, 1>& x,
           double tol, int max_steps, precond_t const* precond = nullptr) {
   const long nF = P.nF, nS = P.nS;
-  const iter_scf::self_energy_slice lay(pmap, nF, nS);
+  const iter_scf::hist_vec_layout layout(pmap, nF, nS);
   auto [f0, f1] = pmap.my_slice(nF);
   long s0 = 0, s1 = 0;
   if (nS > 0) std::tie(s0, s1) = pmap.my_slice(nS);
@@ -101,8 +101,8 @@ int solve(mpi3::communicator& comm, utils::part_map const& pmap, methods::lr_gcr
       Sp = y(nda::range(nF + s0, nF + s1));
     }
     bool conv = false;
-    iter_scf::flat_self_energy probe{std::move(Fp), std::move(Sp)};
-    gcr.step(comm, lay, F(), S(), probe, tol, conv, precond);
+    iter_scf::hist_vec probe{std::move(Fp), std::move(Sp)};
+    gcr.step(comm, layout, F(), S(), probe, tol, conv, precond);
     // Reassemble the full probe (or x) from every rank's slice.
     nda::array<ComplexType, 1> ynew(nF + nS);
     ynew() = 0;

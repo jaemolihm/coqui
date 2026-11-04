@@ -213,7 +213,7 @@ namespace bdft_tests {
 
     iter_scf::iter_scf_t damp_sol(iter_scf::damp_t(0.5));
     iter_scf::iter_scf_t diis_sol(iter_scf::diis_t(0.5, 6, 2));
-    // DIIS with the in-memory, element-sliced subspace (iter_scf::in_memory_diis)
+    // DIIS with the in-memory, element-sliced subspace (iter_scf::diis_mixer)
     iter_scf::iter_scf_t diis_mem_sol(iter_scf::diis_t(0.5, 6, 2, "commutator", "memory"));
 
     auto [e_hf_damp, e_corr_damp] = run_dyson_gw(damp_sol, "dyson_gw_damping_test");

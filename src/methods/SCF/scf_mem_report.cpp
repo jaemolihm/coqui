@@ -208,7 +208,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     }
   }
 
-  // In-memory DIIS history (iter_scf::in_memory_diis): max_subsp trial (F, Sigma) pairs
+  // In-memory DIIS history (iter_scf::diis_mixer): max_subsp trial (F, Sigma) pairs
   // plus max_subsp Sigma residuals (the Fock block of the commutator is not stored),
   // each element-sliced across the global comm, i.e. one whole copy per run. The mixing
   // state also keeps the previous accepted state as one more sliced (F, Sigma) pair.

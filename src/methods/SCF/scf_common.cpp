@@ -486,8 +486,8 @@ template<typename X_t, typename Xt_t>
 void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
                       std::array<std::string,3> const& datasets, long iteration,
                       X_t const& sF_skij, Xt_t const& sSigma_tskij) {
-  auto [f0, f1] = m.lay.F_range();
-  auto [s0, s1] = m.lay.S_range();
+  auto [f0, f1] = m.layout.F_range();
+  auto [s0, s1] = m.layout.S_range();
   m.prev.F = nda::array<ComplexType, 1>(f1 - f0);
   m.prev.S = nda::array<ComplexType, 1>(s1 - s0);
   m.prev.F() = ComplexType(0.0);
@@ -511,7 +511,7 @@ void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
 // stage the previous accepted state from the checkpoint when there is none in memory
 // (first mixing after a restart), let m mix this rank's slices (it returns the per-rank
 // {max|dF|, max|dSigma|}), max-reduce them, and complete the windows
-// (self_energy_unflatten). C_t is the commutator residual, or null when
+// (utils::complete_shared_slices). C_t is the commutator residual, or null when
 // m.needs_residual() was false.
 // Each rank reads/writes only its own slice of the windows (disjoint), so a fence pair
 // suffices.
@@ -526,7 +526,7 @@ auto in_memory_mix_step(MPI_Context_t &context, iter_scf::mixing_state& m,
   std::array<double, 2> conv = m.step(context.comm, sF_skij.local(), sSigma_tskij.local(), C_t);
   // max is exactly order-independent
   context.comm.all_reduce_in_place_n(conv.data(), 2, mpi3::max<>{});
-  iter_scf::self_energy_unflatten(context, m.lay, sF_skij, sSigma_tskij);
+  utils::complete_shared_slices(context, m.layout.pmap(), sF_skij, sSigma_tskij);
   return std::make_tuple(conv[0], conv[1]);
 }
 
@@ -574,7 +574,7 @@ inline bool debug_serial_diis() {
 // G/S/H0 (scf_driver does; the embed and qp callers do not).
 // Returns the mixing state when eligible, nullptr otherwise.
 template<typename Xt_t, typename X_t>
-iter_scf::mixing_state* in_memory_state(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
+iter_scf::mixing_state* in_memory_mixing_state(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
                                                  const X_t* sS, const X_t* sH0) {
   if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
   return iter_solver.mixing_state_if_in_memory();
@@ -674,16 +674,16 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 // Cut the slices of the in-memory mixing state: damping, or DIIS with a damping warmup
 // (the Dyson-SCF commutator residual needs two stored pairs to extrapolate).
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
-void init_in_memory_mixing(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
+void init_mixing_state(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                            iter_scf::mixing_state& m, X_t &sF_skij, Xt_t &sSigma_tskij) {
-  std::optional<iter_scf::in_memory_diis::config> cfg;
+  std::optional<iter_scf::diis_mixer::config> cfg;
   if (auto* dp = iter_solver.get_diis())
-    cfg = iter_scf::in_memory_diis::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
+    cfg = iter_scf::diis_mixer::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
                                            2, 2};
   m.init(context, sF_skij.local().size(), sSigma_tskij.local().size(), iter_solver.mixing(), cfg);
   app_log(2, "In-memory mixing: element-sliced state active ({} parts over {} node(s), "
              "slice sizes F {} / Sigma {})",
-          m.lay.pmap().nparts, context.internode_comm.size(), m.lay.mF(), m.lay.mS());
+          m.layout.pmap().nparts, context.internode_comm.size(), m.layout.mF(), m.layout.mS());
 }
 
 template<typename comm_t, typename X_t, typename Xt_t>
@@ -724,23 +724,23 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     auto Sigma_max_iter = max_element(sSigma_tskij.local().data(), sSigma_tskij.local().data()+sSigma_tskij.local().size(),
                                       [](auto a, auto b) { return std::abs(a) < std::abs(b); });
     conv_Sigma =  std::abs((*Sigma_max_iter));
-    if (auto* m = in_memory_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+    if (auto* m = in_memory_mixing_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
       // Every rank captures its slices of the iteration-1 state. No mixing is applied
       // at iteration 1, so this state is also the accepted previous state of the
       // first mixing.
-      init_in_memory_mixing(context, iter_solver, *m, sF_skij, sSigma_tskij);
-      m->lay.store(m->prev, sF_skij.local(), sSigma_tskij.local());
+      init_mixing_state(context, iter_solver, *m, sF_skij, sSigma_tskij);
+      m->layout.store(m->prev, sF_skij.local(), sSigma_tskij.local());
       m->has_prev = true;
     } else if (iter_solver.iter_alg() == iter_scf::DIIS and context.comm.root()) {
       // Initialize DIIS solver at the root process since the serial solver doesn't support mpi
       diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
     }
     context.comm.barrier();
-  } else if (auto* m = in_memory_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+  } else if (auto* m = in_memory_mixing_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
     iter_solver.metadata_log();
     // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
     if (not m->initialized())
-      init_in_memory_mixing(context, iter_solver, *m, sF_skij, sSigma_tskij);
+      init_mixing_state(context, iter_solver, *m, sF_skij, sSigma_tskij);
     std::optional<sArray_t<Array_view_5D_t>> sC_t;
     if (m->needs_residual())
       sC_t.emplace(distributed_commutator(context, FT, *sG_tskij, sF_skij, sSigma_tskij, mu,
