@@ -1,3 +1,4 @@
+// UNUSED: this whole file is included nowhere and is in no CMake or install list; it is kept only so that upstream changes to it still merge.
 /**
  * ==========================================================================
  * CoQuí: Correlated Quantum ínterface

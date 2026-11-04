@@ -20,6 +20,9 @@
 
 #undef NDEBUG
 
+#include <optional>
+#include <vector>
+
 #include "catch2/catch.hpp"
 
 #include "configuration.hpp"
@@ -43,8 +46,7 @@
  * The in-memory mixing slices the flattened (F, Sigma) pair over the *global*
  * comm, so a node holds valid data only for its own contiguous element run and the
  * node-shared windows have to be completed by an allgatherv over the node roots.
- * Neither half of that is exercised by any end-to-end test (the scf tests build
- * diis_t with storage = "disk"), and neither can be exercised at all on one node.
+ * Neither half of that can be exercised on one node.
  *
  * A test machine is one node, so carve it into synthetic "nodes" exactly as
  * gather_to_shm_synthetic_nodes does (shared memory still works within each
@@ -181,12 +183,15 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
       fill_flat(sC, iter, 2.0);
       const bool warmup = (iter <= 2);
 
-      auto C_loc = sC.local();
-      const Array_view_5D_t* Cp = mix.needs_residual() ? &C_loc : nullptr;
+      std::optional<iter_scf::hist_vec> residual;
+      if (mix.needs_residual()) {
+        residual.emplace();
+        residual->S = mix.layout.S(sC.local());
+      }
 
       sF.win().fence();
       sS.win().fence();
-      mix.step(ctx.comm, sF.local(), sS.local(), Cp);
+      mix.step(ctx.comm, sF.local(), sS.local(), residual ? &*residual : nullptr);
       sF.win().fence();
       sS.win().fence();
       utils::complete_shared_slices(ctx, mix.layout.pmap(), sF, sS);
@@ -225,7 +230,7 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
       fill_flat(sS, iter, 1.0);
       sF.win().fence();
       sS.win().fence();
-      damp.step(ctx.comm, sF.local(), sS.local(), static_cast<const Array_view_5D_t*>(nullptr));
+      damp.step(ctx.comm, sF.local(), sS.local(), nullptr);
       sF.win().fence();
       sS.win().fence();
       utils::complete_shared_slices(ctx, damp.layout.pmap(), sF, sS);
@@ -243,6 +248,94 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
       app_log(2, "damping [{}] iter {}: max err F {:.1e} / Sigma {:.1e}", tag, iter, eF, eS);
       REQUIRE(ctx.comm.all_reduce_value(eF, mpi3::max<>{}) == 0.0);
       REQUIRE(ctx.comm.all_reduce_value(eS, mpi3::max<>{}) == 0.0);
+    }
+  });
+}
+
+// iter_scf::mixing_state with an F-only layout (nS = 0, the qp SCF) and a supplied residual,
+// DIIS of 3 pairs, 1 warmup step: the damping steps against mixing*new + (1-mixing)*prev bit
+// for bit, the extrapolation steps against a dense reference on the full vectors (the
+// residual overlap B and the coefficients from compute_diis_coefs_c1, the newest pair
+// first) to round-off, and the agreement of every rank on the completed window.
+TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
+  const shape_t<4> Fshape = {1, 3, 5, 5};      // |F| = 75
+  const double mixing = 0.4;
+  auto residual_val = [](long i, long iter) {
+    return ComplexType(std::sin(0.37 * double(i) * double(iter + 1) + double(iter)),
+                       std::cos(0.91 * double(i) + 1.3 * double(iter)));
+  };
+
+  for_each_synthetic_layout("mixing_state_f_only_synthetic_nodes", [&](auto& ctx, std::string const& tag) {
+    INFO(tag);
+    auto sF = make_shared(ctx, Fshape);
+    const long nF = sF.local().size();
+    nda::array<ComplexType, 5> no_Sigma;
+
+    iter_scf::mixing_state mix;
+    mix.init(ctx, nF, 0, mixing, iter_scf::diis_mixer::config{mixing, 3, 1, 2, 2});
+    fill_flat(sF, 0, 0.0);
+    mix.layout.store(mix.prev, sF.local(), no_Sigma);
+    mix.has_prev = true;
+
+    // Dense reference: previous accepted state, the stored pairs (oldest first).
+    nda::array<ComplexType, 1> prev(nF);
+    for (long i = 0; i < nF; ++i) prev(i) = val(i, 0, 0.0);
+    std::vector<nda::array<ComplexType, 1>> xs, rs;
+
+    for (long iter = 1; iter <= 6; ++iter) {
+      fill_flat(sF, iter, 0.0);
+      nda::array<ComplexType, 1> trial(nF), res(nF);
+      for (long i = 0; i < nF; ++i) {
+        trial(i) = val(i, iter, 0.0);
+        res(i) = residual_val(i, iter);
+      }
+
+      // The first step stores no pair (its residual needs a previous mixing).
+      std::optional<iter_scf::hist_vec> residual;
+      if (mix.needs_residual()) {
+        residual.emplace();
+        residual->F = mix.layout.F(res);
+        xs.push_back(trial);
+        rs.push_back(res);
+        if (xs.size() > 3) { xs.erase(xs.begin()); rs.erase(rs.begin()); }
+      }
+      sF.win().fence();
+      mix.step(ctx.comm, sF.local(), no_Sigma, residual ? &*residual : nullptr);
+      sF.win().fence();
+      utils::complete_shared_slices(ctx, mix.layout.pmap(), sF);
+
+      nda::array<ComplexType, 1> expected(nF);
+      bool extrapolates = (iter > 1 and xs.size() >= 2);
+      if (not extrapolates) {
+        for (long i = 0; i < nF; ++i) expected(i) = mixing * trial(i) + (1.0 - mixing) * prev(i);
+      } else {
+        const long n = xs.size();
+        nda::matrix<ComplexType> B(n, n);
+        for (long a = 0; a < n; ++a)
+          for (long b = 0; b < n; ++b) B(a, b) = nda::blas::dotc(rs[a], rs[b]);
+        auto C = iter_scf::compute_diis_coefs_c1(B, 2);
+        REQUIRE(C.has_value());
+        expected() = ComplexType{0};
+        for (long k = n - 1; k >= 0; --k) expected += (*C)(k) * xs[k];
+      }
+
+      auto fF = nda::reshape(sF.local(), shape_t<1>{nF});
+      // Every rank holds the same completed window.
+      nda::array<ComplexType, 1> root(nF);
+      for (long i = 0; i < nF; ++i) root(i) = fF(i);
+      ctx.comm.broadcast_n(root.data(), nF, 0);
+      double spread = 0.0, err = 0.0, scale = 0.0;
+      for (long i = 0; i < nF; ++i) {
+        spread = std::max(spread, std::abs(fF(i) - root(i)));
+        err = std::max(err, std::abs(fF(i) - expected(i)));
+        scale = std::max(scale, std::abs(expected(i)));
+      }
+      REQUIRE(ctx.comm.all_reduce_value(spread, mpi3::max<>{}) == 0.0);
+      if (not extrapolates) REQUIRE(ctx.comm.all_reduce_value(err, mpi3::max<>{}) == 0.0);
+      else REQUIRE(ctx.comm.all_reduce_value(err, mpi3::max<>{}) <= 1e-12 * scale);
+      app_log(2, "mixing_state F only [{}] iter {}: {} err {:.1e}", tag, iter,
+              extrapolates ? "DIIS" : "damping", err);
+      for (long i = 0; i < nF; ++i) prev(i) = fF(i);
     }
   });
 }
@@ -581,7 +674,7 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
     for (long iter = 1; iter <= 3; ++iter) {
       REQUIRE(not mix.needs_residual());
       fill(iter);
-      mix.step(ctx.comm, sF.local(), sS.local(), static_cast<const Array_view_5D_t*>(nullptr));
+      mix.step(ctx.comm, sF.local(), sS.local(), nullptr);
       sF.win().fence();
       sS.win().fence();
       utils::complete_shared_slices(ctx, mix.layout.pmap(), sF, sS);
@@ -594,39 +687,6 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
       REQUIRE(ctx.comm.all_reduce_value(e, mpi3::max<>{}) == 0.0);
     }
   });
-}
-
-// diis_alg (the disk/VSpace DIIS, here with in-memory VSpace<Heff> and the vector-difference
-// residual) skips the extrapolation and returns 0 when the residual overlaps are singular, so
-// diis_t damps; independent residuals extrapolate.
-TEST_CASE("diis_alg_singular_residuals_skip", "[methods_scf]") {
-  using nda::array;
-  auto make_H = [](double a) { array<ComplexType, 4> H(1, 1, 2, 2); H() = a; return H; };
-  auto run = [&](std::vector<array<ComplexType, 4>> const& seq) {
-    iter_scf::VSpace<iter_scf::Heff> x_vsp, res_vsp;
-    x_vsp.initialize("diis_alg_test_x.h5", true);
-    res_vsp.initialize("diis_alg_test_r.h5", true);
-    iter_scf::opt_state<iter_scf::Heff> state;
-    state.initialize(iter_scf::Heff(seq[0]));
-    iter_scf::diis_residual<iter_scf::Heff> residual(&x_vsp, &state);
-    iter_scf::diis_alg<iter_scf::Heff> alg;
-    alg.init(&state, &residual, &x_vsp, &res_vsp, 4, true, iter_scf::Heff(seq[0]));
-    alg.grow_xvsp_only = true;
-    REQUIRE(alg.next_step(iter_scf::Heff(seq[1])) == 0);
-    alg.grow_xvsp_only = false;
-    int last = 0;
-    for (size_t i = 2; i < seq.size(); ++i) last = alg.next_step(iter_scf::Heff(seq[i]));
-    return last;
-  };
-
-  // Identical vectors: every residual is zero, B = 0.
-  REQUIRE(run({make_H(1.0), make_H(1.0), make_H(1.0), make_H(1.0), make_H(1.0)}) == 0);
-  // Residuals e2 = (1,0,0,0) and e3 = (0,1,0,0) are orthogonal: B = 1, extrapolation happens.
-  array<ComplexType, 4> v0 = make_H(0.0), v1 = make_H(0.0), v2 = make_H(0.0), v3 = make_H(0.0);
-  v2(0, 0, 0, 0) = 1.0;
-  v3 = v2;
-  v3(0, 0, 0, 1) = 1.0;
-  REQUIRE(run({v0, v1, v2, v3}) == 1);
 }
 
 /**

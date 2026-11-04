@@ -274,6 +274,131 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
     }
   }
 
+  TEST_CASE("dmft_embed_qp_mixing", "[methods][embed]") {
+    // qp dmft_embed at embed_iter >= 1: damping(0.5) vs 0.5*X_new + 0.5*X_prev, with X_new from damping(1)
+    // and X_prev read from embed/iter1; the default iter_alg (DIIS, mixing 1) vs damping(1).
+    auto& mpi = utils::make_unit_test_mpi_context();
+
+    imag_axes_ft::IAFT ft(1000.0, 1.2, imag_axes_ft::ir_basis, "high");
+    std::string coqui_prefix = "dmft_embed_qp_mixing";
+    auto [outdir, prefix] = utils::utest_filename("qe_lih222_sym");
+    auto mf = std::make_shared<mf::MF>(mf::default_MF(mpi, "qe_lih222_sym"));
+    std::string wannier_file = outdir + "/lih_wan.h5";
+
+    iter_scf::iter_scf_t scf_sol("damping");
+    solvers::hf_t hf;
+    solvers::gw_t gw(&ft, "gygi_smallest_q", coqui_prefix);
+    solvers::scr_coulomb_t scr_eri(&ft, "rpa", "gygi_smallest_q");
+    simple_dyson dyson(mf.get(), &ft);
+    thc_reader_t thc(mf, make_thc_reader_ptree(0, "", "incore", "", "bdft",
+                                               1e-8, mf->ecutrho(), 1, 1024, 10, 0.4));
+    auto eri = mb_eri_t(thc, thc);
+    auto psp = hamilt::make_pseudopot(*mf);
+    write_mf_data(*mf, ft, *psp, coqui_prefix);
+    mpi->comm.barrier();
+
+    MBState mb_state(ft, coqui_prefix, mf, wannier_file, true);
+    ptree pt;
+    pt.put("permut_symm", true);
+    pt.put("force_real", true);
+    pt.put("greens_func_source", "mf");
+    embed_eri_t embed_2e(*mf, "gygi_smallest_q");
+    embed_2e.downfolding_crpa(thc, mb_state, pt, "crpa");
+    [[maybe_unused]] auto [e_hf, e_corr] = scf_loop(mb_state, dyson, eri, ft,
+                                                    solvers::mb_solver_t(&hf,&gw,&scr_eri),
+                                                    &scf_sol, 1, true, 1e-9, false);
+
+    qp_params_t qp_params("sc", "pade", 18, 1e-8, 1e-8, "qpscf", false, "qp_energy");
+    embed_t embed(*mf, wannier_file, true);
+    ptree pt_1e;
+    pt_1e.put("update_dc", true);
+    pt_1e.put("force_real", true);
+    pt_1e.put("dc_type", "gw");
+    // downfold_1e/iter1 and embed/iter1 (no mixing), then downfold_1e/iter2: embed_iter = 1 afterwards
+    // Local corrections given directly, scaled by c, so that two calls differ.
+    auto set_local = [&](MBState &state, double c) {
+      auto &proj = state.proj_boson.value().proj_fermi();
+      long nw = ft.nw_f(), ns = mf->nspin(), nI = proj.nImps(), nO = proj.nImpOrbs();
+      state.Sigma_imp_wsIab.emplace(nda::array<ComplexType, 5>(nw, ns, nI, nO, nO));
+      state.Vcorr_dc_sIab.emplace(nda::array<ComplexType, 4>(ns, nI, nO, nO));
+      state.Vhf_imp_sIab.emplace(nda::array<ComplexType, 4>(ns, nI, nO, nO));
+      state.Vhf_dc_sIab.emplace(nda::array<ComplexType, 4>(ns, nI, nO, nO));
+      state.Sigma_imp_wsIab.value() = 0.0;
+      state.Vcorr_dc_sIab.value() = 0.0;
+      state.Vhf_imp_sIab.value() = 0.0;
+      state.Vhf_dc_sIab.value() = 0.0;
+      for (long s = 0; s < ns; ++s)
+        for (long I = 0; I < nI; ++I)
+          for (long a = 0; a < nO; ++a) {
+            state.Vhf_imp_sIab.value()(s, I, a, a) = c;
+            state.Vcorr_dc_sIab.value()(s, I, a, a) = 0.5 * c;
+            for (long n = 0; n < nw; ++n)
+              state.Sigma_imp_wsIab.value()(n, s, I, a, a) = 0.1 * c / (ft.omega(ft.wn_mesh()(n)) + 1.0);
+          }
+    };
+    embed.downfolding(mb_state, pt_1e, &qp_params);
+    iter_scf::iter_scf_t damp1(iter_scf::damp_t(1.0));
+    set_local(mb_state, 1.0);
+    embed.dmft_embed(mb_state, dyson, &damp1, true, false);
+    std::string fname = coqui_prefix + ".mbpt.h5";
+    // downfold_1e/iter2 reads the impurity quantities of iter1
+    if (mpi->comm.root()) {
+      h5::file file(fname, 'a');
+      auto grp = h5::group(file).open_group("downfold_1e/iter1");
+      nda::h5_write(grp, "Vhf_imp_sIab", mb_state.Vhf_imp_sIab.value(), false);
+      nda::h5_write(grp, "Sigma_imp_wsIab", mb_state.Sigma_imp_wsIab.value(), false);
+    }
+    mpi->comm.barrier();
+    embed.downfolding(mb_state, pt_1e, &qp_params);
+
+    using flat_t = std::vector<ComplexType>;
+    auto read_embed = [&](long iter) {
+      std::array<flat_t, 3> out;
+      h5::file file(fname, 'r');
+      auto grp = h5::group(file).open_group("embed/iter" + std::to_string(iter));
+      nda::array<ComplexType, 4> Vhf, Vcorr;
+      nda::array<ComplexType, 5> Sigma;
+      nda::h5_read(grp, "Vhf_skij", Vhf);
+      nda::h5_read(grp, "Vcorr_skij", Vcorr);
+      nda::h5_read(grp, "Sigma_tskij", Sigma);
+      out[0].assign(Vhf.data(), Vhf.data() + Vhf.size());
+      out[1].assign(Vcorr.data(), Vcorr.data() + Vcorr.size());
+      out[2].assign(Sigma.data(), Sigma.data() + Sigma.size());
+      return out;
+    };
+    // Each call mixes with embed/iter1 and overwrites embed/iter2.
+    auto embed_again = [&](iter_scf::iter_scf_t &sol) {
+      MBState state(ft, coqui_prefix, mf, wannier_file, true);
+      set_local(state, 2.0);
+      embed.dmft_embed(state, dyson, &sol, true, false);
+      mpi->comm.barrier();
+      return read_embed(2);
+    };
+
+    auto prev = read_embed(1);
+    auto X_new = embed_again(damp1);
+    iter_scf::iter_scf_t damp_half(iter_scf::damp_t(0.5));
+    auto X_half = embed_again(damp_half);
+    iter_scf::iter_scf_t diis_default(iter_scf::diis_t(1.0, 5, 3, "commutator"));
+    auto X_diis = embed_again(diis_default);
+    for (int i = 0; i < 3; ++i) {
+      REQUIRE(X_new[i].size() == prev[i].size());
+      double err_half = 0.0, norm_half = 0.0, err_diis = 0.0;
+      for (size_t j = 0; j < X_new[i].size(); ++j) {
+        auto expected = 0.5 * X_new[i][j] + 0.5 * prev[i][j];
+        err_half += std::norm(X_half[i][j] - expected);
+        norm_half += std::norm(expected);
+        err_diis += std::norm(X_diis[i][j] - X_new[i][j]);
+      }
+      REQUIRE(std::sqrt(err_half) <= 1e-14 * std::sqrt(norm_half));
+      REQUIRE(err_diis == 0.0);
+    }
+
+    mpi->comm.barrier();
+    if (mpi->comm.root()) remove(fname.c_str());
+    mpi->comm.barrier();
+  }
+
   TEST_CASE("downfold_gloc", "[methods][embed][df_1e]") {
     auto& mpi = utils::make_unit_test_mpi_context();
 

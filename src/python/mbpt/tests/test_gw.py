@@ -155,31 +155,25 @@ def _remove_outputs(mpi, outputs):
     if mpi.root():
         for name in outputs:
             os.remove(f"{name}.mbpt.h5")
-        for name in ("diis_vectors.h5", "diis_residuals.h5"):
-            if os.path.exists(name):
-                os.remove(name)
     mpi.barrier()
 
 
 @pytest.mark.parametrize("iter_alg", [
     {"alg": "damping", "mixing": 0.7},
     {"alg": "diis", "mixing": 0.7, "diis_warmup": 3},
-], ids=["damping", "diis_slim_default"])
+], ids=["damping", "diis"])
 def test_gw_chkpt_slim_mixing(mpi, iter_alg):
     # scGW, 3 iterations, chkpt_slim = true vs false: F, Sigma and G of the final
     # iteration agree to round-off. Iterations 2 and 3 damp (DIIS: warmup), so a
     # mixing with the omitted Sigma read as zero fails this (measured: F rel. error
-    # 3.7e-3 against the 1e-12 bound). For DIIS the slim run switches the default
-    # diis_storage to "memory", so the reference is memory DIIS; 3 iterations with
-    # diis_warmup = 3 cover only the warmup damping (the memory-DIIS extrapolation
-    # never reads the checkpoint).
+    # 3.7e-3 against the 1e-12 bound). 3 iterations with diis_warmup = 3 cover only
+    # the warmup damping.
     mf = construct_qe_mf(mpi, "qe_lih222_sym")
     eri_params = {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
                   "chol_block_size": 1, "init": True}
     thc = coqui.make_thc_coulomb(mf, eri_params)
 
-    ref_alg = dict(iter_alg, diis_storage="memory") if iter_alg["alg"] == "diis" else iter_alg
-    _scgw_slim(mpi, thc, "gw_full", False, ref_alg, 3)
+    _scgw_slim(mpi, thc, "gw_full", False, iter_alg, 3)
     _scgw_slim(mpi, thc, "gw_slim", True, iter_alg, 3)
 
     if mpi.root():
@@ -234,7 +228,7 @@ def test_gw_chkpt_slim_damping_restart(mpi):
     _remove_outputs(mpi, ["gw_once", "gw_full", "gw_slim"])
 
 
-_SLIM_GUARD_RUNNER = """
+_STORAGE_KEY_RUNNER = """
 import sys
 from mpi4py import MPI
 import coqui
@@ -243,46 +237,81 @@ mpi = coqui.MpiHandler()
 mf = construct_qe_mf(mpi, "qe_lih222_sym")
 thc = coqui.make_thc_coulomb(mf, {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
                                   "chol_block_size": 1, "init": True})
-coqui.run_gw({"restart": False, "output": "gw_slim_guard", "niter": 2, "beta": 100,
-              "iaft": {"prec": "medium", "basis": "dlr"}, "chkpt_slim": True,
-              "iter_alg": {"damping": {"alg": "damping", "mixing": 0.7},
-                           "disk_diis": {"alg": "diis", "diis_storage": "disk"},
-                           "storage_key": {"alg": "diis", "storage": "memory"}}[sys.argv[1]]},
+coqui.run_gw({"restart": False, "output": "gw_storage_key", "niter": 2, "beta": 100,
+              "iaft": {"prec": "medium", "basis": "dlr"},
+              "iter_alg": {"alg": "diis", sys.argv[1]: sys.argv[2]}},
              h_int=thc)
-print("GUARD_NOT_TRIGGERED", flush=True)
+print("KEY_ACCEPTED", flush=True)
 """
 
 
-@pytest.mark.parametrize("case, expected", [
-    ("damping", "is not stored in the checkpoint (Sigma_not_stored = true)"),
-    ("disk_diis", "does not work with chkpt_slim = true"),
-    ("storage_key", 'set by "diis_storage"'),
-])
-def test_gw_chkpt_slim_guard(mpi, case, expected):
-    # Slim scGW runs that would mix from the omitted Sigma_tskij vs the chkpt_slim
-    # guards: "damping" is the checkpoint-reading damping (forced by
-    # COQUI_DEBUG_SERIAL_DIIS), which aborts at the read of iteration 1;
-    # "disk_diis" is an explicit diis_storage = "disk", rejected at input parsing;
-    # "storage_key" is the removed key "storage", rejected at input parsing with a
-    # message naming "diis_storage".
-    # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by
-    # rank 0.
+@pytest.mark.parametrize("key", ["storage", "diis_storage"])
+def test_iter_alg_storage_key_rejected(mpi, key):
+    # iter_alg with the removed key "storage" or "diis_storage" (DIIS history is always in memory)
+    # vs the input parsing: the run aborts with a message naming the key that was written.
+    # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by rank 0.
     import subprocess
     import sys
     msg = None
     if mpi.root():
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
-        env["COQUI_DEBUG_SERIAL_DIIS"] = "1"
         proc = subprocess.run(["mpirun", "--bind-to", "none", "-np", "1",
-                               sys.executable, "-c", _SLIM_GUARD_RUNNER, case],
+                               sys.executable, "-c", _STORAGE_KEY_RUNNER, key, "memory"],
                               env=env, capture_output=True, text=True, timeout=900)
         out = proc.stdout + proc.stderr
-        if proc.returncode == 0 or "GUARD_NOT_TRIGGERED" in out:
-            msg = f"slim checkpoint read was accepted:\n{out[-2000:]}"
+        expected = f'the key "{key}" is not recognized'
+        if proc.returncode == 0 or "KEY_ACCEPTED" in out:
+            msg = f"the key {key} was accepted:\n{out[-2000:]}"
         elif expected not in out:
-            msg = f"run failed, but not by the chkpt_slim guard:\n{out[-2000:]}"
-        if os.path.exists("gw_slim_guard.mbpt.h5"):
-            os.remove("gw_slim_guard.mbpt.h5")
+            msg = f"run failed, but not by the key check:\n{out[-2000:]}"
+        if os.path.exists("gw_storage_key.mbpt.h5"):
+            os.remove("gw_storage_key.mbpt.h5")
     msg = MPI.COMM_WORLD.bcast(msg, root=0)
     assert msg is None, msg
+
+
+def test_evgw_diis_ignores_stale_files(mpi):
+    # evGW (residual_type "vector_diff"), DIIS with 2 warmup steps, 6 iterations in a clean directory vs in a
+    # directory that holds a stale diis_heff_vectors.h5 (8 vectors of the right shape, nonzero): the final
+    # Heff is identical, and the planted file is not touched. The DIIS history is in memory.
+    import hashlib
+    import shutil
+    import h5py
+    mf = construct_qe_mf(mpi, "qe_lih222_sym")
+    thc = coqui.make_thc_coulomb(mf, {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
+                                      "chol_block_size": 1, "init": True})
+    params = {"restart": False, "output": "evgw", "niter": 6, "beta": 100,
+              "iaft": {"prec": "medium", "basis": "dlr"}, "conv_thr": 1e-14,
+              "iter_alg": {"alg": "diis", "mixing": 0.7, "diis_warmup": 2}}
+    start = os.getcwd()
+    heff = {}
+    stale_hash = {}
+    for tag in ("clean", "stale"):
+        if mpi.root():
+            os.makedirs(tag, exist_ok=True)
+        mpi.barrier()
+        os.chdir(os.path.join(start, tag))
+        if tag == "stale" and mpi.root():
+            with h5py.File("../clean/evgw.mbpt.h5", "r") as f:
+                shape = f["scf/iter0/Heff_skij"].shape
+            with h5py.File("diis_heff_vectors.h5", "w") as f:
+                for i in range(8):
+                    f.create_group(f"vec{i}").create_dataset("Heff_skij", data=np.full(shape, 0.5 + 0.1j * i))
+            with open("diis_heff_vectors.h5", "rb") as f:
+                stale_hash[tag] = hashlib.md5(f.read()).hexdigest()
+        mpi.barrier()
+        coqui.run_evgw(params, h_int=thc)
+        mpi.barrier()
+        if mpi.root():
+            with h5py.File("evgw.mbpt.h5", "r") as f:
+                heff[tag] = f[f"scf/iter{f['scf/final_iter'][()]}/Heff_skij"][()]
+        os.chdir(start)
+    if mpi.root():
+        assert np.array_equal(heff["clean"], heff["stale"])
+        with open(os.path.join(start, "stale", "diis_heff_vectors.h5"), "rb") as f:
+            assert hashlib.md5(f.read()).hexdigest() == stale_hash["stale"]
+        assert not os.path.exists(os.path.join(start, "clean", "diis_heff_vectors.h5"))
+        for tag in ("clean", "stale"):
+            shutil.rmtree(os.path.join(start, tag))
+    mpi.barrier()

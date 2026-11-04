@@ -489,11 +489,14 @@ double compute_Nelec(double mu, const nda::array<ComplexType, 4> &spectra,
  * @param it          - [INPUT] current iteration
  * @param h5_prefix   - [INPUT] prefix for h5 archive that stores QP results from previous iterations
  * @param sHeff_skij  - [INPUT] quasiparticle Hamiltonian at the current iteration
+ * @param sS_skij     - [INPUT] overlap matrix
+ * @param sDm_skij    - [INPUT] density matrix of the previous accepted Hamiltonian (commutator residual)
  * @return - maximum norm of the SCF error
  */
 template<typename comm_t, typename X_t>
 double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                     long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij);
+                     long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij,
+                     const X_t &sDm_skij);
 /**
  * Iterative solver for the SCF solution of self-energy
  * @param context      - [INPUT] mpi context
@@ -522,20 +525,29 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
                      const X_t* sS_skij = nullptr, const X_t* sH0_skij = nullptr)
   -> std::tuple<double, double>;
 
-template<typename MPI_Context_t, typename X_t, typename Xt_t>
-auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
-                  long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-                  std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"})
--> std::tuple<double, double>;
+/**
+ * Cut the slices of `m` for the arrays sF_skij and sSigma_tskij (null: F only), with the
+ * parameters of iter_solver. Collective on context.comm.
+ */
+template<typename comm_t, typename X_t, typename Xt_t>
+void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
+                       iter_scf::mixing_state& m, X_t &sF_skij, Xt_t *sSigma_tskij);
 
-template<typename MPI_Context_t, typename X_t, typename Xt_t>
-auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
-               long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-               const imag_axes_ft::IAFT *FT,
-               std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"},
-               const Xt_t* sG_tskij = nullptr, double mu = 0.0,
-               const X_t* sS_skij = nullptr, const X_t* sH0_skij = nullptr)
--> std::tuple<double, double>;
+/**
+ * One element-sliced mixing step (damping or DIIS) of the node-shared windows sF_skij and
+ * sSigma_tskij (null: F only) with `m`: the trial on entry, the accepted state on exit.
+ * When m has no previous accepted state, it is read from
+ * {datasets[0]}/iter{iteration-1} of the checkpoint (datasets: group, F, Sigma).
+ * @param residual - residual slices of the trial (m.layout), or null when m.needs_residual() was false
+ * @return - max|ref - out| for F and Sigma over all ranks, ref the previous accepted state
+ *           (damped) or the newest trial (extrapolated)
+ */
+template<typename comm_t, typename X_t, typename Xt_t>
+auto in_memory_mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
+                        std::string const& h5_prefix, std::array<std::string,3> const& datasets,
+                        long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
+                        iter_scf::hist_vec const* residual)
+  -> std::tuple<double, double>;
 
 template<typename comm_t, typename X_t, nda::ArrayOfRank<1> Array1D>
 double eval_corr_energy(comm_t& comm, const imag_axes_ft::IAFT &FT,

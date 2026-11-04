@@ -19,6 +19,8 @@
  */
 
 
+#include <optional>
+
 #include "nda/linalg.hpp"
 #include "nda/linalg/det_and_inverse.hpp"
 #include "numerics/nda_functions.hpp"
@@ -34,6 +36,7 @@
 #include "methods/SCF/mb_solver_t.h"
 #include "methods/SCF/scf_common.hpp"
 #include "methods/SCF/qp_solvers.hpp"
+#include "numerics/iter_scf/commutator_residual.hpp"
 
 namespace methods {
 
@@ -815,8 +818,11 @@ double update_mu(double old_mu, const mf::MF &mf, const X_t &sE_ski, double beta
 
 template<typename comm_t, typename X_t>
 double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                       long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij) {
+                       long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij,
+                       const X_t &sDm_skij) {
   double conv = 0;
+  auto& m = iter_solver.state();
+  sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Heff has no Sigma block
   if (it == 1) {
     // Just check changes w.r.t. mf
     if (context.node_comm.root()) {
@@ -844,23 +850,38 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
       conv =  std::abs((*max_iter));
     }
     context.node_comm.broadcast_n(&conv, 1, 0);
-    if (iter_solver.iter_alg() == iter_scf::DIIS and context.comm.root()) {
-      // Initialize DIIS solver at the root process since the solver currently doesn't support MPI
-      iter_solver.initialize(sHeff_skij.local(), sS_skij.local(), h5_prefix);
-    }
-    context.comm.barrier();
+    // No mixing is applied at iteration 1, so this state is also the accepted previous
+    // state of the first mixing.
+    init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
+    nda::array<ComplexType, 5> no_Sigma_array;
+    m.layout.store(m.prev, sHeff_skij.local(), no_Sigma_array);
+    m.has_prev = true;
   } else {
     iter_solver.metadata_log();
-    if (context.node_comm.root()) {
-      std::string filename = h5_prefix + ".mbpt.h5";
-      h5::file file(filename, 'r');
-      h5::group grp(file);
-      if (grp.has_subgroup("scf/iter" + std::to_string(it-1))) {
-        auto scf_grp = grp.open_group("scf");
-        conv = iter_solver.solve(sHeff_skij.local(), "Heff_skij", scf_grp, it);
+    // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
+    if (not m.initialized())
+      init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
+    // Residual of the trial Heff, for the DIIS steps that store a pair
+    std::optional<iter_scf::hist_vec> residual;
+    if (m.needs_residual()) {
+      residual.emplace();
+      if (iter_solver.diis()->residual_type == "vector_diff") {
+        // trial - previous accepted Heff
+        residual->F = m.layout.F(sHeff_skij.local()) - m.prev.F;
+      } else {
+        // Heff-Dm commutator H D S - S D H, Dm of the previous accepted Heff
+        auto [ns, nk, nao, nao2] = sHeff_skij.shape();
+        auto sC = math::shm::make_shared_array<Array_view_4D_t>(
+            context.comm, context.internode_comm, context.node_comm, {ns, nk, nao, nao2});
+        sC.win().fence();
+        iter_scf::heff_commutator(context.node_comm, sC.local(), sHeff_skij.local(),
+                                  sDm_skij.local(), sS_skij.local());
+        sC.win().fence();
+        residual->F = m.layout.F(sC.local());
       }
     }
-    context.node_comm.broadcast_n(&conv, 1, 0);
+    conv = std::get<0>(in_memory_mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
+                                          sHeff_skij, no_Sigma, residual ? &*residual : nullptr));
   }
   context.comm.barrier();
   return conv;
@@ -910,7 +931,8 @@ template std::tuple<double,double,bool> qp_eqn_secant(double, analyt_cont::AC_t 
 template std::tuple<double,bool> qp_eqn_spectral(double, analyt_cont::AC_t &, long, double, double, double, double);
 
 template double solve_iterative(utils::mpi_context_t<mpi3::communicator>&, iter_scf::iter_scf_t&, long, std::string,
-                                sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_4D_t>&);
+                                sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_4D_t>&,
+                                const sArray_t<Array_view_4D_t>&);
 template void compute_G_from_mf(h5::group, imag_axes_ft::IAFT&, sArray_t<nda::array_view<ComplexType, 5>>&);
 
 } // methods

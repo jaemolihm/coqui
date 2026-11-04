@@ -42,8 +42,8 @@ namespace iter_scf {
  * Given the residual-overlap matrix B, return the real coefficient vector
  * c = B^{-1} 1 / (1^T B^{-1} 1). B is eigendecomposed (real part; the coefs
  * are constrained real) and inverted via a thresholded pseudoinverse, exactly
- * as in the original Pokhilko/Yeh/Zgid scheme. The disk (VSpace/diis_alg) and the
- * in-memory (diis_mixer) paths compute their coefficients from this one source.
+ * as in the original Pokhilko/Yeh/Zgid scheme. The in-memory DIIS (diis_mixer)
+ * computes its coefficients with this function.
  *
  * @param m_B       residual-overlap matrix (n x n).
  * @param log_level verbosity level of the condition-number message.

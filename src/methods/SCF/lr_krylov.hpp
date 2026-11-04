@@ -89,9 +89,8 @@ namespace methods {
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
- * Why not src/numerics/iter_scf/: its solvers keep their vectors in HDF5-backed
- * VSpace storage behind a file-I/O Vector interface, and have no notion of a
- * striped slice or of recycling a basis across right-hand sides.
+ * Why not iter_scf::diis_mixer: it extrapolates (trial, residual) pairs of a
+ * fixed-point iteration and has no notion of recycling a basis across right-hand sides.
  */
 class lr_gcr {
 public:

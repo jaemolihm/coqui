@@ -212,7 +212,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // plus max_subsp Sigma residuals (the Fock block of the commutator is not stored),
   // each element-sliced across the global comm, i.e. one whole copy per run. The mixing
   // state also keeps the previous accepted state as one more sliced (F, Sigma) pair.
-  if (p.iter_alg == "DIIS" and p.diis_storage == "memory") {
+  if (p.iter_alg == "DIIS") {
     if (p.max_subsp >= 2)  // the history is stored only if max_subsp >= min_subsp = 2
       arrays.push_back({"DIIS history (memory)",
                         fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
@@ -382,8 +382,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
               (i == peak_grp) ? "  <- peak" : "");
   app_log(2, "    ranks/node = {}, nodes = {}, t-pools = {} (t-pool comm = {} ranks)",
           rpn, n_nodes, ntpools, np_tpool);
-  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; the W Dyson scratch;"
-             " disk-backed DIIS history");
+  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; the W Dyson scratch");
   if (p.n_thc_readers > 1)
     app_log(2, "    the {} THC readers are assumed to share the correlated reader's NP/nbnd/"
                "x_range shapes", p.n_thc_readers);

@@ -273,7 +273,7 @@ void lr_driver::lr_setup(
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
     } else if (p.iter_params.alg == "DIIS") {
-      // LR DIIS is always in memory (element-sliced); iter_alg.diis_storage is not read.
+      // LR DIIS keeps its history in memory, element-sliced.
       _diis.emplace(iter_scf::diis_mixer::config{
           p.iter_params.mixing, p.iter_params.max_subsp_size, p.iter_params.diis_warmup,
           /*min_subsp=*/3, /*log_level=*/3});

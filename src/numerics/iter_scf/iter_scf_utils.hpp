@@ -37,19 +37,14 @@ namespace iter_scf {
    * DIIS options:
    *  - mixing: "0.7" For initial damping
    *  - max_subsp_size: "5" Maximal dimension of the extrapolation subspace
-   *  - diis_start: "3" When to start applying DIIS extrapolation.
-   *  - diis_storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
-   *    (in-memory; faster, but stores the history in RAM)}
-   *    Memory storage: scf_driver keeps max_subsp trial (F, Sigma) pairs plus max_subsp
-   *    Sigma residuals, element-sliced over all ranks (one copy per job); other callers
-   *    keep 2*max_subsp_size vectors in the in-memory VSpace on the root rank.
-   *    With chkpt_slim the default is "memory" and "disk" is rejected: disk DIIS
-   *    mixes from Sigma_tskij of the previous iteration's checkpoint, which
-   *    chkpt_slim does not write.
+   *  - diis_warmup: "3" Number of damping iterations before the DIIS extrapolation.
+   *  - diis_start: deprecated alias of diis_warmup.
+   *  - residual_type: "commutator" ("vector_diff" for eigenvalue-only scGW). {choices: "commutator", "vector_diff"}
+   * The DIIS history is kept in memory, element-sliced over all ranks, max_subsp_size trial
+   * (F, Sigma) pairs plus max_subsp_size residuals. The former keys "storage" and "diis_storage"
+   * are rejected.
    */
-  inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false,
-                                      bool chkpt_slim=false) {
-    const std::string default_storage = chkpt_slim ? "memory" : "disk";
+  inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false) {
     for (auto const& it : base_pt) {
       if (it.first == "iter_alg") {
         ptree pt = it.second;
@@ -72,15 +67,10 @@ namespace iter_scf {
             auto residual_type = io::get_value_with_default<std::string>(
               pt, "residual_type", is_evscf ? "vector_diff" : "commutator");
             io::tolower(residual_type);
-            utils::check(not pt.get_child_optional("storage"),
-                         "iter_alg: the key \"storage\" is not recognized; the DIIS subspace storage "
-                         "is set by \"diis_storage\".");
-            auto storage = io::get_value_with_default<std::string>(pt, "diis_storage", default_storage);
-            io::tolower(storage);
-            utils::check(not (chkpt_slim and storage == "disk"),
-                         "iter_alg: diis_storage = \"disk\" does not work with chkpt_slim = true: disk "
-                         "DIIS mixes with Sigma_tskij of the previous iteration, which chkpt_slim does not "
-                         "write. Use diis_storage = \"memory\" (the default with chkpt_slim).");
+            for (auto const* key : {"storage", "diis_storage"})
+              utils::check(not pt.get_child_optional(key),
+                           "iter_alg: the key \"{}\" is not recognized; the DIIS history is always kept "
+                           "in memory. Remove the key.", key);
             auto diis_start = io::get_value_with_default<size_t>(pt,"diis_start",-1);
             if (diis_start != -1) {
               app_log(1, "[WARNING] 'diis_start' is deprecated. Please use 'diis_warmup' instead \n"
@@ -94,7 +84,7 @@ namespace iter_scf {
               warmup_iter = diis_start;
             }
 
-            return iter_scf_t(diis_t(mixing, max_subsp_size, warmup_iter, residual_type, storage));
+            return iter_scf_t(diis_t(mixing, max_subsp_size, warmup_iter, residual_type));
 
           } else {
             utils::check(false, "Unrecognized algorithm type for iterative solver. ");
@@ -103,7 +93,7 @@ namespace iter_scf {
         }
       }
     }
-    return iter_scf_t(diis_t(default_mixing, 5, 3, is_evscf ? "vector_diff" : "commutator", default_storage));
+    return iter_scf_t(diis_t(default_mixing, 5, 3, is_evscf ? "vector_diff" : "commutator"));
   }
 } // iter_scf
 

@@ -371,8 +371,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
-      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt, /*default_mixing=*/0.7, /*is_evscf=*/false,
-                                                              /*chkpt_slim=*/chkpt_slim));
+      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
       iter_solver = nullptr;
     }
@@ -390,8 +389,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
-      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt, /*default_mixing=*/0.7, /*is_evscf=*/false,
-                                                              /*chkpt_slim=*/chkpt_slim));
+      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
       iter_solver = nullptr;
     }
@@ -444,8 +442,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
-      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt, /*default_mixing=*/0.7, /*is_evscf=*/false,
-                                                              /*chkpt_slim=*/chkpt_slim));
+      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
       iter_solver = nullptr;
     }
@@ -636,8 +633,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
     simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
-      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt, /*default_mixing=*/0.7, /*is_evscf=*/false,
-                                                              /*chkpt_slim=*/chkpt_slim));
+      iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
     } else {
       iter_solver = nullptr;
     }

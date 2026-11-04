@@ -524,7 +524,7 @@ double qp_scf_loop(
     Timer.stop("MBPT_SOLVERS");
 
     Timer.start("ITERATIVE");
-    Heff_conv = solve_iterative(*mpi, *iter_solver, it, mb_state.coqui_prefix, sHeff_skij, sS_skij);
+    Heff_conv = solve_iterative(*mpi, *iter_solver, it, mb_state.coqui_prefix, sHeff_skij, sS_skij, sDm_skij);
     Timer.stop("ITERATIVE");
 
     Timer.start("CANONICALIZATION");

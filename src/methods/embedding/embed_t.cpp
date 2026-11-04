@@ -207,6 +207,9 @@ namespace methods {
     // if embed_iter != -1 -> mix with embed_iter-1
     double Vhf_conv, Sigma_conv;
     if (iter_solver != nullptr) {
+      iter_solver->state() = {};  // the previous state is read from the checkpoint at every call
+      if (iter_solver->iter_alg() == iter_scf::DIIS)
+        app_log(2, "dmft_embed: one mixing per call; DIIS damps");
       std::tie(Vhf_conv, Sigma_conv) = solve_iterative(
           *_context, *iter_solver, (embed_iter==-1)? gw_iter+1 : embed_iter+1,
           mb_state.coqui_prefix, sVhf_skij, sSigma_tskij, &ft,
@@ -384,21 +387,21 @@ namespace methods {
     double Sigma_conv = -1;
     if (embed_iter >= 1) {
       iter_solver->metadata_log();
-      if (_context->node_comm.root()) {
-        h5::file file(filename, 'r');
-        h5::group grp(file);
-
-        std::string grp_name = "embed/iter"+std::to_string(weiss_f_iter-1);
-        utils::check(grp.has_subgroup(grp_name), "damping_impl: {} does not exist in {}.",
-                     grp_name, filename);
-        auto emb_grp = grp.open_group("embed");
-        Vhf_conv = iter_solver->solve(sVhf_skij.local(), "Vhf_skij", emb_grp, weiss_f_iter);
-        Vcorr_conv = iter_solver->solve(sVcorr_skij.local(), "Vcorr_skij", emb_grp, weiss_f_iter);
-        Sigma_conv = iter_solver->solve(sSigma_tskij.local(), "Sigma_tskij", emb_grp, weiss_f_iter);
-      }
-      _context->node_comm.broadcast_n(&Vhf_conv, 1, 0);
-      _context->node_comm.broadcast_n(&Vcorr_conv, 1, 0);
-      _context->node_comm.broadcast_n(&Sigma_conv, 1, 0);
+      if (iter_solver->iter_alg() == iter_scf::DIIS)
+        app_log(2, "dmft_embed: one mixing per call; DIIS damps");
+      // Mix with embed/iter{weiss_f_iter-1}: (Vhf, Sigma) in the state of the solver, Vcorr in a second state
+      auto& hf_state = iter_solver->state();
+      hf_state = {};
+      iter_scf::mixing_state corr_state;
+      sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Vcorr has no Sigma block
+      init_mixing_state(*_context, *iter_solver, hf_state, sVhf_skij, &sSigma_tskij);
+      init_mixing_state(*_context, *iter_solver, corr_state, sVcorr_skij, no_Sigma);
+      std::tie(Vhf_conv, Sigma_conv) = in_memory_mix_step(
+          *_context, hf_state, mb_state.coqui_prefix, {"embed", "Vhf_skij", "Sigma_tskij"},
+          weiss_f_iter, sVhf_skij, &sSigma_tskij, nullptr);
+      Vcorr_conv = std::get<0>(in_memory_mix_step(
+          *_context, corr_state, mb_state.coqui_prefix, {"embed", "Vcorr_skij", ""},
+          weiss_f_iter, sVcorr_skij, no_Sigma, nullptr));
     }
     _Timer.stop("EMBED_ITERATIVE");
 

@@ -22,12 +22,11 @@
 #ifndef COQUI_ITER_SCF_T_HPP
 #define COQUI_ITER_SCF_T_HPP
 
+#include <string>
+#include <variant>
+
 #include "configuration.hpp"
 #include "utilities/check.hpp"
-
-#include "h5/h5.hpp"
-#include "nda/nda.hpp"
-#include "nda/h5.hpp"
 
 #include "numerics/iter_scf/damp/damp_t.hpp"
 #include "numerics/iter_scf/diis/diis_t.hpp"
@@ -37,94 +36,49 @@
 
 namespace iter_scf {
   /**
-   * Interface for iterative self-consistent algorithms, e.g. damping, DIIS, etc
+   * Iterative self-consistent algorithm, damping or DIIS: its parameters and the in-memory
+   * mixing state (the previous accepted state and, for DIIS, the history).
    */
   class iter_scf_t {
   public:
     iter_scf_t(std::string alg) {
       if (string_to_alg_enum(alg) == iter_alg_e::damping) {
-        _alg_var = damp_t();
+        _params = damp_t();
       } else if (string_to_alg_enum(alg) == iter_alg_e::DIIS) {
-        _alg_var = diis_t();
+        _params = diis_t();
       } else {
         APP_ABORT(" iter_scf_t: Invalid type of iterative algorithm");
       }
     }
 
-    explicit iter_scf_t(const damp_t &damp): _alg_var(damp) {}
-    explicit iter_scf_t(damp_t&& damp): _alg_var(std::move(damp)) {}
-    iter_scf_t& operator=(const damp_t& damp) { _alg_var = damp; _mixing_state = {}; return *this; }
-    iter_scf_t& operator=(damp_t&& damp) { _alg_var = std::move(damp); _mixing_state = {}; return *this; }
+    explicit iter_scf_t(damp_t damp): _params(std::move(damp)) {}
+    iter_scf_t& operator=(damp_t damp) { _params = std::move(damp); _state = {}; return *this; }
 
-    explicit iter_scf_t(const diis_t &diis): _alg_var(diis) {}
-    explicit iter_scf_t(diis_t&& diis): _alg_var(std::move(diis)) {}
-    iter_scf_t& operator=(const diis_t& diis) { _alg_var = diis; _mixing_state = {}; return *this; }
-    iter_scf_t& operator=(diis_t&& diis) { _alg_var = std::move(diis); _mixing_state = {}; return *this; }
-
-    template<class... Args>
-    auto solve(Args&&... args) {
-      return std::visit( [&](auto&& v) { return v.solve(std::forward<Args>(args)...); }, _alg_var);
-    }
-
-    // Needed to prepare complicated algorithms, such as DIIS
-    template<class... Args>
-    void initialize(Args&&... args) {
-      return std::visit( [&](auto&& v) { return v.initialize(std::forward<Args>(args)...); }, _alg_var);
-    }
+    explicit iter_scf_t(diis_t diis): _params(std::move(diis)) {}
+    iter_scf_t& operator=(diis_t diis) { _params = std::move(diis); _state = {}; return *this; }
 
     // Mixing factor of the active algorithm.
     double mixing() const {
-      return std::visit( [&](auto&& v) { return v.mixing; }, _alg_var);
+      return std::visit( [&](auto&& v) { return v.mixing; }, _params);
     }
 
-    bool is_initialized() const {
-      return std::visit( [&](auto&& v) { return v.initialized; }, _alg_var);
-    }
+    // The DIIS parameters (nullptr when the active algorithm is not DIIS).
+    diis_t const* diis() const { return std::get_if<diis_t>(&_params); }
 
-    // Supply the latest-iteration G and mu from memory to the active algorithm
-    // (DIIS commutator residual only; a no-op for algorithms without this hook).
-    template<class Array5D>
-    void upload_diis_g_mu(const Array5D& G, double mu) {
-      std::visit( [&](auto&& v) {
-        if constexpr (requires { v.upload_g_mu(G, mu); })
-          v.upload_g_mu(G, mu);
-      }, _alg_var);
-    }
-
-    // Inject a pre-computed commutator residual C_t (distributed path) into
-    // the active algorithm (DIIS only; a no-op for algorithms without this hook).
-    template<class Array5D>
-    void upload_diis_residual(const Array5D& C_t) {
-      std::visit( [&](auto&& v) {
-        if constexpr (requires { v.upload_residual(C_t); })
-          v.upload_residual(C_t);
-      }, _alg_var);
-    }
-
-    // Direct access to the DIIS driver (nullptr when the active algorithm is
-    // not DIIS). Used by the memory report.
-    diis_t* get_diis() { return std::get_if<diis_t>(&_alg_var); }
-    // The element-sliced in-memory state, for damping or DIIS with diis_storage = "memory";
-    // nullptr for disk DIIS. Used by the in-memory Dyson-SCF mixing in scf_common.cpp.
-    mixing_state* mixing_state_if_in_memory() {
-      if (std::holds_alternative<damp_t>(_alg_var)) return &_mixing_state;
-      auto* dp = std::get_if<diis_t>(&_alg_var);
-      return (dp and dp->storage == "memory") ? &_mixing_state : nullptr;
-    }
+    // The element-sliced in-memory mixing state of the active algorithm.
+    mixing_state& state() { return _state; }
 
     void metadata_log() const {
-      std::visit( [&](auto&& v) { v.metadata_log(); }, _alg_var);
+      std::visit( [&](auto&& v) { v.metadata_log(); }, _params);
     }
 
     // return type of iterative solver
     iter_alg_e iter_alg() const
-    { return std::visit( [&](auto&& v) { return v.get_iter_alg(); }, _alg_var); }
+    { return std::visit( [&](auto&& v) { return v.get_iter_alg(); }, _params); }
 
-    ~iter_scf_t() {};
   private:
-    std::variant<damp_t,diis_t> _alg_var;
-    mixing_state _mixing_state;  // in-memory mixing state of the active algorithm (unused by disk DIIS)
-
+    std::variant<damp_t,diis_t> _params;
+    mixing_state _state;
   };
 
 } // iter_scf

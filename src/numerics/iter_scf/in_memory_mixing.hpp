@@ -44,8 +44,9 @@
 
 /**
  * In-memory, element-sliced mixing of the pair (F, Sigma) of node-shared arrays, for
- * the ground-state Dyson SCF (F, Sigma(tau)) and the linear response (dF, dSigma(tau)
- * or dV_QPGW; dSigma may be absent).
+ * the ground-state Dyson SCF (F, Sigma(tau)), the qp SCF (the effective Hamiltonian, no
+ * Sigma), dmft_embed, and the linear response (dF, dSigma(tau) or dV_QPGW; dSigma may be
+ * absent).
  *
  * Every rank owns one contiguous slice of the flattened F and of the flattened
  * Sigma (utils::part_map, node-major parts over the global comm), keeps only its
@@ -53,11 +54,8 @@
  * of the node-shared windows. The windows are completed afterwards
  * (utils::complete_shared_slices). The whole job then stores each history vector once.
  *
- * Why not VSpace/diis_alg (disk path of diis_t)? That stack holds whole FockSigma
- * vectors on one rank behind a file-I/O Vector interface (HDF5-backed VSpace), and its
- * residual kernel assumes full-array access. Here every rank sees only a slice, the
- * residual arrives precomputed, and the arrays are too large to round-trip through
- * disk. The small dense solve for the DIIS coefficients is shared
+ * Every rank sees only its slices, so the residual of each trial arrives precomputed
+ * from the caller. The small dense solve for the DIIS coefficients is shared
  * (compute_diis_coefs_c1).
  */
 namespace iter_scf {
@@ -340,8 +338,8 @@ private:
   }
 };
 
-/// Ground-state Dyson-SCF state of the in-memory mixers (damping, or DIIS with a damping
-/// warmup): the slicing, the previous accepted state, and the DIIS engine for DIIS.
+/// State of the in-memory mixers (damping, or DIIS with a damping warmup): the slicing, the
+/// previous accepted state, and the DIIS engine for DIIS.
 struct mixing_state {
   hist_vec_layout layout;
   hist_vec prev;     ///< this rank's slices of the previous accepted (post-mix) state
@@ -351,7 +349,7 @@ struct mixing_state {
 
   bool initialized() const { return layout.nF() > 0; }
 
-  /// Cut the slices of F (nF elements) and Sigma (nS); `diis_cfg` selects DIIS over
+  /// Cut the slices of F (nF elements) and Sigma (nS; 0: F only); `diis_cfg` selects DIIS over
   /// damping. Collective on mpi.comm.
   template<typename MPI_Context_t>
   void init(MPI_Context_t& mpi, long nF, long nS, double mixing_,
@@ -363,25 +361,24 @@ struct mixing_state {
     if (diis_cfg) diis.emplace(*diis_cfg);
   }
 
-  /// Whether the next step consumes a commutator residual.
+  /// Whether the next step consumes a residual.
   bool needs_residual() const { return diis and diis->active() and diis->steps() > 0; }
 
   /**
    * @brief One mixing step on this rank's slices of the node-shared F and Sigma
    * (trial on entry, accepted state on exit), then prev <- the accepted state.
    *
-   * @param C_t - commutator residual (node-shared view), or nullptr when
-   *              needs_residual() was false
+   * @param residual - this rank's slices of the residual of the trial (F or Sigma part may
+   *                   be empty), or nullptr when needs_residual() was false
    * @return per-rank {max|ref - out|_F, max|ref - out|_Sigma}, ref the previous accepted
    *         state (damped) or the newest trial (extrapolated); the caller max-reduces.
    */
-  template<typename Comm, typename AF, typename AS, typename AC>
-  std::array<double, 2> step(Comm& comm, AF&& F, AS&& S, const AC* C_t) {
+  template<typename Comm, typename AF, typename AS>
+  std::array<double, 2> step(Comm& comm, AF&& F, AS&& S, hist_vec const* residual) {
     diis_timers::inmem_total.start();
     bool extrapolated = false;
     if (diis) {
-      // Only the Sigma block of the commutator is non-zero, so no F block is stored.
-      if (C_t) diis->push(comm, layout, F, S, nda::array<ComplexType, 1>{}, layout.S(*C_t));
+      if (residual) diis->push(comm, layout, F, S, residual->F, residual->S);
       extrapolated = diis->mix(layout, F, S, prev);
     } else {
       diis_timers::inmem_damp_mix.start();

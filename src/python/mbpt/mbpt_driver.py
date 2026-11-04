@@ -150,14 +150,17 @@ def run_hf(params, h_int, h_int_exchange=None):
             ``[0, 1]`` for damping; smaller values give more conservative updates.
           - ``max_subsp_size`` *(int, optional, default ``5``)* — maximum DIIS
             subspace size (ignored for ``"damping"``).
-          - ``residual_type`` *(str, optional, default ``"commutator"``)* — residual
-            definition for DIIS. ``"commutator"`` or ``"vector_diff"``.
-          - ``diis_storage`` *(str, optional, default ``"disk"``; ``"memory"`` with
-            ``chkpt_slim``)* — DIIS subspace storage. ``"disk"`` (HDF5 files in
-            the working directory) or ``"memory"``. ``"disk"`` is rejected with
-            ``chkpt_slim``: it mixes with the previous iteration's ``Sigma_tskij``
-            read from the checkpoint.
-            The former key ``storage`` is rejected.
+          - ``diis_warmup`` *(int, optional, default ``3``)* — number of damping
+            iterations before the DIIS extrapolation (ignored for ``"damping"``).
+          - ``residual_type`` *(str, optional, default ``"commutator"``; ``"vector_diff"``
+            for ``run_evgw``)* — residual definition for DIIS in the quasiparticle SCF
+            (``run_evgw``, ``run_qpgw``): ``"commutator"`` (the commutator of the
+            effective Hamiltonian with the density matrix) or ``"vector_diff"``
+            (the trial effective Hamiltonian minus the previous accepted one). The
+            Dyson SCF always uses the commutator.
+
+          The DIIS history is kept in memory, ``max_subsp_size`` entries. The keys
+          ``diis_storage`` and ``storage`` are rejected.
 
         - ``chkpt_slim`` *(bool, optional, default ``False``)* — if ``True``,
           ``G_tskij`` and ``Sigma_tskij`` are written only for the final SCF

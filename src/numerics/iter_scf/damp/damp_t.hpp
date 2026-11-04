@@ -23,86 +23,20 @@
 #define COQUI_DAMP_T_HPP
 
 #include "configuration.hpp"
-#include "utilities/check.hpp"
-
-#include "h5/h5.hpp"
-#include "nda/nda.hpp"
-#include "nda/h5.hpp"
+#include "IO/app_loggers.h"
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
-#include "numerics/iter_scf/diis/diis_timers.hpp"
 
 namespace iter_scf {
   /**
-   * Abort when `dataset` is missing from `iter_grp` and the group records Sigma_not_stored
-   * = true (dump_scf). A missing dataset without that flag (HF checkpoints) passes: readers
-   * that call this take it as an exactly-zero quantity.
-   */
-  inline void check_checkpoint_dataset_present(h5::group &iter_grp, std::string const& dataset, long iter) {
-    if (iter_grp.has_dataset(dataset) or not iter_grp.has_dataset("Sigma_not_stored")) return;
-    bool not_stored = false;
-    h5::h5_read(iter_grp, "Sigma_not_stored", not_stored);
-    utils::check(not not_stored,
-                 "iter_scf: {} of iteration {} is not stored in the checkpoint (Sigma_not_stored = true) "
-                 "and cannot be read as the previous state for mixing.", dataset, iter);
-  }
-
-  /**
-   * Damping for an arbitrary target
+   * Parameters of damping: x <- mixing * x + (1 - mixing) * x_previous.
    */
   struct damp_t {
-  public:
-
     static constexpr iter_alg_e iter_alg = damping;
     static constexpr iter_alg_e get_iter_alg() { return iter_alg; }
 
     damp_t() = default;
     damp_t(double mixing_): mixing(mixing_) {}
-
-    damp_t(const damp_t& other) = default;
-    damp_t(damp_t&& other) = default;
-    damp_t& operator=(const damp_t& other) = default;
-    damp_t& operator=(damp_t&& other) = default;
-
-    ~damp_t(){}
-
-    template<nda::MemoryArray Array_H_t>
-    double solve(Array_H_t &&H, std::string dataset, h5::group &grp, long iter) {
-      utils::check(grp.has_subgroup("iter" + std::to_string(iter-1)), "damp: h5 group /scf/iter{} does not exist.", iter-1);
-      auto iter_grp = grp.open_group("iter" + std::to_string(iter-1));
-
-      // H_previous is fully overwritten by the h5_read below (or left zero when the
-      // dataset is absent), so it is only shaped here, not copied from H (complex nda
-      // arrays are calloc-backed). A missing dataset means the previous-iteration
-      // quantity was exactly zero (e.g. Sigma_tskij on an HF checkpoint).
-      std::decay_t<decltype(nda::make_regular(H))> H_previous(H.shape());
-      check_checkpoint_dataset_present(iter_grp, dataset, iter-1);
-      diis_timers::damp_read.start();
-      if (iter_grp.has_dataset(dataset))
-        nda::h5_read(iter_grp, dataset, H_previous);
-      else
-        H_previous() = 0.0;
-      diis_timers::damp_read.stop();
-
-      diis_timers::damp_mix.start();
-      H = mixing*H + (1.0-mixing)*H_previous;
-
-      H_previous -= H;
-      auto max_iter = max_element(H_previous.data(), H_previous.data()+H_previous.size(),
-                              [](auto a, auto b) { return std::abs(a) < std::abs(b); });
-      diis_timers::damp_mix.stop();
-      return std::abs((*max_iter));
-    }
-
-    // This version is compatible with DIIS
-    template<nda::MemoryArray Array_4D_t, nda::MemoryArray Array_5D_t>
-    std::array<double, 2> solve(Array_4D_t &&F, std::string dataset_F, Array_5D_t &&Sigma, std::string dataset_Sigma,
-                 h5::group &grp, long iter)  {
-        return std::array<double, 2>{
-            solve(F, dataset_F, grp, iter),
-            solve(Sigma, dataset_Sigma, grp, iter)
-        };
-    }
 
     void metadata_log() const {
       app_log(2, "\nIterative algorithm for SCF");
@@ -111,14 +45,7 @@ namespace iter_scf {
       app_log(2, "  * mixing parameter = {}\n", mixing);
     }
 
-    // Dummy function to comply with the interface
-    template<class... Args>
-    void initialize([[maybe_unused]] Args&&... args) {}
-
-  public:
     double mixing = 0.7;
-    bool initialized = true;
-
   };
 } // iter_scf
 
