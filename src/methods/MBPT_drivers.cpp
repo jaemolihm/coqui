@@ -1487,6 +1487,24 @@ auto recompute_W_and_eps_inv_head(
                          std::move(eps_inv_head_q0_w));
 }
 
+namespace {
+
+using lr_W_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
+
+/// W_c(iω) and the ε⁻¹ heads kept by a reuse_W call. No member calls MPI in its destructor, so destruction after
+/// MPI_Finalize is safe.
+struct lr_W_cache {
+  lr_W_t W_c_wqPQ;
+  nda::array<ComplexType, 1> eps_inv_head, eps_inv_head_w;
+};
+
+/// The W kept by the last reuse_W call that built one; release_lr_W_cache() drops it
+std::optional<lr_W_cache> W_cache;
+
+} // namespace
+
+void release_lr_W_cache() { W_cache.reset(); }
+
 /**
  * Unified linear response calculation.
  *
@@ -1528,6 +1546,10 @@ auto recompute_W_and_eps_inv_head(
  *                          (hessian only, no extra kernel evaluation) or "symmetric"
  *                          (plain + the stationary functional)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
+ *   reuse_W                take W_c(iω) and the ε⁻¹ head from the process-wide cache if one is kept,
+ *                          otherwise build them and keep a copy (default false; release_lr_W_cache()
+ *                          drops it). The caller guarantees that the kept W belongs to this call's
+ *                          ground state and THC; only the THC size is checked
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
  *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
@@ -1562,6 +1584,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // When true, recompute W from the checkpoint Green's function (RPA) instead
   // of reading it from disk.
   auto recompute_W = io::get_value_with_default<bool>(pt, "recompute_W", false);
+  auto reuse_W = io::get_value_with_default<bool>(pt, "reuse_W", false);
   // Unperturbed reference: "checkpoint" (interacting G rebuilt from the
   // checkpoint F+Σ, default) or "mf_dft" (DFT/KS mean-field G0 built directly
   // from the mean-field eigenvalues/orbitals, for one-shot G0W0@DFT LR). In the
@@ -2051,30 +2074,64 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     } else {
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     }
-    if (recompute_W) {
-      app_log(2, "Recomputing W from checkpoint Green's function ({})...",
-              gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
-      auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-          *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment, gw_edmft ? &(*opt_mb_local) : nullptr);
-      opt_dW.emplace(std::move(dW));
-      opt_eps_inv.emplace(std::move(eps_inv));
-      opt_eps_inv_w.emplace(std::move(eps_inv_w));
-    } else {
-      auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
-          *mpi, eri.corr_eri->get(), ft, input_file, input_grp,
-          screened_interaction_file);
-      opt_dW.emplace(std::move(dW));
-      opt_eps_inv.emplace(std::move(eps_inv));
-      opt_eps_inv_w.emplace(std::move(eps_inv_w));
-      // W carries its own stash; a disagreement means the W file and the
-      // checkpoint came from different runs, and Σ would mix two treatments.
-      // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
-      utils::check(div_str == div_treatment,
-                   "run_lr_calc: div_treatment mismatch. The screened interaction "
-                   "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
-                   "must come from the same ground-state run.",
-                   div_str, input_grp, input_file, div_treatment);
-      div_treatment = div_str;
+    static_assert(std::is_same_v<dW_type, lr_W_t>);
+    // reuse_W: the caller guarantees that the kept W belongs to this call's ground state and THC; only the
+    // THC size is checked. W is reused only if every rank keeps one (a release on some ranks rebuilds on all).
+    bool reuse_W_done = false;
+    if (reuse_W) {
+      int kept = W_cache.has_value();
+      mpi->comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
+      reuse_W_done = (kept == mpi->comm.size());  // reuse is done only if the cache is present in all ranks
+      if (reuse_W_done) {
+        auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
+        long nw_half = (ft.nw_b() + 1) / 2;
+        auto const& thc = eri.corr_eri->get();
+        utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
+                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
+                     "({}, {}, {}, {}). reuse_W requires the ground state and THC the kept W was built with; "
+                     "call coqui.mbpt.release_lr_W_cache() before switching.",
+                     Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
+        app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
+        opt_dW.emplace(W_cache->W_c_wqPQ);
+        opt_eps_inv.emplace(W_cache->eps_inv_head);
+        opt_eps_inv_w.emplace(W_cache->eps_inv_head_w);
+      } else {
+        app_log(1, "reuse_W: building W (nothing kept)");
+        W_cache.reset();
+      }
+    }
+    if (!reuse_W_done) {
+      // W is not reused from memory, either recompute or read from file
+      if (recompute_W) {
+        // Recompute W using Green's functions
+        app_log(2, "Recomputing W from checkpoint Green's function ({})...",
+                gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
+        auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
+            *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment, gw_edmft ? &(*opt_mb_local) : nullptr);
+        opt_dW.emplace(std::move(dW));
+        opt_eps_inv.emplace(std::move(eps_inv));
+        opt_eps_inv_w.emplace(std::move(eps_inv_w));
+      } else {
+        // Read W from disk
+        auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
+            *mpi, eri.corr_eri->get(), ft, input_file, input_grp,
+            screened_interaction_file);
+        opt_dW.emplace(std::move(dW));
+        opt_eps_inv.emplace(std::move(eps_inv));
+        opt_eps_inv_w.emplace(std::move(eps_inv_w));
+        // W carries its own stash; a disagreement means the W file and the
+        // checkpoint came from different runs, and Σ would mix two treatments.
+        // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
+        utils::check(div_str == div_treatment,
+                     "run_lr_calc: div_treatment mismatch. The screened interaction "
+                     "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
+                     "must come from the same ground-state run.",
+                     div_str, input_grp, input_file, div_treatment);
+        div_treatment = div_str;
+      }
+    }
+    if (reuse_W && !reuse_W_done) {
+      W_cache.emplace(lr_W_cache{*opt_dW, *opt_eps_inv, *opt_eps_inv_w});
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }

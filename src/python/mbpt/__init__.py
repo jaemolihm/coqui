@@ -27,6 +27,7 @@ from .mbpt_driver import (
     run_lr_gw_sigma_DeltaW, gw_evaluate_sigma_with_W,
     compute_eps_inv_head,
 )
+from coqui._lib.mbpt_module import release_lr_W_cache
 from .chi_driver import run_chi
 from .lr_driver import (
     calculate_kpq_map,
@@ -41,6 +42,7 @@ __all__ = [
     "run_hf", "run_gw", "run_evgw", "run_qpgw",
     # Linear response
     "run_lr",
+    "release_lr_W_cache",
     "run_lr_g0w0",
     "run_lr_qpgw",
     "run_lr_hf",

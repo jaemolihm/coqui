@@ -56,13 +56,9 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
             include_hartree=True,
             include_exchange=True,
             gw_mode="none",
-            recompute_W=False,
-            screened_interaction_file=None,
             div_treatment=None,
-            precond_method="none",
-            precond_tol=None,
-            precond_max_iter=None,
-            hessian="symmetric"):
+            hessian="symmetric",
+            **kwargs):
     r"""
     Charge susceptibility chi_{G G'}(q) and inverse dielectric matrix at nu = 0.
 
@@ -111,18 +107,17 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Present only so that a True can be rejected (see Raises).
     include_hartree, include_exchange, gw_mode : optional
         Kernel flags, used only when ``method is None``.
-    recompute_W, screened_interaction_file : optional
-        Forwarded to run_lr unchanged.
     div_treatment : str or None, optional
         Divergence treatment. Accepted only with ``unperturbed="mf_dft"``.
-    precond_method, precond_tol, precond_max_iter : optional
-        Forwarded to run_lr (see there).
     hessian : {"symmetric", "plain"}, optional
         "symmetric" (default): ``chi = hessian_sym/Omega`` from the stationary
         estimator. "plain": ``chi = hessian/Omega`` from the plain contraction
         only (no stationary block is computed); with it an order-n chi is damping
         with mixing 1, a ``precond_method``, ``max_iter = n``, ``tol = 0``.
         ``chi_plain`` is returned either way. "none", bools and other values raise.
+    **kwargs
+        Forwarded to run_lr unchanged (e.g. recompute_W, screened_interaction_file,
+        precond_method, precond_tol, precond_max_iter, reuse_W); see run_lr.
 
     Returns
     -------
@@ -180,9 +175,10 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     projector. The hessian adds three striped static stores of that size and one
     extra Dyson solve per column; with ``gw_mode != "none"`` it adds two
     ``nG``-deep omega stores, which is what binds there. Splitting the G list
-    across several run_lr calls is not a lever: each call repeats lr_setup and W,
-    and a call's hessian block spans only its own columns, so it would return
-    diagonal sub-blocks rather than a chi matrix.
+    across several run_lr calls is not a lever: each call rebuilds lr_setup (W is
+    kept between calls only with ``reuse_W``), and a call's hessian block spans
+    only its own columns, so it would return diagonal sub-blocks rather than a
+    chi matrix.
 
     """
     from mpi4py import MPI
@@ -249,12 +245,8 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         include_hartree=hartree, include_exchange=exchange, gw_mode=gw,
         unperturbed=unperturbed,
         max_iter=max_iter, tol=tol, fix_density=False, iter_alg=iter_alg,
-        save_DeltaG=False, hessian=hessian,
-        recompute_W=recompute_W,
-        screened_interaction_file=screened_interaction_file,
-        div_treatment=div_treatment,
-        precond_method=precond_method,
-        precond_tol=precond_tol, precond_max_iter=precond_max_iter)
+        save_DeltaG=False, hessian=hessian, div_treatment=div_treatment,
+        **kwargs)
     niter = np.atleast_1d(niter).astype(np.int64)
     delta_mu = np.atleast_1d(delta_mu).astype(np.float64)
 

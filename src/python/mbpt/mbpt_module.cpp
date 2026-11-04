@@ -118,6 +118,9 @@ namespace coqui_py {
     return kpq_map;
   }
 
+  /// Drop the W kept by run_lr(reuse_W = true).
+  void release_lr_W_cache() { methods::release_lr_W_cache(); }
+
 
   /**
    * @brief Compute LR Fock matrix from LR density matrix
