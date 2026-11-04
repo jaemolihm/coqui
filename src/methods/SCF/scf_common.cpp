@@ -507,6 +507,38 @@ auto stage_prev_state(iter_scf::spmd_damp const& d, std::string h5_prefix,
   return {std::move(F_prev), std::move(S_prev)};
 }
 
+// One element-sliced mixing step on the node-shared F/Sigma windows, shared by the
+// in-memory damping and the SPMD DIIS: stage the previous accepted state from the
+// checkpoint when need_prev (first mixing after a restart), let solve(F_prev, S_prev)
+// mix this rank's slices (it returns the per-rank {max|dF|, max|dSigma|}), max-reduce
+// them, and complete the windows.
+// Each rank reads/writes only its own slice of the windows (disjoint), so a fence
+// pair suffices. The slices are cut over the global comm, so a node then holds valid
+// data only for its own contiguous element run; one allgatherv over the node roots
+// completes every window. The completed array is a mosaic of per-node contributions,
+// which is exact on two invariants: the mixing is elementwise with coefficients
+// identical on every rank (the DIIS B is formed by one all_reduce), and every
+// producer of these windows ends in an internode all_reduce
+// (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for the GW Sigma,
+// thc_gf2.icc for GF2), so no node holds a private variant of the input.
+template<typename MPI_Context_t, typename X_t, typename Xt_t, typename Solve>
+auto spmd_mix_step(MPI_Context_t &context, iter_scf::spmd_damp const& d, bool need_prev,
+                   std::string const& h5_prefix, std::array<std::string,3> const& datasets,
+                   long iteration, X_t &sF_skij, Xt_t &sSigma_tskij, Solve&& solve)
+  -> std::tuple<double, double> {
+  std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
+  if (need_prev)
+    prev.emplace(stage_prev_state(d, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij));
+  sF_skij.win().fence();
+  sSigma_tskij.win().fence();
+  std::array<double, 2> conv = solve(prev ? &prev->first : nullptr,
+                                     prev ? &prev->second : nullptr);
+  // max is exactly order-independent
+  context.comm.all_reduce_in_place_n(conv.data(), 2, mpi3::max<>{});
+  utils::complete_shared_slices(context, d.pmap(), sF_skij, sSigma_tskij);
+  return std::make_tuple(conv[0], conv[1]);
+}
+
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                   long iteration, std::string h5_prefix,
@@ -524,21 +556,12 @@ auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
     // Restart edge: no in-memory previous state; stage it from the checkpoint.
     if (not d.initialized())
       d.init(context, sF_skij.local().size(), sSigma_tskij.local().size());
-    std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
-    if (not d.has_prev())
-      prev.emplace(stage_prev_state(d, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij));
-    sF_skij.win().fence();
-    sSigma_tskij.win().fence();
-    auto conv = d.apply(dspmd->mixing, d.F_slice(sF_skij.local()), d.S_slice(sSigma_tskij.local()),
-                        prev ? &prev->first : nullptr, prev ? &prev->second : nullptr);
-    conv_F = conv[0];
-    conv_Sigma = conv[1];
-    context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
-    context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
-    // Each node holds valid data only for its own ranks' slices; exact because the
-    // mixing is elementwise and every node holds the same F/Sigma on input (see
-    // diis_impl).
-    utils::complete_shared_slices(context, d.pmap(), sF_skij, sSigma_tskij);
+    std::tie(conv_F, conv_Sigma) = spmd_mix_step(
+        context, d, not d.has_prev(), h5_prefix, datasets, iteration, sF_skij, sSigma_tskij,
+        [&](auto const* F_prev, auto const* S_prev) {
+          return d.apply(dspmd->mixing, d.F_slice(sF_skij.local()),
+                         d.S_slice(sSigma_tskij.local()), F_prev, S_prev);
+        });
   } else {
     iter_solver.metadata_log();
     if (context.node_comm.root()) {
@@ -650,41 +673,16 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 
     if (dspmd) {
       // === A12: SPMD in-memory DIIS solve over context.comm ===
-      // Stage the previous accepted state from the checkpoint when there is no
-      // in-memory copy (first damping after a restart).
-      std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
-      if (dspmd->spmd.needs_prev_state())
-        prev.emplace(stage_prev_state(dspmd->spmd.damp(), h5_prefix, datasets, iteration,
-                                      sF_skij, sSigma_tskij));
-
       std::optional<Array_view_5D_t> C_loc;
       if (sC_t_dist) C_loc.emplace(sC_t_dist->local());
       const Array_view_5D_t* Cp = C_loc ? &*C_loc : nullptr;
-      const auto* Fpp = prev ? &prev->first : nullptr;
-      const auto* Spp = prev ? &prev->second : nullptr;
-
-      // Each rank reads/writes only its own slice of the node-shared F/Sigma
-      // windows (disjoint), so a fence pair around the solve suffices.
-      sF_skij.win().fence();
-      sSigma_tskij.win().fence();
-      auto pconv = dspmd->spmd.solve(context.comm,
-                                     sF_skij.local(), sSigma_tskij.local(),
-                                     Cp, Fpp, Spp, iteration);
-      // Per-rank partial maxima -> global (max is exactly order-independent).
-      conv_F = pconv[0];
-      conv_Sigma = pconv[1];
-      context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
-      context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
-      // The slices are cut over the global comm, so a node holds valid data only
-      // for its own contiguous element run; one allgatherv over the node roots
-      // completes every window. The completed array is a mosaic of per-node
-      // contributions, which is exact on two invariants: the coefficients are
-      // identical on every rank (one all_reduce forms B) and the mixing is
-      // elementwise, and every producer of these windows ends in an internode
-      // all_reduce (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for
-      // the GW Sigma, thc_gf2.icc for GF2), so no node holds a private variant of
-      // the input to begin with.
-      utils::complete_shared_slices(context, dspmd->spmd.pmap(), sF_skij, sSigma_tskij);
+      std::tie(conv_F, conv_Sigma) = spmd_mix_step(
+          context, dspmd->spmd.damp(), dspmd->spmd.needs_prev_state(), h5_prefix, datasets,
+          iteration, sF_skij, sSigma_tskij,
+          [&](auto const* F_prev, auto const* S_prev) {
+            return dspmd->spmd.solve(context.comm, sF_skij.local(), sSigma_tskij.local(),
+                                     Cp, F_prev, S_prev, iteration);
+          });
     } else {
     // DIIS does not support mpi yet
     if (context.comm.root()) { // A global communicator here is needed for DIIS
