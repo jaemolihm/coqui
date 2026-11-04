@@ -47,13 +47,13 @@ protected:
     std::string mbpt_output;
     bool g_mu_injected = false;
 
-    Array_5D C_t_injected;         // pre-computed commutator (A10 distributed path)
+    Array_5D C_t_injected;         // pre-computed commutator (distributed path)
     bool residual_injected = false;
 
 public:
 
     /**
-     * Supply a pre-computed commutator residual C_t (A10 k-striped distributed
+     * Supply a pre-computed commutator residual C_t (k-striped distributed
      * path). The next get_diis_residual consumes it once instead of running the
      * serial commutator_t; if not injected, get_diis_residual falls back to the
      * serial path.
@@ -153,7 +153,7 @@ public:
             diis_timers::res_fz.stop();
 
             if (residual_injected) {
-                // A10: consume the pre-computed distributed commutator, moving it
+                // Consume the pre-computed distributed commutator, moving it
                 // into res (the single unavoidable copy already happened in
                 // upload_residual, out of the node-shared window).
                 residual_injected = false;

@@ -21,6 +21,7 @@
 #ifndef COQUI_DIIS_COEFS_HPP
 #define COQUI_DIIS_COEFS_HPP
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <optional>
@@ -47,8 +48,9 @@ namespace iter_scf {
  * @param m_B       residual-overlap matrix (n x n).
  * @param log_level verbosity level of the condition-number message.
  * @return          real extrapolation coefficients (length n), summing to 1; nullopt if
- *                  the unnormalized coefficients sum to less than 1e-14 in magnitude or
- *                  not to a finite number (B = 0 for vanishing residuals).
+ *                  |sum_i x_i| * max_i B_ii < 1e-14 (x = B^+ 1, unnormalized), or the sum is
+ *                  not finite. The product is scale-free; it is 0 when no eigenvalue of the
+ *                  scaled B survives the pseudoinverse cut (B = 0 for vanishing residuals).
  */
 inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B,
                                                                   int log_level = 2) {
@@ -103,8 +105,12 @@ inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::mat
   nda::blas::gemv(1.0, Binv, bb, 0.0, x);
   for (long i = 0; i < n; ++i) x(i) /= d(i);
 
+  // x scales as 1/||r||^2 and max_i B_ii as ||r||^2, so the product does not depend on the
+  // residual scale: it is n for n orthogonal residuals of equal norm, and 0 for B = 0.
   double sum = std::accumulate(x.begin(), x.end(), 0.0);
-  if (not std::isfinite(sum) or std::abs(sum) < 1e-14) return std::nullopt;
+  double Bmax = 0.0;
+  for (long i = 0; i < n; ++i) Bmax = std::max(Bmax, d(i) * d(i));
+  if (not std::isfinite(sum) or std::abs(sum) * Bmax < 1e-14) return std::nullopt;
   return nda::make_regular(x / sum);
 }
 

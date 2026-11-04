@@ -212,11 +212,12 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
   // plus max_subsp Sigma residuals (the Fock block of the commutator is not stored),
   // each element-sliced across the global comm, i.e. one whole copy per run. The mixing
   // state also keeps the previous accepted state as one more sliced (F, Sigma) pair.
-  if (p.iter_alg == "DIIS" and p.diis_storage == "memory" and p.max_subsp >= 2) {
-    arrays.push_back({"DIIS history (memory)",
-                      fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
-                      double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
-                      DIST, PERSIST});
+  if (p.iter_alg == "DIIS" and p.diis_storage == "memory") {
+    if (p.max_subsp >= 2)  // the history is stored only if max_subsp >= min_subsp = 2
+      arrays.push_back({"DIIS history (memory)",
+                        fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
+                        double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
+                        DIST, PERSIST});
     arrays.push_back({"DIIS prev state (striped)", "|F| + |Sigma|",
                       band4() + band5(p.nt_f), DIST, PERSIST});
   }

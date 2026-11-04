@@ -492,8 +492,8 @@ TEST_CASE("in_memory_diis_fallback_to_damping", "[methods_scf]") {
   auto world = mpi3::environment::get_world_instance();
   auto self = world.split(world.rank(), 0);
 
-  // Coefficients: orthonormal residuals give 1/2 each; B = 0 (vanishing residuals) and a
-  // non-finite B give none.
+  // Coefficients: orthonormal residuals give 1/2 each, at any norm; B = 0 (vanishing
+  // residuals) and a non-finite B give none.
   nda::matrix<ComplexType> B(2, 2);
   B() = 0;
   B(0, 0) = 1.0;
@@ -502,6 +502,13 @@ TEST_CASE("in_memory_diis_fallback_to_damping", "[methods_scf]") {
   REQUIRE(C.has_value());
   REQUIRE(std::abs((*C)(0) - 0.5) < 1e-14);
   REQUIRE(std::abs((*C)(1) - 0.5) < 1e-14);
+  // The same residuals with norm 1e8 (||r||^2 = 1e16): the rule is scale-free, so the
+  // coefficients still exist and are the same.
+  B(0, 0) = B(1, 1) = 1e16;
+  auto Cbig = iter_scf::compute_diis_coefs_c1(B);
+  REQUIRE(Cbig.has_value());
+  REQUIRE(std::abs((*Cbig)(0) - 0.5) < 1e-14);
+  REQUIRE(std::abs((*Cbig)(1) - 0.5) < 1e-14);
   B() = 0;
   REQUIRE(not iter_scf::compute_diis_coefs_c1(B).has_value());
   B(0, 0) = B(1, 1) = std::nan("");
