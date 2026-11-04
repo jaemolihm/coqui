@@ -164,14 +164,15 @@ def _remove_outputs(mpi, outputs):
 @pytest.mark.parametrize("iter_alg", [
     {"alg": "damping", "mixing": 0.7},
     {"alg": "diis", "mixing": 0.7, "diis_warmup": 3},
-], ids=["damping", "diis_default_diis_storage"])
+], ids=["damping", "diis_slim_default"])
 def test_gw_chkpt_slim_mixing(mpi, iter_alg):
     # scGW, 3 iterations, chkpt_slim = true vs false: F, Sigma and G of the final
     # iteration agree to round-off. Iterations 2 and 3 damp (DIIS: warmup), so a
     # mixing with the omitted Sigma read as zero fails this (measured: F rel. error
     # 3.7e-3 against the 1e-12 bound). For DIIS the slim run switches the default
-    # diis_storage to "memory", so the reference is memory DIIS; 3 iterations with diis_warmup = 3 cover only the warmup damping
-    # (the memory-DIIS extrapolation never reads the checkpoint).
+    # diis_storage to "memory", so the reference is memory DIIS; 3 iterations with
+    # diis_warmup = 3 cover only the warmup damping (the memory-DIIS extrapolation
+    # never reads the checkpoint).
     mf = construct_qe_mf(mpi, "qe_lih222_sym")
     eri_params = {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
                   "chol_block_size": 1, "init": True}

@@ -36,7 +36,8 @@
 #include "utilities/element_partition.hpp"
 #include "utilities/h5_flat_slice.hpp"
 #include "numerics/shared_array/nda.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
+#include "numerics/imag_axes_ft/IAFT.hpp"
+#include "numerics/iter_scf/iter_scf_utils.hpp"
 
 /**
  * The in-memory mixing slices the flattened (F, Sigma) pair over the *global*
@@ -547,6 +548,78 @@ TEST_CASE("in_memory_diis_fallback_to_damping", "[methods_scf]") {
     REQUIRE(not diis.mix(lay, Fx, Sx, prev));
     check_damped(Fx, Sx);
   }
+
+  // The mixing engine of an inactive DIIS (max_subsp 1 < min_subsp 2) never asks for a
+  // residual and damps without one.
+  for_each_synthetic_layout("in_memory_mixing_inactive_diis", [&](auto& ctx, std::string const& tag) {
+    INFO(tag);
+    auto sF = make_shared(ctx, shape_t<4>{1, 1, 2, 2});
+    auto sS = make_shared(ctx, shape_t<5>{2, 1, 2, 2, 1});
+    const long nF = sF.local().size(), nS = sS.local().size();
+    iter_scf::in_memory_mixing mix;
+    mix.init(ctx, nF, nS, m, iter_scf::in_memory_diis::config{m, 1, 0, 2, 2});
+    auto fill = [&](long iter) {
+      sF.win().fence();
+      sS.win().fence();
+      if (sF.node_comm()->root()) {
+        for (long i = 0; i < nF; ++i) nda::reshape(sF.local(), shape_t<1>{nF})(i) = val(i, iter, 0.0);
+        for (long i = 0; i < nS; ++i) nda::reshape(sS.local(), shape_t<1>{nS})(i) = val(i, iter, 1.0);
+      }
+      sF.win().fence();
+      sS.win().fence();
+    };
+    fill(0);
+    mix.lay.store(mix.prev, sF.local(), sS.local());
+    mix.has_prev = true;
+    for (long iter = 1; iter <= 3; ++iter) {
+      REQUIRE(not mix.needs_residual());
+      fill(iter);
+      mix.step(ctx.comm, sF.local(), sS.local(), static_cast<const Array_view_5D_t*>(nullptr));
+      sF.win().fence();
+      sS.win().fence();
+      iter_scf::self_energy_unflatten(ctx, mix.lay, sF, sS);
+      auto fF = nda::reshape(sF.local(), shape_t<1>{nF});
+      // Step 1 is the damped state m*new + (1-m)*prev.
+      double e = 0.0;
+      if (iter == 1)
+        for (long i = 0; i < nF; ++i)
+          e = std::max(e, std::abs(fF(i) - (m * val(i, 1, 0.0) + (1.0 - m) * val(i, 0, 0.0))));
+      REQUIRE(ctx.comm.all_reduce_value(e, mpi3::max<>{}) == 0.0);
+    }
+  });
+}
+
+// diis_alg (the disk/VSpace DIIS, here with in-memory VSpace<Heff> and the vector-difference
+// residual) skips the extrapolation and returns 0 when the residual overlaps are singular, so
+// diis_t damps; independent residuals extrapolate.
+TEST_CASE("diis_alg_singular_residuals_skip", "[methods_scf]") {
+  using nda::array;
+  auto make_H = [](double a) { array<ComplexType, 4> H(1, 1, 2, 2); H() = a; return H; };
+  auto run = [&](std::vector<array<ComplexType, 4>> const& seq) {
+    iter_scf::VSpace<iter_scf::Heff> x_vsp, res_vsp;
+    x_vsp.initialize("diis_alg_test_x.h5", true);
+    res_vsp.initialize("diis_alg_test_r.h5", true);
+    iter_scf::opt_state<iter_scf::Heff> state;
+    state.initialize(iter_scf::Heff(seq[0]));
+    iter_scf::diis_residual<iter_scf::Heff> residual(&x_vsp, &state);
+    iter_scf::diis_alg<iter_scf::Heff> alg;
+    alg.init(&state, &residual, &x_vsp, &res_vsp, 4, true, iter_scf::Heff(seq[0]));
+    alg.grow_xvsp_only = true;
+    REQUIRE(alg.next_step(iter_scf::Heff(seq[1])) == 0);
+    alg.grow_xvsp_only = false;
+    int last = 0;
+    for (size_t i = 2; i < seq.size(); ++i) last = alg.next_step(iter_scf::Heff(seq[i]));
+    return last;
+  };
+
+  // Identical vectors: every residual is zero, B = 0.
+  REQUIRE(run({make_H(1.0), make_H(1.0), make_H(1.0), make_H(1.0), make_H(1.0)}) == 0);
+  // Residuals e2 = (1,0,0,0) and e3 = (0,1,0,0) are orthogonal: B = 1, extrapolation happens.
+  array<ComplexType, 4> v0 = make_H(0.0), v1 = make_H(0.0), v2 = make_H(0.0), v3 = make_H(0.0);
+  v2(0, 0, 0, 0) = 1.0;
+  v3 = v2;
+  v3(0, 0, 0, 1) = 1.0;
+  REQUIRE(run({v0, v1, v2, v3}) == 1);
 }
 
 /**

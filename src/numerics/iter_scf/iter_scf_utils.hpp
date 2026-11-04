@@ -39,7 +39,10 @@ namespace iter_scf {
    *  - max_subsp_size: "5" Maximal dimension of the extrapolation subspace
    *  - diis_start: "3" When to start applying DIIS extrapolation.
    *  - diis_storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
-   *    (in-memory; faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM)}
+   *    (in-memory; faster, but stores the history in RAM)}
+   *    Memory storage: scf_driver keeps max_subsp trial (F, Sigma) pairs plus max_subsp
+   *    Sigma residuals, element-sliced over all ranks (one copy per job); other callers
+   *    keep 2*max_subsp_size vectors in the in-memory VSpace on the root rank.
    *    With chkpt_slim the default is "memory" and "disk" is rejected: disk DIIS
    *    mixes from Sigma_tskij of the previous iteration's checkpoint, which
    *    chkpt_slim does not write.

@@ -290,7 +290,7 @@ void lr_driver::lr_setup(
     inner_hist.n_vec = 2 * inner_hist.depth + 4 + (p.precond_kernel.empty() ? 0 : 1);
     inner_hist.n_F = 1;
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
-  } else if (_diis) {
+  } else if (_diis and _diis->active()) {
     // The ring holds max_subsp slots, each storing a trial AND a residual.
     inner_hist.depth = static_cast<long>(_diis->cfg().max_subsp);
     inner_hist.n_vec = 2 * inner_hist.depth;

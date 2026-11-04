@@ -329,7 +329,8 @@ namespace iter_scf {
     bool initialized_qp = false;
     std::string residual_type = "commutator";
     // DIIS subspace storage: "disk" (HDF5-backed VSpace) or "memory" (in-memory;
-    // faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
+    // faster; scf_driver keeps the history element-sliced over all ranks (in_memory below),
+    // other callers hold 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
     std::string storage = "disk";
     // Element-sliced in-memory state of the Dyson (FockSigma) DIIS. Driven directly
     // by solve_iterative (scf_common.cpp) when storage == "memory" and the in-memory
