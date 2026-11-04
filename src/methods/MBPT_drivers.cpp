@@ -1517,35 +1517,32 @@ struct lr_W_cache {
   nda::array<ComplexType, 1> eps_inv_head, eps_inv_head_w;
 };
 
-std::optional<lr_W_cache>& lr_W_cache_slot() {
-  static std::optional<lr_W_cache> cache;
-  return cache;
-}
-
-template<typename Arr>
-bool same_bytes(Arr const& a, Arr const& b) {
-  return a.shape() == b.shape() &&
-         std::memcmp(a.data(), b.data(), a.size() * sizeof(typename Arr::value_type)) == 0;
-}
-
-bool same_local(std::optional<lr_local_inputs> const& a, std::optional<lr_local_inputs> const& b) {
-  if (a.has_value() != b.has_value()) return false;
-  if (!a) return true;
-  if (!same_bytes(a->projector_ksIai, b->projector_ksIai) || !same_bytes(a->band_window, b->band_window) ||
-      !same_bytes(a->kpts_crys, b->kpts_crys) ||
-      a->local_polarizabilities.has_value() != b->local_polarizabilities.has_value()) return false;
-  if (!a->local_polarizabilities) return true;
-  auto const& ma = *a->local_polarizabilities;
-  auto const& mb = *b->local_polarizabilities;
-  if (ma.size() != mb.size()) return false;
-  for (auto ia = ma.begin(), ib = mb.begin(); ia != ma.end(); ++ia, ++ib)
-    if (ia->first != ib->first || !same_bytes(ia->second, ib->second)) return false;
-  return true;
-}
+/// The kept W of the last reuse_W call that built one; release_lr_W_cache() drops it
+std::optional<lr_W_cache> W_cache;
 
 /// Name of the first field of `b` that differs from the cache's key `a` on any rank, "" if none; "cache" when a
 /// rank holds no cache (a == nullptr). Collective on mpi.comm: every rank enters the reduction.
-std::string lr_W_key_mismatch(utils::mpi_context_t<mpi3::communicator>& mpi, lr_W_key const* a_ptr, lr_W_key const& b) {
+std::string lr_W_check_mismatch(utils::mpi_context_t<mpi3::communicator>& mpi, lr_W_key const* a_ptr,
+                                lr_W_key const& b) {
+  auto same_bytes = [](auto const& x, auto const& y) {
+    return x.shape() == y.shape() &&
+           std::memcmp(x.data(), y.data(), x.size() * sizeof(*x.data())) == 0;
+  };
+  auto same_local = [&](std::optional<lr_local_inputs> const& x, std::optional<lr_local_inputs> const& y) {
+    if (x.has_value() != y.has_value()) return false;
+    if (!x) return true;
+    if (!same_bytes(x->projector_ksIai, y->projector_ksIai) || !same_bytes(x->band_window, y->band_window) ||
+        !same_bytes(x->kpts_crys, y->kpts_crys) ||
+        x->local_polarizabilities.has_value() != y->local_polarizabilities.has_value()) return false;
+    if (!x->local_polarizabilities) return true;
+    auto const& mx = *x->local_polarizabilities;
+    auto const& my = *y->local_polarizabilities;
+    if (mx.size() != my.size()) return false;
+    for (auto ix = mx.begin(), iy = my.begin(); ix != mx.end(); ++ix, ++iy)
+      if (ix->first != iy->first || !same_bytes(ix->second, iy->second)) return false;
+    return true;
+  };
+
   auto const& a = a_ptr ? *a_ptr : b;
   std::vector<std::pair<const char*, int>> changed = {
       {"cache", a_ptr == nullptr},
@@ -1567,7 +1564,7 @@ std::string lr_W_key_mismatch(utils::mpi_context_t<mpi3::communicator>& mpi, lr_
 
 } // namespace
 
-void release_lr_W_cache() { lr_W_cache_slot().reset(); }
+void release_lr_W_cache() { W_cache.reset(); }
 
 /**
  * Unified linear response calculation.
@@ -2170,12 +2167,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         W_key.w_mtime = std::filesystem::last_write_time(w_path);
         W_key.w_size = std::filesystem::file_size(w_path);
       }
-      auto& cache = lr_W_cache_slot();
-      auto changed = lr_W_key_mismatch(*mpi, cache ? &cache->key : nullptr, W_key);
+      // Hit when every rank holds a cache whose key equals W_key; otherwise `changed` names the first differing
+      // field (or "cache": nothing kept on some rank) for the log, and W is rebuilt below on all ranks
+      auto changed = lr_W_check_mismatch(*mpi, W_cache ? &W_cache->key : nullptr, W_key);
       W_hit = changed.empty();
       if (W_hit) {
         // The caller passes the THC W was built with; a THC of another size cannot be that one.
-        auto const& Wshape = cache->W_c_wqPQ.global_shape();
+        auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
         long nw_half = (ft.nw_b() + 1) / 2;
         auto const& thc = eri.corr_eri->get();
         utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
@@ -2184,13 +2182,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                      "coqui.mbpt.release_lr_W_cache() before switching THC.",
                      Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
         app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
-        opt_dW.emplace(cache->W_c_wqPQ);
-        opt_eps_inv.emplace(cache->eps_inv_head);
-        opt_eps_inv_w.emplace(cache->eps_inv_head_w);
+        opt_dW.emplace(W_cache->W_c_wqPQ);
+        opt_eps_inv.emplace(W_cache->eps_inv_head);
+        opt_eps_inv_w.emplace(W_cache->eps_inv_head_w);
       } else {
         if (changed == "cache") app_log(1, "reuse_W: building W (nothing kept)");
         else app_log(1, "reuse_W: rebuilding W ({} changed)", changed);
-        cache.reset();
+        W_cache.reset();
       }
     }
     if (!W_hit) {
@@ -2221,7 +2219,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       }
     }
     if (reuse_W && !W_hit) {
-      lr_W_cache_slot().emplace(lr_W_cache{std::move(W_key), *opt_dW, *opt_eps_inv, *opt_eps_inv_w});
+      W_cache.emplace(lr_W_cache{std::move(W_key), *opt_dW, *opt_eps_inv, *opt_eps_inv_w});
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }
