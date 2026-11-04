@@ -679,7 +679,7 @@ void init_in_memory_mixing(MPI_Context_t &context, iter_scf::iter_scf_t& iter_so
   std::optional<iter_scf::in_memory_diis::config> cfg;
   if (auto* dp = iter_solver.get_diis())
     cfg = iter_scf::in_memory_diis::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
-                                           2, 2, /*newest_first=*/true};
+                                           2, 2};
   m.init(context, sF_skij.local().size(), sSigma_tskij.local().size(), iter_solver.mixing(), cfg);
   app_log(2, "In-memory mixing: element-sliced state active ({} parts over {} node(s), "
              "slice sizes F {} / Sigma {})",

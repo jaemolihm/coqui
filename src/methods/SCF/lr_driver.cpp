@@ -275,7 +275,7 @@ void lr_driver::lr_setup(
     } else if (p.iter_params.alg == "DIIS") {
       _diis.emplace(iter_scf::in_memory_diis::config{
           p.iter_params.mixing, p.iter_params.max_subsp_size, p.iter_params.diis_warmup,
-          /*min_subsp=*/3, /*log_level=*/3, /*newest_first=*/false});
+          /*min_subsp=*/3, /*log_level=*/3});
     }
   }
   // The preconditioner's inner GCR iterates ΔF alone, so its pairs are tiny.

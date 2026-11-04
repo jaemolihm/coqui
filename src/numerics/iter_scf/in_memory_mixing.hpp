@@ -159,7 +159,6 @@ public:
     size_t warmup;       ///< steps that only damp
     size_t min_subsp;    ///< pairs needed to extrapolate
     int log_level;
-    bool newest_first = true;  // JML: temporary, order of the extrapolation sum
   };
 
   /// A max_subsp below min_subsp can never extrapolate: the engine then only damps.
@@ -259,8 +258,8 @@ public:
     auto S_loc = lay.S(S);
     F_loc() = ComplexType{0};
     S_loc() = ComplexType{0};
-    for (size_t i = 0; i < _n; ++i) {
-      const size_t k = _cfg.newest_first ? _n - 1 - i : i;
+    // Newest pair first.
+    for (size_t k = _n; k-- > 0;) {
       const ComplexType c = (*C)(k);
       auto const& x = _slots[slot(k)].x;
       F_loc += c * x.F;
