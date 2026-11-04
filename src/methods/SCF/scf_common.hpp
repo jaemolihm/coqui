@@ -525,7 +525,8 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                   long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-                  std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"})
+                  std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"},
+                  iter_scf::damp_t* dspmd = nullptr)
 -> std::tuple<double, double>;
 
 template<typename MPI_Context_t, typename X_t, typename Xt_t>

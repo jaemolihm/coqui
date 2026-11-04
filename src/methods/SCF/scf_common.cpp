@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 
 #include "scf_common.hpp"
 #include "hamiltonian/one_body_hamiltonian.hpp"
@@ -473,16 +474,71 @@ auto diis_init(iter_scf::iter_scf_t& iter_solver,
   iter_solver.initialize(sF_skij.local(), sSigma_tskij.local(), mu, S, H0, FT, output);
 }
 
+// This rank's slices of the previous accepted (F, Sigma) from scf/iter{iteration-1},
+// for the first in-memory mixing without an in-memory copy (the first one after a
+// restart). Every rank reads exactly the element slice it owns as an h5 hyperslab,
+// so no full copy of F or Sigma is materialized. A missing Sigma means an exactly
+// zero Sigma (HF checkpoints written before the Sigma_not_stored flag), unless
+// chkpt_slim omitted it.
+// Every rank opening the checkpoint read-only is affordable because this runs at
+// most once per run: after the first solve the previous state is in memory.
+template<typename X_t, typename Xt_t>
+auto stage_prev_state(iter_scf::spmd_damp const& d, std::string h5_prefix,
+                      std::array<std::string,3> const& datasets, long iteration,
+                      X_t const& sF_skij, Xt_t const& sSigma_tskij)
+  -> std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>> {
+  auto [f0, f1] = d.F_range();
+  auto [s0, s1] = d.S_range();
+  nda::array<ComplexType, 1> F_prev(f1 - f0), S_prev(s1 - s0);
+  F_prev() = ComplexType(0.0);
+  S_prev() = ComplexType(0.0);
+  std::string filename = h5_prefix + ".mbpt.h5";
+  h5::file file(filename, 'r');
+  h5::group grp(file);
+  std::string grp_name = datasets[0]+"/iter"+std::to_string(iteration-1);
+  utils::check(grp.has_subgroup(grp_name),
+               "stage_prev_state: {} does not exist in {}.", grp_name, filename);
+  auto it_grp = grp.open_group(grp_name);
+  iter_scf::check_not_omitted_by_slim(it_grp, datasets[2], iteration-1);
+  if (it_grp.has_dataset(datasets[1]))
+    utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), f0, f1, F_prev.data());
+  if (it_grp.has_dataset(datasets[2]))
+    utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij.shape(), s0, s1, S_prev.data());
+  return {std::move(F_prev), std::move(S_prev)};
+}
+
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                   long iteration, std::string h5_prefix,
                   X_t &sF_skij, Xt_t &sSigma_tskij,
-                  std::array<std::string,3> datasets)
+                  std::array<std::string,3> datasets, iter_scf::damp_t* dspmd)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
   if (iteration == 1) {
     utils::check(false, "damping_impl: it = 1 is not allowed.");
+  } else if (dspmd) {
+    // Element-sliced damping with the previous accepted state in memory.
+    iter_solver.metadata_log();
+    auto& d = dspmd->spmd;
+    // Restart edge: no in-memory previous state; stage it from the checkpoint.
+    if (not d.initialized())
+      d.init(context, sF_skij.local().size(), sSigma_tskij.local().size());
+    std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
+    if (not d.has_prev())
+      prev.emplace(stage_prev_state(d, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij));
+    sF_skij.win().fence();
+    sSigma_tskij.win().fence();
+    auto conv = d.apply(dspmd->mixing, d.F_slice(sF_skij.local()), d.S_slice(sSigma_tskij.local()),
+                        prev ? &prev->first : nullptr, prev ? &prev->second : nullptr);
+    conv_F = conv[0];
+    conv_Sigma = conv[1];
+    context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
+    context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
+    // Each node holds valid data only for its own ranks' slices; exact because the
+    // mixing is elementwise and every node holds the same F/Sigma on input (see
+    // diis_impl).
+    utils::complete_shared_slices(context, d.pmap(), sF_skij, sSigma_tskij);
   } else {
     iter_solver.metadata_log();
     if (context.node_comm.root()) {
@@ -505,7 +561,8 @@ auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 }
 
 // COQUI_DEBUG_SERIAL_DIIS=1 forces the original root-only DIIS path (serial
-// residual + serial solve) for A/B validation.
+// residual + serial solve) and the checkpoint-reading damping (damp_t::solve) for
+// A/B validation; the latter aborts on a chkpt_slim run.
 inline bool debug_serial_diis() {
   static const bool serial = (std::getenv("COQUI_DEBUG_SERIAL_DIIS") != nullptr);
   return serial;
@@ -521,6 +578,16 @@ iter_scf::diis_t* spmd_diis_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* s
   if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
   auto* dp = iter_solver.get_diis(); // non-null only when the algorithm is DIIS
   return (dp and dp->storage == "memory") ? dp : nullptr;
+}
+
+// The element-sliced in-memory damping is taken for the same callers as the SPMD
+// DIIS (scf_driver; the embed and qp callers keep the checkpoint read).
+// Returns the damp_t driver when eligible, nullptr otherwise.
+template<typename Xt_t, typename X_t>
+iter_scf::damp_t* spmd_damp_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
+                                const X_t* sS, const X_t* sH0) {
+  if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
+  return iter_solver.get_damp(); // non-null only when the algorithm is damping
 }
 
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
@@ -583,46 +650,18 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 
     if (dspmd) {
       // === A12: SPMD in-memory DIIS solve over context.comm ===
-      const long nF_flat = sF_skij.local().size();
-      const long nS_flat = sSigma_tskij.local().size();
-      auto const& pmap = dspmd->spmd.pmap();
       // Stage the previous accepted state from the checkpoint when there is no
-      // in-memory copy (first damping after a restart). Every rank reads exactly
-      // the element slice it owns as an h5 hyperslab, so no full copy of F or
-      // Sigma is materialized. A missing dataset means the previous state was
-      // exactly zero (slim HF checkpoints). Every rank opening the checkpoint
-      // read-only is affordable because this runs at most once per run: after
-      // the first solve the previous state is in memory.
-      nda::array<ComplexType, 1> F_prev_loc, S_prev_loc;
-      bool have_prev = false;
-      if (dspmd->spmd.needs_prev_state()) {
-        auto [f0, f1] = pmap.my_slice(nF_flat);
-        auto [s0, s1] = pmap.my_slice(nS_flat);
-        F_prev_loc = nda::array<ComplexType, 1>(f1 - f0);
-        S_prev_loc = nda::array<ComplexType, 1>(s1 - s0);
-        F_prev_loc() = ComplexType(0.0);
-        S_prev_loc() = ComplexType(0.0);
-        std::string filename = h5_prefix + ".mbpt.h5";
-        h5::file file(filename, 'r');
-        h5::group grp(file);
-        std::string grp_name = datasets[0]+"/iter"+std::to_string(iteration-1);
-        utils::check(grp.has_subgroup(grp_name),
-                     "diis_impl: {} does not exist in {}.", grp_name, filename);
-        auto it_grp = grp.open_group(grp_name);
-        if (it_grp.has_dataset(datasets[1]))
-          utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(),
-                                       f0, f1, F_prev_loc.data());
-        if (it_grp.has_dataset(datasets[2]))
-          utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij.shape(),
-                                       s0, s1, S_prev_loc.data());
-        have_prev = true;
-      }
+      // in-memory copy (first damping after a restart).
+      std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
+      if (dspmd->spmd.needs_prev_state())
+        prev.emplace(stage_prev_state(dspmd->spmd.damp(), h5_prefix, datasets, iteration,
+                                      sF_skij, sSigma_tskij));
 
       std::optional<Array_view_5D_t> C_loc;
       if (sC_t_dist) C_loc.emplace(sC_t_dist->local());
       const Array_view_5D_t* Cp = C_loc ? &*C_loc : nullptr;
-      const auto* Fpp = have_prev ? &F_prev_loc : nullptr;
-      const auto* Spp = have_prev ? &S_prev_loc : nullptr;
+      const auto* Fpp = prev ? &prev->first : nullptr;
+      const auto* Spp = prev ? &prev->second : nullptr;
 
       // Each rank reads/writes only its own slice of the node-shared F/Sigma
       // windows (disjoint), so a fence pair around the solve suffices.
@@ -631,38 +670,21 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
       auto pconv = dspmd->spmd.solve(context.comm,
                                      sF_skij.local(), sSigma_tskij.local(),
                                      Cp, Fpp, Spp, iteration);
-      sF_skij.win().fence();
-      sSigma_tskij.win().fence();
       // Per-rank partial maxima -> global (max is exactly order-independent).
       conv_F = pconv[0];
       conv_Sigma = pconv[1];
       context.comm.all_reduce_in_place_n(&conv_F, 1, mpi3::max<>{});
       context.comm.all_reduce_in_place_n(&conv_Sigma, 1, mpi3::max<>{});
-      // The slices are cut over the global comm, so a node holds valid data
-      // only for its own contiguous element run; parts are numbered node-major,
-      // so one allgatherv over the node roots completes every node's window.
-      // The completed array is a mosaic of per-node contributions, which is
-      // exact on two invariants: the coefficients are identical on every rank
-      // (one all_reduce forms B) and the mixing is elementwise, and every
-      // producer of these windows ends in an internode all_reduce
-      // (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for the GW
-      // Sigma, thc_gf2.icc for GF2), so no node holds a private variant of the
-      // input to begin with.
-      // comm.size() != node_comm.size() exactly when the job spans more than one
-      // node, and unlike internode_comm.size() it is the same on every rank:
-      // internode_comm is split by node_comm.rank(), so on a ragged node layout
-      // the ranks above the smallest node's size sit in a size-1 internode comm
-      // and would skip a node-collective the rest of their node enters.
-      if (context.comm.size() != context.node_comm.size()) {
-        if (context.node_comm.root()) {
-          utils::complete_node_slices(context.internode_comm, pmap,
-                                      sF_skij.local().data(), nF_flat);
-          utils::complete_node_slices(context.internode_comm, pmap,
-                                      sSigma_tskij.local().data(), nS_flat);
-        }
-        sF_skij.node_sync();
-        sSigma_tskij.node_sync();
-      }
+      // The slices are cut over the global comm, so a node holds valid data only
+      // for its own contiguous element run; one allgatherv over the node roots
+      // completes every window. The completed array is a mosaic of per-node
+      // contributions, which is exact on two invariants: the coefficients are
+      // identical on every rank (one all_reduce forms B) and the mixing is
+      // elementwise, and every producer of these windows ends in an internode
+      // all_reduce (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for
+      // the GW Sigma, thc_gf2.icc for GF2), so no node holds a private variant of
+      // the input to begin with.
+      utils::complete_shared_slices(context, dspmd->spmd.pmap(), sF_skij, sSigma_tskij);
     } else {
     // DIIS does not support mpi yet
     if (context.comm.root()) { // A global communicator here is needed for DIIS
@@ -758,13 +780,20 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
         // Initialize DIIS solver at the root process since the serial solver doesn't support mpi
         diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
       }
+    } else if (auto* dd = spmd_damp_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+      // No mixing is applied at iteration 1, so the current state is the
+      // accepted previous state of the first damping.
+      dd->spmd.init(context, sF_skij.local().size(), sSigma_tskij.local().size());
+      dd->spmd.set_prev(nda::array<ComplexType, 1>(dd->spmd.F_slice(sF_skij.local())),
+                        nda::array<ComplexType, 1>(dd->spmd.S_slice(sSigma_tskij.local())));
     }
     context.comm.barrier();
   } else {
 
     if (iter_solver.iter_alg() == iter_scf::damping) {
-      std::tie(conv_F, conv_Sigma) = damping_impl(context, iter_solver, iteration, h5_prefix,
-                                                  sF_skij, sSigma_tskij, datasets);
+      std::tie(conv_F, conv_Sigma) = damping_impl(
+          context, iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, datasets,
+          spmd_damp_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij));
     } else if (iter_solver.iter_alg() == iter_scf::DIIS) {
       std::tie(conv_F, conv_Sigma) = diis_impl(context, iter_solver, iteration, h5_prefix,
                                                sF_skij, sSigma_tskij, FT, datasets,

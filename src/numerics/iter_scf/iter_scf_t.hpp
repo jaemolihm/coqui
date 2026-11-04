@@ -98,6 +98,9 @@ namespace iter_scf {
     // Direct access to the DIIS driver (nullptr when the active algorithm is
     // not DIIS). Used by the A12 SPMD Dyson-DIIS path in scf_common.cpp.
     diis_t* get_diis() { return std::get_if<diis_t>(&_alg_var); }
+    // Direct access to the damping driver (nullptr when the active algorithm is
+    // not damping). Used by the in-memory damping path in scf_common.cpp.
+    damp_t* get_damp() { return std::get_if<damp_t>(&_alg_var); }
 
     void metadata_log() const {
       std::visit( [&](auto&& v) { v.metadata_log(); }, _alg_var);

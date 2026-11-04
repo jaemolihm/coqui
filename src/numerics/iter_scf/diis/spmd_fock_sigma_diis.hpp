@@ -39,6 +39,7 @@
 
 #include "numerics/iter_scf/diis/diis_coefs.hpp"
 #include "numerics/iter_scf/diis/diis_timers.hpp"
+#include "numerics/iter_scf/damp/spmd_damp.hpp"
 
 namespace iter_scf {
 
@@ -73,10 +74,8 @@ namespace iter_scf {
  *  - Extrapolation / damping: elementwise on slices, written in place into the
  *    node-shared F/Sigma windows. Each element depends only on same-index
  *    inputs, so only the completion allgatherv is needed.
- *  - Warmup damping: out = mixing*new + (1-mixing)*prev with prev = the
- *    previous accepted (post-mix) state, kept as an in-memory slice from the
- *    previous solve (byte-identical to the scf/iter{N-1} checkpoint the serial
- *    damp_t re-reads). On the first solve after a restart there is no
+ *  - Warmup damping: spmd_damp, which also owns the slices and the previous
+ *    accepted (post-mix) state. On the first solve after a restart there is no
  *    in-memory prev; the caller stages it from the checkpoint (needs_prev_state).
  *
  * Convergence maxima are returned as per-rank partials; the caller reduces
@@ -107,27 +106,24 @@ public:
    */
   template<typename MPI_Context_t, nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS>
   void init_x0(MPI_Context_t& mpi, const AF& F, const AS& Sigma, bool capture_prev) {
-    _nF = static_cast<long>(F.size());
-    _nS = static_cast<long>(Sigma.size());
-    _pmap = utils::make_part_map(mpi);  // collective on mpi.comm
-    std::tie(_f0, _f1) = _pmap.my_slice(_nF);
-    std::tie(_s0, _s1) = _pmap.my_slice(_nS);
+    _damp.init(mpi, static_cast<long>(F.size()), static_cast<long>(Sigma.size()));
     push_x(F, Sigma);
-    if (capture_prev) {
-      _prevF = _xF.back();
-      _prevS = _xS.back();
-      _has_prev = true;
-    }
+    if (capture_prev) _damp.set_prev(_xF.back(), _xS.back());
     _warmup_count = 0;
     _inited = true;
     app_log(2, "DIIS: SPMD element-sliced subspace active ({} parts over {} node(s), "
                "slice sizes F {} / Sigma {})",
-            _pmap.nparts, mpi.internode_comm.size(), _f1 - _f0, _s1 - _s0);
+            _damp.pmap().nparts, mpi.internode_comm.size(),
+            _damp.F_range().second - _damp.F_range().first,
+            _damp.S_range().second - _damp.S_range().first);
   }
 
   /// The element partition the slices were cut with. The caller needs it to
   /// complete the node-shared F/Sigma windows after solve().
-  utils::part_map const& pmap() const { return _pmap; }
+  utils::part_map const& pmap() const { return _damp.pmap(); }
+
+  /// The slices and previous accepted state (for staging it from the checkpoint).
+  spmd_damp const& damp() const { return _damp; }
 
   /// Whether the next solve will consume the commutator residual C_t (i.e.
   /// grow the residual subspace). False on the grow-x-only first DIIS call,
@@ -138,7 +134,7 @@ public:
   /// accepted state, so the caller must stage scf/iter{N-1} from the
   /// checkpoint (restart edge).
   bool needs_prev_state() const {
-    if (_has_prev) return false;
+    if (_damp.has_prev()) return false;
     const size_t nx = _inited ? _xF.size() : 1; // lazy init pushes x0 first
     const bool warmup_next = (nx == 1) || (_warmup_count + 1 <= _warmup);
     return warmup_next || _resS.empty();
@@ -173,16 +169,16 @@ public:
     diis_timers::ScopeLog _d2log;
     diis_timers::spmd_total.start();
     utils::check(_inited, "spmd_fs_diis: init_x0 must be called before solve");
-    utils::check(static_cast<long>(F.size()) == _nF and
-                 static_cast<long>(Sigma.size()) == _nS,
+    utils::check(static_cast<long>(F.size()) == _damp.nF() and
+                 static_cast<long>(Sigma.size()) == _damp.nS(),
                  "spmd_fs_diis: array sizes changed between init_x0 and solve");
 
     _warmup_count += 1;
     const size_t nx_pre = _xF.size();
     const bool warmup = (nx_pre == 1) || (_warmup_count <= _warmup);
 
-    auto F_loc = slice_of(F, _nF, _f0, _f1);
-    auto S_loc = slice_of(Sigma, _nS, _s0, _s1);
+    auto F_loc = _damp.F_slice(F);
+    auto S_loc = _damp.S_slice(Sigma);
 
     std::array<double, 2> conv{0.0, 0.0};
 
@@ -197,7 +193,7 @@ public:
       }
       app_log(4, "DIIS: DIIS vector space size: {}", _xF.size());
       app_log(4, "DIIS: DIIS residual space size: {}\n", _resS.size());
-      conv = apply_damping(F_loc, S_loc, F_prev, S_prev);
+      conv = _damp.apply(_mixing, F_loc, S_loc, F_prev, S_prev);
     } else {
       grow_with_residual(comm, F, Sigma, C_t);
       if (_resS.size() > 1) {
@@ -229,14 +225,12 @@ public:
         diis_timers::spmd_writeback.stop();
 
         diis_timers::spmd_prev_store.start();
-        _prevF = std::move(rF);
-        _prevS = std::move(rS);
-        _has_prev = true;
+        _damp.set_prev(std::move(rF), std::move(rS));
         diis_timers::spmd_prev_store.stop();
       } else {
         app_log(2, "DIIS: DIIS extrapolation condition is not satisfied -> Skipping the extrapolation step\n");
         app_log(2, "DIIS: Performing simple damping instead.\n");
-        conv = apply_damping(F_loc, S_loc, F_prev, S_prev);
+        conv = _damp.apply(_mixing, F_loc, S_loc, F_prev, S_prev);
       }
     }
     diis_timers::spmd_total.stop();
@@ -249,28 +243,19 @@ private:
   size_t _warmup = 5;
   size_t _warmup_count = 0;
   bool _inited = false;
-  bool _has_prev = false;
-  long _nF = 0, _nS = 0;
-  long _f0 = 0, _f1 = 0, _s0 = 0, _s1 = 0;
   // This rank's contiguous slices of every trial vector / residual. The trial
   // history mirrors x_vsp (it may exceed max_subsp by the initial grow-only
   // vectors, exactly as the serial x_vsp does); residuals mirror res_vsp.
   std::vector<Vec1D> _xF, _xS;
   std::vector<Vec1D> _resS;
   nda::matrix<ComplexType> _B{0, 0};
-  Vec1D _prevF, _prevS; // previous accepted (post-mix) state slice
-  utils::part_map _pmap; // element partition of F and Sigma over the global comm
-
-  template<typename A>
-  static auto slice_of(A&& a, long n, long i0, long i1) {
-    return nda::reshape(a, std::array<long, 1>{n})(nda::range(i0, i1));
-  }
+  spmd_damp _damp; // slices of F and Sigma, previous accepted state, warmup damping
 
   template<nda::MemoryArrayOfRank<4> AF, nda::MemoryArrayOfRank<5> AS>
   void push_x(const AF& F, const AS& Sigma) {
     diis_timers::spmd_hist_store.start();
-    _xF.emplace_back(slice_of(F, _nF, _f0, _f1));
-    _xS.emplace_back(slice_of(Sigma, _nS, _s0, _s1));
+    _xF.emplace_back(_damp.F_slice(F));
+    _xS.emplace_back(_damp.S_slice(Sigma));
     diis_timers::spmd_hist_store.stop();
   }
 
@@ -292,7 +277,7 @@ private:
     // Fock block), so it contributes exactly 0 to every overlap -- identical
     // to the serial B where the <F_i|F_j> part vanishes exactly.
     diis_timers::spmd_hist_store.start();
-    Vec1D u{slice_of(*C_t, _nS, _s0, _s1)};
+    Vec1D u{_damp.S_slice(*C_t)};
     diis_timers::spmd_hist_store.stop();
     update_B(comm, u);
     _resS.push_back(std::move(u));
@@ -364,45 +349,6 @@ private:
     double m = 0.0;
     for (long i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a(i) - b(i)));
     return m;
-  }
-
-  /// Exact damp_t::solve arithmetic on this rank's slice:
-  /// out = mixing*new + (1-mixing)*prev; partial conv = max|prev - out|.
-  template<typename View>
-  double damp_mix_slice(View&& H, const Vec1D& Hprev) {
-    H = _mixing * H + (1.0 - _mixing) * Hprev;
-    double m = 0.0;
-    for (long i = 0; i < H.size(); ++i) m = std::max(m, std::abs(Hprev(i) - H(i)));
-    return m;
-  }
-
-  template<typename FView, typename SView>
-  std::array<double, 2> apply_damping(FView&& F_loc, SView&& S_loc,
-                                      const Vec1D* F_prev, const Vec1D* S_prev) {
-    // Previous accepted state: in-memory slice from the previous solve, or the
-    // staged checkpoint state on the restart edge (already this rank's slice).
-    const Vec1D *pF = &_prevF, *pS = &_prevS;
-    if (not _has_prev) {
-      utils::check(F_prev != nullptr and S_prev != nullptr,
-                   "spmd_fs_diis: no previous accepted state (in memory or staged)");
-      utils::check(F_prev->size() == _f1 - _f0 and S_prev->size() == _s1 - _s0,
-                   "spmd_fs_diis: staged previous state has the wrong slice size "
-                   "(F {} vs {}, Sigma {} vs {})",
-                   F_prev->size(), _f1 - _f0, S_prev->size(), _s1 - _s0);
-      pF = F_prev;
-      pS = S_prev;
-    }
-    std::array<double, 2> conv{0.0, 0.0};
-    diis_timers::spmd_damp_mix.start();
-    conv[0] = damp_mix_slice(F_loc, *pF);
-    conv[1] = damp_mix_slice(S_loc, *pS);
-    diis_timers::spmd_damp_mix.stop();
-    diis_timers::spmd_prev_store.start();
-    _prevF = Vec1D{F_loc};
-    _prevS = Vec1D{S_loc};
-    _has_prev = true;
-    diis_timers::spmd_prev_store.stop();
-    return conv;
   }
 
   // Log parity with diis_alg::next_step's print_B/print_C/predicted error.

@@ -31,8 +31,23 @@
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
 #include "numerics/iter_scf/diis/diis_timers.hpp"
+#include "numerics/iter_scf/damp/spmd_damp.hpp"
 
 namespace iter_scf {
+  /**
+   * Abort when `dataset` of `iter_grp` was omitted by chkpt_slim (dump_scf writes
+   * Sigma_not_stored = true then). Readers that take a missing dataset as an
+   * exactly-zero quantity call this first.
+   */
+  inline void check_not_omitted_by_slim(h5::group &iter_grp, std::string const& dataset, long iter) {
+    if (iter_grp.has_dataset(dataset) or not iter_grp.has_dataset("Sigma_not_stored")) return;
+    bool not_stored = false;
+    h5::h5_read(iter_grp, "Sigma_not_stored", not_stored);
+    utils::check(not not_stored,
+                 "iter_scf: {} of iteration {} was omitted from the checkpoint by chkpt_slim "
+                 "and cannot be read as the previous state for mixing.", dataset, iter);
+  }
+
   /**
    * Damping for an arbitrary target
    */
@@ -62,6 +77,7 @@ namespace iter_scf {
       // arrays are calloc-backed). A missing dataset means the previous-iteration
       // quantity was exactly zero (e.g. Sigma_tskij on an HF checkpoint).
       std::decay_t<decltype(nda::make_regular(H))> H_previous(H.shape());
+      check_not_omitted_by_slim(iter_grp, dataset, iter-1);
       diis_timers::damp_read.start();
       if (iter_grp.has_dataset(dataset))
         nda::h5_read(iter_grp, dataset, H_previous);
@@ -103,6 +119,10 @@ namespace iter_scf {
   public:
     double mixing = 0.7;
     bool initialized = true;
+    // Element-sliced in-memory damping, driven directly by damping_impl
+    // (scf_common.cpp) for the Dyson SCF (the caller that supplies the in-memory
+    // G/S/H0); solve() above keeps the checkpoint-reading path for the others.
+    spmd_damp spmd;
 
   };
 } // iter_scf

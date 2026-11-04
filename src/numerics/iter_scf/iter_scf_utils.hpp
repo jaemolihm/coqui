@@ -40,8 +40,13 @@ namespace iter_scf {
    *  - diis_start: "3" When to start applying DIIS extrapolation.
    *  - storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
    *    (in-memory; faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM)}
+   *    With chkpt_slim the default is "memory" and "disk" is rejected: disk DIIS
+   *    mixes from Sigma_tskij of the previous iteration's checkpoint, which
+   *    chkpt_slim does not write.
    */
-  inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false) {
+  inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false,
+                                      bool chkpt_slim=false) {
+    const std::string default_storage = chkpt_slim ? "memory" : "disk";
     for (auto const& it : base_pt) {
       if (it.first == "iter_alg") {
         ptree pt = it.second;
@@ -64,8 +69,12 @@ namespace iter_scf {
             auto residual_type = io::get_value_with_default<std::string>(
               pt, "residual_type", is_evscf ? "vector_diff" : "commutator");
             io::tolower(residual_type);
-            auto storage = io::get_value_with_default<std::string>(pt, "storage", "disk");
+            auto storage = io::get_value_with_default<std::string>(pt, "storage", default_storage);
             io::tolower(storage);
+            utils::check(not (chkpt_slim and storage == "disk"),
+                         "iter_alg: storage = \"disk\" does not work with chkpt_slim = true: disk DIIS "
+                         "mixes with Sigma_tskij of the previous iteration, which chkpt_slim does not "
+                         "write. Use storage = \"memory\" (the default with chkpt_slim).");
             auto diis_start = io::get_value_with_default<size_t>(pt,"diis_start",-1);
             if (diis_start != -1) {
               app_log(1, "[WARNING] 'diis_start' is deprecated. Please use 'diis_warmup' instead \n"
@@ -88,7 +97,7 @@ namespace iter_scf {
         }
       }
     }
-    return iter_scf_t(diis_t(default_mixing, 5, 3, is_evscf ? "vector_diff" : "commutator"));
+    return iter_scf_t(diis_t(default_mixing, 5, 3, is_evscf ? "vector_diff" : "commutator", default_storage));
   }
 } // iter_scf
 

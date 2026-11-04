@@ -220,6 +220,10 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     arrays.push_back({"DIIS prev state (striped)", "|F| + |Sigma|",
                       band4() + band5(p.nt_f), DIST, PERSIST});
   }
+  // Damping keeps the previous accepted state, element-sliced like the DIIS one.
+  if (p.iter_alg == "damping")
+    arrays.push_back({"damping prev state (striped)", "|F| + |Sigma|",
+                      band4() + band5(p.nt_f), DIST, PERSIST});
 
   // ---------------- transient: RPA polarizability ----------------
   // Only the THC path builds the auxiliary-basis grids; ft_buffer_dist and

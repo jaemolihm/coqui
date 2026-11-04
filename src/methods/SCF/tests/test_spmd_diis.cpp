@@ -37,6 +37,7 @@
 #include "utilities/h5_flat_slice.hpp"
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/iter_scf/diis/spmd_fock_sigma_diis.hpp"
+#include "numerics/iter_scf/damp/spmd_damp.hpp"
 
 /**
  * The SPMD Fock-Sigma DIIS engine slices the flattened (F, Sigma) pair over the
@@ -202,6 +203,48 @@ TEST_CASE("spmd_diis_synthetic_nodes", "[methods_scf]") {
         for (long i = 0; i < nF; ++i) prevF(i) = fF(i);
         for (long i = 0; i < nS; ++i) prevS(i) = fS(i);
       }
+    }
+
+    // spmd_damp alone (the Dyson-SCF damping) vs out = mixing*new + (1-mixing)*prev,
+    // bit for bit, with prev from memory after iteration 0 was captured.
+    iter_scf::spmd_damp damp;
+    fill_flat(sF, 0, 0.0);
+    fill_flat(sS, 0, 1.0);
+    damp.init(ctx, nF, nS);
+    damp.set_prev(nda::array<ComplexType, 1>(damp.F_slice(sF.local())),
+                  nda::array<ComplexType, 1>(damp.S_slice(sS.local())));
+    for (long i = 0; i < nF; ++i) prevF(i) = val(i, 0, 0.0);
+    for (long i = 0; i < nS; ++i) prevS(i) = val(i, 0, 1.0);
+    for (long iter = 1; iter <= 3; ++iter) {
+      fill_flat(sF, iter, 0.0);
+      fill_flat(sS, iter, 1.0);
+      sF.win().fence();
+      sS.win().fence();
+      damp.apply(mixing, damp.F_slice(sF.local()), damp.S_slice(sS.local()), nullptr, nullptr);
+      sF.win().fence();
+      sS.win().fence();
+      if (ctx.comm.size() != ctx.node_comm.size()) {
+        if (ctx.node_comm.root()) {
+          utils::complete_node_slices(ctx.internode_comm, damp.pmap(), sF.local().data(), nF);
+          utils::complete_node_slices(ctx.internode_comm, damp.pmap(), sS.local().data(), nS);
+        }
+        sF.node_sync();
+        sS.node_sync();
+      }
+      auto fF = nda::reshape(sF.local(), shape_t<1>{nF});
+      auto fS = nda::reshape(sS.local(), shape_t<1>{nS});
+      double eF = 0.0, eS = 0.0;
+      for (long i = 0; i < nF; ++i) {
+        prevF(i) = mixing * val(i, iter, 0.0) + (1.0 - mixing) * prevF(i);
+        eF = std::max(eF, std::abs(fF(i) - prevF(i)));
+      }
+      for (long i = 0; i < nS; ++i) {
+        prevS(i) = mixing * val(i, iter, 1.0) + (1.0 - mixing) * prevS(i);
+        eS = std::max(eS, std::abs(fS(i) - prevS(i)));
+      }
+      app_log(2, "spmd_damp [{}] iter {}: max err F {:.1e} / Sigma {:.1e}", tag, iter, eF, eS);
+      REQUIRE(ctx.comm.all_reduce_value(eF, mpi3::max<>{}) == 0.0);
+      REQUIRE(ctx.comm.all_reduce_value(eS, mpi3::max<>{}) == 0.0);
     }
   };
 
