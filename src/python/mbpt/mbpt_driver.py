@@ -521,12 +521,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         If True, the W_c(iw) and eps^-1 head of this call stay resident in the process
         (one extra W array) until release_lr_W_cache() (call it on every rank) or a call
         with different ground-state inputs replaces them, and a later reuse_W call with
-        the same ground-state inputs (G, W source, div_treatment, IAFT grid, the THC
-        object and its build, and with local polarizabilities the projector inputs)
-        copies them instead of recomputing or reading W; the copy is consumed by that
-        call as usual. A call whose inputs differ rebuilds W and
-        replaces the kept one. Results are identical to a fresh call. Default False:
-        nothing is kept.
+        the same ground-state inputs (G, W source, div_treatment, IAFT grid, and with
+        local polarizabilities the projector inputs) copies them instead of recomputing
+        or reading W; the copy is consumed by that call as usual. A call whose inputs
+        differ rebuilds W and replaces the kept one. Results are identical to a fresh
+        call. The THC is not checked beyond its size: pass the THC the kept W was built
+        with, and call release_lr_W_cache() before switching to another one. Default
+        False: nothing is kept.
     split_sigma_terms : bool, optional
         If True, store the two one-shot ΔΣ terms separately (default False):
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2

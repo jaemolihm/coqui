@@ -1496,8 +1496,6 @@ using lr_W_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3
 
 /// Inputs of the W block of run_lr_calc (reuse_W = true).
 struct lr_W_key {
-  /// thc_reader_t::uid() of the THC; it also fixes the MPI context and the mean field
-  std::uint64_t thc_uid = 0;
   /// Grid of the IAFT used for the W file and the transforms
   double beta = 0, wmax = 0;
   int nt_b = 0, nw_b = 0;
@@ -1551,7 +1549,6 @@ std::string lr_W_key_mismatch(utils::mpi_context_t<mpi3::communicator>& mpi, lr_
   auto const& a = a_ptr ? *a_ptr : b;
   std::vector<std::pair<const char*, int>> changed = {
       {"cache", a_ptr == nullptr},
-      {"THC", a.thc_uid != b.thc_uid},
       {"IAFT", a.beta != b.beta || a.wmax != b.wmax || a.nt_b != b.nt_b || a.nw_b != b.nw_b},
       {"unperturbed", a.unperturbed != b.unperturbed},
       {"W source", a.w_source != b.w_source},
@@ -1615,7 +1612,8 @@ void release_lr_W_cache() { lr_W_cache_slot().reset(); }
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
  *   reuse_W                keep W_c(iω) and the ε⁻¹ head of this call in a process-wide cache and take
  *                          them from it when the next reuse_W call has the same ground-state inputs
- *                          (default false; release_lr_W_cache() drops it)
+ *                          (default false; release_lr_W_cache() drops it). The THC must be the
+ *                          one the kept W was built with; only its size is checked
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
  *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
@@ -2144,7 +2142,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     lr_W_key W_key;
     bool W_hit = false;
     if (reuse_W) {
-      W_key.thc_uid = eri.corr_eri->get().uid();
       W_key.beta = ft.beta();
       W_key.wmax = ft.wmax();
       W_key.nt_b = ft.nt_b();
@@ -2177,6 +2174,15 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       auto changed = lr_W_key_mismatch(*mpi, cache ? &cache->key : nullptr, W_key);
       W_hit = changed.empty();
       if (W_hit) {
+        // The caller passes the THC W was built with; a THC of another size cannot be that one.
+        auto const& Wshape = cache->W_c_wqPQ.global_shape();
+        long nw_half = (ft.nw_b() + 1) / 2;
+        auto const& thc = eri.corr_eri->get();
+        utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
+                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call's THC needs "
+                     "({}, {}, {}, {}). reuse_W requires the THC the kept W was built with; call "
+                     "coqui.mbpt.release_lr_W_cache() before switching THC.",
+                     Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
         app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
         opt_dW.emplace(cache->W_c_wqPQ);
         opt_eps_inv.emplace(cache->eps_inv_head);

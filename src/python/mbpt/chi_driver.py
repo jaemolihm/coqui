@@ -128,7 +128,8 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         Forwarded to run_lr. In a q sweep, the second and later calls copy the W_c(iw)
         and eps^-1 head kept by the first instead of rebuilding them. One extra
         W_c(iw) array stays resident until ``coqui.mbpt.release_lr_W_cache()``
-        (call it on every rank). Default False.
+        (call it on every rank); call it also before switching to another THC. Default
+        False.
 
     Returns
     -------

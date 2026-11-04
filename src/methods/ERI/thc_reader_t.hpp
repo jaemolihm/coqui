@@ -22,8 +22,6 @@
 #ifndef COQUI_THC_READER_T_HPP
 #define COQUI_THC_READER_T_HPP
 
-#include <atomic>
-#include <cstdint>
 #include <string>
 #include <optional>
 #include <utility>
@@ -167,7 +165,6 @@ namespace methods {
 
       utils::check(_X_type == "q_indep", "thc_reader_t: q-dependent Xk is not implemented yet!");
       _dZ_cache.dZ.reset();
-      _uid = next_uid();
 
       for (auto &v: {"BUILD_TOTAL", "BUILD_THC", "BUILD_GATHER", "BUILD_WRITE",
                      "READ_X", "READ_V"})
@@ -1056,9 +1053,6 @@ namespace methods {
     // MPI-nondeterministic at loose thresholds).
     auto const& ri() const { return _rp; }
     int Np() const { return _Np; }
-    /// Id of this THC's current build (new on every init()); copies and moves keep it. Unique per shared
-    /// object: each Python extension has its own counter, and all THCs are built in eri_module
-    std::uint64_t uid() const { return _uid; }
     int nkpts() const { return _nkpts; }
     int nkpts_ibz() const { return _nkpts_ibz; }
     int nqpts() const { return _nqpts; }
@@ -1204,12 +1198,6 @@ namespace methods {
     // the builder is gone.
     grids::truncated_g_grid   _rho_g;
     std::optional<pots::potential_t> _vG_opt;
-
-    static std::uint64_t next_uid() {
-      static std::atomic<std::uint64_t> counter{0};
-      return ++counter;
-    }
-    std::uint64_t _uid = next_uid();
 
     int _Np;
     int _nkpts;
