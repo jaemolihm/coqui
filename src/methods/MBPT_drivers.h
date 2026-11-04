@@ -282,6 +282,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt,
                                      const lr_local_inputs* local = nullptr);
 
+/// Drop the W_c(iw) and eps^-1 head kept by run_lr_calc(reuse_W = true). No-op if none is kept.
+void release_lr_W_cache();
+
 /**
  * @brief Linear response GW self-energy with fixed W (term 1)
  *

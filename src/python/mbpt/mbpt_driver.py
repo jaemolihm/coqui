@@ -398,7 +398,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            precond_method="none",
            precond_tol=None, precond_max_iter=None,
            hessian="none",
-           *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None):
+           *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None,
+           reuse_W=False):
     """
     Run unified linear response calculation.
 
@@ -516,6 +517,16 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
           eigenvalues/orbitals (one-shot G0W0@DFT). W0 is then the RPA screened
           interaction from G0 (recompute_W is forced on) and the checkpoint is
           used only for the IAFT grid + metadata.
+    reuse_W : bool, optional
+        If True, the W_c(iw) and eps^-1 head of this call stay resident in the process
+        (one extra W array) until release_lr_W_cache() (call it on every rank) or a call
+        with different ground-state inputs replaces them, and a later reuse_W call with
+        the same ground-state inputs (G, W source, div_treatment, IAFT grid, the THC
+        object and its build, and with local polarizabilities the projector inputs)
+        copies them instead of recomputing or reading W; the copy is consumed by that
+        call as usual. A call whose inputs differ rebuilds W and
+        replaces the kept one. Results are identical to a fresh call. Default False:
+        nothing is kept.
     split_sigma_terms : bool, optional
         If True, store the two one-shot ΔΣ terms separately (default False):
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
@@ -733,6 +744,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         lr_params["screened_interaction_file"] = str(screened_interaction_file)
     # Recompute W from the checkpoint Green's function instead of reading it.
     lr_params["recompute_W"] = bool(recompute_W)
+    lr_params["reuse_W"] = bool(reuse_W)
     # Unperturbed reference and split-term output (one-shot G0W0@DFT).
     lr_params["unperturbed"] = str(unperturbed)
     lr_params["split_sigma_terms"] = bool(split_sigma_terms)

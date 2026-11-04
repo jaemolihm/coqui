@@ -337,6 +337,10 @@ static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "h_int", "q_vec", "u_mP")};
 
+// release_lr_W_cache
+static auto const fun_16 = c2py::dispatcher_f_kw_t{
+    c2py::cfun([]() { return coqui_py::release_lr_W_cache(); })};
+
 static const auto doc_d_0 =
     fun_0.doc(R"DOC(
 Compute k+q mapping for linear response calculations
@@ -792,6 +796,9 @@ Returns
      {c2py::python_typename<const nda::array<double, 1> &>()},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 2>>>()}},
     {c2py::python_typename<nda::array<ComplexType, 5>>()});
+static const auto doc_d_16 = fun_16.doc(R"DOC(
+Drop the W_c(iw) and eps^-1 head kept by run_lr(reuse_W = True)
+)DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -825,6 +832,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_12.c_str()},
     {"mbpt", (PyCFunction)c2py::pyfkw<fun_13>, METH_VARARGS | METH_KEYWORDS,
      doc_d_13.c_str()},
+    {"release_lr_W_cache", (PyCFunction)c2py::pyfkw<fun_16>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_16.c_str()},
     {"run_lr", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
      doc_d_14.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
