@@ -2077,12 +2077,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     static_assert(std::is_same_v<dW_type, lr_W_t>);
     // reuse_W: the caller guarantees that the kept W belongs to this call's ground state and THC; only the
     // THC size is checked. W is reused only if every rank keeps one (a release on some ranks rebuilds on all).
-    bool W_hit = false;
+    bool reuse_W_done = false;
     if (reuse_W) {
       int kept = W_cache.has_value();
       mpi->comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
-      W_hit = (kept == mpi->comm.size());
-      if (W_hit) {
+      reuse_W_done = (kept == mpi->comm.size());
+      if (reuse_W_done) {
         auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
         long nw_half = (ft.nw_b() + 1) / 2;
         auto const& thc = eri.corr_eri->get();
@@ -2100,7 +2100,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         W_cache.reset();
       }
     }
-    if (!W_hit) {
+    if (!reuse_W_done) {
       if (recompute_W) {
         app_log(2, "Recomputing W from checkpoint Green's function ({})...",
                 gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
@@ -2127,7 +2127,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         div_treatment = div_str;
       }
     }
-    if (reuse_W && !W_hit) {
+    if (reuse_W && !reuse_W_done) {
       W_cache.emplace(lr_W_cache{*opt_dW, *opt_eps_inv, *opt_eps_inv_w});
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
