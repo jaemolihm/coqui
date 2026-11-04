@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <numeric>
+#include <optional>
 
 #include "configuration.hpp"
 #include "nda/nda.hpp"
@@ -40,14 +41,17 @@ namespace iter_scf {
  * Given the residual-overlap matrix B, return the real coefficient vector
  * c = B^{-1} 1 / (1^T B^{-1} 1). B is eigendecomposed (real part; the coefs
  * are constrained real) and inverted via a thresholded pseudoinverse, exactly
- * as in the original Pokhilko/Yeh/Zgid scheme. Extracted verbatim from
- * diis_alg::compute_coefs_c1 so the disk (VSpace/diis_alg) and the memory
- * SPMD (spmd_fock_sigma) paths compute identical coefficients from one source.
+ * as in the original Pokhilko/Yeh/Zgid scheme. The disk (VSpace/diis_alg) and the
+ * in-memory (in_memory_diis) paths compute their coefficients from this one source.
  *
- * @param m_B  residual-overlap matrix (n x n).
- * @return     real extrapolation coefficients (length n), summing to 1.
+ * @param m_B       residual-overlap matrix (n x n).
+ * @param log_level verbosity level of the condition-number message.
+ * @return          real extrapolation coefficients (length n), summing to 1; nullopt if
+ *                  the unnormalized coefficients sum to less than 1e-14 in magnitude or
+ *                  not to a finite number (B = 0 for vanishing residuals).
  */
-inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B) {
+inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B,
+                                                                  int log_level = 2) {
   auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
   const long n = B.shape()[0];
 
@@ -75,11 +79,15 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
 
   auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
   double eig_max = nda::max_element(eig);
-  double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
+  const double eig_min_abs = nda::min_element(eig_abs);
 
   const double eig_thresh = 1E-14;
 
-  app_log(2, "DIIS: Condition number of Jacobi-scaled B: {}", cond);
+  if (eig_min_abs > 0.0)
+    app_log(log_level, "DIIS: Condition number of Jacobi-scaled B: {}",
+            nda::max_element(eig_abs) / eig_min_abs);
+  else
+    app_log(log_level, "DIIS: Jacobi-scaled B is singular (smallest |eigenvalue| = 0)");
 
   // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
   for (auto i : nda::range(0, eig.size())) {
@@ -96,12 +104,7 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   for (long i = 0; i < n; ++i) x(i) /= d(i);
 
   double sum = std::accumulate(x.begin(), x.end(), 0.0);
-  utils::check(std::isfinite(sum) and std::abs(sum) > 1e-300,
-               "compute_diis_coefs_c1: singular residual-overlap matrix (sum of the "
-               "unnormalized coefficients = {}). B_ii = ||r_i||^2, so this happens when "
-               "the residuals are zero (already converged) or linearly dependent to "
-               "machine precision; normalizing would hand NaN coefficients to the "
-               "extrapolation.", sum);
+  if (not std::isfinite(sum) or std::abs(sum) < 1e-14) return std::nullopt;
   return nda::make_regular(x / sum);
 }
 

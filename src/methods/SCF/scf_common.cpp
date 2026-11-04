@@ -474,24 +474,24 @@ auto diis_init(iter_scf::iter_scf_t& iter_solver,
   iter_solver.initialize(sF_skij.local(), sSigma_tskij.local(), mu, S, H0, FT, output);
 }
 
-// This rank's slices of the previous accepted (F, Sigma) from scf/iter{iteration-1},
-// for the first in-memory mixing without an in-memory copy (the first one after a
-// restart). Every rank reads exactly the element slice it owns as an h5 hyperslab,
-// so no full copy of F or Sigma is materialized. A missing Sigma means an exactly
-// zero Sigma (HF checkpoints written before the Sigma_not_stored flag), unless
+// Fill m.prev with this rank's slices of the previous accepted (F, Sigma) from
+// scf/iter{iteration-1}, for the first in-memory mixing without an in-memory copy (the
+// first one after a restart). Every rank reads exactly the element slice it owns as an
+// h5 hyperslab, so no full copy of F or Sigma is materialized. A missing Sigma means an
+// exactly zero Sigma (HF checkpoints written before the Sigma_not_stored flag), unless
 // chkpt_slim omitted it.
 // Every rank opening the checkpoint read-only is affordable because this runs at
 // most once per run: after the first solve the previous state is in memory.
 template<typename X_t, typename Xt_t>
-auto stage_prev_state(iter_scf::spmd_damp const& d, std::string h5_prefix,
+void stage_prev_state(iter_scf::in_memory_mixing& m, std::string h5_prefix,
                       std::array<std::string,3> const& datasets, long iteration,
-                      X_t const& sF_skij, Xt_t const& sSigma_tskij)
-  -> std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>> {
-  auto [f0, f1] = d.F_range();
-  auto [s0, s1] = d.S_range();
-  nda::array<ComplexType, 1> F_prev(f1 - f0), S_prev(s1 - s0);
-  F_prev() = ComplexType(0.0);
-  S_prev() = ComplexType(0.0);
+                      X_t const& sF_skij, Xt_t const& sSigma_tskij) {
+  auto [f0, f1] = m.lay.F_range();
+  auto [s0, s1] = m.lay.S_range();
+  m.prev.F = nda::array<ComplexType, 1>(f1 - f0);
+  m.prev.S = nda::array<ComplexType, 1>(s1 - s0);
+  m.prev.F() = ComplexType(0.0);
+  m.prev.S() = ComplexType(0.0);
   std::string filename = h5_prefix + ".mbpt.h5";
   h5::file file(filename, 'r');
   h5::group grp(file);
@@ -501,41 +501,32 @@ auto stage_prev_state(iter_scf::spmd_damp const& d, std::string h5_prefix,
   auto it_grp = grp.open_group(grp_name);
   iter_scf::check_not_omitted_by_slim(it_grp, datasets[2], iteration-1);
   if (it_grp.has_dataset(datasets[1]))
-    utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), f0, f1, F_prev.data());
+    utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), f0, f1, m.prev.F.data());
   if (it_grp.has_dataset(datasets[2]))
-    utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij.shape(), s0, s1, S_prev.data());
-  return {std::move(F_prev), std::move(S_prev)};
+    utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij.shape(), s0, s1, m.prev.S.data());
+  m.has_prev = true;
 }
 
-// One element-sliced mixing step on the node-shared F/Sigma windows, shared by the
-// in-memory damping and the SPMD DIIS: stage the previous accepted state from the
-// checkpoint when need_prev (first mixing after a restart), let solve(F_prev, S_prev)
-// mix this rank's slices (it returns the per-rank {max|dF|, max|dSigma|}), max-reduce
-// them, and complete the windows.
-// Each rank reads/writes only its own slice of the windows (disjoint), so a fence
-// pair suffices. The slices are cut over the global comm, so a node then holds valid
-// data only for its own contiguous element run; one allgatherv over the node roots
-// completes every window. The completed array is a mosaic of per-node contributions,
-// which is exact on two invariants: the mixing is elementwise with coefficients
-// identical on every rank (the DIIS B is formed by one all_reduce), and every
-// producer of these windows ends in an internode all_reduce
-// (thc_solver_comm::aux_to_primary for the HF Fock, thc_gw.cpp for the GW Sigma,
-// thc_gf2.icc for GF2), so no node holds a private variant of the input.
-template<typename MPI_Context_t, typename X_t, typename Xt_t, typename Solve>
-auto spmd_mix_step(MPI_Context_t &context, iter_scf::spmd_damp const& d, bool need_prev,
-                   std::string const& h5_prefix, std::array<std::string,3> const& datasets,
-                   long iteration, X_t &sF_skij, Xt_t &sSigma_tskij, Solve&& solve)
+// One element-sliced mixing step (damping or DIIS) on the node-shared F/Sigma windows:
+// stage the previous accepted state from the checkpoint when there is none in memory
+// (first mixing after a restart), let m mix this rank's slices (it returns the per-rank
+// {max|dF|, max|dSigma|}), max-reduce them, and complete the windows
+// (self_energy_unflatten). C_t is the commutator residual, or null when
+// m.needs_residual() was false.
+// Each rank reads/writes only its own slice of the windows (disjoint), so a fence pair
+// suffices.
+template<typename MPI_Context_t, typename X_t, typename Xt_t, typename AC>
+auto in_memory_mix_step(MPI_Context_t &context, iter_scf::in_memory_mixing& m,
+                        std::string const& h5_prefix, std::array<std::string,3> const& datasets,
+                        long iteration, X_t &sF_skij, Xt_t &sSigma_tskij, const AC* C_t)
   -> std::tuple<double, double> {
-  std::optional<std::pair<nda::array<ComplexType, 1>, nda::array<ComplexType, 1>>> prev;
-  if (need_prev)
-    prev.emplace(stage_prev_state(d, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij));
+  if (not m.has_prev) stage_prev_state(m, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij);
   sF_skij.win().fence();
   sSigma_tskij.win().fence();
-  std::array<double, 2> conv = solve(prev ? &prev->first : nullptr,
-                                     prev ? &prev->second : nullptr);
+  std::array<double, 2> conv = m.step(context.comm, sF_skij.local(), sSigma_tskij.local(), C_t);
   // max is exactly order-independent
   context.comm.all_reduce_in_place_n(conv.data(), 2, mpi3::max<>{});
-  utils::complete_shared_slices(context, d.pmap(), sF_skij, sSigma_tskij);
+  iter_scf::self_energy_unflatten(context, m.lay, sF_skij, sSigma_tskij);
   return std::make_tuple(conv[0], conv[1]);
 }
 
@@ -543,25 +534,12 @@ template<typename MPI_Context_t, typename X_t, typename Xt_t>
 auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
                   long iteration, std::string h5_prefix,
                   X_t &sF_skij, Xt_t &sSigma_tskij,
-                  std::array<std::string,3> datasets, iter_scf::damp_t* dspmd)
+                  std::array<std::string,3> datasets)
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
   if (iteration == 1) {
     utils::check(false, "damping_impl: it = 1 is not allowed.");
-  } else if (dspmd) {
-    // Element-sliced damping with the previous accepted state in memory.
-    iter_solver.metadata_log();
-    auto& d = dspmd->spmd;
-    // Restart edge: no in-memory previous state; stage it from the checkpoint.
-    if (not d.initialized())
-      d.init(context, sF_skij.local().size(), sSigma_tskij.local().size());
-    std::tie(conv_F, conv_Sigma) = spmd_mix_step(
-        context, d, not d.has_prev(), h5_prefix, datasets, iteration, sF_skij, sSigma_tskij,
-        [&](auto const* F_prev, auto const* S_prev) {
-          return d.apply(dspmd->mixing, d.F_slice(sF_skij.local()),
-                         d.S_slice(sSigma_tskij.local()), F_prev, S_prev);
-        });
   } else {
     iter_solver.metadata_log();
     if (context.node_comm.root()) {
@@ -591,26 +569,38 @@ inline bool debug_serial_diis() {
   return serial;
 }
 
-// A12: the SPMD (element-sliced, all-rank) Dyson-DIIS path is taken when the
-// DIIS solver uses in-memory subspace storage and the driver supplied the
-// in-memory G/S/H0 (scf_driver does; the embed and qp callers do not).
-// Returns the diis_t driver when eligible, nullptr otherwise.
+// The in-memory (element-sliced, all-rank) mixing of the Dyson SCF is taken for damping,
+// and for DIIS with in-memory subspace storage, when the driver supplied the in-memory
+// G/S/H0 (scf_driver does; the embed and qp callers do not).
+// Returns the mixing state when eligible, nullptr otherwise.
 template<typename Xt_t, typename X_t>
-iter_scf::diis_t* spmd_diis_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
-                                const X_t* sS, const X_t* sH0) {
+iter_scf::in_memory_mixing* in_memory_mixing_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
+                                                 const X_t* sS, const X_t* sH0) {
   if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
-  auto* dp = iter_solver.get_diis(); // non-null only when the algorithm is DIIS
-  return (dp and dp->storage == "memory") ? dp : nullptr;
+  return iter_solver.get_in_memory();
 }
 
-// The element-sliced in-memory damping is taken for the same callers as the SPMD
-// DIIS (scf_driver; the embed and qp callers keep the checkpoint read).
-// Returns the damp_t driver when eligible, nullptr otherwise.
-template<typename Xt_t, typename X_t>
-iter_scf::damp_t* spmd_damp_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
-                                const X_t* sS, const X_t* sH0) {
-  if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
-  return iter_solver.get_damp(); // non-null only when the algorithm is damping
+// The k-striped distributed commutator residual C_t of the Dyson-SCF DIIS, computed by all
+// ranks. It is accumulated into a node-shared window: the (s,k) partition is disjoint, so
+// each rank writes distinct blocks (no intra-node reduce) and only the internode sum + a
+// fence are needed to complete it.
+template<typename MPI_Context_t, typename X_t, typename Xt_t>
+auto distributed_commutator(MPI_Context_t &context, const imag_axes_ft::IAFT *FT,
+                            const Xt_t& sG_tskij, X_t &sF_skij, Xt_t &sSigma_tskij, double mu,
+                            const X_t& sS_skij, const X_t& sH0_skij) {
+  auto [nt, ns, nk, nao, nao2] = sSigma_tskij.shape();
+  auto sC_t = math::shm::make_shared_array<Array_view_5D_t>(
+      context.comm, context.internode_comm, context.node_comm, {nt, ns, nk, nao, nao2});
+  sC_t.win().fence();
+  iter_scf::commutator_t_distributed(
+      context.comm, sC_t.local(), FT,
+      sG_tskij.local(), sF_skij.local(), sSigma_tskij.local(), mu,
+      sS_skij.local(), sH0_skij.local());
+  iter_scf::diis_timers::com_dist_reduce.start();
+  sC_t.win().fence();
+  sC_t.all_reduce(); // combine per-node windows across nodes (no-op on 1 node)
+  iter_scf::diis_timers::com_dist_reduce.stop();
+  return sC_t;
 }
 
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
@@ -628,62 +618,17 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
     iter_solver.metadata_log();
     int internode_proc_holding_extrap = 0;
 
-    // A10: k-striped distributed commutator residual, computed by all ranks.
+    // k-striped distributed commutator residual, computed by all ranks.
     // COQUI_DEBUG_SERIAL_DIIS=1 forces the original serial (root-only)
     // residual path for A/B validation.
     const bool distributed_residual =
         (not debug_serial_diis()) and sG_tskij and sS_skij and sH0_skij and
         iter_solver.iter_alg() == iter_scf::DIIS;
-
-    // A12: SPMD element-sliced in-memory DIIS (all ranks; storage == "memory").
-    iter_scf::diis_t* dspmd = spmd_diis_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij);
-    if (dspmd and not dspmd->spmd.initialized()) {
-      // Restart edge: mirror the serial lazy diis_init — the current trial
-      // becomes x0. There is no in-memory previous accepted state, so the
-      // first damping stages it from the checkpoint below.
-      dspmd->spmd.configure(dspmd->mixing, dspmd->max_subsp_size, dspmd->warmup_iter);
-      dspmd->spmd.init_x0(context, sF_skij.local(), sSigma_tskij.local(),
-                          /*capture_prev=*/false);
-    }
-    // The SPMD state is replicated, so all ranks agree on whether the next
-    // solve consumes the residual (the serial root-only path cannot know and
-    // wastes one evaluation per run on the grow-only first DIIS iteration).
-    const bool need_residual = distributed_residual and
-        (dspmd == nullptr or dspmd->spmd.needs_residual_next());
-
-    // The commutator C_t is accumulated into a node-shared window: the (s,k)
-    // partition is disjoint, so each rank writes distinct blocks (no intra-node
-    // reduce) and only the internode sum + a fence are needed to complete it.
     std::optional<sArray_t<Array_view_5D_t>> sC_t_dist;
-    if (need_residual) {
-      auto [nt, ns, nk, nao, nao2] = sSigma_tskij.shape();
-      sC_t_dist.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-          context.comm, context.internode_comm, context.node_comm, {nt, ns, nk, nao, nao2}));
-      sC_t_dist->win().fence();
-      iter_scf::commutator_t_distributed(
-          context.comm, sC_t_dist->local(), FT,
-          sG_tskij->local(), sF_skij.local(), sSigma_tskij.local(), mu,
-          sS_skij->local(), sH0_skij->local());
-      iter_scf::diis_timers::com_dist_reduce.start();
-      sC_t_dist->win().fence();
-      sC_t_dist->all_reduce(); // combine per-node windows across nodes (no-op on 1 node)
-      iter_scf::diis_timers::com_dist_reduce.stop();
-      // C_t is now complete on every rank's node-shared window.
-    }
+    if (distributed_residual)
+      sC_t_dist.emplace(distributed_commutator(context, FT, *sG_tskij, sF_skij, sSigma_tskij, mu,
+                                               *sS_skij, *sH0_skij));
 
-    if (dspmd) {
-      // === A12: SPMD in-memory DIIS solve over context.comm ===
-      std::optional<Array_view_5D_t> C_loc;
-      if (sC_t_dist) C_loc.emplace(sC_t_dist->local());
-      const Array_view_5D_t* Cp = C_loc ? &*C_loc : nullptr;
-      std::tie(conv_F, conv_Sigma) = spmd_mix_step(
-          context, dspmd->spmd.damp(), dspmd->spmd.needs_prev_state(), h5_prefix, datasets,
-          iteration, sF_skij, sSigma_tskij,
-          [&](auto const* F_prev, auto const* S_prev) {
-            return dspmd->spmd.solve(context.comm, sF_skij.local(), sSigma_tskij.local(),
-                                     Cp, F_prev, S_prev, iteration);
-          });
-    } else {
     // DIIS does not support mpi yet
     if (context.comm.root()) { // A global communicator here is needed for DIIS
 
@@ -721,10 +666,24 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
     // Send extrapolated F and Sigma to all nodes
     sF_skij.broadcast_to_nodes(internode_proc_holding_extrap);
     sSigma_tskij.broadcast_to_nodes(internode_proc_holding_extrap);
-    }
   }
   context.comm.barrier();
   return std::make_tuple(conv_F, conv_Sigma);
+}
+
+// Cut the slices of the in-memory mixing state: damping, or DIIS with a damping warmup
+// (the Dyson-SCF commutator residual needs two stored pairs to extrapolate).
+template<typename MPI_Context_t, typename X_t, typename Xt_t>
+void init_in_memory_mixing(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
+                           iter_scf::in_memory_mixing& m, X_t &sF_skij, Xt_t &sSigma_tskij) {
+  std::optional<iter_scf::in_memory_diis::config> cfg;
+  if (auto* dp = iter_solver.get_diis())
+    cfg = iter_scf::in_memory_diis::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
+                                           2, 2, /*newest_first=*/true};
+  m.init(context, sF_skij.local().size(), sSigma_tskij.local().size(), iter_solver.mixing(), cfg);
+  app_log(2, "In-memory mixing: element-sliced state active ({} parts over {} node(s), "
+             "slice sizes F {} / Sigma {})",
+          m.lay.pmap().nparts, context.internode_comm.size(), m.lay.mF(), m.lay.mS());
 }
 
 template<typename comm_t, typename X_t, typename Xt_t>
@@ -765,33 +724,39 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     auto Sigma_max_iter = max_element(sSigma_tskij.local().data(), sSigma_tskij.local().data()+sSigma_tskij.local().size(),
                                       [](auto a, auto b) { return std::abs(a) < std::abs(b); });
     conv_Sigma =  std::abs((*Sigma_max_iter));
-    if (iter_solver.iter_alg() == iter_scf::DIIS) {
-      if (auto* dspmd = spmd_diis_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
-        // A12: every rank captures its slice of the iteration-1 state as x0
-        // (the SPMD analogue of the root-only diis_init). No mixing is applied
-        // at iteration 1, so this state is also the accepted previous state
-        // for the first warmup damping.
-        dspmd->spmd.configure(dspmd->mixing, dspmd->max_subsp_size, dspmd->warmup_iter);
-        dspmd->spmd.init_x0(context, sF_skij.local(), sSigma_tskij.local(),
-                            /*capture_prev=*/true);
-      } else if (context.comm.root()) {
-        // Initialize DIIS solver at the root process since the serial solver doesn't support mpi
-        diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
-      }
-    } else if (auto* dd = spmd_damp_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
-      // No mixing is applied at iteration 1, so the current state is the
-      // accepted previous state of the first damping.
-      dd->spmd.init(context, sF_skij.local().size(), sSigma_tskij.local().size());
-      dd->spmd.set_prev(nda::array<ComplexType, 1>(dd->spmd.F_slice(sF_skij.local())),
-                        nda::array<ComplexType, 1>(dd->spmd.S_slice(sSigma_tskij.local())));
+    if (auto* m = in_memory_mixing_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+      // Every rank captures its slices of the iteration-1 state. No mixing is applied
+      // at iteration 1, so this state is also the accepted previous state of the
+      // first mixing.
+      init_in_memory_mixing(context, iter_solver, *m, sF_skij, sSigma_tskij);
+      m->lay.store(m->prev, sF_skij.local(), sSigma_tskij.local());
+      m->has_prev = true;
+    } else if (iter_solver.iter_alg() == iter_scf::DIIS and context.comm.root()) {
+      // Initialize DIIS solver at the root process since the serial solver doesn't support mpi
+      diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
     }
     context.comm.barrier();
+  } else if (auto* m = in_memory_mixing_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+    iter_solver.metadata_log();
+    // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
+    if (not m->initialized())
+      init_in_memory_mixing(context, iter_solver, *m, sF_skij, sSigma_tskij);
+    std::optional<sArray_t<Array_view_5D_t>> sC_t;
+    if (m->needs_residual())
+      sC_t.emplace(distributed_commutator(context, FT, *sG_tskij, sF_skij, sSigma_tskij, mu,
+                                          *sS_skij, *sH0_skij));
+    std::optional<Array_view_5D_t> C_loc;
+    if (sC_t) C_loc.emplace(sC_t->local());
+    std::optional<iter_scf::diis_timers::ScopeLog> breakdown_log;
+    if (iter_solver.iter_alg() == iter_scf::DIIS) breakdown_log.emplace();
+    std::tie(conv_F, conv_Sigma) = in_memory_mix_step(
+        context, *m, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij,
+        C_loc ? &*C_loc : nullptr);
+    context.comm.barrier();
   } else {
-
     if (iter_solver.iter_alg() == iter_scf::damping) {
       std::tie(conv_F, conv_Sigma) = damping_impl(
-          context, iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, datasets,
-          spmd_damp_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij));
+          context, iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, datasets);
     } else if (iter_solver.iter_alg() == iter_scf::DIIS) {
       std::tie(conv_F, conv_Sigma) = diis_impl(context, iter_solver, iteration, h5_prefix,
                                                sF_skij, sSigma_tskij, FT, datasets,

@@ -213,9 +213,12 @@ namespace bdft_tests {
 
     iter_scf::iter_scf_t damp_sol(iter_scf::damp_t(0.5));
     iter_scf::iter_scf_t diis_sol(iter_scf::diis_t(0.5, 6, 2));
+    // DIIS with the in-memory, element-sliced subspace (iter_scf::in_memory_diis)
+    iter_scf::iter_scf_t diis_mem_sol(iter_scf::diis_t(0.5, 6, 2, "commutator", "memory"));
 
     auto [e_hf_damp, e_corr_damp] = run_dyson_gw(damp_sol, "dyson_gw_damping_test");
     auto [e_hf_diis, e_corr_diis] = run_dyson_gw(diis_sol, "dyson_gw_diis_test");
+    auto [e_hf_mem, e_corr_mem] = run_dyson_gw(diis_mem_sol, "dyson_gw_diis_memory_test");
 
     // Reference from a converged wmax = 10.0 run with accuracy ~ 1e-7.
     constexpr double e_hf_ref = -0.41469260619183446 + -3.8312790207998515;
@@ -225,6 +228,8 @@ namespace bdft_tests {
     VALUE_EQUAL(e_corr_damp, e_corr_ref, abs_tol, abs_tol);
     VALUE_EQUAL(e_hf_diis, e_hf_ref, abs_tol, abs_tol);
     VALUE_EQUAL(e_corr_diis, e_corr_ref, abs_tol, abs_tol);
+    VALUE_EQUAL(e_hf_mem, e_hf_ref, abs_tol, abs_tol);
+    VALUE_EQUAL(e_corr_mem, e_corr_ref, abs_tol, abs_tol);
   }
 
 

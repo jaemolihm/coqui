@@ -43,7 +43,7 @@
 #include "numerics/iter_scf/diis/qp_com_diis_residual.h"
 
 #include "numerics/iter_scf/diis/diis_alg.hpp"
-#include "numerics/iter_scf/diis/spmd_fock_sigma_diis.hpp"
+#include "numerics/iter_scf/in_memory_mixing.hpp"
 #include "numerics/iter_scf/damp/damp_t.hpp"
 
 // TODO clean up duplicate codes between Heff and FockSigma extrapolation
@@ -216,7 +216,7 @@ namespace iter_scf {
         Array_4D_t &&F, std::string dataset_F, Array_5D_t &&Sigma, std::string dataset_Sigma,
         h5::group &scf_grp, long iter) {
         utils::check(initialized, "DIIS must be initialized before solving");
-        // D2: log the cumulative DIIS breakdown when this Dyson-SCF solve returns.
+        // Log the cumulative DIIS breakdown when this Dyson-SCF solve returns.
         diis_timers::ScopeLog _d2log;
         warmup_count += 1;
         if (x_vsp.size() == 1 || warmup_count <= warmup_iter) {
@@ -292,7 +292,7 @@ namespace iter_scf {
     }
 
     /**
-     * @brief Inject a pre-computed commutator residual C_t (A10 distributed path)
+     * @brief Inject a pre-computed commutator residual C_t (distributed path)
      * for the next Dyson-SCF commutator DIIS solve to consume.
      */
     template<nda::MemoryArrayOfRank<5> Array_C>
@@ -331,15 +331,10 @@ namespace iter_scf {
     // DIIS subspace storage: "disk" (HDF5-backed VSpace) or "memory" (in-memory;
     // faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
     std::string storage = "disk";
-    // A12: SPMD element-sliced in-memory engine for the Dyson (FockSigma) DIIS.
-    // Driven directly by diis_impl (scf_common.cpp) when storage == "memory"
-    // and the in-memory G/S/H0 are available; the members above and the serial
-    // stack below are untouched by it (disk keeps the exact root-only path).
-    // Slices span node_comm: with one rank per node the "spread the history"
-    // RAM benefit degenerates to full per-rank copies (correct, just not
-    // smaller). Validated at np8 single-node; multi-node state is re-synced
-    // from node 0 after each solve (see diis_impl).
-    spmd_fs_diis spmd;
+    // Element-sliced in-memory state of the Dyson (FockSigma) DIIS. Driven directly
+    // by solve_iterative (scf_common.cpp) when storage == "memory" and the in-memory
+    // G/S/H0 are available; the serial stack below is untouched by it.
+    in_memory_mixing in_memory;
     
   private:
     VSpace<FockSigma> x_vsp;                 // vector space of Fock-self-energy vectors

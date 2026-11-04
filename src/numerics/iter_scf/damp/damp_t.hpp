@@ -31,7 +31,7 @@
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
 #include "numerics/iter_scf/diis/diis_timers.hpp"
-#include "numerics/iter_scf/damp/spmd_damp.hpp"
+#include "numerics/iter_scf/in_memory_mixing.hpp"
 
 namespace iter_scf {
   /**
@@ -119,10 +119,10 @@ namespace iter_scf {
   public:
     double mixing = 0.7;
     bool initialized = true;
-    // Element-sliced in-memory damping, driven directly by damping_impl
+    // Element-sliced in-memory damping, driven directly by solve_iterative
     // (scf_common.cpp) for the Dyson SCF (the caller that supplies the in-memory
     // G/S/H0); solve() above keeps the checkpoint-reading path for the others.
-    spmd_damp spmd;
+    in_memory_mixing in_memory;
 
   };
 } // iter_scf

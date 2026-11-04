@@ -38,7 +38,7 @@ namespace iter_scf {
    *  - mixing: "0.7" For initial damping
    *  - max_subsp_size: "5" Maximal dimension of the extrapolation subspace
    *  - diis_start: "3" When to start applying DIIS extrapolation.
-   *  - storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
+   *  - diis_storage: "disk" Subspace storage. {choices: "disk" (HDF5-backed), "memory"
    *    (in-memory; faster, but holds 2*max_subsp_size Fock+Sigma vectors in RAM)}
    *    With chkpt_slim the default is "memory" and "disk" is rejected: disk DIIS
    *    mixes from Sigma_tskij of the previous iteration's checkpoint, which
@@ -69,12 +69,15 @@ namespace iter_scf {
             auto residual_type = io::get_value_with_default<std::string>(
               pt, "residual_type", is_evscf ? "vector_diff" : "commutator");
             io::tolower(residual_type);
-            auto storage = io::get_value_with_default<std::string>(pt, "storage", default_storage);
+            utils::check(not pt.get_child_optional("storage"),
+                         "iter_alg: the key \"storage\" is not recognized; the DIIS subspace storage "
+                         "is set by \"diis_storage\".");
+            auto storage = io::get_value_with_default<std::string>(pt, "diis_storage", default_storage);
             io::tolower(storage);
             utils::check(not (chkpt_slim and storage == "disk"),
-                         "iter_alg: storage = \"disk\" does not work with chkpt_slim = true: disk DIIS "
-                         "mixes with Sigma_tskij of the previous iteration, which chkpt_slim does not "
-                         "write. Use storage = \"memory\" (the default with chkpt_slim).");
+                         "iter_alg: diis_storage = \"disk\" does not work with chkpt_slim = true: disk "
+                         "DIIS mixes with Sigma_tskij of the previous iteration, which chkpt_slim does not "
+                         "write. Use diis_storage = \"memory\" (the default with chkpt_slim).");
             auto diis_start = io::get_value_with_default<size_t>(pt,"diis_start",-1);
             if (diis_start != -1) {
               app_log(1, "[WARNING] 'diis_start' is deprecated. Please use 'diis_warmup' instead \n"

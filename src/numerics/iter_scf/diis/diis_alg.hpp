@@ -85,6 +85,7 @@ private:
     
     nda::matrix<ComplexType> m_B;       // Overlap matrix of the residuals
     nda::array<ComplexType, 1> m_C;     // Vector of extrapolation coefficients
+    bool coefs_ok = false;              // whether the last compute_coefs produced m_C
     std::complex<double> lambda;        // Lagrange multiplier for the constraint
     size_t max_subsp_size;              // maximum size of the DIIS subspace
 
@@ -206,6 +207,11 @@ public:
         if (extrap && (res_vsp->size() > 1) ) {
             app_log(2, diis_str + "Performing the DIIS extrapolation. \n");
             compute_coefs(1);
+            if (not coefs_ok) {
+                app_log(1, "[WARNING] DIIS: the residual-overlap matrix is singular (the residuals vanish "
+                           "or are linearly dependent to machine precision); skipping the extrapolation.");
+                return 0;
+            }
             print_B();
             print_C();
             if(m_B.shape()[0] == m_B.shape()[1] && m_B.shape()[0] == m_C.shape()[0]) {
@@ -383,9 +389,15 @@ private:
 
 
     void compute_coefs_c1() {
-        // The eigendecomposition/pseudoinverse solve is shared with the SPMD
-        // in-memory DIIS path (diis_coefs.hpp) so it exists in one place only.
-        m_C = compute_diis_coefs_c1(m_B);
+        // The eigendecomposition/pseudoinverse solve is shared with in_memory_diis
+        // (diis_coefs.hpp).
+        auto C = compute_diis_coefs_c1(m_B);
+        if (C) {
+            m_C = *C;
+            coefs_ok = true;
+        } else {
+            coefs_ok = false;
+        }
      }
 
 

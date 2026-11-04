@@ -164,20 +164,20 @@ def _remove_outputs(mpi, outputs):
 @pytest.mark.parametrize("iter_alg", [
     {"alg": "damping", "mixing": 0.7},
     {"alg": "diis", "mixing": 0.7, "diis_warmup": 3},
-], ids=["damping", "diis_default_storage"])
+], ids=["damping", "diis_default_diis_storage"])
 def test_gw_chkpt_slim_mixing(mpi, iter_alg):
     # scGW, 3 iterations, chkpt_slim = true vs false: F, Sigma and G of the final
     # iteration agree to round-off. Iterations 2 and 3 damp (DIIS: warmup), so a
-    # mixing with the omitted Sigma read as zero fails this at O(1). For DIIS the
-    # slim run switches the default storage to "memory", so the reference is
-    # memory DIIS; 3 iterations with diis_warmup = 3 cover only the warmup damping
+    # mixing with the omitted Sigma read as zero fails this (measured: F rel. error
+    # 3.7e-3 against the 1e-12 bound). For DIIS the slim run switches the default
+    # diis_storage to "memory", so the reference is memory DIIS; 3 iterations with diis_warmup = 3 cover only the warmup damping
     # (the memory-DIIS extrapolation never reads the checkpoint).
     mf = construct_qe_mf(mpi, "qe_lih222_sym")
     eri_params = {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
                   "chol_block_size": 1, "init": True}
     thc = coqui.make_thc_coulomb(mf, eri_params)
 
-    ref_alg = dict(iter_alg, storage="memory") if iter_alg["alg"] == "diis" else iter_alg
+    ref_alg = dict(iter_alg, diis_storage="memory") if iter_alg["alg"] == "diis" else iter_alg
     _scgw_slim(mpi, thc, "gw_full", False, ref_alg, 3)
     _scgw_slim(mpi, thc, "gw_slim", True, iter_alg, 3)
 
@@ -245,7 +245,8 @@ thc = coqui.make_thc_coulomb(mf, {"storage": "incore", "thresh": 1e-4, "ecut": m
 coqui.run_gw({"restart": False, "output": "gw_slim_guard", "niter": 2, "beta": 100,
               "iaft": {"prec": "medium", "basis": "dlr"}, "chkpt_slim": True,
               "iter_alg": {"damping": {"alg": "damping", "mixing": 0.7},
-                           "disk_diis": {"alg": "diis", "storage": "disk"}}[sys.argv[1]]},
+                           "disk_diis": {"alg": "diis", "diis_storage": "disk"},
+                           "storage_key": {"alg": "diis", "storage": "memory"}}[sys.argv[1]]},
              h_int=thc)
 print("GUARD_NOT_TRIGGERED", flush=True)
 """
@@ -254,12 +255,15 @@ print("GUARD_NOT_TRIGGERED", flush=True)
 @pytest.mark.parametrize("case, expected", [
     ("damping", "omitted from the checkpoint by chkpt_slim"),
     ("disk_diis", "does not work with chkpt_slim = true"),
+    ("storage_key", 'set by "diis_storage"'),
 ])
 def test_gw_chkpt_slim_guard(mpi, case, expected):
     # Slim scGW runs that would mix from the omitted Sigma_tskij vs the chkpt_slim
     # guards: "damping" is the checkpoint-reading damping (forced by
     # COQUI_DEBUG_SERIAL_DIIS), which aborts at the read of iteration 1;
-    # "disk_diis" is an explicit storage = "disk", rejected at input parsing.
+    # "disk_diis" is an explicit diis_storage = "disk", rejected at input parsing;
+    # "storage_key" is the removed key "storage", rejected at input parsing with a
+    # message naming "diis_storage".
     # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by
     # rank 0.
     import subprocess

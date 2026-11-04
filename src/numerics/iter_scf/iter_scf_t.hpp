@@ -71,6 +71,11 @@ namespace iter_scf {
       return std::visit( [&](auto&& v) { return v.initialize(std::forward<Args>(args)...); }, _alg_var);
     }
 
+    // Mixing factor of the active algorithm.
+    double mixing() const {
+      return std::visit( [&](auto&& v) { return v.mixing; }, _alg_var);
+    }
+
     bool is_initialized() const {
       return std::visit( [&](auto&& v) { return v.initialized; }, _alg_var);
     }
@@ -85,7 +90,7 @@ namespace iter_scf {
       }, _alg_var);
     }
 
-    // Inject a pre-computed commutator residual C_t (A10 distributed path) into
+    // Inject a pre-computed commutator residual C_t (distributed path) into
     // the active algorithm (DIIS only; a no-op for algorithms without this hook).
     template<class Array5D>
     void upload_diis_residual(const Array5D& C_t) {
@@ -96,11 +101,16 @@ namespace iter_scf {
     }
 
     // Direct access to the DIIS driver (nullptr when the active algorithm is
-    // not DIIS). Used by the A12 SPMD Dyson-DIIS path in scf_common.cpp.
+    // not DIIS). Used by the memory report.
     diis_t* get_diis() { return std::get_if<diis_t>(&_alg_var); }
-    // Direct access to the damping driver (nullptr when the active algorithm is
-    // not damping). Used by the in-memory damping path in scf_common.cpp.
-    damp_t* get_damp() { return std::get_if<damp_t>(&_alg_var); }
+    // The element-sliced in-memory state of damping, or of DIIS with in-memory
+    // subspace storage; nullptr for DIIS with disk storage. Used by the in-memory
+    // Dyson-SCF mixing in scf_common.cpp.
+    in_memory_mixing* get_in_memory() {
+      if (auto* d = std::get_if<damp_t>(&_alg_var)) return &d->in_memory;
+      auto* dp = std::get_if<diis_t>(&_alg_var);
+      return (dp and dp->storage == "memory") ? &dp->in_memory : nullptr;
+    }
 
     void metadata_log() const {
       std::visit( [&](auto&& v) { v.metadata_log(); }, _alg_var);

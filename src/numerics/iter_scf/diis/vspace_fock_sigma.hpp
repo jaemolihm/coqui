@@ -353,7 +353,7 @@ void commutator_t(Array_G& C_t, const imag_axes_ft::IAFT *FT,
 
 
 /**
- * A10: k-striped SPMD version of commutator_t.
+ * k-striped distributed version of commutator_t.
  *
  * Every rank reads G, F, Sigma, S, H0 directly from the node-shared arrays
  * (byte-identical on all ranks) and processes only its own round-robin subset

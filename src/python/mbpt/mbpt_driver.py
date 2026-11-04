@@ -152,11 +152,12 @@ def run_hf(params, h_int, h_int_exchange=None):
             subspace size (ignored for ``"damping"``).
           - ``residual_type`` *(str, optional, default ``"commutator"``)* — residual
             definition for DIIS. ``"commutator"`` or ``"vector_diff"``.
-          - ``storage`` *(str, optional, default ``"disk"``; ``"memory"`` with
+          - ``diis_storage`` *(str, optional, default ``"disk"``; ``"memory"`` with
             ``chkpt_slim``)* — DIIS subspace storage. ``"disk"`` (HDF5 files in
             the working directory) or ``"memory"``. ``"disk"`` is rejected with
             ``chkpt_slim``: it mixes with the previous iteration's ``Sigma_tskij``
             read from the checkpoint.
+            The former key ``storage`` is rejected.
 
         - ``chkpt_slim`` *(bool, optional, default ``False``)* — if ``True``,
           ``G_tskij`` and ``Sigma_tskij`` are written only for the final SCF
