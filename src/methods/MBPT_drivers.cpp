@@ -2081,7 +2081,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     if (reuse_W) {
       int kept = W_cache.has_value();
       mpi->comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
-      reuse_W_done = (kept == mpi->comm.size());
+      reuse_W_done = (kept == mpi->comm.size());  // reuse is done only if the cache is present in all ranks
       if (reuse_W_done) {
         auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
         long nw_half = (ft.nw_b() + 1) / 2;
@@ -2101,7 +2101,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       }
     }
     if (!reuse_W_done) {
+      // W is not reused from memory, either recompute or read from file
       if (recompute_W) {
+        // Recompute W using Green's functions
         app_log(2, "Recomputing W from checkpoint Green's function ({})...",
                 gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
         auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
@@ -2110,6 +2112,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         opt_eps_inv.emplace(std::move(eps_inv));
         opt_eps_inv_w.emplace(std::move(eps_inv_w));
       } else {
+        // Read W from disk
         auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
             *mpi, eri.corr_eri->get(), ft, input_file, input_grp,
             screened_interaction_file);
