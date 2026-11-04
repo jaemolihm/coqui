@@ -42,7 +42,7 @@
  * *elements* of an array over the ranks of an existing communicator, so that a
  * quantity derived from a node-replicated array (an iterative-solver history, a
  * "previous iterate" copy, a norm) is stored and computed once globally instead
- * of once per node. Users: iter_scf::self_energy_flatten (the in-memory mixing of
+ * of once per node. Users: iter_scf::self_energy_slice (the in-memory mixing of
  * the Dyson SCF and of the LR driver) and lr_hessian_t.
  */
 namespace utils {

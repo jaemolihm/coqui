@@ -273,6 +273,7 @@ void lr_driver::lr_setup(
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
       _lr_gcr = std::make_unique<lr_gcr>(cap);
     } else if (p.iter_params.alg == "DIIS") {
+      // LR DIIS is always in memory (element-sliced); iter_alg.diis_storage is not read.
       _diis.emplace(iter_scf::in_memory_diis::config{
           p.iter_params.mixing, p.iter_params.max_subsp_size, p.iter_params.diis_warmup,
           /*min_subsp=*/3, /*log_level=*/3});
@@ -395,9 +396,9 @@ void lr_driver::lr_setup(
   // ΔV_QPGW in its place).
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
   const auto pmap = utils::make_part_map(*_mpi);
-  _slices = iter_scf::self_energy_flatten(
+  _slices = iter_scf::self_energy_slice(
       pmap, nF, qp ? nF : (K.has_sigma() ? _nts * nF : 0));
-  _slices_F = iter_scf::self_energy_flatten(pmap, nF, 0);
+  _slices_F = iter_scf::self_energy_slice(pmap, nF, 0);
   _prev.F = nda::array<ComplexType, 1>(_slices.mF());
   _prev.S = nda::array<ComplexType, 1>(_slices.mS());
   _DeltaDm_prev = nda::array<ComplexType, 1>(_slices.mF());

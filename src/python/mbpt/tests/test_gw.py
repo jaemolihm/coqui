@@ -254,7 +254,7 @@ print("GUARD_NOT_TRIGGERED", flush=True)
 
 
 @pytest.mark.parametrize("case, expected", [
-    ("damping", "omitted from the checkpoint by chkpt_slim"),
+    ("damping", "is not stored in the checkpoint (Sigma_not_stored = true)"),
     ("disk_diis", "does not work with chkpt_slim = true"),
     ("storage_key", 'set by "diis_storage"'),
 ])

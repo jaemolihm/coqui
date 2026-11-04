@@ -85,7 +85,7 @@ namespace methods {
  * (ΔF + ΔΣ)-sized slice. With a Σ in the kernel one pair costs a ΔΣ, as one
  * DIIS depth unit does; the pairs are allocated as the basis grows.
  *
- * Every rank of `comm` holds its slice (iter_scf::self_energy_flatten) of every vector, and the
+ * Every rank of `comm` holds its slice (iter_scf::self_energy_slice) of every vector, and the
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
@@ -156,7 +156,7 @@ public:
    * @return ‖r‖ after the step
    */
   template<typename Comm, typename FView, typename SView>
-  double step(Comm& comm, iter_scf::self_energy_flatten const& lay,
+  double step(Comm& comm, iter_scf::self_energy_slice const& lay,
               FView F_inout, SView S_inout, iter_scf::flat_self_energy const& probe,
               double tol, bool& converged,
               std::function<void(Vec1D const&, Vec1D&)> const* precond = nullptr) {
@@ -368,7 +368,7 @@ private:
  *                            concatenation [F; S]; collective. Null: z = r
  */
 template<typename FView, typename SView>
-void lr_damping_step(iter_scf::self_energy_flatten const& lay, FView F_inout, SView S_inout,
+void lr_damping_step(iter_scf::self_energy_slice const& lay, FView F_inout, SView S_inout,
                      iter_scf::flat_self_energy const& prev, double mixing,
                      std::function<void(nda::array<ComplexType, 1> const&,
                                         nda::array<ComplexType, 1>&)> const* precond) {

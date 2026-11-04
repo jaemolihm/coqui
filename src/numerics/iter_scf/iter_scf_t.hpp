@@ -31,6 +31,7 @@
 
 #include "numerics/iter_scf/damp/damp_t.hpp"
 #include "numerics/iter_scf/diis/diis_t.hpp"
+#include "numerics/iter_scf/in_memory_mixing.hpp"
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
 
@@ -52,13 +53,13 @@ namespace iter_scf {
 
     explicit iter_scf_t(const damp_t &damp): _alg_var(damp) {}
     explicit iter_scf_t(damp_t&& damp): _alg_var(std::move(damp)) {}
-    iter_scf_t& operator=(const damp_t& damp) { _alg_var = damp; return *this; }
-    iter_scf_t& operator=(damp_t&& damp) { _alg_var = std::move(damp); return *this; }
+    iter_scf_t& operator=(const damp_t& damp) { _alg_var = damp; _state = {}; return *this; }
+    iter_scf_t& operator=(damp_t&& damp) { _alg_var = std::move(damp); _state = {}; return *this; }
 
     explicit iter_scf_t(const diis_t &diis): _alg_var(diis) {}
     explicit iter_scf_t(diis_t&& diis): _alg_var(std::move(diis)) {}
-    iter_scf_t& operator=(const diis_t& diis) { _alg_var = diis; return *this; }
-    iter_scf_t& operator=(diis_t&& diis) { _alg_var = std::move(diis); return *this; }
+    iter_scf_t& operator=(const diis_t& diis) { _alg_var = diis; _state = {}; return *this; }
+    iter_scf_t& operator=(diis_t&& diis) { _alg_var = std::move(diis); _state = {}; return *this; }
 
     template<class... Args>
     auto solve(Args&&... args) {
@@ -103,13 +104,12 @@ namespace iter_scf {
     // Direct access to the DIIS driver (nullptr when the active algorithm is
     // not DIIS). Used by the memory report.
     diis_t* get_diis() { return std::get_if<diis_t>(&_alg_var); }
-    // The element-sliced in-memory state of damping, or of DIIS with in-memory
-    // subspace storage; nullptr for DIIS with disk storage. Used by the in-memory
-    // Dyson-SCF mixing in scf_common.cpp.
-    in_memory_mixing* get_in_memory() {
-      if (auto* d = std::get_if<damp_t>(&_alg_var)) return &d->in_memory;
+    // The element-sliced in-memory state, for damping or DIIS with diis_storage = "memory";
+    // nullptr for disk DIIS. Used by the in-memory Dyson-SCF mixing in scf_common.cpp.
+    mixing_state* mixing_state_if_in_memory() {
+      if (std::holds_alternative<damp_t>(_alg_var)) return &_state;
       auto* dp = std::get_if<diis_t>(&_alg_var);
-      return (dp and dp->storage == "memory") ? &dp->in_memory : nullptr;
+      return (dp and dp->storage == "memory") ? &_state : nullptr;
     }
 
     void metadata_log() const {
@@ -123,6 +123,7 @@ namespace iter_scf {
     ~iter_scf_t() {};
   private:
     std::variant<damp_t,diis_t> _alg_var;
+    mixing_state _state;  // in-memory mixing state of the active algorithm (unused by disk DIIS)
 
   };
 

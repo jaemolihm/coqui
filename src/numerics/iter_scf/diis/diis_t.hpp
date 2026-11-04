@@ -43,7 +43,6 @@
 #include "numerics/iter_scf/diis/qp_com_diis_residual.h"
 
 #include "numerics/iter_scf/diis/diis_alg.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
 #include "numerics/iter_scf/damp/damp_t.hpp"
 
 // TODO clean up duplicate codes between Heff and FockSigma extrapolation
@@ -329,13 +328,9 @@ namespace iter_scf {
     bool initialized_qp = false;
     std::string residual_type = "commutator";
     // DIIS subspace storage: "disk" (HDF5-backed VSpace) or "memory" (in-memory;
-    // faster; scf_driver keeps the history element-sliced over all ranks (in_memory below),
+    // faster; scf_driver keeps the history element-sliced over all ranks (iter_scf_t::mixing_state),
     // other callers hold 2*max_subsp_size Fock+Sigma vectors in RAM on the DIIS rank)
     std::string storage = "disk";
-    // Element-sliced in-memory state of the Dyson (FockSigma) DIIS. Driven directly
-    // by solve_iterative (scf_common.cpp) when storage == "memory" and the in-memory
-    // G/S/H0 are available; the serial stack below is untouched by it.
-    in_memory_mixing in_memory;
     
   private:
     VSpace<FockSigma> x_vsp;                 // vector space of Fock-self-energy vectors

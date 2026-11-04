@@ -606,9 +606,9 @@ private:
   /// handles one slice and the whole job stores each of them once instead of once per
   /// node. The second block is ΔΣ(iω) when the kernel carries a Σ, ΔV_QPGW in qp mode,
   /// and absent otherwise.
-  iter_scf::self_energy_flatten _slices;
+  iter_scf::self_energy_slice _slices;
   /// The same slicing of ΔF alone (the preconditioner's inner GCR).
-  iter_scf::self_energy_flatten _slices_F;
+  iter_scf::self_energy_slice _slices_F;
   /// This rank's slices of the previous iterate (ΔF, second block) and of the previous ΔDm.
   iter_scf::flat_self_energy _prev;
   nda::array<ComplexType, 1> _DeltaDm_prev;

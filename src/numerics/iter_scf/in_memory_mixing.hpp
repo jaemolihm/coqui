@@ -68,12 +68,12 @@ struct flat_self_energy {
 };
 
 /// This rank's cut of the pair (F, Sigma) of flattened sizes nF and nS (nS = 0: F only).
-class self_energy_flatten {
+class self_energy_slice {
 public:
-  self_energy_flatten() = default;
+  self_energy_slice() = default;
 
   /// Not collective.
-  self_energy_flatten(utils::part_map pmap, long nF, long nS)
+  self_energy_slice(utils::part_map pmap, long nF, long nS)
       : _pmap(std::move(pmap)), _nF(nF), _nS(nS) {
     std::tie(_f0, _f1) = _pmap.my_slice(_nF);
     std::tie(_s0, _s1) = _pmap.my_slice(_nS);
@@ -123,13 +123,13 @@ private:
  * that no node holds a private variant of the input.
  */
 template<typename MPI_Context_t, typename... sArr_t>
-void self_energy_unflatten(MPI_Context_t& mpi, self_energy_flatten const& flat, sArr_t&... arrs) {
+void self_energy_unflatten(MPI_Context_t& mpi, self_energy_slice const& flat, sArr_t&... arrs) {
   utils::complete_shared_slices(mpi, flat.pmap(), arrs...);
 }
 
 /// x <- mixing * x + (1 - mixing) * prev on this rank's slices; nothing for mixing >= 1.
 template<typename AF, typename AS>
-void damp_slices(self_energy_flatten const& lay, double mixing, AF&& F, AS&& S,
+void damp_slices(self_energy_slice const& lay, double mixing, AF&& F, AS&& S,
                  flat_self_energy const& prev) {
   if (mixing >= 1.0) return;
   auto F_loc = lay.F(F);
@@ -195,7 +195,7 @@ public:
    * @param rF, rS   - this rank's slices of the residual; rF may be empty
    */
   template<typename Comm, typename AF, typename AS, typename RF, typename RS>
-  void push(Comm& comm, self_energy_flatten const& lay, AF const& F, AS const& S,
+  void push(Comm& comm, self_energy_slice const& lay, AF const& F, AS const& S,
             RF const& rF, RS const& rS) {
     if (not active()) return;
     diis_timers::inmem_hist_store.start();
@@ -220,7 +220,7 @@ public:
    * extrapolated. Every rank takes the same branch.
    */
   template<typename AF, typename AS>
-  bool mix(self_energy_flatten const& lay, AF&& F, AS&& S, flat_self_energy const& prev) {
+  bool mix(self_energy_slice const& lay, AF&& F, AS&& S, flat_self_energy const& prev) {
     ++_steps;
     const int L = _cfg.log_level;
     auto damp = [&]() {
@@ -353,8 +353,8 @@ private:
 
 /// Ground-state Dyson-SCF state of the in-memory mixers (damping, or DIIS with a damping
 /// warmup): the slicing, the previous accepted state, and the DIIS engine for DIIS.
-struct in_memory_mixing {
-  self_energy_flatten lay;
+struct mixing_state {
+  self_energy_slice lay;
   flat_self_energy prev;     ///< this rank's slices of the previous accepted (post-mix) state
   bool has_prev = false;
   double mixing = 1.0;       ///< damping factor of the damping algorithm
@@ -367,7 +367,7 @@ struct in_memory_mixing {
   template<typename MPI_Context_t>
   void init(MPI_Context_t& mpi, long nF, long nS, double mixing_,
             std::optional<in_memory_diis::config> diis_cfg) {
-    lay = self_energy_flatten(utils::make_part_map(mpi), nF, nS);
+    lay = self_energy_slice(utils::make_part_map(mpi), nF, nS);
     mixing = mixing_;
     has_prev = false;
     diis.reset();

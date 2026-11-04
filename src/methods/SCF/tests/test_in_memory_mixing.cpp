@@ -127,7 +127,7 @@ auto make_shared(Ctx& ctx, Shape const& shape) {
 
 } // namespace
 
-// iter_scf::in_memory_mixing: the damping steps against out = mixing*new + (1-mixing)*prev
+// iter_scf::mixing_state: the damping steps against out = mixing*new + (1-mixing)*prev
 // bit for bit (every layout), the extrapolation steps against agreement of every rank on
 // the completed window (zero spread), with a DIIS of 3 pairs and 2 warmup steps.
 TEST_CASE("in_memory_mixing_synthetic_nodes", "[methods_scf]") {
@@ -155,14 +155,14 @@ TEST_CASE("in_memory_mixing_synthetic_nodes", "[methods_scf]") {
       };
       const double spread_F = max_spread(sF, nF);
       const double spread_S = max_spread(sS, nS);
-      app_log(2, "in_memory_mixing [{}] iter {}: nodes = {}, cross-rank spread F {:.1e} / Sigma {:.1e}",
+      app_log(2, "mixing_state [{}] iter {}: nodes = {}, cross-rank spread F {:.1e} / Sigma {:.1e}",
               tag, iter, ctx.internode_comm.size(), spread_F, spread_S);
       REQUIRE(spread_F == 0.0);
       REQUIRE(spread_S == 0.0);
     };
 
     // DIIS (max_subsp 3, warmup 2, min_subsp 2) with the previous accepted state of iteration 0.
-    iter_scf::in_memory_mixing mix;
+    iter_scf::mixing_state mix;
     mix.init(ctx, nF, nS, mixing,
              iter_scf::in_memory_diis::config{mixing, 3, 2, 2, 2});
     fill_flat(sF, 0, 0.0);
@@ -212,7 +212,7 @@ TEST_CASE("in_memory_mixing_synthetic_nodes", "[methods_scf]") {
 
     // Damping alone (the Dyson-SCF damping) vs out = mixing*new + (1-mixing)*prev,
     // bit for bit, with prev from memory after iteration 0 was captured.
-    iter_scf::in_memory_mixing damp;
+    iter_scf::mixing_state damp;
     damp.init(ctx, nF, nS, mixing, std::nullopt);
     fill_flat(sF, 0, 0.0);
     fill_flat(sS, 0, 1.0);
@@ -247,13 +247,13 @@ TEST_CASE("in_memory_mixing_synthetic_nodes", "[methods_scf]") {
   });
 }
 
-// iter_scf::self_energy_flatten on the synthetic layouts: the slices tile [0, n) exactly
+// iter_scf::self_energy_slice on the synthetic layouts: the slices tile [0, n) exactly
 // once, store() then writing the slices into a poisoned window and completing it
 // reproduces the reference on every rank bit for bit, and rF()/rS() address the
 // concatenation [F; S] of the slices. Cases: F and Sigma of ordinary sizes, F alone
 // (nS = 0, with an empty array standing in for Sigma), and a Sigma of 3 elements over
 // >= 4 ranks (empty trailing slices).
-TEST_CASE("self_energy_flatten_round_trip", "[methods_scf]") {
+TEST_CASE("self_energy_slice_round_trip", "[methods_scf]") {
   struct sizes_t { shape_t<4> F; shape_t<5> S; bool has_S; std::string name; };
   const std::vector<sizes_t> cases = {
     {{1, 3, 5, 5}, {7, 1, 3, 5, 5}, true, "F 75 / S 525"},
@@ -261,7 +261,7 @@ TEST_CASE("self_energy_flatten_round_trip", "[methods_scf]") {
     {{1, 3, 5, 5}, {3, 1, 1, 1, 1}, true, "S of 3 elements"},
   };
 
-  for_each_synthetic_layout("self_energy_flatten_round_trip", [&](auto& ctx, std::string const& tag) {
+  for_each_synthetic_layout("self_energy_slice_round_trip", [&](auto& ctx, std::string const& tag) {
     for (auto const& c : cases) {
       INFO(tag << ", " << c.name);
       auto sF = make_shared(ctx, c.F);
@@ -271,7 +271,7 @@ TEST_CASE("self_energy_flatten_round_trip", "[methods_scf]") {
       for (long i = 0; i < nF; ++i) nda::reshape(refF, shape_t<1>{nF})(i) = val(i, 1, 0.0);
       for (long i = 0; i < nS; ++i) nda::reshape(refS, shape_t<1>{nS})(i) = val(i, 1, 1.0);
 
-      const iter_scf::self_energy_flatten lay(utils::make_part_map(ctx), nF, nS);
+      const iter_scf::self_energy_slice lay(utils::make_part_map(ctx), nF, nS);
 
       // The slices tile [0, n): gather every part's range, indexed by part.
       const long np = lay.pmap().nparts;
@@ -385,7 +385,7 @@ struct affine_map {
 // after each step; returns the final x. gs_residual: the residual has an empty F block and (g(x) - x) on S (the Dyson-SCF
 // commutator layout), else g(x) - x on both blocks (the LR layout).
 template<typename Comm, typename FV, typename SV, typename Load, typename Complete>
-nda::array<ComplexType, 1> run_affine(Comm& comm, iter_scf::self_energy_flatten const& lay,
+nda::array<ComplexType, 1> run_affine(Comm& comm, iter_scf::self_energy_slice const& lay,
                                       iter_scf::in_memory_diis& diis, affine_map const& P,
                                       FV F, SV S, Load&& load, Complete&& complete,
                                       bool gs_residual, int nsteps) {
@@ -430,7 +430,7 @@ TEST_CASE("in_memory_diis_affine_fixed_point", "[methods_scf]") {
   auto self = world.split(world.rank(), 0);
   utils::part_map pmap1;
   pmap1.nparts = 1;
-  const iter_scf::self_energy_flatten lay1(pmap1, P.nF, P.nS);
+  const iter_scf::self_energy_slice lay1(pmap1, P.nF, P.nS);
   nda::array<ComplexType, 4> F1(shape_t<4>{1, 1, 2, 2});
   nda::array<ComplexType, 5> S1(shape_t<5>{2, 1, 2, 2, 1});
   iter_scf::in_memory_diis::config gs_cfg{1.0, 20, 0, 2, 2};
@@ -459,7 +459,7 @@ TEST_CASE("in_memory_diis_affine_fixed_point", "[methods_scf]") {
     INFO(tag);
     auto sF = make_shared(ctx, shape_t<4>{1, 1, 2, 2});
     auto sS = make_shared(ctx, shape_t<5>{2, 1, 2, 2, 1});
-    const iter_scf::self_energy_flatten lay(utils::make_part_map(ctx), P.nF, P.nS);
+    const iter_scf::self_energy_slice lay(utils::make_part_map(ctx), P.nF, P.nS);
     auto complete = [&] { iter_scf::self_energy_unflatten(ctx, lay, sF, sS); };
     // The node root loads g(x); the fences order the load before every rank's in-place mixing.
     auto load = [&](auto const& gF, auto const& gS) {
@@ -516,7 +516,7 @@ TEST_CASE("in_memory_diis_fallback_to_damping", "[methods_scf]") {
 
   utils::part_map pmap1;
   pmap1.nparts = 1;
-  const iter_scf::self_energy_flatten lay(pmap1, 5, 7);
+  const iter_scf::self_energy_slice lay(pmap1, 5, 7);
   nda::array<ComplexType, 1> F(5), S(7), Fn(5), Sn(7);
   for (long i = 0; i < 5; ++i) { F(i) = val(i, 0, 0.0); Fn(i) = val(i, 1, 0.0); }
   for (long i = 0; i < 7; ++i) { S(i) = val(i, 0, 1.0); Sn(i) = val(i, 1, 1.0); }
@@ -563,7 +563,7 @@ TEST_CASE("in_memory_diis_fallback_to_damping", "[methods_scf]") {
     auto sF = make_shared(ctx, shape_t<4>{1, 1, 2, 2});
     auto sS = make_shared(ctx, shape_t<5>{2, 1, 2, 2, 1});
     const long nF = sF.local().size(), nS = sS.local().size();
-    iter_scf::in_memory_mixing mix;
+    iter_scf::mixing_state mix;
     mix.init(ctx, nF, nS, m, iter_scf::in_memory_diis::config{m, 1, 0, 2, 2});
     auto fill = [&](long iter) {
       sF.win().fence();

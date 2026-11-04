@@ -483,7 +483,7 @@ auto diis_init(iter_scf::iter_scf_t& iter_solver,
 // Every rank opening the checkpoint read-only is affordable because this runs at
 // most once per run: after the first solve the previous state is in memory.
 template<typename X_t, typename Xt_t>
-void stage_prev_state(iter_scf::in_memory_mixing& m, std::string h5_prefix,
+void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
                       std::array<std::string,3> const& datasets, long iteration,
                       X_t const& sF_skij, Xt_t const& sSigma_tskij) {
   auto [f0, f1] = m.lay.F_range();
@@ -499,7 +499,7 @@ void stage_prev_state(iter_scf::in_memory_mixing& m, std::string h5_prefix,
   utils::check(grp.has_subgroup(grp_name),
                "stage_prev_state: {} does not exist in {}.", grp_name, filename);
   auto it_grp = grp.open_group(grp_name);
-  iter_scf::check_not_omitted_by_slim(it_grp, datasets[2], iteration-1);
+  iter_scf::check_checkpoint_dataset_present(it_grp, datasets[2], iteration-1);
   if (it_grp.has_dataset(datasets[1]))
     utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), f0, f1, m.prev.F.data());
   if (it_grp.has_dataset(datasets[2]))
@@ -516,7 +516,7 @@ void stage_prev_state(iter_scf::in_memory_mixing& m, std::string h5_prefix,
 // Each rank reads/writes only its own slice of the windows (disjoint), so a fence pair
 // suffices.
 template<typename MPI_Context_t, typename X_t, typename Xt_t, typename AC>
-auto in_memory_mix_step(MPI_Context_t &context, iter_scf::in_memory_mixing& m,
+auto in_memory_mix_step(MPI_Context_t &context, iter_scf::mixing_state& m,
                         std::string const& h5_prefix, std::array<std::string,3> const& datasets,
                         long iteration, X_t &sF_skij, Xt_t &sSigma_tskij, const AC* C_t)
   -> std::tuple<double, double> {
@@ -574,10 +574,10 @@ inline bool debug_serial_diis() {
 // G/S/H0 (scf_driver does; the embed and qp callers do not).
 // Returns the mixing state when eligible, nullptr otherwise.
 template<typename Xt_t, typename X_t>
-iter_scf::in_memory_mixing* in_memory_mixing_ptr(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
+iter_scf::mixing_state* in_memory_state(iter_scf::iter_scf_t& iter_solver, const Xt_t* sG,
                                                  const X_t* sS, const X_t* sH0) {
   if (debug_serial_diis() or not sG or not sS or not sH0) return nullptr;
-  return iter_solver.get_in_memory();
+  return iter_solver.mixing_state_if_in_memory();
 }
 
 // The k-striped distributed commutator residual C_t of the Dyson-SCF DIIS, computed by all
@@ -675,7 +675,7 @@ auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
 // (the Dyson-SCF commutator residual needs two stored pairs to extrapolate).
 template<typename MPI_Context_t, typename X_t, typename Xt_t>
 void init_in_memory_mixing(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
-                           iter_scf::in_memory_mixing& m, X_t &sF_skij, Xt_t &sSigma_tskij) {
+                           iter_scf::mixing_state& m, X_t &sF_skij, Xt_t &sSigma_tskij) {
   std::optional<iter_scf::in_memory_diis::config> cfg;
   if (auto* dp = iter_solver.get_diis())
     cfg = iter_scf::in_memory_diis::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
@@ -724,7 +724,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     auto Sigma_max_iter = max_element(sSigma_tskij.local().data(), sSigma_tskij.local().data()+sSigma_tskij.local().size(),
                                       [](auto a, auto b) { return std::abs(a) < std::abs(b); });
     conv_Sigma =  std::abs((*Sigma_max_iter));
-    if (auto* m = in_memory_mixing_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+    if (auto* m = in_memory_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
       // Every rank captures its slices of the iteration-1 state. No mixing is applied
       // at iteration 1, so this state is also the accepted previous state of the
       // first mixing.
@@ -736,7 +736,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
       diis_init(iter_solver, iteration, h5_prefix, sF_skij, sSigma_tskij, FT);
     }
     context.comm.barrier();
-  } else if (auto* m = in_memory_mixing_ptr(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
+  } else if (auto* m = in_memory_state(iter_solver, sG_tskij, sS_skij, sH0_skij)) {
     iter_solver.metadata_log();
     // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
     if (not m->initialized())
