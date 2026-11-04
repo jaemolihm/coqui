@@ -20,8 +20,6 @@
 
 
 
-#include <cstring>
-#include <filesystem>
 #include <string>
 
 #include "configuration.hpp"
@@ -51,7 +49,6 @@
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
 #include "methods/tools/chkpt_utils.h"
 #include "numerics/shared_array/shared_array_io.hpp"
-#include "utilities/element_partition.hpp"
 #include "utilities/lr_utils.hpp"
 #include "utilities/proc_meminfo.hpp"
 #include "utilities/Timer.hpp"
@@ -1494,73 +1491,15 @@ namespace {
 
 using lr_W_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
-/// Inputs of the W block of run_lr_calc (reuse_W = true).
-struct lr_W_key {
-  /// Grid of the IAFT used for the W file and the transforms
-  double beta = 0, wmax = 0;
-  int nt_b = 0, nw_b = 0;
-  std::string unperturbed, w_source, div_treatment;
-  std::filesystem::file_time_type w_mtime{};
-  std::uintmax_t w_size = 0;
-  /// This rank's stripe of the flattened G (recompute source only)
-  nda::array<ComplexType, 1> G_slice;
-  /// Ground-state fields of the GW+EDMFT inputs
-  std::optional<lr_local_inputs> local;
-  bool translate_home_cell = false;
-};
-
-/// The W block's outputs with the key they were built from. No member calls MPI in its destructor, so
-/// destruction after MPI_Finalize is safe.
+/// W_c(iω) and the ε⁻¹ heads kept by a reuse_W call. No member calls MPI in its destructor, so destruction after
+/// MPI_Finalize is safe.
 struct lr_W_cache {
-  lr_W_key key;
   lr_W_t W_c_wqPQ;
   nda::array<ComplexType, 1> eps_inv_head, eps_inv_head_w;
 };
 
-/// The kept W of the last reuse_W call that built one; release_lr_W_cache() drops it
+/// The W kept by the last reuse_W call that built one; release_lr_W_cache() drops it
 std::optional<lr_W_cache> W_cache;
-
-/// Name of the first field of `b` that differs from the cache's key `a` on any rank, "" if none; "cache" when a
-/// rank holds no cache (a == nullptr). Collective on mpi.comm: every rank enters the reduction.
-std::string lr_W_check_mismatch(utils::mpi_context_t<mpi3::communicator>& mpi, lr_W_key const* a_ptr,
-                                lr_W_key const& b) {
-  auto same_bytes = [](auto const& x, auto const& y) {
-    return x.shape() == y.shape() &&
-           std::memcmp(x.data(), y.data(), x.size() * sizeof(*x.data())) == 0;
-  };
-  auto same_local = [&](std::optional<lr_local_inputs> const& x, std::optional<lr_local_inputs> const& y) {
-    if (x.has_value() != y.has_value()) return false;
-    if (!x) return true;
-    if (!same_bytes(x->projector_ksIai, y->projector_ksIai) || !same_bytes(x->band_window, y->band_window) ||
-        !same_bytes(x->kpts_crys, y->kpts_crys) ||
-        x->local_polarizabilities.has_value() != y->local_polarizabilities.has_value()) return false;
-    if (!x->local_polarizabilities) return true;
-    auto const& mx = *x->local_polarizabilities;
-    auto const& my = *y->local_polarizabilities;
-    if (mx.size() != my.size()) return false;
-    for (auto ix = mx.begin(), iy = my.begin(); ix != mx.end(); ++ix, ++iy)
-      if (ix->first != iy->first || !same_bytes(ix->second, iy->second)) return false;
-    return true;
-  };
-
-  auto const& a = a_ptr ? *a_ptr : b;
-  std::vector<std::pair<const char*, int>> changed = {
-      {"cache", a_ptr == nullptr},
-      {"IAFT", a.beta != b.beta || a.wmax != b.wmax || a.nt_b != b.nt_b || a.nw_b != b.nw_b},
-      {"unperturbed", a.unperturbed != b.unperturbed},
-      {"W source", a.w_source != b.w_source},
-      {"W file", a.w_mtime != b.w_mtime || a.w_size != b.w_size},
-      {"div_treatment", a.div_treatment != b.div_treatment},
-      {"G", !same_bytes(a.G_slice, b.G_slice)},
-      {"local projector inputs", !same_local(a.local, b.local)},
-      {"translate_home_cell", a.translate_home_cell != b.translate_home_cell}};
-  std::vector<int> flags;
-  for (auto const& c : changed) flags.push_back(c.second);
-  mpi.comm.all_reduce_in_place_n(flags.data(), flags.size(), std::plus<>{});
-  for (size_t i = 0; i < flags.size(); ++i)
-    if (flags[i] != 0) return changed[i].first;
-  return "";
-}
 
 } // namespace
 
@@ -1607,10 +1546,10 @@ void release_lr_W_cache() { W_cache.reset(); }
  *                          (hessian only, no extra kernel evaluation) or "symmetric"
  *                          (plain + the stationary functional)
  *   fix_density            compute Δμ to enforce ΔN = 0 (default false)
- *   reuse_W                keep W_c(iω) and the ε⁻¹ head of this call in a process-wide cache and take
- *                          them from it when the next reuse_W call has the same ground-state inputs
- *                          (default false; release_lr_W_cache() drops it). The THC must be the
- *                          one the kept W was built with; only its size is checked
+ *   reuse_W                take W_c(iω) and the ε⁻¹ head from the process-wide cache if one is kept,
+ *                          otherwise build them and keep a copy (default false; release_lr_W_cache()
+ *                          drops it). The caller guarantees that the kept W belongs to this call's
+ *                          ground state and THC; only the THC size is checked
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
  *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
@@ -2136,58 +2075,28 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       div_treatment = read_div_treatment(*mpi, input_file, input_grp);
     }
     static_assert(std::is_same_v<dW_type, lr_W_t>);
-    lr_W_key W_key;
+    // reuse_W: the caller guarantees that the kept W belongs to this call's ground state and THC; only the
+    // THC size is checked. W is reused only if every rank keeps one (a release on some ranks rebuilds on all).
     bool W_hit = false;
     if (reuse_W) {
-      W_key.beta = ft.beta();
-      W_key.wmax = ft.wmax();
-      W_key.nt_b = ft.nt_b();
-      W_key.nw_b = ft.nw_b();
-      W_key.unperturbed = unperturbed;
-      W_key.div_treatment = div_treatment;
-      if (gw_edmft) {
-        // The local projector inputs enter W only through the GW+EDMFT local polarizabilities
-        W_key.translate_home_cell = io::get_value_with_default<bool>(pt, "translate_home_cell", false);
-        W_key.local = *local;
-        W_key.local->dc_cells.reset();
-        W_key.local->impurity_response.reset();
-      }
-      if (recompute_W) {
-        // Using the rebuilt G as the key of the recomputed W
-        W_key.w_source = "recompute";
-        auto [i0, i1] = utils::make_part_map(*mpi).my_slice(sG_tskij.local().size());
-        W_key.G_slice = nda::array<ComplexType, 1>(i1 - i0);
-        std::copy_n(sG_tskij.local().data() + i0, i1 - i0, W_key.G_slice.data());
-      } else {
-        // Using the W file; div_treatment and the IAFT come from the checkpoint
-        auto w_path = screened_interaction_file.empty()
-            ? std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5"
-            : std::filesystem::path(screened_interaction_file);
-        W_key.w_source = std::filesystem::weakly_canonical(w_path).string() + "|" + input_file + "|" + input_grp;
-        W_key.w_mtime = std::filesystem::last_write_time(w_path);
-        W_key.w_size = std::filesystem::file_size(w_path);
-      }
-      // Hit when every rank holds a cache whose key equals W_key; otherwise `changed` names the first differing
-      // field (or "cache": nothing kept on some rank) for the log, and W is rebuilt below on all ranks
-      auto changed = lr_W_check_mismatch(*mpi, W_cache ? &W_cache->key : nullptr, W_key);
-      W_hit = changed.empty();
+      int kept = W_cache.has_value();
+      mpi->comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
+      W_hit = (kept == mpi->comm.size());
       if (W_hit) {
-        // The caller passes the THC W was built with; a THC of another size cannot be that one.
         auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
         long nw_half = (ft.nw_b() + 1) / 2;
         auto const& thc = eri.corr_eri->get();
         utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
-                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call's THC needs "
-                     "({}, {}, {}, {}). reuse_W requires the THC the kept W was built with; call "
-                     "coqui.mbpt.release_lr_W_cache() before switching THC.",
+                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
+                     "({}, {}, {}, {}). reuse_W requires the ground state and THC the kept W was built with; "
+                     "call coqui.mbpt.release_lr_W_cache() before switching.",
                      Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
         app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
         opt_dW.emplace(W_cache->W_c_wqPQ);
         opt_eps_inv.emplace(W_cache->eps_inv_head);
         opt_eps_inv_w.emplace(W_cache->eps_inv_head_w);
       } else {
-        if (changed == "cache") app_log(1, "reuse_W: building W (nothing kept)");
-        else app_log(1, "reuse_W: rebuilding W ({} changed)", changed);
+        app_log(1, "reuse_W: building W (nothing kept)");
         W_cache.reset();
       }
     }
@@ -2219,7 +2128,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       }
     }
     if (reuse_W && !W_hit) {
-      W_cache.emplace(lr_W_cache{std::move(W_key), *opt_dW, *opt_eps_inv, *opt_eps_inv_w});
+      W_cache.emplace(lr_W_cache{*opt_dW, *opt_eps_inv, *opt_eps_inv_w});
     }
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }

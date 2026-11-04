@@ -518,16 +518,13 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
           interaction from G0 (recompute_W is forced on) and the checkpoint is
           used only for the IAFT grid + metadata.
     reuse_W : bool, optional
-        If True, the W_c(iw) and eps^-1 head of this call stay resident in the process
-        (one extra W array) until release_lr_W_cache() (call it on every rank) or a call
-        with different ground-state inputs replaces them, and a later reuse_W call with
-        the same ground-state inputs (G, W source, div_treatment, IAFT grid, and with
-        local polarizabilities the projector inputs) copies them instead of recomputing
-        or reading W; the copy is consumed by that call as usual. A call whose inputs
-        differ rebuilds W and replaces the kept one. Results are identical to a fresh
-        call. The THC is not checked beyond its size: pass the THC the kept W was built
-        with, and call release_lr_W_cache() before switching to another one. Default
-        False: nothing is kept.
+        If True and a W is kept from an earlier reuse_W call, copy its W_c(iw) and
+        eps^-1 head instead of recomputing or reading W; otherwise build them and keep a
+        copy (one extra W array) until release_lr_W_cache() (call it on every rank). The
+        caller guarantees that the kept W belongs to this call's ground state and THC
+        (checkpoint, unperturbed, W source, div_treatment, local polarizabilities): call
+        release_lr_W_cache() before switching. Only the THC size is checked. Results are
+        identical to a fresh call. Default False: nothing is kept or read.
     split_sigma_terms : bool, optional
         If True, store the two one-shot ΔΣ terms separately (default False):
         DeltaSigma_tskij = term 1 (dG0·W_c0), DeltaSigma_term2_tskij = term 2
