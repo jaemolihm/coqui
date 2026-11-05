@@ -524,8 +524,8 @@ auto in_memory_mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_
 template<typename comm_t, typename X_t, typename Xt_t>
 void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
                        iter_scf::mixing_state& m, X_t &sF_skij, Xt_t *sSigma_tskij) {
-  // DIIS extrapolates from two stored pairs (the first step stores none, its residual needs
-  // the accepted state of a previous mixing)
+  // DIIS extrapolates from two stored pairs; the first step stores none (needs_residual() is
+  // false at steps() == 0)
   std::optional<iter_scf::diis_mixer::config> cfg;
   if (auto* dp = iter_solver.diis())
     cfg = iter_scf::diis_mixer::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter, 2, 2};

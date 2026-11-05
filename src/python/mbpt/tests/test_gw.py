@@ -239,16 +239,17 @@ thc = coqui.make_thc_coulomb(mf, {"storage": "incore", "thresh": 1e-4, "ecut": m
                                   "chol_block_size": 1, "init": True})
 coqui.run_gw({"restart": False, "output": "gw_storage_key", "niter": 2, "beta": 100,
               "iaft": {"prec": "medium", "basis": "dlr"},
-              "iter_alg": {"alg": "diis", sys.argv[1]: sys.argv[2]}},
+              "iter_alg": {"alg": sys.argv[1], sys.argv[2]: sys.argv[3]}},
              h_int=thc)
 print("KEY_ACCEPTED", flush=True)
 """
 
 
+@pytest.mark.parametrize("alg", ["diis", "damping"])
 @pytest.mark.parametrize("key", ["storage", "diis_storage"])
-def test_iter_alg_storage_key_rejected(mpi, key):
-    # iter_alg with the removed key "storage" or "diis_storage" (DIIS history is always in memory)
-    # vs the input parsing: the run aborts with a message naming the key that was written.
+def test_iter_alg_storage_key_rejected(mpi, alg, key):
+    # iter_alg (DIIS or damping) with the removed key "storage" or "diis_storage" (DIIS history is always in
+    # memory) vs the input parsing: the run aborts with a message naming the key that was written.
     # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by rank 0.
     import subprocess
     import sys
@@ -257,7 +258,7 @@ def test_iter_alg_storage_key_rejected(mpi, key):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
         proc = subprocess.run(["mpirun", "--bind-to", "none", "-np", "1",
-                               sys.executable, "-c", _STORAGE_KEY_RUNNER, key, "memory"],
+                               sys.executable, "-c", _STORAGE_KEY_RUNNER, alg, key, "memory"],
                               env=env, capture_output=True, text=True, timeout=900)
         out = proc.stdout + proc.stderr
         expected = f'the key "{key}" is not recognized'
@@ -307,11 +308,18 @@ def test_evgw_diis_ignores_stale_files(mpi):
             with h5py.File("evgw.mbpt.h5", "r") as f:
                 heff[tag] = f[f"scf/iter{f['scf/final_iter'][()]}/Heff_skij"][()]
         os.chdir(start)
+    msg = None
     if mpi.root():
-        assert np.array_equal(heff["clean"], heff["stale"])
+        if not np.array_equal(heff["clean"], heff["stale"]):
+            msg = "final Heff differs between the clean and the stale-file run"
         with open(os.path.join(start, "stale", "diis_heff_vectors.h5"), "rb") as f:
-            assert hashlib.md5(f.read()).hexdigest() == stale_hash["stale"]
-        assert not os.path.exists(os.path.join(start, "clean", "diis_heff_vectors.h5"))
+            if hashlib.md5(f.read()).hexdigest() != stale_hash["stale"]:
+                msg = "the planted diis_heff_vectors.h5 was modified"
+        if os.path.exists(os.path.join(start, "clean", "diis_heff_vectors.h5")):
+            msg = "a diis_heff_vectors.h5 was written"
+    msg = MPI.COMM_WORLD.bcast(msg, root=0)
+    if mpi.root():
         for tag in ("clean", "stale"):
             shutil.rmtree(os.path.join(start, tag))
     mpi.barrier()
+    assert msg is None, msg

@@ -55,6 +55,10 @@ namespace iter_scf {
           auto alg = io::get_value<std::string>(pt,"alg","iter_alg - missing alg type: damping");
           io::tolower(alg);
           auto mixing = io::get_value_with_default<double>(pt,"mixing",0.7);
+          for (auto const* key : {"storage", "diis_storage"})
+            utils::check(not pt.get_child_optional(key),
+                         "iter_alg: the key \"{}\" is not recognized; the DIIS history is always kept "
+                         "in memory. Remove the key.", key);
 
           if (alg == "damping") {
 
@@ -67,10 +71,6 @@ namespace iter_scf {
             auto residual_type = io::get_value_with_default<std::string>(
               pt, "residual_type", is_evscf ? "vector_diff" : "commutator");
             io::tolower(residual_type);
-            for (auto const* key : {"storage", "diis_storage"})
-              utils::check(not pt.get_child_optional(key),
-                           "iter_alg: the key \"{}\" is not recognized; the DIIS history is always kept "
-                           "in memory. Remove the key.", key);
             auto diis_start = io::get_value_with_default<size_t>(pt,"diis_start",-1);
             if (diis_start != -1) {
               app_log(1, "[WARNING] 'diis_start' is deprecated. Please use 'diis_warmup' instead \n"

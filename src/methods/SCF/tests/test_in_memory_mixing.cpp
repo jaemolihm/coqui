@@ -41,6 +41,7 @@
 #include "numerics/shared_array/nda.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
 #include "numerics/iter_scf/iter_scf_utils.hpp"
+#include "numerics/iter_scf/commutator_residual.hpp"
 
 /**
  * The in-memory mixing slices the flattened (F, Sigma) pair over the *global*
@@ -290,7 +291,8 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
         res(i) = residual_val(i, iter);
       }
 
-      // The first step stores no pair (its residual needs a previous mixing).
+      // DIIS extrapolates from two stored pairs; the first step stores none (needs_residual() is false
+      // at steps() == 0).
       std::optional<iter_scf::hist_vec> residual;
       if (mix.needs_residual()) {
         residual.emplace();
@@ -337,6 +339,62 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
               extrapolates ? "DIIS" : "damping", err);
       for (long i = 0; i < nF; ++i) prev(i) = fF(i);
     }
+  });
+}
+
+// iter_scf::heff_commutator against H D S - S D H formed with nda::matmul, bit for bit, on random
+// Hermitian H, D, S (ns = 2, nk = 3, nao = 4), written into a node-shared window by the (s,k)-striped
+// node ranks: every rank of every synthetic node must see the full window.
+TEST_CASE("heff_commutator_synthetic_nodes", "[methods_scf]") {
+  const shape_t<4> shape = {2, 3, 4, 4};
+  // Hermitian matrix per (s,k), element-unique and seed-dependent
+  auto hermitian = [&](double seed) {
+    nda::array<ComplexType, 4> A(shape);
+    for (long s = 0; s < 2; ++s)
+      for (long k = 0; k < 3; ++k)
+        for (long i = 0; i < 4; ++i)
+          for (long j = 0; j < 4; ++j)
+            A(s, k, i, j) = ComplexType(std::sin(seed + 1.7 * s + 0.9 * k + 0.37 * i - 0.61 * j + 0.13 * i * j),
+                                        std::cos(seed + 0.4 * s - 1.1 * k + 0.83 * i + 0.29 * j));
+    nda::array<ComplexType, 4> Hm(shape);
+    for (long s = 0; s < 2; ++s)
+      for (long k = 0; k < 3; ++k)
+        for (long i = 0; i < 4; ++i)
+          for (long j = 0; j < 4; ++j)
+            Hm(s, k, i, j) = A(s, k, i, j) + std::conj(A(s, k, j, i));
+    return Hm;
+  };
+  auto Href = hermitian(0.3), Dref = hermitian(1.1), Sref = hermitian(2.9);
+  decltype(nda::range::all) all;
+  nda::array<ComplexType, 4> Cref(shape);
+  for (long s = 0; s < 2; ++s)
+    for (long k = 0; k < 3; ++k) {
+      auto H = nda::matrix<ComplexType>(Href(s, k, all, all));
+      auto D = nda::matrix<ComplexType>(Dref(s, k, all, all));
+      auto S = nda::matrix<ComplexType>(Sref(s, k, all, all));
+      Cref(s, k, all, all) = nda::matrix<ComplexType>(nda::matmul(nda::matmul(H, D), S)
+                                                      - nda::matmul(nda::matmul(S, D), H));
+    }
+
+  for_each_synthetic_layout("heff_commutator_synthetic_nodes", [&](auto& ctx, std::string const& tag) {
+    INFO(tag);
+    auto sH = make_shared(ctx, shape), sD = make_shared(ctx, shape), sS = make_shared(ctx, shape);
+    auto sC = make_shared(ctx, shape);
+    for (auto* p : {&sH, &sD, &sS, &sC}) p->win().fence();
+    if (ctx.node_comm.root()) {
+      sH.local() = Href; sD.local() = Dref; sS.local() = Sref;
+      sC.local() = ComplexType(-777.0); // poison: every block must be overwritten
+    }
+    for (auto* p : {&sH, &sD, &sS, &sC}) p->win().fence();
+    iter_scf::heff_commutator(ctx.node_comm, sC.local(), sH.local(), sD.local(), sS.local());
+    sC.win().fence();
+    double err = 0.0;
+    for (long s = 0; s < 2; ++s)
+      for (long k = 0; k < 3; ++k)
+        for (long i = 0; i < 4; ++i)
+          for (long j = 0; j < 4; ++j)
+            err = std::max(err, std::abs(sC.local()(s, k, i, j) - Cref(s, k, i, j)));
+    REQUIRE(ctx.comm.all_reduce_value(err, mpi3::max<>{}) == 0.0);
   });
 }
 
