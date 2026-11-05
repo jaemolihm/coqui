@@ -94,16 +94,17 @@ struct lr_qp_static_params {
 };
 
 /**
- * @brief Parameters for LR SCF iteration algorithm
+ * @brief Parameters for LR SCF iteration algorithm: "GCR" (default), "DIIS" or "damping".
  *
- * Mirrors the ground-state iter_alg pattern (damping vs DIIS).
+ * run_lr_calc sets every field; the qpGW map (qp_static_sigma) defaults to DIIS there, since
+ * lr_setup rejects GCR for it.
  */
 struct lr_iter_params {
-  std::string alg = "DIIS";
+  std::string alg = "GCR";
   double mixing = 1.0;
   /// DIIS subspace depth, or the GCR basis capacity. For GCR, 0 selects the
   /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
-  size_t max_subsp_size = 10;
+  size_t max_subsp_size = 0;
   size_t diis_warmup = 0;
 };
 
@@ -192,7 +193,7 @@ struct lr_params {
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
   /// reads it regardless when the kernel has a Σ (see lr_solve_one).
   bool save_DeltaG = true;
-  lr_iter_params iter_params{};   ///< damping / DIIS
+  lr_iter_params iter_params{};   ///< GCR, DIIS or damping
 
   // --- Preconditioner (GCR or damping) ---
   /// Σ-free kernel K_pc whose resolvent z = (I - K_pc Pχ)⁻¹ r preconditions GCR
