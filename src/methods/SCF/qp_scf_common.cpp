@@ -854,7 +854,7 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
     // state of the first mixing.
     init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
     nda::array<ComplexType, 5> no_Sigma_array;
-    m.layout.store(m.prev, sHeff_skij.local(), no_Sigma_array);
+    m.layout.store_slice(m.prev_vec, sHeff_skij.local(), no_Sigma_array);
     m.has_prev = true;
   } else {
     iter_solver.metadata_log();
@@ -862,12 +862,12 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
     if (not m.initialized())
       init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
     // Residual of the trial Heff, for the DIIS steps that store an entry
-    std::optional<iter_scf::hist_vec> residual;
+    std::optional<iter_scf::hist_vec> residual_vec;
     if (m.needs_residual()) {
-      residual.emplace();
+      residual_vec.emplace();
       if (iter_solver.diis()->residual_type == "vector_diff") {
         // trial - previous accepted Heff
-        residual->F = m.layout.F(sHeff_skij.local()) - m.prev.F;
+        residual_vec->F = m.layout.F_view_slice(sHeff_skij.local()) - m.prev_vec.F;
       } else {
         // Heff-Dm commutator H D S - S D H, Dm of the previous accepted Heff
         auto [ns, nk, nao, nao2] = sHeff_skij.shape();
@@ -877,11 +877,11 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
         iter_scf::heff_commutator(context.node_comm, sC.local(), sHeff_skij.local(),
                                   sDm_skij.local(), sS_skij.local());
         sC.win().fence();
-        residual->F = m.layout.F(sC.local());
+        residual_vec->F = m.layout.F_view_slice(sC.local());
       }
     }
     conv = std::get<0>(mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
-                                    sHeff_skij, no_Sigma, residual ? &*residual : nullptr));
+                                    sHeff_skij, no_Sigma, residual_vec ? &*residual_vec : nullptr));
   }
   context.comm.barrier();
   return conv;

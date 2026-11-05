@@ -64,70 +64,80 @@
  */
 namespace iter_scf {
 
-/// Values: this rank's slices of F and Sigma (S empty if absent), one stored vector
-/// (the previous state, a DIIS trial or residual, a GCR vector). Sliced by hist_vec_layout.
+/// One flattened vector of mixing data: this rank's slices of the flattened F and Sigma
+/// (S empty if absent). Holds the previous accepted state, a DIIS trial or residual, or a
+/// GCR probe. Which elements the slices are is given by a hist_vec_layout, shared by all
+/// the vectors of one run.
 struct hist_vec {
   nda::array<ComplexType, 1> F, S;
 };
 
-/// Layout, no values: the flat element ranges of F (size nF) and Sigma (size nS; 0: F only)
-/// that this rank owns, one per run. F(full)/S(full) view this rank's slice of a full array;
-/// store() copies it into a hist_vec.
+/// Which elements of the flattened F (F_size_total elements) and Sigma (S_size_total; 0: F
+/// only) this rank owns: one contiguous range of each. One layout per run, shared by every
+/// hist_vec of that run. F_view_slice / S_view_slice view this rank's slice of a full array;
+/// store_slice copies the slices into a hist_vec.
 class hist_vec_layout {
 public:
   hist_vec_layout() = default;
 
   /// Not collective.
-  hist_vec_layout(utils::part_map pmap, long nF, long nS)
-      : _pmap(std::move(pmap)), _nF(nF), _nS(nS) {
-    std::tie(_f0, _f1) = _pmap.my_slice(_nF);
-    std::tie(_s0, _s1) = _pmap.my_slice(_nS);
+  hist_vec_layout(utils::part_map pmap, long F_size_total, long S_size_total)
+      : _pmap(std::move(pmap)), _F_size_total(F_size_total), _S_size_total(S_size_total) {
+    std::tie(_F_start, _F_end) = _pmap.my_slice(_F_size_total);
+    std::tie(_S_start, _S_end) = _pmap.my_slice(_S_size_total);
   }
 
+  /// The partition of the global comm into parts (one per rank, node-major) and this rank's
+  /// part; utils::complete_shared_slices reads it to fill the node-shared windows.
   utils::part_map const& pmap() const { return _pmap; }
-  long nF() const { return _nF; }
-  long nS() const { return _nS; }
-  /// Flat element ranges [i0, i1) of F and Sigma owned by this rank.
-  std::pair<long, long> F_range() const { return {_f0, _f1}; }
-  std::pair<long, long> S_range() const { return {_s0, _s1}; }
-  /// Slice lengths.
-  long mF() const { return _f1 - _f0; }
-  long mS() const { return _s1 - _s0; }
-  /// Ranges of the F and Sigma parts of the concatenation [F; Sigma] of the slices.
-  nda::range rF() const { return nda::range(0, mF()); }
-  nda::range rS() const { return nda::range(mF(), mF() + mS()); }
+  /// Number of elements of the whole flattened F and Sigma.
+  long F_size_total() const { return _F_size_total; }
+  long S_size_total() const { return _S_size_total; }
+  /// [start, end) of this rank's slice in the flattened F and Sigma.
+  std::pair<long, long> F_startend() const { return {_F_start, _F_end}; }
+  std::pair<long, long> S_startend() const { return {_S_start, _S_end}; }
+  /// Number of elements of this rank's slices.
+  long F_len() const { return _F_end - _F_start; }
+  long S_len() const { return _S_end - _S_start; }
+  /// Ranges of the F and Sigma parts in the concatenation [F slice; Sigma slice] of length
+  /// F_len() + S_len() (the GCR vectors of the LR).
+  nda::range F_range() const { return nda::range(0, F_len()); }
+  nda::range S_range() const { return nda::range(F_len(), F_len() + S_len()); }
 
-  /// 1D view of this rank's slice of the full array `full` (F or Sigma).
-  template<typename A> auto F(A&& full) const {
-    return nda::reshape(full, std::array<long, 1>{_nF})(nda::range(_f0, _f1));
+  /// 1D view of this rank's slice of the full F_skij (or the full Sigma_tskij).
+  template<typename A> auto F_view_slice(A&& F_skij) const {
+    return nda::reshape(F_skij, std::array<long, 1>{_F_size_total})(nda::range(_F_start, _F_end));
   }
-  template<typename A> auto S(A&& full) const {
-    return nda::reshape(full, std::array<long, 1>{_nS})(nda::range(_s0, _s1));
+  template<typename A> auto S_view_slice(A&& S_tskij) const {
+    return nda::reshape(S_tskij, std::array<long, 1>{_S_size_total})(nda::range(_S_start, _S_end));
   }
 
-  /// v <- this rank's slices of the full arrays.
+  /// Copy this rank's slices of the full arrays into v_vec.
   template<typename AF, typename AS>
-  void store(hist_vec& v, AF const& F_full, AS const& S_full) const {
-    v.F = F(F_full);
-    v.S = S(S_full);
+  void store_slice(hist_vec& v_vec, AF const& F_skij, AS const& S_tskij) const {
+    v_vec.F = F_view_slice(F_skij);
+    v_vec.S = S_view_slice(S_tskij);
   }
 
 private:
   utils::part_map _pmap;
-  long _nF = 0, _nS = 0;
-  long _f0 = 0, _f1 = 0, _s0 = 0, _s1 = 0;
+  long _F_size_total = 0, _S_size_total = 0;
+  long _F_start = 0, _F_end = 0, _S_start = 0, _S_end = 0;
 };
 
-/// x <- mixing * x + (1 - mixing) * prev on this rank's slices; nothing for mixing >= 1.
+/// Update in-place F and S by mixing them with a previous iterate, prev_vec.
+/// (F, S) = mixing * (F, S) + (1 - mixing) * prev_vec.
+/// Each rank only updates the range it stores in layout.
+/// Do nothing for mixing >= 1.
 template<typename AF, typename AS>
-void damp_slices(hist_vec_layout const& layout, double mixing, AF&& F, AS&& S,
-                 hist_vec const& prev) {
+void damp_slices(hist_vec_layout const& layout, double mixing, AF&& F_skij, AS&& S_tskij,
+                 hist_vec const& prev_vec) {
   if (mixing >= 1.0) return;
-  auto F_loc = layout.F(F);
-  F_loc = mixing * F_loc + (1.0 - mixing) * prev.F;
-  if (layout.mS() > 0) {
-    auto S_loc = layout.S(S);
-    S_loc = mixing * S_loc + (1.0 - mixing) * prev.S;
+  auto F_slice = layout.F_view_slice(F_skij);
+  F_slice = mixing * F_slice + (1.0 - mixing) * prev_vec.F;
+  if (layout.S_len() > 0) {
+    auto S_slice = layout.S_view_slice(S_tskij);
+    S_slice = mixing * S_slice + (1.0 - mixing) * prev_vec.S;
   }
 }
 
@@ -176,18 +186,18 @@ public:
     _B = nda::matrix<ComplexType>(0, 0);
   }
 
-  hist_vec const& newest_trial() const { return _entries[entry_index(_n - 1)].x; }
+  hist_vec const& newest_trial() const { return _entries[entry_index(_n - 1)].x_vec; }
 
   /**
-   * @brief Store the trial (F, S) with its residual (rF, rS) as the newest entry,
+   * @brief Store the trial (F, S) with its residual (res_F, res_S) as the newest entry,
    * evicting the oldest entry first when max_subsp are stored, and extend B. Collective on comm.
    *
-   * @param F, S     - full arrays of the trial (this rank's slices are stored)
-   * @param rF, rS   - this rank's slices of the residual; rF may be empty
+   * @param F_skij, S_tskij - full arrays of the trial (this rank's slices are stored)
+   * @param res_F, res_S    - this rank's slices of the residual; res_F may be empty
    */
   template<typename Comm, typename AF, typename AS, typename RF, typename RS>
-  void push(Comm& comm, hist_vec_layout const& layout, AF const& F, AS const& S,
-            RF const& rF, RS const& rS) {
+  void push(Comm& comm, hist_vec_layout const& layout, AF const& F_skij, AS const& S_tskij,
+            RF const& res_F, RS const& res_S) {
     if (not active()) return;
     diis_timers::mix_hist_store.start();
     if (_n == _cfg.max_subsp) evict_oldest();
@@ -197,9 +207,9 @@ public:
       _entries.emplace_back();
     }
     auto& s = _entries[entry_index(_n)];
-    layout.store(s.x, F, S);
-    s.res.F = rF;
-    s.res.S = rS;
+    layout.store_slice(s.x_vec, F_skij, S_tskij);
+    s.res_vec.F = res_F;
+    s.res_vec.S = res_S;
     ++_n;
     diis_timers::mix_hist_store.stop();
     update_B(comm);
@@ -207,16 +217,16 @@ public:
 
   /**
    * @brief Mix this rank's slices of (F, S) in place: the DIIS extrapolation of the
-   * stored trials, or damping against `prev` when there is none. Returns true if it
+   * stored trials, or damping against `prev_vec` when there is none. Returns true if it
    * extrapolated. Every rank takes the same branch.
    */
   template<typename AF, typename AS>
-  bool mix(hist_vec_layout const& layout, AF&& F, AS&& S, hist_vec const& prev) {
+  bool mix(hist_vec_layout const& layout, AF&& F_skij, AS&& S_tskij, hist_vec const& prev_vec) {
     ++_steps;
     const int L = _cfg.log_level;
     auto damp = [&]() {
       diis_timers::mix_damp.start();
-      damp_slices(layout, _cfg.mixing, F, S, prev);
+      damp_slices(layout, _cfg.mixing, F_skij, S_tskij, prev_vec);
       diis_timers::mix_damp.stop();
     };
     if (_steps <= _cfg.warmup) {
@@ -245,16 +255,16 @@ public:
     log_extrapolation(*C);
 
     diis_timers::mix_lincomb.start();
-    auto F_loc = layout.F(F);
-    auto S_loc = layout.S(S);
-    F_loc() = ComplexType{0};
-    S_loc() = ComplexType{0};
+    auto F_slice = layout.F_view_slice(F_skij);
+    auto S_slice = layout.S_view_slice(S_tskij);
+    F_slice() = ComplexType{0};
+    S_slice() = ComplexType{0};
     // Newest entry first.
     for (size_t k = _n; k-- > 0;) {
       const ComplexType c = (*C)(k);
-      auto const& x = _entries[entry_index(k)].x;
-      F_loc += c * x.F;
-      S_loc += c * x.S;
+      auto const& x_vec = _entries[entry_index(k)].x_vec;
+      F_slice += c * x_vec.F;
+      S_slice += c * x_vec.S;
     }
     diis_timers::mix_lincomb.stop();
     return true;
@@ -262,7 +272,7 @@ public:
 
 private:
   struct entry_t {
-    hist_vec x, res;  ///< trial and its residual
+    hist_vec x_vec, res_vec;  ///< trial and its residual
   };
 
   config _cfg;
@@ -294,15 +304,15 @@ private:
   template<typename Comm>
   void update_B(Comm& comm) {
     const size_t n = _n;
-    auto const& rn = _entries[entry_index(n - 1)].res;
+    auto const& rn_vec = _entries[entry_index(n - 1)].res_vec;
     nda::array<ComplexType, 1> col(n);
     col() = 0;
     diis_timers::mix_B_dots.start();
     for (size_t i = 0; i < n; ++i) {
-      auto const& ri = _entries[entry_index(i)].res;
+      auto const& ri_vec = _entries[entry_index(i)].res_vec;
       ComplexType acc = 0.0;
-      if (ri.F.size() > 0) acc += nda::blas::dotc(ri.F, rn.F);
-      if (ri.S.size() > 0) acc += nda::blas::dotc(ri.S, rn.S);
+      if (ri_vec.F.size() > 0) acc += nda::blas::dotc(ri_vec.F, rn_vec.F);
+      if (ri_vec.S.size() > 0) acc += nda::blas::dotc(ri_vec.S, rn_vec.S);
       col(i) = acc;
     }
     diis_timers::mix_B_dots.stop();
@@ -344,27 +354,33 @@ private:
   }
 };
 
-/// State of the mixers (damping, or DIIS with a damping warmup): the slicing, the
-/// previous accepted state, and the DIIS history for DIIS.
+/**
+ * Everything one SCF loop keeps from one mixing step to the next, for the Dyson SCF, the qp
+ * SCF and dmft_embed: the slicing (layout), this rank's slices of the previous accepted state
+ * (prev_vec), and, for DIIS, the history (diis). The SCF arrays are overwritten in place by
+ * each Dyson pass and each mixing, so prev_vec is the only in-memory copy of the previous
+ * state. iter_scf_t owns one (iter_scf_t::state()), so it lives as long as the solver, across
+ * the iterations of scf_loop / qp_scf_loop; dmft_embed resets it at every call. The LR does not
+ * use it: lr_driver keeps its own layout and previous iterate and calls diis_mixer directly.
+ */
 struct mixing_state {
   hist_vec_layout layout;
-  /// This rank's slices of the previous accepted (post-mix) state. Read by every damping
-  /// step (the damping target), by the DIIS warmup and fallback steps, and by the
-  /// convergence measure of the damped steps; the mixed arrays are overwritten in place, so
-  /// this is the only in-run copy of the previous state.
-  hist_vec prev;
-  bool has_prev = false;  ///< whether prev is filled (false until the first step or a stage from the checkpoint)
+  /// This rank's slices of the previous accepted (post-mix) state: the damping target of the
+  /// damping, DIIS warmup and DIIS fallback steps, and the reference of their convergence
+  /// measure.
+  hist_vec prev_vec;
+  bool has_prev = false;  ///< whether prev_vec is filled (false until the first step or a stage from the checkpoint)
   double mixing = 1.0;       ///< damping factor of the damping algorithm
   std::optional<diis_mixer> diis;  ///< DIIS only
 
-  bool initialized() const { return layout.nF() > 0; }
+  bool initialized() const { return layout.F_size_total() > 0; }
 
-  /// Cut the slices of F (nF elements) and Sigma (nS; 0: F only); `diis_cfg` selects DIIS over
-  /// damping. Collective on mpi.comm.
+  /// Cut the slices of F (F_size_total elements) and Sigma (S_size_total; 0: F only);
+  /// `diis_cfg` selects DIIS over damping. Collective on mpi.comm.
   template<typename MPI_Context_t>
-  void init(MPI_Context_t& mpi, long nF, long nS, double mixing_,
+  void init(MPI_Context_t& mpi, long F_size_total, long S_size_total, double mixing_,
             std::optional<diis_mixer::config> diis_cfg) {
-    layout = hist_vec_layout(utils::make_part_map(mpi), nF, nS);
+    layout = hist_vec_layout(utils::make_part_map(mpi), F_size_total, S_size_total);
     mixing = mixing_;
     has_prev = false;
     diis.reset();
@@ -376,38 +392,39 @@ struct mixing_state {
 
   /**
    * @brief One mixing step on this rank's slices of the node-shared F and Sigma
-   * (trial on entry, accepted state on exit), then prev <- the accepted state.
+   * (trial on entry, accepted state on exit), then prev_vec <- the accepted state.
    *
-   * @param residual - this rank's slices of the residual of the trial (F or Sigma part may
-   *                   be empty), or nullptr when needs_residual() was false
+   * @param residual_vec - this rank's slices of the residual of the trial (F or Sigma part
+   *                       may be empty), or nullptr when needs_residual() was false
    * @return per-rank {max|ref - out|_F, max|ref - out|_Sigma}, ref the previous accepted
    *         state (damped) or the newest trial (extrapolated); the caller max-reduces.
    */
   template<typename Comm, typename AF, typename AS>
-  std::array<double, 2> step(Comm& comm, AF&& F, AS&& S, hist_vec const* residual) {
+  std::array<double, 2> step(Comm& comm, AF&& F_skij, AS&& S_tskij, hist_vec const* residual_vec) {
     diis_timers::mix_total.start();
     bool extrapolated = false;
     if (diis) {
-      if (residual) diis->push(comm, layout, F, S, residual->F, residual->S);
-      extrapolated = diis->mix(layout, F, S, prev);
+      if (residual_vec) diis->push(comm, layout, F_skij, S_tskij, residual_vec->F, residual_vec->S);
+      extrapolated = diis->mix(layout, F_skij, S_tskij, prev_vec);
     } else {
       diis_timers::mix_damp.start();
-      damp_slices(layout, mixing, F, S, prev);
+      damp_slices(layout, mixing, F_skij, S_tskij, prev_vec);
       diis_timers::mix_damp.stop();
     }
 
     diis_timers::mix_conv.start();
-    hist_vec const& ref = extrapolated ? diis->newest_trial() : prev;
+    hist_vec const& ref_vec = extrapolated ? diis->newest_trial() : prev_vec;
     auto max_absdiff = [](auto const& a, auto const& b) {
       double m = 0.0;
       for (long i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a(i) - b(i)));
       return m;
     };
-    std::array<double, 2> conv{max_absdiff(ref.F, layout.F(F)), max_absdiff(ref.S, layout.S(S))};
+    std::array<double, 2> conv{max_absdiff(ref_vec.F, layout.F_view_slice(F_skij)),
+                               max_absdiff(ref_vec.S, layout.S_view_slice(S_tskij))};
     diis_timers::mix_conv.stop();
 
     diis_timers::mix_prev_store.start();
-    layout.store(prev, F, S);
+    layout.store_slice(prev_vec, F_skij, S_tskij);
     has_prev = true;
     diis_timers::mix_prev_store.stop();
     diis_timers::mix_total.stop();

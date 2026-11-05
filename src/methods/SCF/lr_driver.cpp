@@ -389,7 +389,7 @@ void lr_driver::lr_setup(
   }
 
   _Timer.start("LR_DRIVER_SETUP_ALLOC");
-  // _prev (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate y that entered the
+  // _prev_vec (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate y that entered the
   // current iteration, as this rank's slices of the flattened arrays. apply_kernel (and lr_qp_approx
   // in qp mode) writes g(y) into the same shared ΔF/ΔΣ, and the mixing then writes the next
   // iterate there in place, so y survives only in this copy. The damping uses it as the target,
@@ -402,9 +402,9 @@ void lr_driver::lr_setup(
   _hist_layout = iter_scf::hist_vec_layout(
       pmap, nF, qp ? nF : (K.has_sigma() ? _nts * nF : 0));
   if (_pc_gcr) _hist_layout_pc = iter_scf::hist_vec_layout(pmap, nF, 0);  // read only by precond_solve
-  _prev.F = nda::array<ComplexType, 1>(_hist_layout.mF());
-  _prev.S = nda::array<ComplexType, 1>(_hist_layout.mS());
-  _DeltaDm_prev = nda::array<ComplexType, 1>(_hist_layout.mF());
+  _prev_vec.F = nda::array<ComplexType, 1>(_hist_layout.F_len());
+  _prev_vec.S = nda::array<ComplexType, 1>(_hist_layout.S_len());
+  _DeltaDm_prev = nda::array<ComplexType, 1>(_hist_layout.F_len());
 
   if (!K.has_sigma()) {
     // ΔDm-only Dyson pass (Σ-free kernel)
@@ -669,21 +669,21 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               thc_reader_t& thc, const lr_params& p) {
   auto& r_F = *_sDeltaF_pc_r;
   auto& r_S = *_sDeltaSigma_r;
-  auto rF = _hist_layout.rF();
-  auto rS = _hist_layout.rS();
+  auto F_range = _hist_layout.F_range();
+  auto S_range = _hist_layout.S_range();
 
   // Gather r = (r_F, r_Σ) into shared memory.
   r_F.win().fence();
   r_S.win().fence();
-  _hist_layout.F(r_F.local()) = r(rF);
-  _hist_layout.S(r_S.local()) = r(rS);
+  _hist_layout.F_view_slice(r_F.local()) = r(F_range);
+  _hist_layout.S_view_slice(r_S.local()) = r(S_range);
   utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), r_F, r_S);
 
   precond_solve(r_F, &r_S, sG_tskij, thc, p);
 
   // z = (r_F + y_F, r_Σ)
-  z(rF) = r(rF) + _hist_layout.F(_sDeltaF_pc_y->local());
-  z(rS) = r(rS);
+  z(F_range) = r(F_range) + _hist_layout.F_view_slice(_sDeltaF_pc_y->local());
+  z(S_range) = r(S_range);
 }
 
 
@@ -707,13 +707,13 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
 
   // y_F = K_pc[Pχ(r_F + y_F, r_Σ)], from y_F = 0, by the ΔF-only _pc_gcr.
   _pc_gcr->reset_rhs();
-  iter_scf::hist_vec y_prev;
+  iter_scf::hist_vec y_prev_vec;
   nda::array<ComplexType, 5> empty_sigma;
   double tol_in = 0.0;
   double rn = 0.0;
   _pc_sweeps = 0;
   for (int sweep = 1; sweep <= p.precond_max_iter; ++sweep) {
-    y_prev.F = _hist_layout_pc.F(y_F.local());
+    y_prev_vec.F = _hist_layout_pc.F_view_slice(y_F.local());
     _Timer.start("LR_DYSON");
     _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F,
                                      r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density);
@@ -723,14 +723,14 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                  thc, p);
     // ‖r_in,0‖ = ‖K_pc[Pχ(r_F, r_Σ)]‖, the inner residual at y_F = 0.
     if (sweep == 1)
-      tol_in = p.precond_tol * utils::striped_norm(_mpi->comm, _hist_layout_pc.F(y_F.local()),
-                                                   y_prev.F, false).first;
+      tol_in = p.precond_tol * utils::striped_norm(_mpi->comm, _hist_layout_pc.F_view_slice(y_F.local()),
+                                                   y_prev_vec.F, false).first;
     // The last sweep takes any residual as converged, so y_F is left at the
     // inner iterate rather than at its next probe.
     const double tol_s = (sweep == p.precond_max_iter)
                              ? std::numeric_limits<double>::infinity() : tol_in;
     bool conv = false;
-    rn = _pc_gcr->step(_mpi->comm, _hist_layout_pc, y_F.local(), empty_sigma, y_prev, tol_s, conv);
+    rn = _pc_gcr->step(_mpi->comm, _hist_layout_pc, y_F.local(), empty_sigma, y_prev_vec, tol_s, conv);
     utils::complete_shared_slices(*_mpi, _hist_layout_pc.pmap(), y_F);
     _pc_sweeps = sweep;
     if (conv) break;
@@ -899,13 +899,13 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // iteration: at the first, zero or the preconditioner start. ΔDm only enters
     // a difference norm.
     if (qp)
-      _hist_layout.store(_prev, sDeltaF_skij.local(), sDeltaVcorr_skij->local());
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), sDeltaVcorr_skij->local());
     else if (track_sigma)
-      _hist_layout.store(_prev, sDeltaF_skij.local(), sDeltaSigma_tskij->local());
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), sDeltaSigma_tskij->local());
     else
-      _hist_layout.store(_prev, sDeltaF_skij.local(), empty_sigma);
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), empty_sigma);
     if (iter > 1)
-      _DeltaDm_prev = _hist_layout.F(sDeltaDm_skij.local());
+      _DeltaDm_prev = _hist_layout.F_view_slice(sDeltaDm_skij.local());
     _mpi->comm.barrier();
     _Timer.stop("LR_SAVE");
 
@@ -918,7 +918,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Compute norms for logging, reduced over the global comm from the slices.
     _Timer.start("LR_CONVERGENCE");
     auto norms_Dm = utils::striped_norm(
-        _mpi->comm, _hist_layout.F(sDeltaDm_skij.local()), _DeltaDm_prev, iter > 1);
+        _mpi->comm, _hist_layout.F_view_slice(sDeltaDm_skij.local()), _DeltaDm_prev, iter > 1);
     double norm_DeltaDm = norms_Dm.first;
     double norm_DeltaDm_diff = norms_Dm.second;
     _Timer.stop("LR_CONVERGENCE");
@@ -950,22 +950,22 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     _pc_sweeps = 0;
     // Striped: every rank of the global comm participates, each operating on its
     // slice of the shared ΔF/ΔΣ and writing the mixed result back in place. Pass
-    // .local() views directly (in/out); `_prev` already holds this rank's slices.
+    // .local() views directly (in/out); `_prev_vec` already holds this rank's slices.
     //
     // The second quantity mixed alongside ΔF is the dynamic ΔΣ in the standard
     // path, or the static ΔV_QPGW in qp mode; every accelerator takes (ΔF, second quantity).
     auto step = [&](auto F, auto S) {
       if (use_gcr) {
         // GCR
-        gcr_rnorm = _gcr->step(_mpi->comm, _hist_layout, F, S, _prev,
+        gcr_rnorm = _gcr->step(_mpi->comm, _hist_layout, F, S, _prev_vec,
                                p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
       } else if (_diis) {
         // DIIS: the residual is the difference of the successive iterates
-        _diis->push(_mpi->comm, _hist_layout, F, S, _hist_layout.F(F) - _prev.F, _hist_layout.S(S) - _prev.S);
-        _diis->mix(_hist_layout, F, S, _prev);
+        _diis->push(_mpi->comm, _hist_layout, F, S, _hist_layout.F_view_slice(F) - _prev_vec.F, _hist_layout.S_view_slice(S) - _prev_vec.S);
+        _diis->mix(_hist_layout, F, S, _prev_vec);
       } else {
         // Damping, preconditioned with pc_fn when set
-        lr_damping_step(_hist_layout, F, S, _prev, p.iter_params.mixing, pc_fn ? &pc_fn : nullptr);
+        lr_damping_step(_hist_layout, F, S, _prev_vec, p.iter_params.mixing, pc_fn ? &pc_fn : nullptr);
       }
     };
     if (qp) {
@@ -992,7 +992,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // same slices.
     _Timer.start("LR_CONVERGENCE");
     auto norms_F = utils::striped_norm(
-        _mpi->comm, _hist_layout.F(sDeltaF_skij.local()), _prev.F, iter > 1);
+        _mpi->comm, _hist_layout.F_view_slice(sDeltaF_skij.local()), _prev_vec.F, iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
 
@@ -1002,12 +1002,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     double norm_DeltaSigma_diff = 0.0;
     if (qp) {
       auto norms_V = utils::striped_norm(
-          _mpi->comm, _hist_layout.S(sDeltaVcorr_skij->local()), _prev.S, iter > 1);
+          _mpi->comm, _hist_layout.S_view_slice(sDeltaVcorr_skij->local()), _prev_vec.S, iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
     } else if (track_sigma) {
       auto norms_Sigma = utils::striped_norm(
-          _mpi->comm, _hist_layout.S(sDeltaSigma_tskij->local()), _prev.S, iter > 1);
+          _mpi->comm, _hist_layout.S_view_slice(sDeltaSigma_tskij->local()), _prev_vec.S, iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
       norm_DeltaSigma_diff = norms_Sigma.second;
     }

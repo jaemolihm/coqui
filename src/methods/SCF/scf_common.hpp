@@ -538,7 +538,7 @@ void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
  * sSigma_tskij (null: F only) with `m`: the trial on entry, the accepted state on exit.
  * When m has no previous accepted state, it is read from
  * {datasets[0]}/iter{iteration-1} of the checkpoint (datasets: group, F, Sigma).
- * @param residual - residual slices of the trial (m.layout), or null when m.needs_residual() was false
+ * @param residual_vec - residual slices of the trial (m.layout), or null when m.needs_residual() was false
  * @return - max|ref - out| for F and Sigma over all ranks, ref the previous accepted state
  *           (damped) or the newest trial (extrapolated)
  */
@@ -546,7 +546,7 @@ template<typename comm_t, typename X_t, typename Xt_t>
 auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
               std::string const& h5_prefix, std::array<std::string,3> const& datasets,
               long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
-              iter_scf::hist_vec const* residual)
+              iter_scf::hist_vec const* residual_vec)
   -> std::tuple<double, double>;
 
 template<typename comm_t, typename X_t, nda::ArrayOfRank<1> Array1D>

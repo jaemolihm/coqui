@@ -615,7 +615,7 @@ private:
   /// the mixing then overwrites them with the next iterate, so y survives only here. The damping
   /// uses it as the target, DIIS as g(y) - y (and as the fallback target), GCR as the probe y,
   /// and the convergence norms ‖Δ - Δ_prev‖ read it.
-  iter_scf::hist_vec _prev;
+  iter_scf::hist_vec _prev_vec;
   /// The same for ΔDm, which is not mixed (dyson_pass overwrites it): read only by the convergence norm ‖ΔDm - ΔDm_prev‖.
   nda::array<ComplexType, 1> _DeltaDm_prev;
 

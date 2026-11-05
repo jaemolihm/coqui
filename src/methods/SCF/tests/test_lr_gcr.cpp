@@ -101,8 +101,8 @@ int solve(mpi3::communicator& comm, utils::part_map const& pmap, methods::lr_gcr
       Sp = y(nda::range(nF + s0, nF + s1));
     }
     bool conv = false;
-    iter_scf::hist_vec probe{std::move(Fp), std::move(Sp)};
-    gcr.step(comm, layout, F(), S(), probe, tol, conv, precond);
+    iter_scf::hist_vec probe_vec{std::move(Fp), std::move(Sp)};
+    gcr.step(comm, layout, F(), S(), probe_vec, tol, conv, precond);
     // Reassemble the full probe (or x) from every rank's slice.
     nda::array<ComplexType, 1> ynew(nF + nS);
     ynew() = 0;
@@ -154,18 +154,18 @@ precond_t dense_precond(mpi3::communicator& comm, utils::part_map const& pmap,
     auto [f0, f1] = pmap.my_slice(nF);
     long s0 = 0, s1 = 0;
     if (nS > 0) std::tie(s0, s1) = pmap.my_slice(nS);
-    const long mF = f1 - f0;
+    const long F_len = f1 - f0;
     nda::array<ComplexType, 1> rf(nF + nS);
     rf() = 0;
-    rf(nda::range(f0, f1)) = r(nda::range(0, mF));
-    if (nS > 0) rf(nda::range(nF + s0, nF + s1)) = r(nda::range(mF, mF + s1 - s0));
+    rf(nda::range(f0, f1)) = r(nda::range(0, F_len));
+    if (nS > 0) rf(nda::range(nF + s0, nF + s1)) = r(nda::range(F_len, F_len + s1 - s0));
     comm.all_reduce_in_place_n(rf.data(), rf.size(), std::plus<>{});
     nda::array<ComplexType, 1> zf(nF + nS);
     zf() = 0;
     for (long i = 0; i < nF + nS; ++i)
       for (long j = 0; j < nF + nS; ++j) zf(i) += Minv(i, j) * rf(j);
-    z(nda::range(0, mF)) = zf(nda::range(f0, f1));
-    if (nS > 0) z(nda::range(mF, mF + s1 - s0)) = zf(nda::range(nF + s0, nF + s1));
+    z(nda::range(0, F_len)) = zf(nda::range(f0, f1));
+    if (nS > 0) z(nda::range(F_len, F_len + s1 - s0)) = zf(nda::range(nF + s0, nF + s1));
   };
 }
 

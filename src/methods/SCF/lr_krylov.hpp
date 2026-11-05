@@ -138,7 +138,7 @@ public:
    * @brief One GCR step on the iterate (ΔF, ΔΣ).
    *
    * The iterate is given as two arguments, each a full array (F_inout, S_inout), and the probe as this
-   * rank's slices of both. S_inout may be empty (a ΔF-only iterate, `layout.nS() == 0`). Internally the two
+   * rank's slices of both. S_inout may be empty (a ΔF-only iterate, `layout.S_size_total() == 0`). Internally the two
    * slices are concatenated into one vector [F; S], and every inner product is
    * Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *
@@ -147,7 +147,7 @@ public:
    *                            this rank's slice of the next probe (x + r,
    *                            x + M⁻¹r, or a kick), or of x once converged, on exit
    * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
-   * @param probe     - [INPUT]  this rank's slices of the probe y g was applied to
+   * @param probe_vec - [INPUT]  this rank's slices of the probe y g was applied to
    * @param tol       - [INPUT]  convergence threshold on ‖r‖ of the concatenation
    * @param converged - [OUTPUT] ‖r‖ ≤ tol
    * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
@@ -156,24 +156,24 @@ public:
    */
   template<typename Comm, typename FView, typename SView>
   double step(Comm& comm, iter_scf::hist_vec_layout const& layout,
-              FView F_inout, SView S_inout, iter_scf::hist_vec const& probe,
+              FView F_inout, SView S_inout, iter_scf::hist_vec const& probe_vec,
               double tol, bool& converged,
               std::function<void(Vec1D const&, Vec1D&)> const* precond = nullptr) {
-    utils::check(probe.F.size() == layout.mF() and probe.S.size() == layout.mS(),
+    utils::check(probe_vec.F.size() == layout.F_len() and probe_vec.S.size() == layout.S_len(),
                  "lr_gcr: probe slices ({}, {}) != partition slices ({}, {})",
-                 probe.F.size(), probe.S.size(), layout.mF(), layout.mS());
-    const long n = layout.mF() + layout.mS();
-    auto rF = layout.rF();
-    auto rS = layout.rS();
-    auto F_loc = layout.F(F_inout);
+                 probe_vec.F.size(), probe_vec.S.size(), layout.F_len(), layout.S_len());
+    const long n = layout.F_len() + layout.S_len();
+    auto F_range = layout.F_range();
+    auto S_range = layout.S_range();
+    auto F_slice = layout.F_view_slice(F_inout);
 
     // _g <- g(y), _y <- y, both as [F; S]. Sized once per (layout of) solve.
     if (_g.size() != n) { _g = Vec1D(n); _y = Vec1D(n); }
-    _g(rF) = F_loc;
-    _y(rF) = probe.F;
-    if (layout.nS() > 0) {
-      _g(rS) = layout.S(S_inout);
-      _y(rS) = probe.S;
+    _g(F_range) = F_slice;
+    _y(F_range) = probe_vec.F;
+    if (layout.S_size_total() > 0) {
+      _g(S_range) = layout.S_view_slice(S_inout);
+      _y(S_range) = probe_vec.S;
     }
 
     _g -= _y;                             // r(y) = g(y) − y
@@ -289,8 +289,8 @@ public:
       // Next probe x + r
       _y() = _x + _r;
     }
-    F_loc = _y(rF);
-    if (layout.nS() > 0) layout.S(S_inout) = _y(rS);
+    F_slice = _y(F_range);
+    if (layout.S_size_total() > 0) layout.S_view_slice(S_inout) = _y(S_range);
     return rn;
   }
 
@@ -361,32 +361,32 @@ private:
  * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
  * @param F_inout   - [IN/OUT] the full ΔF: g(y_prev) in, this rank's slice of y out
  * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
- * @param prev      - [INPUT]  this rank's slices of y_prev
+ * @param prev_vec  - [INPUT]  this rank's slices of y_prev
  * @param mixing    - [INPUT]  damping factor
  * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
  *                            concatenation [F; S]; collective. Null: z = r
  */
 template<typename FView, typename SView>
 void lr_damping_step(iter_scf::hist_vec_layout const& layout, FView F_inout, SView S_inout,
-                     iter_scf::hist_vec const& prev, double mixing,
+                     iter_scf::hist_vec const& prev_vec, double mixing,
                      std::function<void(nda::array<ComplexType, 1> const&,
                                         nda::array<ComplexType, 1>&)> const* precond) {
-  utils::check(prev.F.size() == layout.mF() and prev.S.size() == layout.mS(),
+  utils::check(prev_vec.F.size() == layout.F_len() and prev_vec.S.size() == layout.S_len(),
                "lr_damping_step: history slices ({}, {}) != partition slices ({}, {}).",
-               prev.F.size(), prev.S.size(), layout.mF(), layout.mS());
+               prev_vec.F.size(), prev_vec.S.size(), layout.F_len(), layout.S_len());
   if (precond) {
-    const long n = layout.mF() + layout.mS();
-    auto rF = layout.rF();
-    auto rS = layout.rS();
-    auto F_loc = layout.F(F_inout);
+    const long n = layout.F_len() + layout.S_len();
+    auto F_range = layout.F_range();
+    auto S_range = layout.S_range();
+    auto F_slice = layout.F_view_slice(F_inout);
     nda::array<ComplexType, 1> r(n), z(n);
-    r(rF) = F_loc - prev.F;
-    if (layout.nS() > 0) r(rS) = layout.S(S_inout) - prev.S;
+    r(F_range) = F_slice - prev_vec.F;
+    if (layout.S_size_total() > 0) r(S_range) = layout.S_view_slice(S_inout) - prev_vec.S;
     (*precond)(r, z);
-    F_loc = prev.F + mixing * z(rF);
-    if (layout.nS() > 0) layout.S(S_inout) = prev.S + mixing * z(rS);
+    F_slice = prev_vec.F + mixing * z(F_range);
+    if (layout.S_size_total() > 0) layout.S_view_slice(S_inout) = prev_vec.S + mixing * z(S_range);
   } else {
-    iter_scf::damp_slices(layout, mixing, F_inout, S_inout, prev);
+    iter_scf::damp_slices(layout, mixing, F_inout, S_inout, prev_vec);
   }
 }
 
