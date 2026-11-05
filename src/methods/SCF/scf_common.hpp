@@ -483,34 +483,40 @@ double compute_Nelec(double mu, const nda::array<ComplexType, 4> &spectra,
                      const mf::MF &mf, const imag_axes_ft::IAFT &FT);
 
 /**
- * Iterative solver for the SCF solution of effective quasiparticle Hamiltonian.
+ * Mixing (damping or DIIS) of the effective quasiparticle Hamiltonian Heff of one qp-SCF
+ * iteration, in place. Called by qp_scf_loop once per iteration. Iteration 1 is not mixed; it
+ * only stores Heff as the previous accepted state of the next mixing.
  * @param context     - [INPUT] mpi context
- * @param iter_solver - [INPUT] iterative solver
+ * @param iter_solver - [INPUT] iterative solver; holds the mixing state across iterations
  * @param it          - [INPUT] current iteration
- * @param h5_prefix   - [INPUT] prefix for h5 archive that stores QP results from previous iterations
- * @param sHeff_skij  - [INPUT] quasiparticle Hamiltonian at the current iteration
+ * @param h5_prefix   - [INPUT] checkpoint prefix, read only when no previous state is in memory
+ * @param sHeff_skij  - [IN/OUT] quasiparticle Hamiltonian: the trial on entry, the mixed one on exit
+ * @param sS_skij     - [INPUT] overlap matrix
+ * @param sDm_skij    - [INPUT] density matrix of the previous accepted Hamiltonian (commutator residual)
  * @return - maximum norm of the SCF error
  */
 template<typename comm_t, typename X_t>
 double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                     long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij);
+                     long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij,
+                     const X_t &sDm_skij);
 /**
- * Iterative solver for the SCF solution of self-energy
+ * Mixing (damping or DIIS) of the static and dynamic self-energy (F, Sigma) of one Dyson-SCF
+ * iteration, in place. Called by scf_loop once per iteration, between the self-energy solve and
+ * the Dyson equation, and by dmft_embed (Dyson path) once per call. Iteration 1 is not mixed;
+ * it only stores the state as the previous accepted state of the next mixing.
  * @param context      - [INPUT] mpi context
- * @param iter_solver  - [INPUT] iterative solver
- * @param it           - [INPUT] current iteration
- * @param h5_prefix    - [INPUT] prefix for h5 archive that stores QP results from previous iterations
- * @param sF_skij      - [INPUT] static self-energy at the current iteration
- * @param sSigma_tskij - [INPUT] dynamic self-energy at the current iteration
+ * @param iter_solver  - [INPUT] iterative solver; holds the mixing state across iterations
+ * @param iteration    - [INPUT] current iteration
+ * @param h5_prefix    - [INPUT] checkpoint prefix, read only when no previous state is in memory
+ * @param sF_skij      - [IN/OUT] static self-energy: the trial on entry, the mixed one on exit
+ * @param sSigma_tskij - [IN/OUT] dynamic self-energy: the trial on entry, the mixed one on exit
  * @param FT           - [INPUT] Fourier transform driver on imaginary axes
- * @param restart      - [INPUT] whether this is a restart SCF
- * @param sG_tskij     - [INPUT] latest-iteration Green's function (optional). When given
- *                       (together with mu, sS_skij, sH0_skij), the DIIS commutator residual
- *                       is evaluated with the k-striped distributed path (A10) reading these
- *                       node-shared arrays directly instead of re-reading from the checkpoint.
+ * @param dataset      - [INPUT] checkpoint group and dataset names of F and Sigma
+ * @param sG_tskij     - [INPUT] Green's function of the previous iteration; with mu, sS_skij
+ *                       and sH0_skij required for DIIS (the commutator residual), unused for damping
  * @param mu           - [INPUT] chemical potential matching sG_tskij
- * @param sS_skij      - [INPUT] overlap matrix (optional; enables the A10 distributed commutator)
- * @param sH0_skij     - [INPUT] non-interacting Hamiltonian (optional; enables A10)
+ * @param sS_skij      - [INPUT] overlap matrix (DIIS)
+ * @param sH0_skij     - [INPUT] non-interacting Hamiltonian (DIIS)
  * @return - maximum norm of the SCF error for F and Sigma
  */
 template<typename comm_t, typename X_t, typename Xt_t>
@@ -522,20 +528,35 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
                      const X_t* sS_skij = nullptr, const X_t* sH0_skij = nullptr)
   -> std::tuple<double, double>;
 
-template<typename MPI_Context_t, typename X_t, typename Xt_t>
-auto damping_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
-                  long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-                  std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"})
--> std::tuple<double, double>;
+/**
+ * Cut the slices of `mix_state` for the arrays sF_skij and *sSigma_tskij, with the parameters
+ * of iter_solver. Collective on context.comm. Called once per SCF run (or at the first
+ * iteration after a restart) by both solve_iterative, and by dmft_embed at every call.
+ * Without sSigma_tskij (null) only F is mixed: the qp SCF Heff and the embedding Vcorr.
+ */
+template<typename comm_t, typename X_t>
+void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
+                       iter_scf::mixing_state& mix_state, X_t &sF_skij,
+                       sArray_t<Array_view_5D_t> *sSigma_tskij = nullptr);
 
-template<typename MPI_Context_t, typename X_t, typename Xt_t>
-auto diis_impl(MPI_Context_t &context, iter_scf::iter_scf_t& iter_solver,
-               long iteration, std::string h5_prefix, X_t &sF_skij, Xt_t &sSigma_tskij,
-               const imag_axes_ft::IAFT *FT,
-               std::array<std::string,3> datasets={"scf", "F_skij", "Sigma_tskij"},
-               const Xt_t* sG_tskij = nullptr, double mu = 0.0,
-               const X_t* sS_skij = nullptr, const X_t* sH0_skij = nullptr)
--> std::tuple<double, double>;
+/**
+ * One element-sliced mixing step (damping or DIIS) of the node-shared windows sF_skij and
+ * *sSigma_tskij with `mix_state`: the trial on entry, the accepted state on exit. Without
+ * sSigma_tskij (null) only F is mixed.
+ * Called by both solve_iterative, and directly by dmft_embed (qp path), which mixes (Vhf, Sigma)
+ * and Vcorr with two separate states.
+ * When mix_state has no previous accepted state, it is read from
+ * {datasets[0]}/iter{iteration-1} of the checkpoint (datasets: group, F, Sigma).
+ * @param residual_vec - residual slices of the trial (mix_state.layout), or null when mix_state.needs_residual() was false
+ * @return - max|ref - out| for F and Sigma over all ranks, ref the previous accepted state
+ *           (damped) or the newest trial (extrapolated)
+ */
+template<typename comm_t, typename X_t>
+auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& mix_state,
+              std::string const& h5_prefix, std::array<std::string,3> const& datasets,
+              long iteration, X_t &sF_skij, iter_scf::hist_vec const* residual_vec,
+              sArray_t<Array_view_5D_t> *sSigma_tskij = nullptr)
+  -> std::tuple<double, double>;
 
 template<typename comm_t, typename X_t, nda::ArrayOfRank<1> Array1D>
 double eval_corr_energy(comm_t& comm, const imag_axes_ft::IAFT &FT,

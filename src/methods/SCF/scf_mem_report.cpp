@@ -208,18 +208,24 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     }
   }
 
-  // In-memory DIIS history: max_subsp trial (F, Sigma) pairs plus max_subsp Sigma
-  // residuals, each element-sliced across the global comm (utils::part_map), i.e.
-  // one whole copy per run. The engine also keeps the previous accepted state as
-  // one more sliced (F, Sigma) pair.
-  if (p.iter_alg == "DIIS" and p.diis_storage == "memory" and p.max_subsp > 0) {
-    arrays.push_back({"DIIS history (memory)",
-                      fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
-                      double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
-                      DIST, PERSIST});
+  // DIIS history (iter_scf::diis_mixer): max_subsp trial vectors (F, Sigma) plus max_subsp
+  // Sigma residuals (the Fock block of the commutator is not stored), each element-sliced
+  // across the global comm, i.e. one whole copy per run. The mixing state also keeps the
+  // previous accepted state (F, Sigma), sliced the same way, for the damping steps and
+  // the convergence norm.
+  if (p.iter_alg == "DIIS") {
+    if (p.max_subsp >= 2)  // the history is stored only if max_subsp >= min_subsp = 2
+      arrays.push_back({"DIIS history",
+                        fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
+                        double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
+                        DIST, PERSIST});
     arrays.push_back({"DIIS prev state (striped)", "|F| + |Sigma|",
                       band4() + band5(p.nt_f), DIST, PERSIST});
   }
+  // Damping keeps the previous accepted state, element-sliced like the DIIS one.
+  if (p.iter_alg == "damping")
+    arrays.push_back({"damping prev state (striped)", "|F| + |Sigma|",
+                      band4() + band5(p.nt_f), DIST, PERSIST});
 
   // ---------------- transient: RPA polarizability ----------------
   // Only the THC path builds the auxiliary-basis grids; ft_buffer_dist and
@@ -377,8 +383,7 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
               (i == peak_grp) ? "  <- peak" : "");
   app_log(2, "    ranks/node = {}, nodes = {}, t-pools = {} (t-pool comm = {} ranks)",
           rpn, n_nodes, ntpools, np_tpool);
-  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; the W Dyson scratch;"
-             " disk-backed DIIS history");
+  app_log(2, "    not modeled: HF Fock-build scratch (~nk·NP·nb); _Vxc; the W Dyson scratch");
   if (p.n_thc_readers > 1)
     app_log(2, "    the {} THC readers are assumed to share the correlated reader's NP/nbnd/"
                "x_range shapes", p.n_thc_readers);

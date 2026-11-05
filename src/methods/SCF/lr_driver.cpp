@@ -271,28 +271,30 @@ void lr_driver::lr_setup(
       // every pair costs a ΔΣ, as one DIIS depth unit does.
       size_t cap = p.iter_params.max_subsp_size;
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
-      _lr_gcr = std::make_unique<lr_gcr>(cap);
+      _gcr = std::make_unique<lr_gcr>(cap);
     } else if (p.iter_params.alg == "DIIS") {
-      _lr_diis = std::make_unique<lr_diis>(p.iter_params);
+      _diis.emplace(iter_scf::diis_mixer::config{
+          p.iter_params.mixing, p.iter_params.max_subsp_size, p.iter_params.diis_warmup,
+          /*min_subsp=*/3, /*log_level=*/3});
     }
   }
   // The preconditioner's inner GCR iterates ΔF alone, so its pairs are tiny.
   if (!p.precond_kernel.empty()) _pc_gcr = std::make_unique<lr_gcr>(50);
 
   // Accelerator history, for the memory report.
-  lr_diis_hist_t inner_hist;
-  if (_lr_gcr) {
+  lr_hist_t inner_hist;
+  if (_gcr) {
     // 2M basis vectors plus x, r and the per-step g, y (and M⁻¹r when
     // preconditioned).
-    inner_hist.depth = static_cast<long>(_lr_gcr->capacity());
+    inner_hist.depth = static_cast<long>(_gcr->capacity());
     inner_hist.n_vec = 2 * inner_hist.depth + 4 + (p.precond_kernel.empty() ? 0 : 1);
     inner_hist.n_F = 1;
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
-  } else if (_lr_diis) {
-    // The ring holds max_subsp_size + 1 slots: push_slot() grows to that before
-    // the first eviction. Each slot stores a trial AND a residual.
-    inner_hist.depth = static_cast<long>(_lr_diis->max_subsp_size());
-    inner_hist.n_vec = 2 * (inner_hist.depth + 1);
+  } else if (_diis and _diis->active()) {
+    // DIIS stores max_subsp entries, each a trial vector AND its residual, plus the
+    // residual _res_vec filled before each push.
+    inner_hist.depth = static_cast<long>(_diis->cfg().max_subsp);
+    inner_hist.n_vec = 2 * inner_hist.depth + 1;
     inner_hist.n_F = qp ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
   }
@@ -388,22 +390,22 @@ void lr_driver::lr_setup(
   }
 
   _Timer.start("LR_DRIVER_SETUP_ALLOC");
-  // Element partition of the node-replicated band arrays over the *global*
-  // comm: the DIIS history, the "previous iterate" copies and their norms are
-  // all elementwise, so each rank handles one slice and the whole job stores
-  // each of those quantities once instead of once per node.
-  _pmap = utils::make_part_map(*_mpi);
-
-  // Previous ΔDm / ΔF / ΔΣ / ΔV_QPGW (for damping/DIIS and the difference norms)
-  // are rank-private slices of the flattened arrays, in the `_pmap` partition. ΔΣ
-  // is tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
-  // tracks the static ΔV_QPGW in its place). An inactive quantity gets
-  // n_flat = 0.
+  // _prev_vec (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate y that entered the
+  // current iteration, as this rank's slices of the flattened arrays. apply_kernel (and lr_qp_approx
+  // in qp mode) writes g(y) into the same shared ΔF/ΔΣ, and the mixing then writes the next
+  // iterate there in place, so y survives only in this copy. The damping uses it as the target,
+  // DIIS as g(y) - y (and as the fallback target), GCR as the probe y, and every iteration's
+  // norms ‖Δ - Δ_prev‖ read it. _DeltaDm_prev: dyson_pass overwrites ΔDm.
+  // ΔΣ is tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
+  // tracks the static ΔV_QPGW in its place).
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
-  _DeltaDm.alloc(_pmap, nF);
-  _DeltaF.alloc(_pmap, nF);
-  _DeltaSigma.alloc(_pmap, (K.has_sigma() && !qp) ? _nts * nF : 0);
-  _DeltaVcorr.alloc(_pmap, qp ? nF : 0);
+  const auto pmap = utils::make_part_map(*_mpi);
+  _hist_layout = iter_scf::hist_vec_layout(
+      pmap, nF, qp ? nF : (K.has_sigma() ? _nts * nF : 0));
+  if (_pc_gcr) _hist_layout_pc = iter_scf::hist_vec_layout(pmap, nF, 0);  // read only by precond_solve
+  _prev_vec.F = nda::array<ComplexType, 1>(_hist_layout.F_len());
+  _prev_vec.S = nda::array<ComplexType, 1>(_hist_layout.S_len());
+  _DeltaDm_prev = nda::array<ComplexType, 1>(_hist_layout.F_len());
 
   if (!K.has_sigma()) {
     // ΔDm-only Dyson pass (Σ-free kernel)
@@ -668,23 +670,21 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               thc_reader_t& thc, const lr_params& p) {
   auto& r_F = *_sDeltaF_pc_r;
   auto& r_S = *_sDeltaSigma_r;
-  const long mF = _DeltaF.i1 - _DeltaF.i0;
-  const long mS = _DeltaSigma.i1 - _DeltaSigma.i0;
-  auto rF = nda::range(0, mF);
-  auto rS = nda::range(mF, mF + mS);
+  auto F_range = _hist_layout.F_range();
+  auto S_range = _hist_layout.S_range();
 
   // Gather r = (r_F, r_Σ) into shared memory.
   r_F.win().fence();
   r_S.win().fence();
-  _DeltaF.slice(r_F.local()) = r(rF);
-  _DeltaSigma.slice(r_S.local()) = r(rS);
-  utils::complete_shared_slices(*_mpi, _pmap, r_F, r_S);
+  _hist_layout.F_view_slice(r_F.local()) = r(F_range);
+  _hist_layout.S_view_slice(r_S.local()) = r(S_range);
+  utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), r_F, r_S);
 
   precond_solve(r_F, &r_S, sG_tskij, thc, p);
 
   // z = (r_F + y_F, r_Σ)
-  z(rF) = r(rF) + _DeltaF.slice(_sDeltaF_pc_y->local());
-  z(rS) = r(rS);
+  z(F_range) = r(F_range) + _hist_layout.F_view_slice(_sDeltaF_pc_y->local());
+  z(S_range) = r(S_range);
 }
 
 
@@ -693,7 +693,6 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                               const sArray_t<Array_view_5D_t>& sG_tskij,
                               thc_reader_t& thc, const lr_params& p) {
   auto& y_F = *_sDeltaF_pc_y;
-  const long mF = _DeltaF.i1 - _DeltaF.i0;
 
   // y_F = 0 serves as both the zero ΔH0 and ΔF of the ΔDm pass below, and as the
   // start of the inner solve.
@@ -709,14 +708,13 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
 
   // y_F = K_pc[Pχ(r_F + y_F, r_Σ)], from y_F = 0, by the ΔF-only _pc_gcr.
   _pc_gcr->reset_rhs();
-  nda::array<ComplexType, 1> y_prev(mF);
+  iter_scf::hist_vec y_prev_vec;
   nda::array<ComplexType, 5> empty_sigma;
-  nda::array<ComplexType, 1> empty_prev;
   double tol_in = 0.0;
   double rn = 0.0;
   _pc_sweeps = 0;
   for (int sweep = 1; sweep <= p.precond_max_iter; ++sweep) {
-    y_prev = _DeltaF.slice(y_F.local());
+    y_prev_vec.F = _hist_layout_pc.F_view_slice(y_F.local());
     _Timer.start("LR_DYSON");
     _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F,
                                      r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density);
@@ -726,16 +724,15 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                  thc, p);
     // ‖r_in,0‖ = ‖K_pc[Pχ(r_F, r_Σ)]‖, the inner residual at y_F = 0.
     if (sweep == 1)
-      tol_in = p.precond_tol * utils::striped_norm(_mpi->comm, _DeltaF.slice(y_F.local()),
-                                                   y_prev, false).first;
+      tol_in = p.precond_tol * utils::striped_norm(_mpi->comm, _hist_layout_pc.F_view_slice(y_F.local()),
+                                                   y_prev_vec.F, false).first;
     // The last sweep takes any residual as converged, so y_F is left at the
     // inner iterate rather than at its next probe.
     const double tol_s = (sweep == p.precond_max_iter)
                              ? std::numeric_limits<double>::infinity() : tol_in;
     bool conv = false;
-    rn = _pc_gcr->step(_mpi->comm, _pmap, y_F.local(), y_prev, empty_sigma, empty_prev,
-                       tol_s, conv);
-    utils::complete_shared_slices(*_mpi, _pmap, y_F);
+    rn = _pc_gcr->step(_mpi->comm, _hist_layout_pc, y_F.local(), empty_sigma, y_prev_vec, tol_s, conv);
+    utils::complete_shared_slices(*_mpi, _hist_layout_pc.pmap(), y_F);
     _pc_sweeps = sweep;
     if (conv) break;
   }
@@ -790,8 +787,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   sDeltaF_skij.set_zero();
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
   if (qp) sDeltaVcorr_skij->set_zero();
-  if (_lr_diis) _lr_diis->reset();
-  if (_lr_gcr) _lr_gcr->reset();
+  if (_diis) _diis->reset();
+  if (_gcr) _gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
   _pc_applies = 0;
   _pc_cap_hits = 0;
@@ -830,7 +827,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   const int max_iter = K.empty() ? 0 : p.max_iter;
   bool converged = K.empty();
 
-  const bool use_gcr = (_lr_gcr != nullptr);
+  const bool use_gcr = (_gcr != nullptr);
   // The preconditioner map z = M⁻¹ r (GCR direction, damping step), preconditioned runs only.
   std::function<void(nda::array<ComplexType, 1> const&, nda::array<ComplexType, 1>&)> pc_fn;
   if (!p.precond_kernel.empty())
@@ -892,6 +889,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     app_log(1, "  " + std::string(92, '-'));
   }
 
+  // Stands in for ΔΣ when the kernel has no Σ (the second block of (ΔF, ΔΣ) is then empty).
+  nda::array<ComplexType, 5> empty_sigma;
+
   for (iter = 1; iter <= max_iter; ++iter) {
 
     // Save the previous iterates, each as this rank's partition slice only.
@@ -899,13 +899,14 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // The iteration-algorithm step reads the input ΔF/ΔΣ (ΔV_QPGW) of every
     // iteration: at the first, zero or the preconditioner start. ΔDm only enters
     // a difference norm.
-    _DeltaF.prev = _DeltaF.slice(sDeltaF_skij.local());
-    if (track_sigma)
-      _DeltaSigma.prev = _DeltaSigma.slice(sDeltaSigma_tskij->local());
     if (qp)
-      _DeltaVcorr.prev = _DeltaVcorr.slice(sDeltaVcorr_skij->local());
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), sDeltaVcorr_skij->local());
+    else if (track_sigma)
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), sDeltaSigma_tskij->local());
+    else
+      _hist_layout.store_slice(_prev_vec, sDeltaF_skij.local(), empty_sigma);
     if (iter > 1)
-      _DeltaDm.prev = _DeltaDm.slice(sDeltaDm_skij.local());
+      _DeltaDm_prev = _hist_layout.F_view_slice(sDeltaDm_skij.local());
     _mpi->comm.barrier();
     _Timer.stop("LR_SAVE");
 
@@ -918,7 +919,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // Compute norms for logging, reduced over the global comm from the slices.
     _Timer.start("LR_CONVERGENCE");
     auto norms_Dm = utils::striped_norm(
-        _mpi->comm, _DeltaDm.slice(sDeltaDm_skij.local()), _DeltaDm.prev, iter > 1);
+        _mpi->comm, _hist_layout.F_view_slice(sDeltaDm_skij.local()), _DeltaDm_prev, iter > 1);
     double norm_DeltaDm = norms_Dm.first;
     double norm_DeltaDm_diff = norms_Dm.second;
     _Timer.stop("LR_CONVERGENCE");
@@ -949,51 +950,44 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     bool gcr_converged = false;
     _pc_sweeps = 0;
     // Striped: every rank of the global comm participates, each operating on its
-    // `_pmap` element-slice of the shared ΔF/ΔΣ and writing the mixed result
-    // back in place. Pass .local() views directly (in/out); the "prev" arguments
-    // are already this rank's slice.
+    // slice of the shared ΔF/ΔΣ and writing the mixed result back in place. Pass
+    // .local() views directly (in/out); `_prev_vec` already holds this rank's slices.
     //
-    // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
-    // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
-    // the same two-slot arguments.
-    auto step = [&](auto F, auto const& F_prev, auto S, auto const& S_prev) {
+    // The second quantity mixed alongside ΔF is the dynamic ΔΣ in the standard
+    // path, or the static ΔV_QPGW in qp mode; every accelerator takes (ΔF, second quantity).
+    auto step = [&](auto F, auto S) {
       if (use_gcr) {
         // GCR
-        gcr_rnorm = _lr_gcr->step(_mpi->comm, _pmap, F, F_prev, S, S_prev,
-                                   p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
-      } else if (_lr_diis) {
-        // DIIS
-        _lr_diis->next_step_combined(_mpi->comm, _pmap, F, F_prev, S, S_prev, iter);
+        gcr_rnorm = _gcr->step(_mpi->comm, _hist_layout, F, S, _prev_vec,
+                               p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
+      } else if (_diis) {
+        // DIIS: residual g(y) - y, the kernel output in (F, S) minus the iterate y in _prev_vec
+        _res_vec.F = _hist_layout.F_view_slice(F) - _prev_vec.F;
+        _res_vec.S = _hist_layout.S_view_slice(S) - _prev_vec.S;
+        _diis->push(_mpi->comm, _hist_layout, F, S, _res_vec);
+        _diis->mix(_hist_layout, F, S, _prev_vec);
       } else {
         // Damping, preconditioned with pc_fn when set
-        lr_damping_step(_pmap, F, F_prev, S, S_prev, p.iter_params.mixing,
-                        pc_fn ? &pc_fn : nullptr);
+        lr_damping_step(_hist_layout, F, S, _prev_vec, p.iter_params.mixing, pc_fn ? &pc_fn : nullptr);
       }
     };
     if (qp) {
       // qp mode: (ΔF, ΔV_QPGW)
-      step(sDeltaF_skij.local(), _DeltaF.prev,
-           sDeltaVcorr_skij->local(), _DeltaVcorr.prev);
+      step(sDeltaF_skij.local(), sDeltaVcorr_skij->local());
+      utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), sDeltaF_skij, *sDeltaVcorr_skij);
     } else if (track_sigma) {
       // Kernel with a Σ: (ΔF, ΔΣ)
-      step(sDeltaF_skij.local(), _DeltaF.prev,
-           sDeltaSigma_tskij->local(), _DeltaSigma.prev);
+      step(sDeltaF_skij.local(), sDeltaSigma_tskij->local());
+      utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), sDeltaF_skij, *sDeltaSigma_tskij);
     } else {
       // Σ-free kernel: ΔF alone
-      nda::array<ComplexType, 5> empty_sigma;
-      nda::array<ComplexType, 1> empty_prev;
-      step(sDeltaF_skij.local(), _DeltaF.prev, empty_sigma, empty_prev);
+      step(sDeltaF_skij.local(), empty_sigma);
+      utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), sDeltaF_skij);
     }
     // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
-    // place with no trailing collective; each node then holds a valid copy of
-    // its own contiguous element run only. With the striping global, each
-    // element is mixed exactly once in the whole job.
-    if (qp)
-      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaVcorr_skij);
-    else if (track_sigma)
-      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij, *sDeltaSigma_tskij);
-    else
-      utils::complete_shared_slices(*_mpi, _pmap, sDeltaF_skij);
+    // place with no trailing collective, so each node holds valid data only for its own
+    // contiguous element run until complete_shared_slices (called in each branch above).
+    // Each element is mixed exactly once in the whole job.
     _Timer.stop("LR_ITER_ALG");
 
     // Compute norms of ΔF and ΔF-ΔF_prev for logging. The previous iterates are
@@ -1001,7 +995,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // same slices.
     _Timer.start("LR_CONVERGENCE");
     auto norms_F = utils::striped_norm(
-        _mpi->comm, _DeltaF.slice(sDeltaF_skij.local()), _DeltaF.prev, iter > 1);
+        _mpi->comm, _hist_layout.F_view_slice(sDeltaF_skij.local()), _prev_vec.F, iter > 1);
     double norm_DeltaF = norms_F.first;
     double norm_DeltaF_diff = norms_F.second;
 
@@ -1011,14 +1005,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     double norm_DeltaSigma_diff = 0.0;
     if (qp) {
       auto norms_V = utils::striped_norm(
-          _mpi->comm, _DeltaVcorr.slice(sDeltaVcorr_skij->local()), _DeltaVcorr.prev,
-          iter > 1);
+          _mpi->comm, _hist_layout.S_view_slice(sDeltaVcorr_skij->local()), _prev_vec.S, iter > 1);
       norm_DeltaSigma = norms_V.first;
       norm_DeltaSigma_diff = norms_V.second;
     } else if (track_sigma) {
       auto norms_Sigma = utils::striped_norm(
-          _mpi->comm, _DeltaSigma.slice(sDeltaSigma_tskij->local()), _DeltaSigma.prev,
-          iter > 1);
+          _mpi->comm, _hist_layout.S_view_slice(sDeltaSigma_tskij->local()), _prev_vec.S, iter > 1);
       norm_DeltaSigma = norms_Sigma.first;
       norm_DeltaSigma_diff = norms_Sigma.second;
     }
@@ -1060,8 +1052,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       const std::string pc_lbl =
           pc_fn ? fmt::format("  precond sweeps {}", _pc_sweeps) : std::string();
       app_log(1, "          [GCR] ||r|| = {:.6e}  (basis {}){}{}", gcr_rnorm,
-              _lr_gcr->basis_size(), _lr_gcr->kicked() ? "  kick" : "", pc_lbl);
-      if (_lr_gcr->stagnated())
+              _gcr->basis_size(), _gcr->kicked() ? "  kick" : "", pc_lbl);
+      if (_gcr->stagnated())
         app_log(1, "    [WARNING] LR GCR: ||r|| = {:.3e} has not dropped "
                    "below {:.0f}% of its value {} steps ago (tol = {:.3e}), which "
                    "the Krylov kick normally prevents; if it does not converge, "
@@ -1170,7 +1162,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
 void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                                       long n_sigma_prev,
-                                      lr_diis_hist_t inner_hist,
+                                      lr_hist_t inner_hist,
                                       bool precond,
                                       bool need_Delta_mu,
                                       bool exchange_static_W,
@@ -1242,16 +1234,16 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
     arrays.push_back({"ΔΣ_prev (striped)", shp5b(nt), band5(nt), true, PERSIST});
   }
 
-  // Accelerator history (lr_diis ring or lr_gcr basis), n_vec vectors counted by
+  // Accelerator history (DIIS entries or lr_gcr basis), n_vec vectors counted by
   // lr_setup. It is striped over the global comm, so the whole job stores it once.
-  auto push_hist = [&](lr_diis_hist_t const& h, const char* who) {
+  auto push_hist = [&](lr_hist_t const& h, const char* who) {
     if (h.n_vec <= 0 || (h.n_F == 0 && h.n_Sigma == 0)) return;
     const double nelem = h.n_vec * (h.n_F * band5(1) + h.n_Sigma * band5(nt));
     arrays.push_back({std::string(who),
                       fmt::format("{}x[{}xΔF + {}xΔΣ]", h.n_vec, h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
-  push_hist(inner_hist, _lr_gcr ? "GCR basis" : "DIIS history");
+  push_hist(inner_hist, _gcr ? "GCR basis" : "DIIS history");
 
   // Stationary hessian estimator. The ω stores — ΔΣ_λ(iω) and ΔG_p(iω) for every
   // perturbation of the batch — are the largest thing the feature allocates and the

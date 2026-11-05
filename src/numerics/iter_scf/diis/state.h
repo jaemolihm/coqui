@@ -1,3 +1,4 @@
+// UNUSED: no compiled file includes this file (only other UNUSED diis/ files do), and it is in no CMake or install list; it is kept so that upstream changes to it still merge.
 /**
  * ==========================================================================
  * CoQuí: Correlated Quantum ínterface
@@ -53,12 +54,6 @@ public:
     }
 
     Vector get() const {
-        utils::check(inited, "State is not initialized");
-        return x;
-    }
-
-    // Read-only access to the stored vector without a copy.
-    const Vector& get_ref() const {
         utils::check(inited, "State is not initialized");
         return x;
     }

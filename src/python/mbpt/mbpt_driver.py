@@ -150,8 +150,21 @@ def run_hf(params, h_int, h_int_exchange=None):
             ``[0, 1]`` for damping; smaller values give more conservative updates.
           - ``max_subsp_size`` *(int, optional, default ``5``)* — maximum DIIS
             subspace size (ignored for ``"damping"``).
-          - ``residual_type`` *(str, optional, default ``"commutator"``)* — residual
-            definition for DIIS. ``"commutator"`` or ``"vector_diff"``.
+          - ``diis_warmup`` *(int, optional, default ``3``)* — number of damping
+            iterations before the DIIS extrapolation (ignored for ``"damping"``).
+          - ``residual_type`` *(str, optional, default ``"commutator"``; ``"vector_diff"``
+            for ``run_evgw``)* — residual definition for DIIS in the quasiparticle SCF
+            (``run_evgw``, ``run_qpgw``): ``"commutator"`` (the commutator of the
+            effective Hamiltonian with the density matrix) or ``"vector_diff"``
+            (the trial effective Hamiltonian minus the previous accepted one). The
+            Dyson SCF always uses the commutator.
+
+          The DIIS history holds ``max_subsp_size`` (trial, residual) entries. It has no
+          storage option: ``diis_storage`` or ``storage`` aborts the run.
+
+        - ``chkpt_slim`` *(bool, optional, default ``False``)* — if ``True``,
+          ``G_tskij`` and ``Sigma_tskij`` are written only for the final SCF
+          iteration. A restart reads only the final iteration.
 
     h_int : ThcCoulomb or CholCoulomb
         Coulomb interaction object used for both the Hartree and exchange terms.
@@ -472,9 +485,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         If True, compute Δμ to enforce particle conservation ΔN=0 (default False).
         Only meaningful for q=0 perturbations.
     iter_alg : dict or None, optional
-        Iteration algorithm configuration. If None, uses DIIS with mixing=1.0
-        and a subspace of 10. Keys:
-        - alg : str - "DIIS" (default), "damping" or "GCR"
+        Iteration algorithm configuration. If None, uses GCR (DIIS with mixing=1.0
+        and a subspace of 10 for qp_static_sigma). Keys:
+        - alg : str - "GCR" (default; "DIIS" with qp_static_sigma), "DIIS" or
+          "damping"
         - mixing : float - Damping/mixing parameter (default 1.0; ignored by GCR)
         - max_subsp_size : int - DIIS subspace size (default 10), or the GCR
           basis capacity (default 50 when the kernel has no Sigma, i.e. a
@@ -712,7 +726,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
                       ("diis_warmup", int)):
         if key in iter_alg:
             iter_alg[key] = cast(iter_alg[key])
-    if iter_alg.get("alg") == "GCR" and iter_alg.get("mixing", 1.0) != 1.0:
+    # The C++ default: GCR, or DIIS for the qpGW map (qp_static_sigma)
+    alg = iter_alg.get("alg", "DIIS" if dict(params).get("qp_static_sigma", False) else "GCR")
+    if alg == "GCR" and iter_alg.get("mixing", 1.0) != 1.0:
         warnings.warn("iter_alg 'GCR' ignores mixing", stacklevel=2)
 
     if MPI.COMM_WORLD.Get_rank() == 0:
@@ -920,7 +936,8 @@ def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
     fix_density : bool, optional
         Enforce ΔN=0 via Δμ (q=0 only). Default False.
     iter_alg : dict or None, optional
-        Iteration algorithm (damping/DIIS); see run_lr.
+        Iteration algorithm, "DIIS" (default here) or "damping"; GCR is
+        rejected for the qpGW map. See run_lr.
 
     Notes on parameters
     -------------------

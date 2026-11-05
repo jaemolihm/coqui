@@ -1,3 +1,4 @@
+// UNUSED: no compiled file includes this file (only other UNUSED diis/ files do), and it is in no CMake or install list; it is kept so that upstream changes to it still merge.
 /**
  * ==========================================================================
  * CoQuí: Correlated Quantum ínterface
@@ -25,11 +26,9 @@
 #define DIIS_DEBUG 0
 
 #include <complex>
-#include <sstream>
 #include "nda/linalg/dot.hpp"
 #include <nda/linalg/eigenelements.hpp>
 #include "diis_residual.h"
-#include "diis_coefs.hpp"
 
 
 namespace iter_scf {
@@ -75,11 +74,11 @@ public:
     // (no extrapolation as well)
     bool grow_xvsp_only;
 
-    const Vector& get_extrapolated_state_ref() {
+    auto get_extrapolated_state() {
         if(extrapolated_state == nullptr) {
             APP_ABORT("DIIS state is not initialized! ABORT!");
         }
-        return extrapolated_state->get_ref();
+        return extrapolated_state->get();
     }
 private:
     
@@ -98,26 +97,23 @@ private:
     std::string diis_str = "DIIS: ";
 
     void print_B() {
-        std::ostringstream os;
-        os << diis_str << "error overlaps B:" << std::endl;
-        os << std::setprecision(10);
+        std::cout << diis_str << "error overlaps B:" << std::endl;
+        std::cout << std::setprecision(10);
         for(auto i : nda::range(0, m_B.shape()[0])) {
-            for(auto j : nda::range(0, m_B.shape()[1]))
-                os << m_B(i,j) << " ";
+            for(auto j : nda::range(0, m_B.shape()[1])) 
+                std::cout << m_B(i,j) << " ";
 
-            os << std::endl;
+            std::cout << std::endl;;
         }
-        app_log(3, "{}", os.str());
     }
 
     void print_C() {
-        std::ostringstream os;
-        os << diis_str << "Extrapolation coefficients:" << std::endl;
-        os << std::setprecision(10);
+        std::cout << diis_str << "Extrapolation coefficients:" << std::endl;
+        std::cout << std::setprecision(10);
         for(auto i : nda::range(0, m_B.shape()[0]))
-                os << m_C(i) << " ";
+                std::cout << m_C(i) << " ";
 
-        app_log(3, "{}", os.str());
+            std::cout << std::endl;;
     }
 
 public:
@@ -163,10 +159,10 @@ public:
      * return 1 if extrapolation was performed
      *        0 if no extrapolation (just growing the subspace)
      */
-    int next_step(Vector new_vec) {
+    int next_step(const Vector& new_vec) {
         if (x_vsp->size() == 0 || grow_xvsp_only) {
             app_log(2, diis_str + "Growing vector subspace only. No extrapolation.\n");
-            x_vsp->add_to_vspace(std::move(new_vec));    // growing vector space
+            x_vsp->add_to_vspace(new_vec);    // growing vector space
             app_log(2, "");
             return 0;
         }
@@ -182,8 +178,8 @@ public:
             }
             update_overlaps(res); // the overlap with res is added in any case...
 
-            res_vsp->add_to_vspace(std::move(res));       // growing residual space
-            x_vsp->add_to_vspace(std::move(new_vec));     // growing vector space
+            res_vsp->add_to_vspace(res);   // growing residual space
+            x_vsp->add_to_vspace(new_vec); // growing vector space
         } else {
             // The subspace is already of the maximum size
             app_log(2, diis_str + "Reached maximum subspace -> the first vector will be kicked out of the subspace.\n");
@@ -199,8 +195,8 @@ public:
                 APP_ABORT(diis_str +  "Could not get residual!!! ABORT!");
             }
             update_overlaps(res);
-            res_vsp->add_to_vspace(std::move(res));       // growing residual space
-            x_vsp->add_to_vspace(std::move(new_vec));     // growing vector space
+            res_vsp->add_to_vspace(res);   // growing residual space
+            x_vsp->add_to_vspace(new_vec); // growing vector space
         }
 
         if (extrap && (res_vsp->size() > 1) ) {
@@ -218,7 +214,7 @@ public:
             // build extrapolated vector
             Vector result = x_vsp->make_linear_comb(m_C);
             app_log(2, "");
-            extrapolated_state->put(std::move(result)); // update extrapolated state
+            extrapolated_state->put(result); // update extrapolated state
             return 1;
             
         } else {
@@ -272,18 +268,14 @@ private:
                 Bnew(i,j) = m_B(i,j);
         }
 
-        // Evaluate new overlaps and add them to B. The whole row/col plus the
-        // diagonal <u|u> is built in one batched pass (H7): for FockSigma this
-        // reuses a single cached conj(u) across all x_i, replacing the n+1 per-pair
-        // 1.8 GB conjugate materializations; bit-identical to the per-pair path.
-        size_t m = m_B.shape()[1];
-        auto ov = res_vsp->overlaps_new_row(u);
-        utils::check(ov.size() == m + 1, "diis_alg::update_overlaps: overlap row size mismatch");
-        for(size_t i = 0; i < m; i++) {
-            Bnew(i, m) = ov[i];
-            Bnew(m, i) = std::conj(ov[i]);
+        // Evaluate new overlaps and add them to B:
+        // Can ship this piece as a function with the vector space 
+        // for good parallelization
+        for(size_t i = 0; i < m_B.shape()[1]; i++) {
+            Bnew(i, m_B.shape()[1]) = res_vsp->overlap(i, u);
+            Bnew(m_B.shape()[1], i) = std::conj(Bnew(i, m_B.shape()[1]));
         }
-       Bnew(m, m) = ov[m];
+       Bnew(m_B.shape()[1],m_B.shape()[1]) = res_vsp->overlap(u, u);
        m_B = Bnew;
 #if DIIS_DEBUG
        std::cout << "After the update" << std::endl;
@@ -383,9 +375,44 @@ private:
 
 
     void compute_coefs_c1() {
-        // The eigendecomposition/pseudoinverse solve is shared with the SPMD
-        // in-memory DIIS path (diis_coefs.hpp) so it exists in one place only.
-        m_C = compute_diis_coefs_c1(m_B);
+
+//#pragma float_control(precise, on) // Need accurate extrapolation coeffs
+        auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
+
+        nda::array<double, 1> bb(B.shape()[1]); 
+        bb() = 1.0;
+
+        auto [eig, evecs] = nda::linalg::eigenelements(B);
+        auto evecs_tr = nda::make_regular(nda::transpose(evecs));
+
+        nda::matrix<double> Binv(B.shape()[0], B.shape()[1]); // Inverse or pseudoinverse
+        nda::matrix<double> eig_inv(B.shape()[0], B.shape()[1]);
+        nda::matrix<double> I(B.shape()[0], B.shape()[1]);
+        Binv() = 0;
+        eig_inv() = 0;
+
+        double eig_max = nda::max_element(eig);
+        double eig_min = nda::min_element(eig);
+        double cond = eig_max / eig_min;
+
+        const double eig_thresh = 1E-12;
+
+        app_log(2, diis_str + "Condition number of B: {}", cond);
+
+        for (auto i : nda::range(0, eig.size())) { 
+            if(eig(i)*cond > eig_thresh) {
+                eig_inv(i,i) = 1.0/(eig(i)); 
+            }
+        }
+
+        nda::blas::gemm(evecs, eig_inv, I);
+        nda::blas::gemm(I, evecs_tr, Binv);
+
+        nda::array<double, 1> x(B.shape()[1]); 
+        nda::blas::gemv(1.0, Binv, bb, 0.0, x);
+        
+        std::complex<double> sum = std::accumulate(x.begin(), x.end(), 0.0);
+        m_C = make_regular(nda::real(x / sum));
      }
 
 

@@ -30,6 +30,7 @@
 #include "nda/blas.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/element_partition.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 
 namespace methods {
 
@@ -74,8 +75,8 @@ namespace methods {
  *
  * The iterate is (ΔF, ΔΣ(τ)), ΔΣ empty for a Σ-free kernel; every vector here
  * is this rank's slice of the concatenation [ΔF; ΔΣ]. The inner product is
- * Re Σ conj(a) b over it, unweighted, the same combined product lr_diis's
- * B-matrix uses: with fix_density at q = Γ the map is
+ * Re Σ conj(a) b over it, unweighted, the same combined product the
+ * B-matrix of iter_scf::diis_mixer uses: with fix_density at q = Γ the map is
  * ℝ-linear only, and the real inner product is what keeps GCR exact there.
  * The map must be affine for w = A z and the recycled pairs to hold, which rules
  * out the qpGW statification (its Padé continuation is not additive in ΔΣ).
@@ -84,14 +85,12 @@ namespace methods {
  * (ΔF + ΔΣ)-sized slice. With a Σ in the kernel one pair costs a ΔΣ, as one
  * DIIS depth unit does; the pairs are allocated as the basis grows.
  *
- * SPMD: every rank of `comm` holds its `pmap` slice of every vector, and the
+ * Every rank of `comm` holds its slice (iter_scf::hist_vec_layout) of every vector, and the
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
- * Why not src/numerics/iter_scf/: its solvers keep their vectors in HDF5-backed
- * VSpace storage behind a file-I/O Vector interface, and have no notion of a
- * striped slice or of recycling a basis across right-hand sides. lr_diis
- * already stands apart from it for the same reasons.
+ * Why not iter_scf::diis_mixer: it extrapolates (trial, residual) entries of a
+ * fixed-point iteration and has no notion of recycling a basis across right-hand sides.
  */
 class lr_gcr {
 public:
@@ -138,55 +137,43 @@ public:
   /**
    * @brief One GCR step on the iterate (ΔF, ΔΣ).
    *
-   * The same argument layout as lr_diis::next_step_combined: two slots, each a
-   * full array plus this rank's slice of the probe. The second slot may be empty
-   * (a ΔF-only iterate). Internally the two slices are concatenated into one
-   * vector [F; S], and every inner product is Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
+   * The iterate is given as two arguments, each a full array (F_inout, S_inout), and the probe as this
+   * rank's slices of both. S_inout may be empty (a ΔF-only iterate, `layout.S_size_total() == 0`). Internally the two
+   * slices are concatenated into one vector [F; S], and every inner product is
+   * Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *
+   * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
    * @param F_inout   - [IN/OUT] the full ΔF (pass .local()); g(y) on entry, and
    *                            this rank's slice of the next probe (x + r,
    *                            x + M⁻¹r, or a kick), or of x once converged, on exit
-   * @param F_probe   - [INPUT]  this rank's slice of the ΔF probe y g was applied to
    * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
-   * @param S_probe   - [INPUT]  this rank's slice of the ΔΣ probe
+   * @param probe_vec - [INPUT]  this rank's slices of the probe y g was applied to
    * @param tol       - [INPUT]  convergence threshold on ‖r‖ of the concatenation
    * @param converged - [OUTPUT] ‖r‖ ≤ tol
    * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
    *                            concatenation; collective. Null: z = r
    * @return ‖r‖ after the step
    */
-  template<typename Comm, typename FView, typename FProbe, typename SView, typename SProbe>
-  double step(Comm& comm, utils::part_map const& pmap,
-              FView F_inout, FProbe const& F_probe,
-              SView S_inout, SProbe const& S_probe,
+  template<typename Comm, typename FView, typename SView>
+  double step(Comm& comm, iter_scf::hist_vec_layout const& layout,
+              FView F_inout, SView S_inout, iter_scf::hist_vec const& probe_vec,
               double tol, bool& converged,
               std::function<void(Vec1D const&, Vec1D&)> const* precond = nullptr) {
-    const long nF = F_inout.size();
-    auto [f0, f1] = pmap.my_slice(nF);
-    auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
-    utils::check(static_cast<long>(F_probe.size()) == f1 - f0,
-                 "lr_gcr: ΔF probe slice size {} != partition slice size {}",
-                 F_probe.size(), f1 - f0);
-    const long nS = S_inout.size();
-    long s0 = 0, s1 = 0;
-    if (nS > 0) {
-      std::tie(s0, s1) = pmap.my_slice(nS);
-      utils::check(static_cast<long>(S_probe.size()) == s1 - s0,
-                   "lr_gcr: ΔΣ probe slice size {} != partition slice size {}",
-                   S_probe.size(), s1 - s0);
-    }
-    const long mF = f1 - f0, n = mF + (s1 - s0);
-    auto rF = nda::range(0, mF);
-    auto rS = nda::range(mF, n);
+    utils::check(probe_vec.F.size() == layout.F_len() and probe_vec.S.size() == layout.S_len(),
+                 "lr_gcr: probe slices ({}, {}) != partition slices ({}, {})",
+                 probe_vec.F.size(), probe_vec.S.size(), layout.F_len(), layout.S_len());
+    const long n = layout.F_len() + layout.S_len();
+    auto F_range = layout.F_range();
+    auto S_range = layout.S_range();
+    auto F_slice = layout.F_view_slice(F_inout);
 
     // _g <- g(y), _y <- y, both as [F; S]. Sized once per (layout of) solve.
     if (_g.size() != n) { _g = Vec1D(n); _y = Vec1D(n); }
-    _g(rF) = F_loc;
-    _y(rF) = F_probe;
-    if (nS > 0) {
-      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
-      _g(rS) = S_loc;
-      _y(rS) = S_probe;
+    _g(F_range) = F_slice;
+    _y(F_range) = probe_vec.F;
+    if (layout.S_size_total() > 0) {
+      _g(S_range) = layout.S_view_slice(S_inout);
+      _y(S_range) = probe_vec.S;
     }
 
     _g -= _y;                             // r(y) = g(y) − y
@@ -302,11 +289,8 @@ public:
       // Next probe x + r
       _y() = _x + _r;
     }
-    F_loc = _y(rF);
-    if (nS > 0) {
-      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
-      S_loc = _y(rS);
-    }
+    F_slice = _y(F_range);
+    if (layout.S_size_total() > 0) layout.S_view_slice(S_inout) = _y(S_range);
     return rn;
   }
 
@@ -374,54 +358,39 @@ private:
  *   y = y_prev + mixing · r          (precond null; mixing >= 1 leaves g(y_prev))
  *   y = y_prev + mixing · M⁻¹ r      (precond),     r = g(y_prev) − y_prev
  *
- * @param pmap      - [INPUT]  partition of the flattened F and S across ranks
+ * The LR damping iteration; called by lr_driver::lr_solve_one once per iteration when neither
+ * GCR nor DIIS is selected.
+ *
+ * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
  * @param F_inout   - [IN/OUT] the full ΔF: g(y_prev) in, this rank's slice of y out
- * @param F_prev    - [INPUT]  this rank's slice of y_prev
  * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
- * @param S_prev    - [INPUT]  this rank's slice of the ΔΣ y_prev
+ * @param prev_vec  - [INPUT]  this rank's slices of y_prev
  * @param mixing    - [INPUT]  damping factor
  * @param precond   - [INPUT]  optional z = M⁻¹ r on this rank's slices of the
  *                            concatenation [F; S]; collective. Null: z = r
  */
-template<typename FView, typename FPrev, typename SView, typename SPrev>
-void lr_damping_step(utils::part_map const& pmap,
-                     FView F_inout, FPrev const& F_prev,
-                     SView S_inout, SPrev const& S_prev, double mixing,
+template<typename FView, typename SView>
+void lr_damping_step(iter_scf::hist_vec_layout const& layout, FView F_inout, SView S_inout,
+                     iter_scf::hist_vec const& prev_vec, double mixing,
                      std::function<void(nda::array<ComplexType, 1> const&,
                                         nda::array<ComplexType, 1>&)> const* precond) {
-  const long nF = F_inout.size();
-  const long nS = S_inout.size();
-  auto [f0, f1] = pmap.my_slice(nF);
-  long s0 = 0, s1 = 0;
-  if (nS > 0) std::tie(s0, s1) = pmap.my_slice(nS);
-  utils::check(static_cast<long>(F_prev.size()) == f1 - f0 &&
-               static_cast<long>(S_prev.size()) == s1 - s0,
+  utils::check(prev_vec.F.size() == layout.F_len() and prev_vec.S.size() == layout.S_len(),
                "lr_damping_step: history slices ({}, {}) != partition slices ({}, {}).",
-               F_prev.size(), S_prev.size(), f1 - f0, s1 - s0);
-  auto F_loc = nda::reshape(F_inout, std::array<long, 1>{nF})(nda::range(f0, f1));
-  if (precond) {
-    const long mF = f1 - f0, n = mF + (s1 - s0);
-    auto rF = nda::range(0, mF);
-    auto rS = nda::range(mF, n);
+               prev_vec.F.size(), prev_vec.S.size(), layout.F_len(), layout.S_len());
+  if (precond) { // Preconditioned: y = y_prev + mixing M⁻¹ r on the concatenated slices
+    const long n = layout.F_len() + layout.S_len();
+    auto F_range = layout.F_range();
+    auto S_range = layout.S_range();
+    auto F_slice = layout.F_view_slice(F_inout);
+    // r = g(y_prev) - y_prev, then z = M⁻¹ r (collective)
     nda::array<ComplexType, 1> r(n), z(n);
-    r(rF) = F_loc - F_prev;
-    if (nS > 0) {
-      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
-      r(rS) = S_loc - S_prev;
-    }
+    r(F_range) = F_slice - prev_vec.F;
+    if (layout.S_size_total() > 0) r(S_range) = layout.S_view_slice(S_inout) - prev_vec.S;
     (*precond)(r, z);
-    F_loc = F_prev + mixing * z(rF);
-    if (nS > 0) {
-      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
-      S_loc = S_prev + mixing * z(rS);
-    }
-  } else {
-    if (mixing >= 1.0) return;
-    F_loc = mixing * F_loc + (1.0 - mixing) * F_prev;
-    if (nS > 0) {
-      auto S_loc = nda::reshape(S_inout, std::array<long, 1>{nS})(nda::range(s0, s1));
-      S_loc = mixing * S_loc + (1.0 - mixing) * S_prev;
-    }
+    F_slice = prev_vec.F + mixing * z(F_range);
+    if (layout.S_size_total() > 0) layout.S_view_slice(S_inout) = prev_vec.S + mixing * z(S_range);
+  } else { // Plain damping: y = mixing g(y_prev) + (1 - mixing) y_prev
+    iter_scf::damp_slices(layout, mixing, F_inout, S_inout, prev_vec);
   }
 }
 

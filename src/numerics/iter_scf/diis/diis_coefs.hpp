@@ -21,8 +21,10 @@
 #ifndef COQUI_DIIS_COEFS_HPP
 #define COQUI_DIIS_COEFS_HPP
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <optional>
 
 #include "configuration.hpp"
 #include "nda/nda.hpp"
@@ -40,14 +42,20 @@ namespace iter_scf {
  * Given the residual-overlap matrix B, return the real coefficient vector
  * c = B^{-1} 1 / (1^T B^{-1} 1). B is eigendecomposed (real part; the coefs
  * are constrained real) and inverted via a thresholded pseudoinverse, exactly
- * as in the original Pokhilko/Yeh/Zgid scheme. Extracted verbatim from
- * diis_alg::compute_coefs_c1 so the disk (VSpace/diis_alg) and the memory
- * SPMD (spmd_fock_sigma) paths compute identical coefficients from one source.
+ * as in the original scheme (P. Pokhilko, C.-N. Yeh, D. Zgid, J. Chem. Phys. 156,
+ * 094101 (2022), https://doi.org/10.1063/5.0082586).
+ * The same arithmetic as diis_alg::compute_coefs_c1 of the serial DIIS (diis_alg.hpp, not compiled),
+ * plus the nullopt return for a singular B. iter_scf::diis_mixer computes its coefficients with this function.
  *
- * @param m_B  residual-overlap matrix (n x n).
- * @return     real extrapolation coefficients (length n), summing to 1.
+ * @param m_B       residual-overlap matrix (n x n).
+ * @param log_level verbosity level of the condition-number message.
+ * @return          real extrapolation coefficients (length n), summing to 1; nullopt if
+ *                  |sum_i x_i| * max_i B_ii < 1e-14 (x = B^+ 1, unnormalized), or the sum is
+ *                  not finite. The product is scale-free; it is 0 when no eigenvalue of the
+ *                  scaled B survives the pseudoinverse cut (B = 0 for vanishing residuals).
  */
-inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B) {
+inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::matrix<ComplexType>& m_B,
+                                                                  int log_level = 2) {
   auto B = nda::make_regular(nda::real(m_B)); // only real part is needed due to constraint to real coefs
   const long n = B.shape()[0];
 
@@ -64,6 +72,7 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   for (long i = 0; i < n; ++i)
     for (long j = 0; j < n; ++j) B(i, j) /= d(i) * d(j);
 
+  // Pseudoinverse of the scaled B from its eigendecomposition
   auto [eig, evecs] = nda::linalg::eigenelements(B);
   auto evecs_tr = nda::make_regular(nda::transpose(evecs));
 
@@ -75,11 +84,14 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
 
   auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
   double eig_max = nda::max_element(eig);
-  double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
+  double eig_min_abs = nda::min_element(eig_abs);
 
   const double eig_thresh = 1E-14;
 
-  app_log(2, "DIIS: Condition number of Jacobi-scaled B: {}", cond);
+  if (eig_min_abs > 0.0)
+    app_log(log_level, "DIIS: Condition number of Jacobi-scaled B: {}", nda::max_element(eig_abs) / eig_min_abs);
+  else
+    app_log(log_level, "DIIS: Jacobi-scaled B is singular");
 
   // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
   for (auto i : nda::range(0, eig.size())) {
@@ -91,17 +103,17 @@ inline nda::array<double, 1> compute_diis_coefs_c1(const nda::matrix<ComplexType
   nda::blas::gemm(evecs, eig_inv, I);
   nda::blas::gemm(I, evecs_tr, Binv);
 
+  // x = B^+ 1, with the Jacobi scaling undone
   nda::array<double, 1> x(n);
   nda::blas::gemv(1.0, Binv, bb, 0.0, x);
   for (long i = 0; i < n; ++i) x(i) /= d(i);
 
+  // x scales as 1/||r||^2 and max_i B_ii as ||r||^2, so the product does not depend on the
+  // residual scale: it is n for n orthogonal residuals of equal norm, and 0 for B = 0.
   double sum = std::accumulate(x.begin(), x.end(), 0.0);
-  utils::check(std::isfinite(sum) and std::abs(sum) > 1e-300,
-               "compute_diis_coefs_c1: singular residual-overlap matrix (sum of the "
-               "unnormalized coefficients = {}). B_ii = ||r_i||^2, so this happens when "
-               "the residuals are zero (already converged) or linearly dependent to "
-               "machine precision; normalizing would hand NaN coefficients to the "
-               "extrapolation.", sum);
+  double Bmax = 0.0;
+  for (long i = 0; i < n; ++i) Bmax = std::max(Bmax, d(i) * d(i));
+  if (not std::isfinite(sum) or std::abs(sum) * Bmax < 1e-14) return std::nullopt;
   return nda::make_regular(x / sum);
 }
 

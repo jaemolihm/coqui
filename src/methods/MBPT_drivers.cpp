@@ -1553,8 +1553,9 @@ void release_lr_W_cache() { W_cache.reset(); }
  *   translate_home_cell    translate the local projector to the home cell (default false;
  *                          read only when the local projection is requested)
  *   iter_alg.{alg, mixing, max_subsp_size, diis_warmup}
- *                          "DIIS" (default), "damping" or "GCR"; mixing 1.0;
- *                          subspace 10 (GCR: 0 = chosen by lr_setup); warmup 0
+ *                          "GCR" (default; "DIIS" with qp_static_sigma), "DIIS" or
+ *                          "damping"; mixing 1.0; subspace 10 (GCR: 0 = chosen by
+ *                          lr_setup); warmup 0
  *
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
@@ -1600,8 +1601,16 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   utils::check(tol >= 0.0, "run_lr_calc: tol must be >= 0, got {}.", tol);
   auto fix_density = io::get_value_with_default<bool>(pt, "fix_density", false);
 
+  // LR-qpGW: statify the dynamic ΔΣ(iω) into a static ΔV_QPGW each iteration
+  // (frozen QP orbitals from the qpGW checkpoint). Uses W0=RPA[G_QP] (recompute_W
+  // forced on).
+  auto qp_static_sigma = io::get_value_with_default<bool>(pt, "qp_static_sigma", false);
+
+  // Default GCR; DIIS for the qpGW map, whose Padé statification is not affine (lr_setup
+  // rejects GCR there)
   lr_iter_params iter_params;
-  iter_params.alg = io::get_value_with_default<std::string>(pt, "iter_alg.alg", "DIIS");
+  iter_params.alg = io::get_value_with_default<std::string>(
+      pt, "iter_alg.alg", qp_static_sigma ? std::string("DIIS") : std::string("GCR"));
   utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS" ||
                iter_params.alg == "GCR",
                "run_lr_calc: unknown iter_alg '{}'. Must be 'damping', 'DIIS' or 'GCR'.",
@@ -1700,10 +1709,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "any stale THC checkpoint first), or set include_xc = false.");
   }
 
-  // LR-qpGW: statify the dynamic ΔΣ(iω) into a static ΔV_QPGW each iteration
-  // (frozen QP orbitals from the qpGW checkpoint). Uses W0=RPA[G_QP] (recompute_W
-  // forced on).
-  auto qp_static_sigma = io::get_value_with_default<bool>(pt, "qp_static_sigma", false);
   if (qp_static_sigma) {
     utils::check(unperturbed == "checkpoint",
                  "run_lr_calc: qp_static_sigma requires unperturbed='checkpoint' (a qpGW checkpoint).");

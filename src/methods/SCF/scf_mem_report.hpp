@@ -78,7 +78,6 @@ struct scf_mem_params {
   std::string sigma_alg;       // "R" or "k"
   std::string div_treatment;
   std::string iter_alg;        // "damping" / "DIIS" ("" when no iterative solver)
-  std::string diis_storage;    // "disk" / "memory" ("" unless DIIS)
   long max_subsp = 0;          // DIIS max subspace size
 };
 
@@ -174,10 +173,8 @@ scf_mem_params make_scf_mem_params(mf_ptr_t mf, const imag_axes_ft::IAFT& FT,
 
   if (iter_solver != nullptr) {
     p.iter_alg = iter_scf::alg_enum_to_string(iter_solver->iter_alg());
-    if (auto* diis = iter_solver->get_diis(); diis != nullptr) {
-      p.diis_storage = diis->storage;
-      p.max_subsp    = long(diis->max_subsp_size);
-    }
+    if (auto* diis = iter_solver->diis(); diis != nullptr)
+      p.max_subsp = long(diis->max_subsp_size);
   }
 
   p.keep_w = keep_w;

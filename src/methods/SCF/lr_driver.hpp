@@ -34,7 +34,7 @@
 #include "numerics/shared_array/nda.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
-#include "methods/SCF/lr_diis.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 #include "methods/SCF/lr_krylov.hpp"
 #include "methods/SCF/lr_ibc.hpp"
 #include "methods/HF/lr_hf.hpp"
@@ -93,9 +93,24 @@ struct lr_qp_static_params {
   double mu = 0.0;
 };
 
-/// Per-node footprint of the accelerator's history (lr_diis ring or lr_gcr basis):
+/**
+ * @brief Parameters for LR SCF iteration algorithm: "GCR" (default), "DIIS" or "damping".
+ *
+ * run_lr_calc sets every field; the qpGW map (qp_static_sigma) defaults to DIIS there, since
+ * lr_setup rejects GCR for it.
+ */
+struct lr_iter_params {
+  std::string alg = "GCR";
+  double mixing = 1.0;
+  /// DIIS subspace depth, or the GCR basis capacity. For GCR, 0 selects the
+  /// default lr_setup resolves from the kernel (see lr_driver::lr_setup).
+  size_t max_subsp_size = 0;
+  size_t diis_warmup = 0;
+};
+
+/// Per-node footprint of the accelerator's history (DIIS entries or lr_gcr basis):
 /// n_vec vectors of the quantities the accelerator actually stores.
-struct lr_diis_hist_t {
+struct lr_hist_t {
   long depth = 0;     ///< subspace depth / basis capacity; 0 = accelerator off
   long n_vec = 0;     ///< stored vectors, each of n_F ΔF + n_Sigma ΔΣ
   long n_F = 0;       ///< # of ΔF-sized (ns,nk,nb,nb) quantities per vector
@@ -178,7 +193,7 @@ struct lr_params {
   /// Whether the checkpoint reads sDeltaG_tskij after the solve. The hessian path
   /// reads it regardless when the kernel has a Σ (see lr_solve_one).
   bool save_DeltaG = true;
-  lr_iter_params iter_params{};   ///< damping / DIIS
+  lr_iter_params iter_params{};   ///< GCR, DIIS or damping
 
   // --- Preconditioner (GCR or damping) ---
   /// Σ-free kernel K_pc whose resolvent z = (I - K_pc Pχ)⁻¹ r preconditions GCR
@@ -398,7 +413,7 @@ public:
    */
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                              long n_sigma_prev = 0,
-                             lr_diis_hist_t inner_hist = {},
+                             lr_hist_t inner_hist = {},
                              bool precond = false,
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
@@ -566,10 +581,10 @@ private:
   std::unique_ptr<solvers::lr_rpa_pi> _lr_pi;
   std::unique_ptr<solvers::lr_scr_coulomb_t> _lr_scr;
   /// DIIS, when iter_params.alg == "DIIS" and the kernel is not empty.
-  std::unique_ptr<lr_diis> _lr_diis;
-  /// GCR in place of _lr_diis when iter_params.alg == "GCR" and the kernel is
+  std::optional<iter_scf::diis_mixer> _diis;
+  /// GCR in place of _diis when iter_params.alg == "GCR" and the kernel is
   /// not empty.
-  std::unique_ptr<lr_gcr> _lr_gcr;
+  std::unique_ptr<lr_gcr> _gcr;
   /// The preconditioner's ΔF-only inner GCR, preconditioned runs only.
   std::unique_ptr<lr_gcr> _pc_gcr;
 
@@ -584,33 +599,28 @@ private:
   std::optional<dArr_5D_t> _opt_dG_tsRPQ, _opt_dG_mtau_tsRPQ;  // G^R(τ)/G^R(β−τ)
   std::optional<lr_ibc_DeltaX> _opt_ibc;
 
-  /**
-   * One iterated quantity (ΔDm, ΔF, ΔΣ or ΔV_QPGW), striped over the global
-   * comm: this rank owns [i0, i1) of the flattened array and keeps only that
-   * slice of the previous iterate. The whole job then stores each previous
-   * iterate once instead of once per node.
-   */
-  struct lr_iterate_history {
-    long n_flat = 0;                  ///< elements of the flattened array (0 = inactive)
-    long i0 = 0, i1 = 0;              ///< this rank's slice
-    nda::array<ComplexType, 1> prev;  ///< previous iterate over [i0, i1)
-
-    void alloc(utils::part_map const& pmap, long n) {
-      n_flat = n;
-      std::tie(i0, i1) = pmap.my_slice(n);
-      prev = nda::array<ComplexType, 1>(i1 - i0);
-    }
-    /// This rank's slice of `A`, flattened — what the save, mixing and norms use.
-    auto slice(auto&& A) const {
-      return nda::reshape(A, std::array<long, 1>{n_flat})(nda::range(i0, i1));
-    }
-  };
-
   // --- Per-perturbation buffers: allocated once. Each is either zeroed at the top
   //     of lr_solve_one or written before it is read, so mode m's solve cannot
   //     see mode m−1's state.
-  utils::part_map _pmap;
-  lr_iterate_history _DeltaDm, _DeltaF, _DeltaSigma, _DeltaVcorr;   // ΔDm, ΔF, ΔΣ(iω), ΔV_QPGW
+  /// Element slicing, over the global comm, of the node-replicated arrays (ΔF, ΔΣ): the
+  /// DIIS history, the previous iterate and its norms are all elementwise, so each rank
+  /// handles one slice and the whole job stores each of them once instead of once per
+  /// node. The second block is ΔΣ(iω) when the kernel carries a Σ, ΔV_QPGW in qp mode,
+  /// and absent otherwise.
+  iter_scf::hist_vec_layout _hist_layout;
+  /// The same slicing of ΔF alone, for the preconditioner's inner GCR (_pc_gcr);
+  /// built only when a precond_kernel is set.
+  iter_scf::hist_vec_layout _hist_layout_pc;
+  /// This rank's slices of the iterate y that entered the current iteration (ΔF and the second
+  /// block). apply_kernel (and lr_qp_approx in qp mode) writes g(y) into the shared arrays and
+  /// the mixing then overwrites them with the next iterate, so y survives only here. The damping
+  /// uses it as the target, DIIS as g(y) - y (and as the fallback target), GCR as the probe y,
+  /// and the convergence norms ‖Δ - Δ_prev‖ read it.
+  iter_scf::hist_vec _prev_vec;
+  /// This rank's slices of the DIIS residual g(y) - y, filled before each _diis->push.
+  iter_scf::hist_vec _res_vec;
+  /// The same for ΔDm, which is not mixed (dyson_pass overwrites it): read only by the convergence norm ‖ΔDm - ΔDm_prev‖.
+  nda::array<ComplexType, 1> _DeltaDm_prev;
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).
   /// The ΔF the last ΔDm-only pass was fed. The ΔG(τ) of that ΔDm is formed from

@@ -182,6 +182,34 @@ namespace bdft_tests {
     }
   }
 
+  TEST_CASE("qp_iterative_solver_diis_restart", "[methods_scf]") {
+    // qp-SCF HF with DIIS: 3 iterations, then a restart (a new solver without history, previous Heff from
+    // the checkpoint) that converges to the energy of the uninterrupted damping/DIIS runs above.
+    auto& mpi_context = utils::make_unit_test_mpi_context();
+    solvers::hf_t hf;
+    imag_axes_ft::IAFT ft(1000.0, 1.2, imag_axes_ft::dlr_basis);
+    auto mf = std::make_shared<mf::MF>(mf::default_MF(mpi_context, "qe_lih222"));
+    const std::string output = "qphf_lih222_diis_restart_test";
+    thc_reader_t thc(mf, make_thc_reader_ptree(mf->nbnd()*12, "", "incore", "", output,
+                                               1e-12, mf->ecutrho(), 1, 1024));
+    auto eri = mb_eri_t(thc, thc);
+    qp_params_t qp_params;
+    auto run = [&](long niter, bool restart) {
+      iter_scf::iter_scf_t diis_sol(iter_scf::diis_t(0.5, 6, 2, "commutator"));
+      MBState mb_state(mpi_context, ft, output);
+      return qp_scf_loop(mb_state, eri, ft, qp_params, solvers::mb_solver_t(&hf), &diis_sol,
+                         niter, restart, 1e-7);
+    };
+    double e_first = run(3, false);
+    double e_restart = run(50, true);
+    mpi_context->comm.barrier();
+    if (mpi_context->comm.root()) std::remove((output + ".mbpt.h5").c_str());
+    mpi_context->comm.barrier();
+    constexpr double e_hf_ref = -4.284215374096246;
+    REQUIRE(std::abs(e_first - e_hf_ref) > 1e-6);  // the first run is not converged
+    VALUE_EQUAL(e_restart, e_hf_ref, 1e-6, 1e-6);
+  }
+
   TEST_CASE("dyson_scf_gw_diis_vs_damping", "[methods_scf]") {
     auto& mpi_context = utils::make_unit_test_mpi_context();
 
