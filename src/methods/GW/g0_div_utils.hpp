@@ -94,20 +94,20 @@ namespace methods {
         // (qp_to_ibz is the identity in full-BZ mode).
         // Qpts(iq) is exactly S q_ibz or -S q_ibz, not folded by a reciprocal-lattice vector G: the head is not
         // G-periodic (eps_inv_00(q+G) = eps_inv_GG(q) differs), so folding Qpts would make these values wrong.
-        auto Qpts_bz = mf.Qpts();
+        auto Qpts = mf.Qpts();
         auto qp_to_ibz = mf.qp_to_ibz();
         utils::check(nqpts_ibz == mf.nqpts_ibz(), "extrapolate_eps_inv_q0: eps_inv_wq must have nqpts_ibz columns");
 
         if (div_treatment.find("gygi_extrplt") != std::string::npos) {
-          int nqpts_bz = mf.nqpts();
-          nda::array<ComplexType, 1> Q_abs(nqpts_bz);
-          for (int iq = 0; iq < nqpts_bz; ++iq) {
-            Q_abs(iq) = ComplexType( std::sqrt( Qpts_bz(iq,0)*Qpts_bz(iq,0) + Qpts_bz(iq,1)*Qpts_bz(iq,1) + Qpts_bz(iq,2)*Qpts_bz(iq,2) ) );
+          nda::array<ComplexType, 1> Q_abs(mf.nqpts());
+          for (int iq = 0; iq < mf.nqpts(); ++iq) {
+            auto qpt = Qpts(iq, nda::range::all);
+            Q_abs(iq) = ComplexType( std::sqrt( qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2) ) );
           }
           // TODO Deprecated method. Should be removed in the future. 
           utils::check(mf.nkpts_ibz() > 1, "extrapolate_eps_inv_q0: nkpts_ibz <= 1 while div_treatment==gygi_extrplt");
           
-          auto q_indices = filter_qpts(Qpts_bz, 0.8, 1, two_dimension);
+          auto q_indices = filter_qpts(Qpts, 0.8, 1, two_dimension);
           nda::array<ComplexType, 1> Q_filtered(q_indices.size());
           nda::array<ComplexType, 2> eps_inv_filtered(niw, q_indices.size());
           
@@ -118,7 +118,7 @@ namespace methods {
 
           if ( q_indices.empty() ) {
             // If no q-points passed the filter, fall back to the smallest-|q| point
-            int smallest_idx = find_smallest_qabs(Qpts_bz, false);
+            int smallest_idx = find_smallest_qabs(Qpts, false);
             eps_inv_q0_w = eps_inv_wq(nda::range::all, qp_to_ibz(smallest_idx));
           } else if ( q_indices.size() < 3) {
             // Choose the closest point to the gamma instead
@@ -137,8 +137,9 @@ namespace methods {
 
         } else if (div_treatment.find("gygi_average") != std::string::npos) {
 
-          // Average over all full-BZ q-points with smallest |q|; each star counts with its multiplicity
-          auto smallest_indices = find_smallest_qabs_indices(Qpts_bz, false, false);
+          // Average over all full-BZ q-points with smallest |q|
+          // (a set of n symmetry-equivalent points contributes its value n times)
+          auto smallest_indices = find_smallest_qabs_indices(Qpts, false, false);
           eps_inv_q0_w = 0.0;
           for (int idx : smallest_indices) {
             eps_inv_q0_w += eps_inv_wq(nda::range::all, qp_to_ibz(idx));
@@ -187,7 +188,7 @@ namespace methods {
           app_log(4, "   - Maximum polynomial fit order: {}", fit_order);
           app_log(4, "   - Maximum number of q-points used for fit per direction: {}", fit_order+1);
 
-          eps_inv_q0_w = extrapolate_gygi_q0(eps_inv_wq, Qpts_bz, mf.lattv(), qp_to_ibz, fit_order, two_dimension);
+          eps_inv_q0_w = extrapolate_gygi_q0(eps_inv_wq, Qpts, mf.lattv(), qp_to_ibz, fit_order, two_dimension);
 
           if (div_treatment.find("metal") != std::string::npos) {
             app_log(3, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems{}.\n",
