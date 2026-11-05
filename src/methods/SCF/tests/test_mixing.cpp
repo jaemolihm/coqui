@@ -166,7 +166,7 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
 
     // DIIS (max_subsp 3, warmup 2, min_subsp 2) with the previous accepted state of iteration 0.
     iter_scf::mixing_state mix;
-    mix.init(ctx, nF, nS, mixing,
+    mix.init(ctx, Fshape, Sshape, mixing,
              iter_scf::diis_mixer::config{mixing, 3, 2, 2, 2});
     fill_flat(sF, 0, 0.0);
     fill_flat(sS, 0, 1.0);
@@ -219,7 +219,7 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
     // Damping alone (the Dyson-SCF damping) vs out = mixing*new + (1-mixing)*prev,
     // bit for bit, with prev from memory after iteration 0 was captured.
     iter_scf::mixing_state damp;
-    damp.init(ctx, nF, nS, mixing, std::nullopt);
+    damp.init(ctx, Fshape, Sshape, mixing, std::nullopt);
     fill_flat(sF, 0, 0.0);
     fill_flat(sS, 0, 1.0);
     damp.layout.store_slice(damp.prev_vec, sF.local(), sS.local());
@@ -270,12 +270,12 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
     INFO(tag);
     auto sF = make_shared(ctx, Fshape);
     const long nF = sF.local().size();
-    nda::array<ComplexType, 5> no_Sigma;
 
+    // No Sigma: zero S shape, and the F-only overloads of store_slice and step
     iter_scf::mixing_state mix;
-    mix.init(ctx, nF, 0, mixing, iter_scf::diis_mixer::config{mixing, 3, 1, 2, 2});
+    mix.init(ctx, Fshape, {}, mixing, iter_scf::diis_mixer::config{mixing, 3, 1, 2, 2});
     fill_flat(sF, 0, 0.0);
-    mix.layout.store_slice(mix.prev_vec, sF.local(), no_Sigma);
+    mix.layout.store_slice(mix.prev_vec, sF.local());
     mix.has_prev = true;
 
     // Dense reference: previous accepted state, the stored entries (oldest first).
@@ -302,7 +302,7 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
         if (xs.size() > 3) { xs.erase(xs.begin()); rs.erase(rs.begin()); }
       }
       sF.win().fence();
-      mix.step(ctx.comm, sF.local(), no_Sigma, residual_vec ? &*residual_vec : nullptr);
+      mix.step(ctx.comm, sF.local(), residual_vec ? &*residual_vec : nullptr);
       sF.win().fence();
       utils::complete_shared_slices(ctx, mix.layout.pmap(), sF);
 
@@ -715,7 +715,8 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
     auto sS = make_shared(ctx, shape_t<5>{2, 1, 2, 2, 1});
     const long nF = sF.local().size(), nS = sS.local().size();
     iter_scf::mixing_state mix;
-    mix.init(ctx, nF, nS, m, iter_scf::diis_mixer::config{m, 1, 0, 2, 2});
+    mix.init(ctx, shape_t<4>{1, 1, 2, 2}, shape_t<5>{2, 1, 2, 2, 1}, m,
+             iter_scf::diis_mixer::config{m, 1, 0, 2, 2});
     auto fill = [&](long iter) {
       sF.win().fence();
       sS.win().fence();

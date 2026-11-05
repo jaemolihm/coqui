@@ -821,7 +821,7 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
                        long it, std::string h5_prefix, X_t &sHeff_skij, const X_t &sS_skij,
                        const X_t &sDm_skij) {
   double conv = 0;
-  auto& m = iter_solver.state();
+  auto& mix_state = iter_solver.state();
   sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Heff has no Sigma block
   if (it == 1) { // Iteration 1: no mixing; the change from the MF, and Heff becomes prev_vec
     // Change of Heff from the MF (scf/iter0)
@@ -852,21 +852,20 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
     context.node_comm.broadcast_n(&conv, 1, 0);
     // No mixing is applied at iteration 1, so this state is also the accepted previous
     // state of the first mixing.
-    init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
-    nda::array<ComplexType, 5> no_Sigma_array;
-    m.layout.store_slice(m.prev_vec, sHeff_skij.local(), no_Sigma_array);
-    m.has_prev = true;
+    init_mixing_state(context, iter_solver, mix_state, sHeff_skij, no_Sigma);
+    mix_state.layout.store_slice(mix_state.prev_vec, sHeff_skij.local());
+    mix_state.has_prev = true;
   } else { // Later iterations: mix the trial Heff with the previous accepted Heff
     iter_solver.metadata_log();
     // Restart: no mixing state yet; mix_step reads the previous Heff from the checkpoint
-    if (not m.initialized())
-      init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
+    if (not mix_state.initialized())
+      init_mixing_state(context, iter_solver, mix_state, sHeff_skij, no_Sigma);
     // Residual of the trial Heff, for the DIIS steps that store an entry
     std::optional<iter_scf::hist_vec> residual_vec;
-    if (m.needs_residual()) {
+    if (mix_state.needs_residual()) {
       residual_vec.emplace();
       if (iter_solver.diis()->residual_type == "vector_diff") { // trial - previous accepted Heff
-        residual_vec->F = m.layout.F_view_slice(sHeff_skij.local()) - m.prev_vec.F;
+        residual_vec->F = mix_state.layout.F_view_slice(sHeff_skij.local()) - mix_state.prev_vec.F;
       } else { // Heff-Dm commutator H D S - S D H, Dm of the previous accepted Heff
         auto [ns, nk, nao, nao2] = sHeff_skij.shape();
         auto sC = math::shm::make_shared_array<Array_view_4D_t>(
@@ -875,10 +874,10 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
         iter_scf::heff_commutator(context.node_comm, sC.local(), sHeff_skij.local(),
                                   sDm_skij.local(), sS_skij.local());
         sC.win().fence();
-        residual_vec->F = m.layout.F_view_slice(sC.local());
+        residual_vec->F = mix_state.layout.F_view_slice(sC.local());
       }
     }
-    conv = std::get<0>(mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
+    conv = std::get<0>(mix_step(context, mix_state, h5_prefix, {"scf", "Heff_skij", ""}, it,
                                     sHeff_skij, no_Sigma, residual_vec ? &*residual_vec : nullptr));
   }
   context.comm.barrier();

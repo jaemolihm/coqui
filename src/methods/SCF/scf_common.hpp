@@ -529,27 +529,27 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
   -> std::tuple<double, double>;
 
 /**
- * Cut the slices of `m` for the arrays sF_skij and sSigma_tskij (null: F only), with the
+ * Cut the slices of `mix_state` for the arrays sF_skij and sSigma_tskij (null: F only), with the
  * parameters of iter_solver. Collective on context.comm. Called once per SCF run (or at the
  * first iteration after a restart) by both solve_iterative, and by dmft_embed at every call.
  */
 template<typename comm_t, typename X_t, typename Xt_t>
 void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                       iter_scf::mixing_state& m, X_t &sF_skij, Xt_t *sSigma_tskij);
+                       iter_scf::mixing_state& mix_state, X_t &sF_skij, Xt_t *sSigma_tskij);
 
 /**
  * One element-sliced mixing step (damping or DIIS) of the node-shared windows sF_skij and
- * sSigma_tskij (null: F only) with `m`: the trial on entry, the accepted state on exit.
+ * sSigma_tskij (null: F only) with `mix_state`: the trial on entry, the accepted state on exit.
  * Called by both solve_iterative, and directly by dmft_embed (qp path), which mixes (Vhf, Sigma)
  * and Vcorr with two separate states.
- * When m has no previous accepted state, it is read from
+ * When mix_state has no previous accepted state, it is read from
  * {datasets[0]}/iter{iteration-1} of the checkpoint (datasets: group, F, Sigma).
- * @param residual_vec - residual slices of the trial (m.layout), or null when m.needs_residual() was false
+ * @param residual_vec - residual slices of the trial (mix_state.layout), or null when mix_state.needs_residual() was false
  * @return - max|ref - out| for F and Sigma over all ranks, ref the previous accepted state
  *           (damped) or the newest trial (extrapolated)
  */
 template<typename comm_t, typename X_t, typename Xt_t>
-auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
+auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& mix_state,
               std::string const& h5_prefix, std::array<std::string,3> const& datasets,
               long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
               iter_scf::hist_vec const* residual_vec)

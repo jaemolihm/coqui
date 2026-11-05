@@ -458,18 +458,14 @@ double update_mu(double old_mu, dyson_type& dyson, const mf::MF &mf,
 // starts from a fresh mixing state and mixes against the checkpoint iteration its caller selects:
 // the GW result or a previous embedding iteration.) Read the group datasets[0]/iter{iteration-1}
 // from checkpoint file h5_prefix + ".mbpt.h5".
-template<typename X_t, typename Xt_t>
-void read_prev_state_from_checkpoint(iter_scf::mixing_state& m, std::string h5_prefix,
-                                     std::array<std::string,3> const& datasets, long iteration,
-                                     X_t const& sF_skij, Xt_t const* sSigma_tskij) {
+void read_prev_state_from_checkpoint(iter_scf::mixing_state& mix_state, std::string h5_prefix,
+                                     std::array<std::string,3> const& datasets, long iteration) {
   // This rank's element ranges of the flattened F and Sigma; a dataset missing from the
   // checkpoint (Sigma of an HF run) leaves its slice at zero
-  auto [F_start, F_end] = m.layout.F_startend();
-  auto [S_start, S_end] = m.layout.S_startend();
-  m.prev_vec.F = nda::array<ComplexType, 1>(F_end - F_start);
-  m.prev_vec.S = nda::array<ComplexType, 1>(S_end - S_start);
-  m.prev_vec.F() = ComplexType(0.0);
-  m.prev_vec.S() = ComplexType(0.0);
+  auto [F_start, F_end] = mix_state.layout.F_startend();
+  auto [S_start, S_end] = mix_state.layout.S_startend();
+  mix_state.prev_vec.F = nda::zeros<ComplexType>(F_end - F_start);
+  mix_state.prev_vec.S = nda::zeros<ComplexType>(S_end - S_start);
   // Every rank opens the file read-only; this runs once per run (once per dmft_embed call)
   std::string filename = h5_prefix + ".mbpt.h5";
   h5::file file(filename, 'r');
@@ -479,54 +475,54 @@ void read_prev_state_from_checkpoint(iter_scf::mixing_state& m, std::string h5_p
                "read_prev_state_from_checkpoint: {} does not exist in {}.", grp_name, filename);
   auto it_grp = grp.open_group(grp_name);
   // Read only this rank's slices (h5 hyperslabs), never the full arrays. Without Sigma
-  // (sSigma_tskij null) datasets[2] is not read.
+  // (S_size_total() == 0) datasets[2] is not read.
   if (it_grp.has_dataset(datasets[1]))
-    utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), F_start, F_end, m.prev_vec.F.data());
-  if (sSigma_tskij) {
-    if (it_grp.has_dataset(datasets[2]))
-      utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij->shape(), S_start, S_end, m.prev_vec.S.data());
-  }
-  m.has_prev = true;
+    utils::h5_read_flat_range<4>(it_grp, datasets[1], mix_state.F_shape, F_start, F_end,
+                                 mix_state.prev_vec.F.data());
+  if (mix_state.layout.S_size_total() > 0 and it_grp.has_dataset(datasets[2]))
+    utils::h5_read_flat_range<5>(it_grp, datasets[2], mix_state.S_shape, S_start, S_end,
+                                 mix_state.prev_vec.S.data());
+  mix_state.has_prev = true;
 }
 
 template<typename comm_t, typename X_t, typename Xt_t>
-auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
+auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& mix_state,
               std::string const& h5_prefix, std::array<std::string,3> const& datasets,
               long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
               iter_scf::hist_vec const* residual_vec)
   -> std::tuple<double, double> {
   // No previous accepted state in memory (restart, dmft_embed): read it from the checkpoint
-  if (not m.has_prev) read_prev_state_from_checkpoint(m, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij);
+  if (not mix_state.has_prev) read_prev_state_from_checkpoint(mix_state, h5_prefix, datasets, iteration);
   // Mix this rank's slices in place, after every rank's writes to the windows are visible
-  nda::array<ComplexType, 5> no_Sigma;
   sF_skij.win().fence();
   if (sSigma_tskij) sSigma_tskij->win().fence();
   std::array<double, 2> conv = sSigma_tskij
-      ? m.step(context.comm, sF_skij.local(), sSigma_tskij->local(), residual_vec)  // F and Sigma
-      : m.step(context.comm, sF_skij.local(), no_Sigma, residual_vec);               // F only
-  // Convergence over all ranks (max is exactly order-independent), then fill every rank's
-  // node-shared windows with the slices mixed on the other ranks
-  context.comm.all_reduce_in_place_n(conv.data(), 2, mpi3::max<>{});
-  if (sSigma_tskij) utils::complete_shared_slices(context, m.layout.pmap(), sF_skij, *sSigma_tskij);
-  else utils::complete_shared_slices(context, m.layout.pmap(), sF_skij);
-  return std::make_tuple(conv[0], conv[1]);
+      ? mix_state.step(context.comm, sF_skij.local(), sSigma_tskij->local(), residual_vec)  // F and Sigma
+      : mix_state.step(context.comm, sF_skij.local(), residual_vec);                        // F only
+  // Each rank wrote only its slices: fill every node's windows with the slices of the other ranks
+  utils::complete_shared_slices(context, mix_state.layout.pmap(), sF_skij);
+  if (sSigma_tskij) utils::complete_shared_slices(context, mix_state.layout.pmap(), *sSigma_tskij);
+  return std::make_tuple(conv[0], conv[1]);  // convergence error of F and Sigma
 }
 
 template<typename comm_t, typename X_t, typename Xt_t>
 void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                       iter_scf::mixing_state& m, X_t &sF_skij, Xt_t *sSigma_tskij) {
-  // DIIS parameters of iter_solver (none for damping). DIIS extrapolates from two stored
-  // entries; the first step stores none (needs_residual() is false at steps() == 0)
+                       iter_scf::mixing_state& mix_state, X_t &sF_skij, Xt_t *sSigma_tskij) {
+  // DIIS parameters of iter_solver (none for damping). min_subsp = 2: with one stored entry
+  // the coefficient is c = 1 and the step would return that trial unmixed, so DIIS starts at
+  // two entries (as the SCF DIIS did before). The first step stores none (needs_residual()
+  // is false at steps() == 0).
   std::optional<iter_scf::diis_mixer::config> cfg;
   if (auto* dp = iter_solver.diis())
     cfg = iter_scf::diis_mixer::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
                                          /*min_subsp=*/2, /*log_level=*/2};
-  // Cut this rank's slices of the flattened F and Sigma
-  long nS = sSigma_tskij ? sSigma_tskij->local().size() : 0;
-  m.init(context, sF_skij.local().size(), nS, iter_solver.mixing(), cfg);
+  // Cut this rank's slices of the flattened F and Sigma (no Sigma: zero shape)
+  std::array<long, 5> S_shape{};
+  if (sSigma_tskij) S_shape = sSigma_tskij->shape();
+  mix_state.init(context, sF_skij.shape(), S_shape, iter_solver.mixing(), cfg);
   app_log(2, "Mixing: element-sliced state active ({} parts over {} node(s), "
              "slice sizes F {} / Sigma {})",
-          m.layout.pmap().nparts, context.internode_comm.size(), m.layout.F_len(), m.layout.S_len());
+          mix_state.layout.pmap().nparts, context.internode_comm.size(), mix_state.layout.F_len(), mix_state.layout.S_len());
 }
 
 // The DIIS residual of the Dyson SCF, the commutator C_t = [G, G_0^{-1} - Sigma] in tau
@@ -566,7 +562,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
   -> std::tuple<double, double> {
   double conv_F = 0;
   double conv_Sigma = 0;
-  auto& m = iter_solver.state();
+  auto& mix_state = iter_solver.state();
   if (iteration == 1) { // Iteration 1: no mixing; the change from the MF, and the state becomes prev_vec
     // Change of F from the MF (scf/iter0) and max|Sigma|
     if (context.node_comm.root()) {
@@ -598,29 +594,29 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     // Every rank captures its slices of the iteration-1 state. No mixing is applied
     // at iteration 1, so this state is also the accepted previous state of the
     // first mixing.
-    init_mixing_state(context, iter_solver, m, sF_skij, &sSigma_tskij);
-    m.layout.store_slice(m.prev_vec, sF_skij.local(), sSigma_tskij.local());
-    m.has_prev = true;
+    init_mixing_state(context, iter_solver, mix_state, sF_skij, &sSigma_tskij);
+    mix_state.layout.store_slice(mix_state.prev_vec, sF_skij.local(), sSigma_tskij.local());
+    mix_state.has_prev = true;
     context.comm.barrier();
   } else { // Later iterations: mix the trial (F, Sigma) with the previous accepted state
     iter_solver.metadata_log();
     // Restart: no mixing state yet; mix_step reads the previous state from the checkpoint
-    if (not m.initialized())
-      init_mixing_state(context, iter_solver, m, sF_skij, &sSigma_tskij);
+    if (not mix_state.initialized())
+      init_mixing_state(context, iter_solver, mix_state, sF_skij, &sSigma_tskij);
     // Commutator residual of the trial, for the DIIS steps that store an entry
     std::optional<iter_scf::hist_vec> residual_vec;
-    if (m.needs_residual()) {
+    if (mix_state.needs_residual()) {
       utils::check(sG_tskij and sS_skij and sH0_skij,
                    "solve_iterative: the DIIS commutator residual needs G, S and H0.");
       auto sC_t = compute_dyson_commutator_residual(context, FT, *sG_tskij, sF_skij, sSigma_tskij, mu,
                                          *sS_skij, *sH0_skij);
       residual_vec.emplace();
-      residual_vec->S = m.layout.S_view_slice(sC_t.local()); // only the Sigma block of the commutator is non-zero
+      residual_vec->S = mix_state.layout.S_view_slice(sC_t.local()); // only the Sigma block of the commutator is non-zero
     }
     std::optional<iter_scf::diis_timers::ScopeLog> breakdown_log;
     if (iter_solver.iter_alg() == iter_scf::DIIS) breakdown_log.emplace();
     std::tie(conv_F, conv_Sigma) = mix_step(
-        context, m, h5_prefix, datasets, iteration, sF_skij, &sSigma_tskij,
+        context, mix_state, h5_prefix, datasets, iteration, sF_skij, &sSigma_tskij,
         residual_vec ? &*residual_vec : nullptr);
     context.comm.barrier();
   }

@@ -121,6 +121,12 @@ public:
     v_vec.F = F_view_slice(F_skij);
     v_vec.S = S_view_slice(S_tskij);
   }
+  /// The same without Sigma (S_size_total() == 0): v_vec.S is left empty.
+  template<typename AF>
+  void store_slice(hist_vec& v_vec, AF const& F_skij) const {
+    v_vec.F = F_view_slice(F_skij);
+    v_vec.S = nda::array<ComplexType, 1>{};
+  }
 
 private:
   utils::part_map _pmap;
@@ -383,18 +389,30 @@ struct mixing_state {
   /// damping, DIIS warmup and DIIS fallback steps, and the reference of their convergence
   /// measure.
   hist_vec prev_vec;
-  bool has_prev = false;  ///< whether prev_vec is filled (false until the first step or a stage from the checkpoint)
+  bool has_prev = false;  ///< whether prev_vec is filled (false until the first step or a read from the checkpoint)
   double mixing = 1.0;       ///< damping factor of the damping algorithm
   std::optional<diis_mixer> diis;  ///< DIIS only
+  /// Shapes of the mixed arrays F_skij and Sigma_tskij (all zero: no Sigma); the checkpoint
+  /// read of the previous state (read_prev_state_from_checkpoint) needs them.
+  std::array<long, 4> F_shape{};
+  std::array<long, 5> S_shape{};
 
   bool initialized() const { return layout.F_size_total() > 0; }
 
-  /// Cut the slices of F (F_size_total elements) and Sigma (S_size_total; 0: F only);
-  /// `diis_cfg` selects DIIS over damping. Collective on mpi.comm.
+  /// Cut the slices of F (shape F_shape_) and Sigma (S_shape_; all zero: F only); `diis_cfg`
+  /// selects DIIS over damping. Collective on mpi.comm.
   template<typename MPI_Context_t>
-  void init(MPI_Context_t& mpi, long F_size_total, long S_size_total, double mixing_,
+  void init(MPI_Context_t& mpi, std::array<long, 4> const& F_shape_,
+            std::array<long, 5> const& S_shape_, double mixing_,
             std::optional<diis_mixer::config> diis_cfg) {
-    layout = hist_vec_layout(utils::make_part_map(mpi), F_size_total, S_size_total);
+    F_shape = F_shape_;
+    S_shape = S_shape_;
+    auto size = [](auto const& shape) {
+      long n = 1;
+      for (long d : shape) n *= d;
+      return n;
+    };
+    layout = hist_vec_layout(utils::make_part_map(mpi), size(F_shape), size(S_shape));
     mixing = mixing_;
     has_prev = false;
     diis.reset();
@@ -407,11 +425,13 @@ struct mixing_state {
   /**
    * @brief One mixing step on this rank's slices of the node-shared F and Sigma
    * (trial on entry, accepted state on exit), then prev_vec <- the accepted state.
+   * Collective on comm. The caller completes the node-shared windows afterwards
+   * (utils::complete_shared_slices): each rank writes only its own slices.
    *
    * @param residual_vec - this rank's slices of the residual of the trial (F or Sigma part
    *                       may be empty), or nullptr when needs_residual() was false
-   * @return per-rank {max|ref - out|_F, max|ref - out|_Sigma}, ref the previous accepted
-   *         state (damped) or the newest trial (extrapolated); the caller max-reduces.
+   * @return {max|ref - out|_F, max|ref - out|_Sigma} over all ranks of comm, ref the previous
+   *         accepted state (damped) or the newest trial (extrapolated)
    */
   template<typename Comm, typename AF, typename AS>
   std::array<double, 2> step(Comm& comm, AF&& F_skij, AS&& S_tskij, hist_vec const* residual_vec) {
@@ -441,6 +461,7 @@ struct mixing_state {
     };
     std::array<double, 2> conv{max_absdiff(ref_vec.F, layout.F_view_slice(F_skij)),
                                max_absdiff(ref_vec.S, layout.S_view_slice(S_tskij))};
+    comm.all_reduce_in_place_n(conv.data(), 2, boost::mpi3::max<>{});  // max is exactly order-independent
     diis_timers::mix_conv.stop();
 
     // Store the mixed result to prev_vec to use in the next mixing step
@@ -450,6 +471,13 @@ struct mixing_state {
     diis_timers::mix_prev_store.stop();
     diis_timers::mix_total.stop();
     return conv;
+  }
+
+  /// The same without Sigma (S_shape all zero), for the qp SCF and the embedding Vcorr.
+  template<typename Comm, typename AF>
+  std::array<double, 2> step(Comm& comm, AF&& F_skij, hist_vec const* residual_vec) {
+    nda::array<ComplexType, 1> no_Sigma;  // S_view_slice of an empty array is empty
+    return step(comm, F_skij, no_Sigma, residual_vec);
   }
 };
 
