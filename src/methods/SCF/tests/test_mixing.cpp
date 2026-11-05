@@ -552,10 +552,10 @@ nda::array<ComplexType, 1> run_affine(Comm& comm, iter_scf::hist_vec_layout cons
     nda::reshape(xF, shape_t<1>{P.nF}) = x(nda::range(0, P.nF));
     nda::reshape(xS, shape_t<1>{P.nS}) = x(nda::range(P.nF, n));
     layout.store_slice(prev_vec, xF, xS);
-    if (gs_residual)
-      diis.push(comm, layout, F, S, nda::array<ComplexType, 1>{}, layout.S_view_slice(S) - prev_vec.S);
-    else
-      diis.push(comm, layout, F, S, layout.F_view_slice(F) - prev_vec.F, layout.S_view_slice(S) - prev_vec.S);
+    iter_scf::hist_vec res_vec;
+    if (not gs_residual) res_vec.F = layout.F_view_slice(F) - prev_vec.F;  // empty F block for the Dyson-SCF residual
+    res_vec.S = layout.S_view_slice(S) - prev_vec.S;
+    diis.push(comm, layout, F, S, res_vec);
     diis.mix(layout, F, S, prev_vec);
     complete();
     for (long i = 0; i < P.nF; ++i) x(i) = nda::reshape(F, shape_t<1>{P.nF})(i);
@@ -684,11 +684,11 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
   // Zero residuals: B = 0, so the extrapolation is skipped and the step damps.
   {
     iter_scf::diis_mixer diis({m, 5, 0, 2, 2});
-    nda::array<ComplexType, 1> zeroF(5), zeroS(7);
-    zeroF() = 0;
-    zeroS() = 0;
-    diis.push(self, layout, Fn, Sn, zeroF, zeroS);
-    diis.push(self, layout, Fn, Sn, zeroF, zeroS);
+    iter_scf::hist_vec zero_vec{nda::array<ComplexType, 1>(5), nda::array<ComplexType, 1>(7)};
+    zero_vec.F() = 0;
+    zero_vec.S() = 0;
+    diis.push(self, layout, Fn, Sn, zero_vec);
+    diis.push(self, layout, Fn, Sn, zero_vec);
     REQUIRE(diis.size() == 2);
     auto Fx = Fn, Sx = Sn;
     REQUIRE(not diis.mix(layout, Fx, Sx, prev_vec));
@@ -698,9 +698,9 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
   {
     iter_scf::diis_mixer diis({m, 1, 0, 2, 2});
     REQUIRE(not diis.active());
-    nda::array<ComplexType, 1> res_F = Fn - F, res_S = Sn - S;
-    diis.push(self, layout, Fn, Sn, res_F, res_S);
-    diis.push(self, layout, Fn, Sn, res_F, res_S);
+    iter_scf::hist_vec res_vec{Fn - F, Sn - S};
+    diis.push(self, layout, Fn, Sn, res_vec);
+    diis.push(self, layout, Fn, Sn, res_vec);
     REQUIRE(diis.size() == 0);
     auto Fx = Fn, Sx = Sn;
     REQUIRE(not diis.mix(layout, Fx, Sx, prev_vec));

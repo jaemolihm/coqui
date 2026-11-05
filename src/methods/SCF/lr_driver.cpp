@@ -291,9 +291,10 @@ void lr_driver::lr_setup(
     inner_hist.n_F = 1;
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
   } else if (_diis and _diis->active()) {
-    // DIIS stores max_subsp entries, each a trial vector AND its residual.
+    // DIIS stores max_subsp entries, each a trial vector AND its residual, plus the
+    // residual _res_vec filled before each push.
     inner_hist.depth = static_cast<long>(_diis->cfg().max_subsp);
-    inner_hist.n_vec = 2 * inner_hist.depth;
+    inner_hist.n_vec = 2 * inner_hist.depth + 1;
     inner_hist.n_F = qp ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
   }
@@ -961,7 +962,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
                                p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
       } else if (_diis) {
         // DIIS: the residual is the difference of the successive iterates
-        _diis->push(_mpi->comm, _hist_layout, F, S, _hist_layout.F_view_slice(F) - _prev_vec.F, _hist_layout.S_view_slice(S) - _prev_vec.S);
+        _res_vec.F = _hist_layout.F_view_slice(F) - _prev_vec.F;
+        _res_vec.S = _hist_layout.S_view_slice(S) - _prev_vec.S;
+        _diis->push(_mpi->comm, _hist_layout, F, S, _res_vec);
         _diis->mix(_hist_layout, F, S, _prev_vec);
       } else {
         // Damping, preconditioned with pc_fn when set

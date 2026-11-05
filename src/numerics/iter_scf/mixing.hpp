@@ -192,15 +192,15 @@ public:
   hist_vec const& newest_trial() const { return _entries[entry_index(_n - 1)].x_vec; }
 
   /**
-   * @brief Store the trial (F, S) with its residual (res_F, res_S) as the newest entry,
+   * @brief Store the trial (F, S) with its residual res_vec as the newest entry,
    * evicting the oldest entry first when max_subsp are stored, and extend B. Collective on comm.
    *
    * @param F_skij, S_tskij - full arrays of the trial (this rank's slices are stored)
-   * @param res_F, res_S    - this rank's slices of the residual; res_F may be empty
+   * @param res_vec         - this rank's slices of the residual; res_vec.F may be empty
    */
-  template<typename Comm, typename AF, typename AS, typename RF, typename RS>
+  template<typename Comm, typename AF, typename AS>
   void push(Comm& comm, hist_vec_layout const& layout, AF const& F_skij, AS const& S_tskij,
-            RF const& res_F, RS const& res_S) {
+            hist_vec const& res_vec) {
     if (not active()) return;
     diis_timers::mix_hist_store.start();
     if (_n == _cfg.max_subsp) evict_oldest();
@@ -211,8 +211,7 @@ public:
     }
     auto& s = _entries[entry_index(_n)];
     layout.store_slice(s.x_vec, F_skij, S_tskij);
-    s.res_vec.F = res_F;
-    s.res_vec.S = res_S;
+    s.res_vec = res_vec;
     ++_n;
     diis_timers::mix_hist_store.stop();
     update_B(comm);
@@ -410,7 +409,7 @@ struct mixing_state {
     bool extrapolated = false;
     if (diis) {
       // Store the trial (F_skij, S_tskij) and its residual as the newest DIIS entry (none at the first step)
-      if (residual_vec) diis->push(comm, layout, F_skij, S_tskij, residual_vec->F, residual_vec->S);
+      if (residual_vec) diis->push(comm, layout, F_skij, S_tskij, *residual_vec);
       // Extrapolate from the stored trials, or damp against prev_vec (warmup, too few entries,
       // singular B). The entries are pre-mix trials, so the previous accepted state is only in prev_vec.
       extrapolated = diis->mix(layout, F_skij, S_tskij, prev_vec);
