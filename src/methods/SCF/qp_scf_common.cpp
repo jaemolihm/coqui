@@ -823,8 +823,8 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
   double conv = 0;
   auto& m = iter_solver.state();
   sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Heff has no Sigma block
-  if (it == 1) {
-    // Just check changes w.r.t. mf
+  if (it == 1) { // Iteration 1: no mixing; the change from the MF, and Heff becomes prev_vec
+    // Change of Heff from the MF (scf/iter0)
     if (context.node_comm.root()) {
       auto H_mf = nda::make_regular(sHeff_skij.local());
       std::string filename = h5_prefix + ".mbpt.h5";
@@ -856,20 +856,18 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
     nda::array<ComplexType, 5> no_Sigma_array;
     m.layout.store_slice(m.prev_vec, sHeff_skij.local(), no_Sigma_array);
     m.has_prev = true;
-  } else {
+  } else { // Later iterations: mix the trial Heff with the previous accepted Heff
     iter_solver.metadata_log();
-    // Restart: no previous state in memory; mix_step stages it from the checkpoint.
+    // Restart: no mixing state yet; mix_step reads the previous Heff from the checkpoint
     if (not m.initialized())
       init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
     // Residual of the trial Heff, for the DIIS steps that store an entry
     std::optional<iter_scf::hist_vec> residual_vec;
     if (m.needs_residual()) {
       residual_vec.emplace();
-      if (iter_solver.diis()->residual_type == "vector_diff") {
-        // trial - previous accepted Heff
+      if (iter_solver.diis()->residual_type == "vector_diff") { // trial - previous accepted Heff
         residual_vec->F = m.layout.F_view_slice(sHeff_skij.local()) - m.prev_vec.F;
-      } else {
-        // Heff-Dm commutator H D S - S D H, Dm of the previous accepted Heff
+      } else { // Heff-Dm commutator H D S - S D H, Dm of the previous accepted Heff
         auto [ns, nk, nao, nao2] = sHeff_skij.shape();
         auto sC = math::shm::make_shared_array<Array_view_4D_t>(
             context.comm, context.internode_comm, context.node_comm, {ns, nk, nao, nao2});

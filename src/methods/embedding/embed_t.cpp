@@ -390,7 +390,7 @@ namespace methods {
       if (iter_solver->iter_alg() == iter_scf::DIIS)
         app_log(2, "dmft_embed: GW+DMFT runs for one iteration, and DIIS becomes simple damping");
       // Mix (Vhf, Sigma) and Vcorr with the result of the previous call, embed/iter{weiss_f_iter-1}.
-      // Every call starts from fresh mixing states and stages the previous state from that
+      // Every call starts from fresh mixing states and reads the previous state from that
       // checkpoint iteration, so a call takes a single mixing step: no DIIS history exists.
       // A mixing_state mixes one array plus an optional second one (Sigma): (Vhf, Sigma) use
       // the solver's state, and Vcorr, which has no Sigma, gets its own.

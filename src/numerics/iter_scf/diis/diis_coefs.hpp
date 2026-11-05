@@ -72,6 +72,7 @@ inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::mat
   for (long i = 0; i < n; ++i)
     for (long j = 0; j < n; ++j) B(i, j) /= d(i) * d(j);
 
+  // Pseudoinverse of the scaled B from its eigendecomposition
   auto [eig, evecs] = nda::linalg::eigenelements(B);
   auto evecs_tr = nda::make_regular(nda::transpose(evecs));
 
@@ -102,6 +103,7 @@ inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::mat
   nda::blas::gemm(evecs, eig_inv, I);
   nda::blas::gemm(I, evecs_tr, Binv);
 
+  // x = B^+ 1, with the Jacobi scaling undone
   nda::array<double, 1> x(n);
   nda::blas::gemv(1.0, Binv, bb, 0.0, x);
   for (long i = 0; i < n; ++i) x(i) /= d(i);

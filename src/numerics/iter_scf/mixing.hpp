@@ -194,6 +194,8 @@ public:
   /**
    * @brief Store the trial (F, S) with its residual res_vec as the newest entry,
    * evicting the oldest entry first when max_subsp are stored, and extend B. Collective on comm.
+   * Called once per step that has a residual: by mixing_state::step (Dyson SCF, qp SCF) and
+   * by lr_driver (LR, every iteration), before mix().
    *
    * @param F_skij, S_tskij - full arrays of the trial (this rank's slices are stored)
    * @param res_vec         - this rank's slices of the residual; res_vec.F may be empty
@@ -203,24 +205,28 @@ public:
             hist_vec const& res_vec) {
     if (not active()) return;
     diis_timers::mix_hist_store.start();
+    // Make room: drop the oldest entry when full, or grow the buffer before the first eviction
     if (_n == _cfg.max_subsp) evict_oldest();
     if (_n == _entries.size()) {
       // Growth happens only before the first eviction, so appending keeps the order.
       utils::check(_head == 0, "diis_mixer: growth of the history with head = {} != 0", _head);
       _entries.emplace_back();
     }
+    // Copy this rank's slices of the trial and its residual into the newest slot
     auto& s = _entries[entry_index(_n)];
     layout.store_slice(s.x_vec, F_skij, S_tskij);
     s.res_vec = res_vec;
     ++_n;
     diis_timers::mix_hist_store.stop();
+    // Overlaps of the new residual with every stored one (one all_reduce)
     update_B(comm);
   }
 
   /**
    * @brief Mix this rank's slices of (F, S) in place: the DIIS extrapolation of the
    * stored trials, or damping against `prev_vec` when there is none. Returns true if it
-   * extrapolated. Every rank takes the same branch.
+   * extrapolated. Called after push() by mixing_state::step and by lr_driver. Every rank takes
+   * the same branch: the branch depends only on _steps, _n and B, which are replicated.
    */
   template<typename AF, typename AS>
   bool mix(hist_vec_layout const& layout, AF&& F_skij, AS&& S_tskij, hist_vec const& prev_vec) {
@@ -231,23 +237,24 @@ public:
       damp_slices(layout, _cfg.mixing, F_skij, S_tskij, prev_vec);
       diis_timers::mix_damp.stop();
     };
-    if (_steps <= _cfg.warmup) {
+    if (_steps <= _cfg.warmup) { // Warmup: damp only
       app_log(L, "DIIS: warmup iteration {}/{}: damping (mixing = {}, subspace size {})",
               _steps, _cfg.warmup, _cfg.mixing, _n);
       damp();
       return false;
     }
-    if (_n < _cfg.min_subsp) {
+    if (_n < _cfg.min_subsp) { // Too few stored entries to extrapolate: damp
       app_log(L, "DIIS: subspace size {} < {}: damping (mixing = {})",
               _n, _cfg.min_subsp, _cfg.mixing);
       damp();
       return false;
     }
 
+    // Coefficients c = B^+ 1 / sum(B^+ 1), or none when B is singular
     diis_timers::mix_coefs.start();
     auto C = compute_diis_coefs_c1(_B, L); // identical on every rank (B replicated)
     diis_timers::mix_coefs.stop();
-    if (not C) {
+    if (not C) { // Singular B: damp instead of extrapolating
       app_log(1, "[WARNING] DIIS: the residual-overlap matrix is singular (the residuals vanish "
                  "or are linearly dependent to machine precision); skipping the extrapolation "
                  "and damping instead (mixing = {}).", _cfg.mixing);
@@ -256,6 +263,7 @@ public:
     }
     log_extrapolation(*C);
 
+    // Extrapolate: this rank's slices <- sum_k c_k x_k over the stored trials
     diis_timers::mix_lincomb.start();
     auto F_slice = layout.F_view_slice(F_skij);
     auto S_slice = layout.S_view_slice(S_tskij);
@@ -302,9 +310,10 @@ private:
   }
 
   /// Extend B by the row and column of the newest residual: this rank's dot products over
-  /// its slices of both blocks (an empty block adds nothing), one all_reduce.
+  /// its slices of both blocks (an empty block adds nothing), one all_reduce. Called by push().
   template<typename Comm>
   void update_B(Comm& comm) {
+    // col(i) = <r_i | r_newest> over this rank's slices
     const size_t n = _n;
     auto const& rn_vec = _entries[entry_index(n - 1)].res_vec;
     nda::array<ComplexType, 1> col(n);
@@ -318,10 +327,12 @@ private:
       col(i) = acc;
     }
     diis_timers::mix_B_dots.stop();
+    // Sum the slices over all ranks, so every rank holds the same B
     diis_timers::mix_B_comm.start();
     comm.all_reduce_in_place_n(col.data(), static_cast<long>(n), std::plus<>{});
     diis_timers::mix_B_comm.stop();
 
+    // Bnew = [[B, col], [col^H, col(n-1)]]
     nda::matrix<ComplexType> Bnew(n, n);
     Bnew() = 0;
     for (size_t i = 0; i + 1 < n; ++i)
@@ -334,6 +345,7 @@ private:
     _B = Bnew;
   }
 
+  /// Log B, the coefficients and sum_i (B c)_i, the predicted squared error of the extrapolation.
   void log_extrapolation(nda::array<double, 1> const& C) const {
     const int L = _cfg.log_level;
     double c_norm = 0.0;

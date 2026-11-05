@@ -961,7 +961,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
         gcr_rnorm = _gcr->step(_mpi->comm, _hist_layout, F, S, _prev_vec,
                                p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
       } else if (_diis) {
-        // DIIS: the residual is the difference of the successive iterates
+        // DIIS: residual g(y) - y, the kernel output in (F, S) minus the iterate y in _prev_vec
         _res_vec.F = _hist_layout.F_view_slice(F) - _prev_vec.F;
         _res_vec.S = _hist_layout.S_view_slice(S) - _prev_vec.S;
         _diis->push(_mpi->comm, _hist_layout, F, S, _res_vec);

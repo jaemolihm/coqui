@@ -42,7 +42,8 @@ namespace iter_scf {
 
 /**
  * Commutator in tau space between G and G_0^{-1} - Sigma, C = G (G_0^{-1} - Sigma) - (G_0^{-1} - Sigma) G
- * with G_0^{-1} = (iw + mu) S - H0 - F, striped over (s,k).
+ * with G_0^{-1} = (iw + mu) S - H0 - F, striped over (s,k). The DIIS residual of the Dyson SCF;
+ * called by compute_dyson_commutator_residual (scf_common.cpp) at every DIIS step that stores an entry.
  *
  * Every rank reads G, F, Sigma, S, H0 directly from the node-shared arrays
  * (byte-identical on all ranks) and processes only its own round-robin subset
@@ -118,6 +119,7 @@ void dyson_commutator(comm_t& comm, Arr_out&& C_t_out,
     for (long sk = rank; sk < nsk; sk += nranks) {
         long s = sk / nk, k = sk % nk;
 
+        // G(iw) and Sigma(iw) of this (s,k)
         G_t_sk = G_t(all, s, k, all, all);
         diis_timers::com_dist_ftG.start();
         FT->tau_to_w(G_t_sk, G_w_sk, imag_axes_ft::fermion);
@@ -136,6 +138,7 @@ void dyson_commutator(comm_t& comm, Arr_out&& C_t_out,
         auto F_sk  = Fock(s, k, all, all);
         auto H0_sk = H0(s, k, all, all);
 
+        // C(iw) = G (G_0^{-1} - Sigma) - (G_0^{-1} - Sigma) G
         diis_timers::com_dist_gemm.start();
         for (long iw = 0; iw < nw; iw++) {
             long wn = FT->wn_mesh()(iw);
@@ -150,6 +153,7 @@ void dyson_commutator(comm_t& comm, Arr_out&& C_t_out,
         }
         diis_timers::com_dist_gemm.stop();
 
+        // Back to tau, into this rank's (s,k) block of the shared output
         diis_timers::com_dist_wtau.start();
         FT->w_to_tau(C_w_sk, C_t_sk, imag_axes_ft::fermion);
         diis_timers::com_dist_wtau.stop();
@@ -163,7 +167,9 @@ void dyson_commutator(comm_t& comm, Arr_out&& C_t_out,
 
 /**
  * Commutator of the effective Hamiltonian with the density matrix, C = H D S - S D H,
- * for every (s,k), striped over the ranks of `comm`.
+ * for every (s,k), striped over the ranks of `comm`. The DIIS residual of the qp SCF with
+ * residual_type = "commutator"; called by the qp solve_iterative (qp_scf_common.cpp), with Dm
+ * the density matrix of the previous accepted Heff.
  *
  * C_out is a window shared by the ranks of `comm`; each rank writes distinct (s,k) blocks, so
  * the caller only fences the window.

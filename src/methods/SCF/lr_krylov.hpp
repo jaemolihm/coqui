@@ -358,6 +358,9 @@ private:
  *   y = y_prev + mixing · r          (precond null; mixing >= 1 leaves g(y_prev))
  *   y = y_prev + mixing · M⁻¹ r      (precond),     r = g(y_prev) − y_prev
  *
+ * The LR damping iteration; called by lr_driver::lr_solve_one once per iteration when neither
+ * GCR nor DIIS is selected.
+ *
  * @param layout       - [INPUT]  slicing of the flattened F and S across ranks
  * @param F_inout   - [IN/OUT] the full ΔF: g(y_prev) in, this rank's slice of y out
  * @param S_inout   - [IN/OUT] the full ΔΣ, as F_inout; empty for a ΔF-only iterate
@@ -374,18 +377,19 @@ void lr_damping_step(iter_scf::hist_vec_layout const& layout, FView F_inout, SVi
   utils::check(prev_vec.F.size() == layout.F_len() and prev_vec.S.size() == layout.S_len(),
                "lr_damping_step: history slices ({}, {}) != partition slices ({}, {}).",
                prev_vec.F.size(), prev_vec.S.size(), layout.F_len(), layout.S_len());
-  if (precond) {
+  if (precond) { // Preconditioned: y = y_prev + mixing M⁻¹ r on the concatenated slices
     const long n = layout.F_len() + layout.S_len();
     auto F_range = layout.F_range();
     auto S_range = layout.S_range();
     auto F_slice = layout.F_view_slice(F_inout);
+    // r = g(y_prev) - y_prev, then z = M⁻¹ r (collective)
     nda::array<ComplexType, 1> r(n), z(n);
     r(F_range) = F_slice - prev_vec.F;
     if (layout.S_size_total() > 0) r(S_range) = layout.S_view_slice(S_inout) - prev_vec.S;
     (*precond)(r, z);
     F_slice = prev_vec.F + mixing * z(F_range);
     if (layout.S_size_total() > 0) layout.S_view_slice(S_inout) = prev_vec.S + mixing * z(S_range);
-  } else {
+  } else { // Plain damping: y = mixing g(y_prev) + (1 - mixing) y_prev
     iter_scf::damp_slices(layout, mixing, F_inout, S_inout, prev_vec);
   }
 }
