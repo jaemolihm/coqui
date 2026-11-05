@@ -453,27 +453,16 @@ double update_mu(double old_mu, dyson_type& dyson, const mf::MF &mf,
   }
 }
 
-// Abort when `dataset` is missing from `iter_grp` and the group records Sigma_not_stored
-// = true (dump_scf). A missing dataset without that flag (HF checkpoints) passes: readers
-// that call this take it as an exactly-zero quantity.
-static void check_checkpoint_dataset_present(h5::group &iter_grp, std::string const& dataset, long iter) {
-  if (iter_grp.has_dataset(dataset) or not iter_grp.has_dataset("Sigma_not_stored")) return;
-  bool not_stored = false;
-  h5::h5_read(iter_grp, "Sigma_not_stored", not_stored);
-  utils::check(not not_stored,
-               "iter_scf: {} of iteration {} is not stored in the checkpoint (Sigma_not_stored = true) "
-               "and cannot be read as the previous state for mixing.", dataset, iter);
-}
-
 // Fill m.prev with this rank's slices of the previous accepted (F, Sigma) from
 // {datasets[0]}/iter{iteration-1}, for the first in-memory mixing without an in-memory copy
 // (the first one after a restart, and every dmft_embed call). Every rank reads exactly the
 // element slice it owns as an h5 hyperslab, so no full copy of F or Sigma is materialized.
 // A missing Sigma means an exactly zero Sigma (HF checkpoints written before the
-// Sigma_not_stored flag), unless chkpt_slim omitted it. Without Sigma (m.layout.nS() = 0,
-// sSigma_tskij null) datasets[2] is not read.
-// Every rank opening the checkpoint read-only is affordable because this runs at
-// most once per run: after the first solve the previous state is in memory.
+// Sigma_not_stored flag). A slim intermediate iteration, whose Sigma is omitted, never reaches
+// here: the staged iteration is the one read_scf read before, and read_scf rejects it.
+// Without Sigma (m.layout.nS() = 0, sSigma_tskij null) datasets[2] is not read.
+// Every rank opening the checkpoint read-only is affordable because this runs at most once
+// per run (once per dmft_embed call): after the first solve the previous state is in memory.
 template<typename X_t, typename Xt_t>
 void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
                       std::array<std::string,3> const& datasets, long iteration,
@@ -494,7 +483,6 @@ void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
   if (it_grp.has_dataset(datasets[1]))
     utils::h5_read_flat_range<4>(it_grp, datasets[1], sF_skij.shape(), f0, f1, m.prev.F.data());
   if (sSigma_tskij) {
-    check_checkpoint_dataset_present(it_grp, datasets[2], iteration-1);
     if (it_grp.has_dataset(datasets[2]))
       utils::h5_read_flat_range<5>(it_grp, datasets[2], sSigma_tskij->shape(), s0, s1, m.prev.S.data());
   }
@@ -528,7 +516,8 @@ void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
   // false at steps() == 0)
   std::optional<iter_scf::diis_mixer::config> cfg;
   if (auto* dp = iter_solver.diis())
-    cfg = iter_scf::diis_mixer::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter, 2, 2};
+    cfg = iter_scf::diis_mixer::config{dp->mixing, dp->max_subsp_size, dp->warmup_iter,
+                                         /*min_subsp=*/2, /*log_level=*/2};
   long nS = sSigma_tskij ? sSigma_tskij->local().size() : 0;
   m.init(context, sF_skij.local().size(), nS, iter_solver.mixing(), cfg);
   app_log(2, "In-memory mixing: element-sliced state active ({} parts over {} node(s), "

@@ -53,12 +53,16 @@ namespace iter_scf {
     void metadata_log() const {
       app_log(2, "\nIterative algorithm for SCF");
       app_log(2, "-----------------------------");
+      // Dyson SCF: frequency-dependent commutator residual; qp SCF: residual_type
       app_log(2, "  * algorithm: DIIS");
+      app_log(2, "    Dyson SCF: frequency-dependent commutator DIIS\n"
+                 "               P. Pokhilko, C.-N. Yeh, D. Zgid. J. Chem. Phys., 2022, 156, 094101\n"
+                 "               https://doi.org/10.1063/5.0082586");
       app_log(2, "  * DIIS parameters: ");
-      app_log(2, "    mixing            = {}", mixing);
-      app_log(2, "    max subspace size = {}", max_subsp_size);
-      app_log(2, "    warmup iteration  = {}", warmup_iter);
-      app_log(2, "    residual type     = {}\n", residual_type);
+      app_log(2, "    mixing                   = {}", mixing);
+      app_log(2, "    max subspace size        = {}", max_subsp_size);
+      app_log(2, "    warmup iteration         = {}", warmup_iter);
+      app_log(2, "    residual type (qp SCF)   = {}\n", residual_type);
     }
 
     double mixing = 0.2;

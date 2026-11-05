@@ -274,13 +274,21 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
     }
   }
 
-  TEST_CASE("dmft_embed_qp_mixing", "[methods][embed]") {
-    // qp dmft_embed at embed_iter >= 1: damping(0.5) vs 0.5*X_new + 0.5*X_prev, with X_new from damping(1)
-    // and X_prev read from embed/iter1; the default iter_alg (DIIS, mixing 1) vs damping(1).
+  TEST_CASE("dmft_embed_mixing", "[methods][embed]") {
+    // dmft_embed at embed_iter >= 1, qp and Dyson paths: damping(0.5) vs 0.5*X_new + 0.5*X_prev, with X_new
+    // from damping(1) and X_prev read from the first embed iteration; DIIS(0.5) vs damping(0.5) bitwise (one mixing per call,
+    // so DIIS damps); the default iter_alg (DIIS, mixing 1) vs damping(1) bitwise.
     auto& mpi = utils::make_unit_test_mpi_context();
+    bool qp = false;
+    SECTION("qp") { qp = true; }
+    SECTION("dyson") { qp = false; }
 
     imag_axes_ft::IAFT ft(1000.0, 1.2, imag_axes_ft::ir_basis, "high");
-    std::string coqui_prefix = "dmft_embed_qp_mixing";
+    std::string coqui_prefix = qp ? "dmft_embed_mixing_qp" : "dmft_embed_mixing_dyson";
+    std::string fname = coqui_prefix + ".mbpt.h5";
+    // A checkpoint left by an interrupted run would shift every downfold/embed iteration.
+    if (mpi->comm.root()) remove(fname.c_str());
+    mpi->comm.barrier();
     auto [outdir, prefix] = utils::utest_filename("qe_lih222_sym");
     auto mf = std::make_shared<mf::MF>(mf::default_MF(mpi, "qe_lih222_sym"));
     std::string wannier_file = outdir + "/lih_wan.h5";
@@ -314,7 +322,8 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
     pt_1e.put("update_dc", true);
     pt_1e.put("force_real", true);
     pt_1e.put("dc_type", "gw");
-    // downfold_1e/iter1 and embed/iter1 (no mixing), then downfold_1e/iter2: embed_iter = 1 afterwards
+    // A first downfold_1e and embed iteration (no mixing), then a second downfold_1e; the iteration numbers
+    // follow the qp or Dyson workflow (qp: downfold_1e/iter1, embed/iter1; Dyson: from scf/iter1, so iter2).
     // Local corrections given directly, scaled by c, so that two calls differ.
     auto set_local = [&](MBState &state, double c) {
       auto &proj = state.proj_boson.value().proj_fermi();
@@ -336,52 +345,88 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
               state.Sigma_imp_wsIab.value()(n, s, I, a, a) = 0.1 * c / (ft.omega(ft.wn_mesh()(n)) + 1.0);
           }
     };
-    embed.downfolding(mb_state, pt_1e, &qp_params);
+    // The Dyson dmft_embed requires downfold_1e and downfold_2e at the same iteration, both numbered
+    // from the scf/embed iteration: each Dyson downfolding redoes the cRPA one first (2e, then 1e).
+    auto downfold = [&](MBState &state) {
+      if (qp) embed.downfolding(state, pt_1e, &qp_params);
+      else {
+        embed_2e.downfolding_crpa(thc, state, pt, "crpa");
+        embed.downfolding(state, pt_1e);
+      }
+    };
+    downfold(mb_state);
     iter_scf::iter_scf_t damp1(iter_scf::damp_t(1.0));
     set_local(mb_state, 1.0);
-    embed.dmft_embed(mb_state, dyson, &damp1, true, false);
-    std::string fname = coqui_prefix + ".mbpt.h5";
-    // downfold_1e/iter2 reads the impurity quantities of iter1
+    embed.dmft_embed(mb_state, dyson, &damp1, qp, false);
+    // The next downfold_1e reads the impurity quantities of the current one
     if (mpi->comm.root()) {
       h5::file file(fname, 'a');
-      auto grp = h5::group(file).open_group("downfold_1e/iter1");
+      long d1 = 0;
+      h5::h5_read(h5::group(file).open_group("downfold_1e"), "final_iter", d1);
+      auto grp = h5::group(file).open_group("downfold_1e/iter" + std::to_string(d1));
       nda::h5_write(grp, "Vhf_imp_sIab", mb_state.Vhf_imp_sIab.value(), false);
       nda::h5_write(grp, "Sigma_imp_wsIab", mb_state.Sigma_imp_wsIab.value(), false);
     }
     mpi->comm.barrier();
-    embed.downfolding(mb_state, pt_1e, &qp_params);
+    downfold(mb_state);
 
+    // embed/iter{e1} is the unmixed first call; every later call mixes with it and writes iter{e1 + 1}.
+    long e1 = 0;
     using flat_t = std::vector<ComplexType>;
+    // The mixed datasets of each path: qp Vhf, Vcorr, Sigma; Dyson F (= Vhf), Sigma.
+    std::vector<std::string> mixed = qp ? std::vector<std::string>{"Vhf_skij", "Vcorr_skij", "Sigma_tskij"}
+                                        : std::vector<std::string>{"F_skij", "Sigma_tskij"};
     auto read_embed = [&](long iter) {
-      std::array<flat_t, 3> out;
+      std::vector<flat_t> out;
       h5::file file(fname, 'r');
       auto grp = h5::group(file).open_group("embed/iter" + std::to_string(iter));
-      nda::array<ComplexType, 4> Vhf, Vcorr;
-      nda::array<ComplexType, 5> Sigma;
-      nda::h5_read(grp, "Vhf_skij", Vhf);
-      nda::h5_read(grp, "Vcorr_skij", Vcorr);
-      nda::h5_read(grp, "Sigma_tskij", Sigma);
-      out[0].assign(Vhf.data(), Vhf.data() + Vhf.size());
-      out[1].assign(Vcorr.data(), Vcorr.data() + Vcorr.size());
-      out[2].assign(Sigma.data(), Sigma.data() + Sigma.size());
+      for (auto const& name : mixed) {
+        if (name == "Sigma_tskij") {
+          nda::array<ComplexType, 5> A;
+          nda::h5_read(grp, name, A);
+          out.emplace_back(A.data(), A.data() + A.size());
+        } else {
+          nda::array<ComplexType, 4> A;
+          nda::h5_read(grp, name, A);
+          out.emplace_back(A.data(), A.data() + A.size());
+        }
+      }
       return out;
     };
-    // Each call mixes with embed/iter1 and overwrites embed/iter2.
+    // Each call mixes with embed/iter{e1} and overwrites embed/iter{e1 + 1}.
     auto embed_again = [&](iter_scf::iter_scf_t &sol) {
+      // Every call repeats the same DMFT iteration. The Dyson path mixes with embed/iter{final_iter}, so
+      // final_iter goes back to e1; the qp path mixes with embed/iter{weiss_f_iter - 1}, which is e1 here.
+      // The barrier closes every rank's read of the checkpoint before rank 0 opens it for writing.
+      mpi->comm.barrier();
+      if (mpi->comm.root()) {
+        h5::file file(fname, 'a');
+        auto grp = h5::group(file).open_group("embed");
+        h5::h5_write(grp, "final_iter", e1);
+      }
+      mpi->comm.barrier();
       MBState state(ft, coqui_prefix, mf, wannier_file, true);
       set_local(state, 2.0);
-      embed.dmft_embed(state, dyson, &sol, true, false);
+      embed.dmft_embed(state, dyson, &sol, qp, false);
       mpi->comm.barrier();
-      return read_embed(2);
+      return read_embed(e1 + 1);
     };
 
-    auto prev = read_embed(1);
+    if (mpi->comm.root()) {
+      h5::file file(fname, 'r');
+      h5::h5_read(h5::group(file).open_group("embed"), "final_iter", e1);
+    }
+    mpi->comm.broadcast_n(&e1, 1, 0);
+    auto prev = read_embed(e1);
     auto X_new = embed_again(damp1);
     iter_scf::iter_scf_t damp_half(iter_scf::damp_t(0.5));
     auto X_half = embed_again(damp_half);
+    iter_scf::iter_scf_t diis_half(iter_scf::diis_t(0.5, 5, 3, "commutator"));
+    auto X_diis_half = embed_again(diis_half);
     iter_scf::iter_scf_t diis_default(iter_scf::diis_t(1.0, 5, 3, "commutator"));
     auto X_diis = embed_again(diis_default);
-    for (int i = 0; i < 3; ++i) {
+    REQUIRE(X_new.size() == mixed.size());
+    for (size_t i = 0; i < mixed.size(); ++i) {
       REQUIRE(X_new[i].size() == prev[i].size());
       double err_half = 0.0, norm_half = 0.0, err_diis = 0.0;
       for (size_t j = 0; j < X_new[i].size(); ++j) {
@@ -391,6 +436,7 @@ TEST_CASE("downfold_1e_mb_qp", "[methods][embed][df_1e]") {
         err_diis += std::norm(X_diis[i][j] - X_new[i][j]);
       }
       REQUIRE(std::sqrt(err_half) <= 1e-14 * std::sqrt(norm_half));
+      REQUIRE(X_diis_half[i] == X_half[i]);
       REQUIRE(err_diis == 0.0);
     }
 
