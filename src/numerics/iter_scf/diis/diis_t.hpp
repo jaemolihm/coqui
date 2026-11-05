@@ -35,7 +35,7 @@
 namespace iter_scf {
   /**
    * Parameters of DIIS: the damping factor of the warmup and fallback steps, the number
-   * of stored (trial, residual) pairs, the number of damping-only steps, and the residual
+   * of stored (trial, residual) entries, the number of damping-only steps, and the residual
    * definition ("commutator" or "vector_diff"). The history lives in iter_scf::mixing_state.
    */
   struct diis_t {

@@ -248,8 +248,8 @@ print("KEY_ACCEPTED", flush=True)
 @pytest.mark.parametrize("alg", ["diis", "damping"])
 @pytest.mark.parametrize("key", ["storage", "diis_storage"])
 def test_iter_alg_storage_key_rejected(mpi, alg, key):
-    # iter_alg (DIIS or damping) with the removed key "storage" or "diis_storage" (DIIS history is always in
-    # memory) vs the input parsing: the run aborts with a message naming the key that was written.
+    # iter_alg (DIIS or damping) with the unrecognized key "storage" or "diis_storage" (the DIIS history has
+    # no storage option) vs the input parsing: the run aborts with a message naming the key that was written.
     # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by rank 0.
     import subprocess
     import sys
@@ -275,7 +275,7 @@ def test_iter_alg_storage_key_rejected(mpi, alg, key):
 def test_evgw_diis_ignores_stale_files(mpi):
     # evGW (residual_type "vector_diff"), DIIS with 2 warmup steps, 6 iterations in a clean directory vs in a
     # directory that holds a stale diis_heff_vectors.h5 (8 vectors of the right shape, nonzero): the final
-    # Heff is identical, and the planted file is not touched. The DIIS history is in memory.
+    # Heff is identical, and the planted file is not touched.
     import hashlib
     import shutil
     import h5py

@@ -32,7 +32,12 @@
 #include "numerics/nda_functions.hpp"  // nda::blas 3-argument gemm
 #include "numerics/iter_scf/diis/diis_timers.hpp"
 
-// Commutator residuals of the SCF mixing, computed on node-shared arrays.
+// Commutator residuals of the SCF mixing (DIIS), computed on node-shared arrays.
+//
+// dyson_commutator is the (s,k)-striped form of commutator_t (diis/vspace_fock_sigma.hpp) for
+// the frequency-dependent commutator DIIS of the Dyson SCF: P. Pokhilko, C.-N. Yeh, D. Zgid,
+// J. Chem. Phys. 156, 094101 (2022), https://doi.org/10.1063/5.0082586. heff_commutator is
+// the (s,k)-striped H D S - S D H of qp_com_diis_residual::get_diis_residual (qp SCF).
 namespace iter_scf {
 
 /**

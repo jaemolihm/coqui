@@ -40,9 +40,8 @@ namespace iter_scf {
    *  - diis_warmup: "3" Number of damping iterations before the DIIS extrapolation.
    *  - diis_start: deprecated alias of diis_warmup.
    *  - residual_type: "commutator" ("vector_diff" for eigenvalue-only scGW). {choices: "commutator", "vector_diff"}
-   * The DIIS history is kept in memory, element-sliced over all ranks, max_subsp_size trial
-   * (F, Sigma) pairs plus max_subsp_size residuals. The former keys "storage" and "diis_storage"
-   * are rejected.
+   * The DIIS history, max_subsp_size trial vectors (F, Sigma) plus max_subsp_size residuals, is
+   * element-sliced over all ranks. The keys "storage" and "diis_storage" are not recognized.
    */
   inline decltype(auto) make_iter_scf(ptree const& base_pt, double default_mixing=0.7, bool is_evscf=false) {
     for (auto const& it : base_pt) {
@@ -57,8 +56,7 @@ namespace iter_scf {
           auto mixing = io::get_value_with_default<double>(pt,"mixing",0.7);
           for (auto const* key : {"storage", "diis_storage"})
             utils::check(not pt.get_child_optional(key),
-                         "iter_alg: the key \"{}\" is not recognized; the DIIS history is always kept "
-                         "in memory. Remove the key.", key);
+                         "iter_alg: the key \"{}\" is not recognized. Remove the key.", key);
 
           if (alg == "damping") {
 

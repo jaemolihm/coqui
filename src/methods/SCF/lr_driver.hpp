@@ -34,7 +34,7 @@
 #include "numerics/shared_array/nda.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 #include "methods/SCF/lr_krylov.hpp"
 #include "methods/SCF/lr_ibc.hpp"
 #include "methods/HF/lr_hf.hpp"
@@ -107,7 +107,7 @@ struct lr_iter_params {
   size_t diis_warmup = 0;
 };
 
-/// Per-node footprint of the accelerator's history (DIIS ring or lr_gcr basis):
+/// Per-node footprint of the accelerator's history (DIIS entries or lr_gcr basis):
 /// n_vec vectors of the quantities the accelerator actually stores.
 struct lr_hist_t {
   long depth = 0;     ///< subspace depth / basis capacity; 0 = accelerator off
@@ -583,7 +583,7 @@ private:
   std::optional<iter_scf::diis_mixer> _diis;
   /// GCR in place of _diis when iter_params.alg == "GCR" and the kernel is
   /// not empty.
-  std::unique_ptr<lr_gcr> _lr_gcr;
+  std::unique_ptr<lr_gcr> _gcr;
   /// The preconditioner's ΔF-only inner GCR, preconditioned runs only.
   std::unique_ptr<lr_gcr> _pc_gcr;
 
@@ -601,7 +601,7 @@ private:
   // --- Per-perturbation buffers: allocated once. Each is either zeroed at the top
   //     of lr_solve_one or written before it is read, so mode m's solve cannot
   //     see mode m−1's state.
-  /// Element slicing, over the global comm, of the node-replicated pair (ΔF, ΔΣ): the
+  /// Element slicing, over the global comm, of the node-replicated arrays (ΔF, ΔΣ): the
   /// DIIS history, the previous iterate and its norms are all elementwise, so each rank
   /// handles one slice and the whole job stores each of them once instead of once per
   /// node. The second block is ΔΣ(iω) when the kernel carries a Σ, ΔV_QPGW in qp mode,
@@ -609,8 +609,11 @@ private:
   iter_scf::hist_vec_layout _layout;
   /// The same slicing of ΔF alone (the preconditioner's inner GCR).
   iter_scf::hist_vec_layout _layout_F;
-  /// This rank's slices of the previous iterate (ΔF, second block) and of the previous ΔDm.
+  /// This rank's slices of the iterate that entered the current iteration (ΔF and the second
+  /// block), saved because the mixing overwrites the shared arrays in place. Read by the
+  /// damping / DIIS / GCR step and by the convergence norms ‖Δ - Δ_prev‖.
   iter_scf::hist_vec _prev;
+  /// The same for ΔDm, which is not mixed: read only by the convergence norm ‖ΔDm - ΔDm_prev‖.
   nda::array<ComplexType, 1> _DeltaDm_prev;
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).

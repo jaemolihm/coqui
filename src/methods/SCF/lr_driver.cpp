@@ -271,9 +271,8 @@ void lr_driver::lr_setup(
       // every pair costs a ΔΣ, as one DIIS depth unit does.
       size_t cap = p.iter_params.max_subsp_size;
       if (cap == 0) cap = (K.has_sigma() && !qp) ? 10 : 50;
-      _lr_gcr = std::make_unique<lr_gcr>(cap);
+      _gcr = std::make_unique<lr_gcr>(cap);
     } else if (p.iter_params.alg == "DIIS") {
-      // LR DIIS keeps its history in memory, element-sliced.
       _diis.emplace(iter_scf::diis_mixer::config{
           p.iter_params.mixing, p.iter_params.max_subsp_size, p.iter_params.diis_warmup,
           /*min_subsp=*/3, /*log_level=*/3});
@@ -284,15 +283,15 @@ void lr_driver::lr_setup(
 
   // Accelerator history, for the memory report.
   lr_hist_t inner_hist;
-  if (_lr_gcr) {
+  if (_gcr) {
     // 2M basis vectors plus x, r and the per-step g, y (and M⁻¹r when
     // preconditioned).
-    inner_hist.depth = static_cast<long>(_lr_gcr->capacity());
+    inner_hist.depth = static_cast<long>(_gcr->capacity());
     inner_hist.n_vec = 2 * inner_hist.depth + 4 + (p.precond_kernel.empty() ? 0 : 1);
     inner_hist.n_F = 1;
     inner_hist.n_Sigma = (K.has_sigma() && !qp) ? 1 : 0;
   } else if (_diis and _diis->active()) {
-    // The ring holds max_subsp slots, each storing a trial AND a residual.
+    // DIIS stores max_subsp entries, each a trial vector AND its residual.
     inner_hist.depth = static_cast<long>(_diis->cfg().max_subsp);
     inner_hist.n_vec = 2 * inner_hist.depth;
     inner_hist.n_F = qp ? 2 : 1;   // ΔF (+ the static ΔV_QPGW in qp mode)
@@ -390,10 +389,13 @@ void lr_driver::lr_setup(
   }
 
   _Timer.start("LR_DRIVER_SETUP_ALLOC");
-  // Previous ΔDm / ΔF / ΔΣ / ΔV_QPGW (for damping/DIIS and the difference norms)
-  // are rank-private slices of the flattened arrays. ΔΣ is tracked only when the
-  // kernel carries a Σ and we are not in qp mode (qp mode tracks the static
-  // ΔV_QPGW in its place).
+  // _prev (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate that entered the
+  // current iteration, as this rank's slices of the flattened arrays. The mixing overwrites the
+  // shared arrays in place, so the entering iterate is gone afterwards unless it is saved:
+  // damping, DIIS and GCR read it (damping target, DIIS/GCR residual), and the convergence
+  // norms ‖Δ - Δ_prev‖ of every iteration read it; no other copy exists.
+  // ΔΣ is tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
+  // tracks the static ΔV_QPGW in its place).
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
   const auto pmap = utils::make_part_map(*_mpi);
   _layout = iter_scf::hist_vec_layout(
@@ -784,7 +786,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (sDeltaSigma_tskij) sDeltaSigma_tskij->set_zero();
   if (qp) sDeltaVcorr_skij->set_zero();
   if (_diis) _diis->reset();
-  if (_lr_gcr) _lr_gcr->reset();
+  if (_gcr) _gcr->reset();
   if (_pc_gcr) _pc_gcr->reset();
   _pc_applies = 0;
   _pc_cap_hits = 0;
@@ -823,7 +825,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   const int max_iter = K.empty() ? 0 : p.max_iter;
   bool converged = K.empty();
 
-  const bool use_gcr = (_lr_gcr != nullptr);
+  const bool use_gcr = (_gcr != nullptr);
   // The preconditioner map z = M⁻¹ r (GCR direction, damping step), preconditioned runs only.
   std::function<void(nda::array<ComplexType, 1> const&, nda::array<ComplexType, 1>&)> pc_fn;
   if (!p.precond_kernel.empty())
@@ -885,7 +887,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     app_log(1, "  " + std::string(92, '-'));
   }
 
-  // Second block of the mixed pair for a Σ-free kernel.
+  // Stands in for ΔΣ when the kernel has no Σ (the second block of (ΔF, ΔΣ) is then empty).
   nda::array<ComplexType, 5> empty_sigma;
 
   for (iter = 1; iter <= max_iter; ++iter) {
@@ -949,13 +951,12 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     // slice of the shared ΔF/ΔΣ and writing the mixed result back in place. Pass
     // .local() views directly (in/out); `_prev` already holds this rank's slices.
     //
-    // The static second quantity mixed alongside ΔF is the dynamic ΔΣ in the
-    // standard path, or the static ΔV_QPGW in qp mode. Both accelerators take
-    // the same two-slot arguments.
+    // The second quantity mixed alongside ΔF is the dynamic ΔΣ in the standard
+    // path, or the static ΔV_QPGW in qp mode; every accelerator takes (ΔF, second quantity).
     auto step = [&](auto F, auto S) {
       if (use_gcr) {
         // GCR
-        gcr_rnorm = _lr_gcr->step(_mpi->comm, _layout, F, S, _prev,
+        gcr_rnorm = _gcr->step(_mpi->comm, _layout, F, S, _prev,
                                   p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
       } else if (_diis) {
         // DIIS: the residual is the difference of the successive iterates
@@ -980,8 +981,9 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       utils::complete_shared_slices(*_mpi, _layout.pmap(), sDeltaF_skij);
     }
     // The mixing above writes each rank's slice of the shared ΔF/ΔΣ buffer in
-    // place with no trailing collective; the unflatten completes each node's copy.
-    // With the striping global, each element is mixed exactly once in the whole job.
+    // place with no trailing collective, so each node holds valid data only for its own
+    // contiguous element run until complete_shared_slices (called in each branch above).
+    // Each element is mixed exactly once in the whole job.
     _Timer.stop("LR_ITER_ALG");
 
     // Compute norms of ΔF and ΔF-ΔF_prev for logging. The previous iterates are
@@ -1046,8 +1048,8 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       const std::string pc_lbl =
           pc_fn ? fmt::format("  precond sweeps {}", _pc_sweeps) : std::string();
       app_log(1, "          [GCR] ||r|| = {:.6e}  (basis {}){}{}", gcr_rnorm,
-              _lr_gcr->basis_size(), _lr_gcr->kicked() ? "  kick" : "", pc_lbl);
-      if (_lr_gcr->stagnated())
+              _gcr->basis_size(), _gcr->kicked() ? "  kick" : "", pc_lbl);
+      if (_gcr->stagnated())
         app_log(1, "    [WARNING] LR GCR: ||r|| = {:.3e} has not dropped "
                    "below {:.0f}% of its value {} steps ago (tol = {:.3e}), which "
                    "the Krylov kick normally prevents; if it does not converge, "
@@ -1228,7 +1230,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
     arrays.push_back({"ΔΣ_prev (striped)", shp5b(nt), band5(nt), true, PERSIST});
   }
 
-  // Accelerator history (DIIS ring or lr_gcr basis), n_vec vectors counted by
+  // Accelerator history (DIIS entries or lr_gcr basis), n_vec vectors counted by
   // lr_setup. It is striped over the global comm, so the whole job stores it once.
   auto push_hist = [&](lr_hist_t const& h, const char* who) {
     if (h.n_vec <= 0 || (h.n_F == 0 && h.n_Sigma == 0)) return;
@@ -1237,7 +1239,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                       fmt::format("{}x[{}xΔF + {}xΔΣ]", h.n_vec, h.n_F, h.n_Sigma),
                       nelem, true, PERSIST});
   };
-  push_hist(inner_hist, _lr_gcr ? "GCR basis" : "DIIS history");
+  push_hist(inner_hist, _gcr ? "GCR basis" : "DIIS history");
 
   // Stationary hessian estimator. The ω stores — ΔΣ_λ(iω) and ΔG_p(iω) for every
   // perturbation of the batch — are the largest thing the feature allocates and the

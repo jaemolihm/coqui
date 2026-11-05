@@ -454,7 +454,7 @@ double update_mu(double old_mu, dyson_type& dyson, const mf::MF &mf,
 }
 
 // Fill m.prev with this rank's slices of the previous accepted (F, Sigma) from
-// {datasets[0]}/iter{iteration-1}, for the first in-memory mixing without an in-memory copy
+// {datasets[0]}/iter{iteration-1}, for the first mixing step that has no previous state in memory
 // (the first one after a restart, and every dmft_embed call). Every rank reads exactly the
 // element slice it owns as an h5 hyperslab, so no full copy of F or Sigma is materialized.
 // A missing Sigma means an exactly zero Sigma (HF checkpoints written before the
@@ -490,7 +490,7 @@ void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
 }
 
 template<typename comm_t, typename X_t, typename Xt_t>
-auto in_memory_mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
+auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
                         std::string const& h5_prefix, std::array<std::string,3> const& datasets,
                         long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
                         iter_scf::hist_vec const* residual)
@@ -512,7 +512,7 @@ auto in_memory_mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_
 template<typename comm_t, typename X_t, typename Xt_t>
 void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
                        iter_scf::mixing_state& m, X_t &sF_skij, Xt_t *sSigma_tskij) {
-  // DIIS extrapolates from two stored pairs; the first step stores none (needs_residual() is
+  // DIIS extrapolates from two stored entries; the first step stores none (needs_residual() is
   // false at steps() == 0)
   std::optional<iter_scf::diis_mixer::config> cfg;
   if (auto* dp = iter_solver.diis())
@@ -520,7 +520,7 @@ void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
                                          /*min_subsp=*/2, /*log_level=*/2};
   long nS = sSigma_tskij ? sSigma_tskij->local().size() : 0;
   m.init(context, sF_skij.local().size(), nS, iter_solver.mixing(), cfg);
-  app_log(2, "In-memory mixing: element-sliced state active ({} parts over {} node(s), "
+  app_log(2, "Mixing: element-sliced state active ({} parts over {} node(s), "
              "slice sizes F {} / Sigma {})",
           m.layout.pmap().nparts, context.internode_comm.size(), m.layout.mF(), m.layout.mS());
 }
@@ -596,10 +596,10 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     context.comm.barrier();
   } else {
     iter_solver.metadata_log();
-    // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
+    // Restart: no previous state in memory; mix_step stages it from the checkpoint.
     if (not m.initialized())
       init_mixing_state(context, iter_solver, m, sF_skij, &sSigma_tskij);
-    // Commutator residual of the trial, for the DIIS steps that store a pair
+    // Commutator residual of the trial, for the DIIS steps that store an entry
     std::optional<iter_scf::hist_vec> residual;
     if (m.needs_residual()) {
       utils::check(sG_tskij and sS_skij and sH0_skij,
@@ -611,7 +611,7 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     }
     std::optional<iter_scf::diis_timers::ScopeLog> breakdown_log;
     if (iter_solver.iter_alg() == iter_scf::DIIS) breakdown_log.emplace();
-    std::tie(conv_F, conv_Sigma) = in_memory_mix_step(
+    std::tie(conv_F, conv_Sigma) = mix_step(
         context, m, h5_prefix, datasets, iteration, sF_skij, &sSigma_tskij,
         residual ? &*residual : nullptr);
     context.comm.barrier();
@@ -737,7 +737,7 @@ template void init_mixing_state(utils::mpi_context_t<mpi3::communicator>&, iter_
                                 iter_scf::mixing_state&, sArray_t<Array_view_4D_t>&,
                                 sArray_t<Array_view_5D_t>*);
 
-template auto in_memory_mix_step(utils::mpi_context_t<mpi3::communicator>&, iter_scf::mixing_state&,
+template auto mix_step(utils::mpi_context_t<mpi3::communicator>&, iter_scf::mixing_state&,
                                  std::string const&, std::array<std::string,3> const&, long,
                                  sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>*,
                                  iter_scf::hist_vec const*)

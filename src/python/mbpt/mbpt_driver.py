@@ -159,8 +159,8 @@ def run_hf(params, h_int, h_int_exchange=None):
             (the trial effective Hamiltonian minus the previous accepted one). The
             Dyson SCF always uses the commutator.
 
-          The DIIS history is kept in memory, ``max_subsp_size`` entries. The keys
-          ``diis_storage`` and ``storage`` are rejected.
+          The DIIS history holds ``max_subsp_size`` (trial, residual) entries. The keys
+          ``diis_storage`` and ``storage`` are not recognized.
 
         - ``chkpt_slim`` *(bool, optional, default ``False``)* — if ``True``,
           ``G_tskij`` and ``Sigma_tskij`` are written only for the final SCF

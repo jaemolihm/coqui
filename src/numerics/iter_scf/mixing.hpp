@@ -18,8 +18,8 @@
  * ==========================================================================
  */
 
-#ifndef COQUI_IN_MEMORY_MIXING_HPP
-#define COQUI_IN_MEMORY_MIXING_HPP
+#ifndef COQUI_MIXING_HPP
+#define COQUI_MIXING_HPP
 
 #include <algorithm>
 #include <array>
@@ -43,10 +43,10 @@
 #include "numerics/iter_scf/diis/diis_timers.hpp"
 
 /**
- * In-memory, element-sliced mixing of the pair (F, Sigma) of node-shared arrays, for
- * the ground-state Dyson SCF (F, Sigma(tau)), the qp SCF (the effective Hamiltonian, no
- * Sigma), dmft_embed, and the linear response (dF, dSigma(tau) or dV_QPGW; dSigma may be
- * absent).
+ * Element-sliced mixing (damping or DIIS) of the two node-shared arrays (F, Sigma) that
+ * an SCF iteration updates together, for the ground-state Dyson SCF (F, Sigma(tau)), the qp
+ * SCF (the effective Hamiltonian, no Sigma), dmft_embed, and the linear response (dF,
+ * dSigma(tau) or dV_QPGW; dSigma may be absent).
  *
  * Every rank owns one contiguous slice of the flattened F and of the flattened
  * Sigma (utils::part_map, node-major parts over the global comm), keeps only its
@@ -57,11 +57,15 @@
  * Every rank sees only its slices, so the residual of each trial arrives precomputed
  * from the caller. The small dense solve for the DIIS coefficients is shared
  * (compute_diis_coefs_c1).
+ *
+ * DIIS with the frequency-dependent commutator residual of the Dyson SCF:
+ * P. Pokhilko, C.-N. Yeh, D. Zgid, J. Chem. Phys. 156, 094101 (2022),
+ * https://doi.org/10.1063/5.0082586
  */
 namespace iter_scf {
 
 /// Values: this rank's slices of F and Sigma (S empty if absent), one stored vector
-/// (the previous state, a DIIS trial or residual, a GCR vector). Laid out by hist_vec_layout.
+/// (the previous state, a DIIS trial or residual, a GCR vector). Sliced by hist_vec_layout.
 struct hist_vec {
   nda::array<ComplexType, 1> F, S;
 };
@@ -128,30 +132,30 @@ void damp_slices(hist_vec_layout const& layout, double mixing, AF&& F, AS&& S,
 }
 
 /**
- * @brief DIIS over sliced vectors: a ring of (trial, residual) pairs and the residual
- * overlap matrix B.
+ * @brief DIIS over sliced vectors: the stored (trial, residual) entries, at most
+ * max_subsp of them (the oldest is dropped first), and the residual overlap matrix B.
  *
  * The caller supplies the residual of each trial (the Dyson-SCF commutator, or the
  * difference of successive iterates in the LR). B_ij = <r_i|r_j> summed over the two
  * blocks, each rank forming its slice of the dot products and one all_reduce
  * completing them, so that every rank holds the same B and the same coefficients.
- * Extrapolation needs more than `warmup` steps and at least `min_subsp` stored pairs;
+ * Extrapolation needs more than `warmup` steps and at least `min_subsp` stored entries;
  * otherwise, or when the coefficients do not exist, the step damps.
  */
 class diis_mixer {
 public:
   struct config {
     double mixing;       ///< damping factor of the warmup and fallback steps
-    size_t max_subsp;    ///< stored (trial, residual) pairs
+    size_t max_subsp;    ///< stored (trial, residual) entries
     size_t warmup;       ///< steps that only damp
-    size_t min_subsp;    ///< pairs needed to extrapolate
+    size_t min_subsp;    ///< entries needed to extrapolate
     int log_level;
   };
 
   /// A max_subsp below min_subsp can never extrapolate: the engine then only damps.
   explicit diis_mixer(config c) : _cfg(c), _B(0, 0) {
     if (not active())
-      app_log(1, "[WARNING] DIIS: a subspace of depth {} can never reach the {} pairs needed "
+      app_log(1, "[WARNING] DIIS: a subspace of depth {} can never reach the {} entries needed "
                  "to extrapolate; the iteration will only damp (mixing = {}). Raise the "
                  "subspace depth to use DIIS.", _cfg.max_subsp, _cfg.min_subsp, _cfg.mixing);
   }
@@ -161,7 +165,7 @@ public:
   bool active() const { return _cfg.max_subsp >= _cfg.min_subsp; }
   /// mix() calls since reset().
   size_t steps() const { return _steps; }
-  /// Live (trial, residual) pairs.
+  /// Stored (trial, residual) entries.
   size_t size() const { return _n; }
 
   /// Forget the subspace, keeping every history buffer.
@@ -172,11 +176,11 @@ public:
     _B = nda::matrix<ComplexType>(0, 0);
   }
 
-  hist_vec const& newest_trial() const { return _slots[slot(_n - 1)].x; }
+  hist_vec const& newest_trial() const { return _entries[entry_index(_n - 1)].x; }
 
   /**
-   * @brief Store the trial (F, S) with its residual (rF, rS) in the newest slot,
-   * evicting the oldest pair at max_subsp first, and extend B. Collective on comm.
+   * @brief Store the trial (F, S) with its residual (rF, rS) as the newest entry,
+   * evicting the oldest entry first when max_subsp are stored, and extend B. Collective on comm.
    *
    * @param F, S     - full arrays of the trial (this rank's slices are stored)
    * @param rF, rS   - this rank's slices of the residual; rF may be empty
@@ -185,19 +189,19 @@ public:
   void push(Comm& comm, hist_vec_layout const& layout, AF const& F, AS const& S,
             RF const& rF, RS const& rS) {
     if (not active()) return;
-    diis_timers::inmem_hist_store.start();
+    diis_timers::mix_hist_store.start();
     if (_n == _cfg.max_subsp) evict_oldest();
-    if (_n == _slots.size()) {
+    if (_n == _entries.size()) {
       // Growth happens only before the first eviction, so appending keeps the order.
-      utils::check(_head == 0, "diis_mixer: ring growth with head = {} != 0", _head);
-      _slots.emplace_back();
+      utils::check(_head == 0, "diis_mixer: growth of the history with head = {} != 0", _head);
+      _entries.emplace_back();
     }
-    auto& s = _slots[slot(_n)];
+    auto& s = _entries[entry_index(_n)];
     layout.store(s.x, F, S);
     s.res.F = rF;
     s.res.S = rS;
     ++_n;
-    diis_timers::inmem_hist_store.stop();
+    diis_timers::mix_hist_store.stop();
     update_B(comm);
   }
 
@@ -211,9 +215,9 @@ public:
     ++_steps;
     const int L = _cfg.log_level;
     auto damp = [&]() {
-      diis_timers::inmem_damp_mix.start();
+      diis_timers::mix_damp_mix.start();
       damp_slices(layout, _cfg.mixing, F, S, prev);
-      diis_timers::inmem_damp_mix.stop();
+      diis_timers::mix_damp_mix.stop();
     };
     if (_steps <= _cfg.warmup) {
       app_log(L, "DIIS: warmup iteration {}/{}: damping (mixing = {}, subspace size {})",
@@ -228,9 +232,9 @@ public:
       return false;
     }
 
-    diis_timers::inmem_coefs.start();
+    diis_timers::mix_coefs.start();
     auto C = compute_diis_coefs_c1(_B, L); // identical on every rank (B replicated)
-    diis_timers::inmem_coefs.stop();
+    diis_timers::mix_coefs.stop();
     if (not C) {
       app_log(1, "[WARNING] DIIS: the residual-overlap matrix is singular (the residuals vanish "
                  "or are linearly dependent to machine precision); skipping the extrapolation "
@@ -240,46 +244,48 @@ public:
     }
     log_extrapolation(*C);
 
-    diis_timers::inmem_lincomb.start();
+    diis_timers::mix_lincomb.start();
     auto F_loc = layout.F(F);
     auto S_loc = layout.S(S);
     F_loc() = ComplexType{0};
     S_loc() = ComplexType{0};
-    // Newest pair first.
+    // Newest entry first.
     for (size_t k = _n; k-- > 0;) {
       const ComplexType c = (*C)(k);
-      auto const& x = _slots[slot(k)].x;
+      auto const& x = _entries[entry_index(k)].x;
       F_loc += c * x.F;
       S_loc += c * x.S;
     }
-    diis_timers::inmem_lincomb.stop();
+    diis_timers::mix_lincomb.stop();
     return true;
   }
 
 private:
-  struct slot_t {
-    hist_vec x, res;
+  struct entry_t {
+    hist_vec x, res;  ///< trial and its residual
   };
 
   config _cfg;
-  // A fixed-capacity ring: _n live pairs, chronological pair i in slot (_head + i) % size.
-  // Evicting moves _head, so no buffer is destroyed or reallocated once the ring is full.
-  std::vector<slot_t> _slots;
+  // Circular buffer of the stored entries: _n of them are live, and the i-th oldest is
+  // _entries[(_head + i) % _entries.size()]. Evicting the oldest only advances _head, so no
+  // vector is destroyed or reallocated once max_subsp entries exist.
+  std::vector<entry_t> _entries;
   size_t _n = 0;
   size_t _head = 0;
   size_t _steps = 0;
   nda::matrix<ComplexType> _B;
 
-  size_t slot(size_t i) const { return (_head + i) % _slots.size(); }
+  /// Position in _entries of the i-th oldest live entry.
+  size_t entry_index(size_t i) const { return (_head + i) % _entries.size(); }
 
-  /// Forget the oldest pair and the first row and column of B.
+  /// Forget the oldest entry and the first row and column of B.
   void evict_oldest() {
     const size_t n = _B.shape()[0];
     nda::matrix<ComplexType> Bnew(n - 1, n - 1);
     for (size_t i = 0; i + 1 < n; ++i)
       for (size_t j = 0; j + 1 < n; ++j) Bnew(i, j) = _B(i + 1, j + 1);
     _B = Bnew;
-    _head = (_head + 1) % _slots.size();
+    _head = (_head + 1) % _entries.size();
     --_n;
   }
 
@@ -288,21 +294,21 @@ private:
   template<typename Comm>
   void update_B(Comm& comm) {
     const size_t n = _n;
-    auto const& rn = _slots[slot(n - 1)].res;
+    auto const& rn = _entries[entry_index(n - 1)].res;
     nda::array<ComplexType, 1> col(n);
     col() = 0;
-    diis_timers::inmem_B_dots.start();
+    diis_timers::mix_B_dots.start();
     for (size_t i = 0; i < n; ++i) {
-      auto const& ri = _slots[slot(i)].res;
+      auto const& ri = _entries[entry_index(i)].res;
       ComplexType acc = 0.0;
       if (ri.F.size() > 0) acc += nda::blas::dotc(ri.F, rn.F);
       if (ri.S.size() > 0) acc += nda::blas::dotc(ri.S, rn.S);
       col(i) = acc;
     }
-    diis_timers::inmem_B_dots.stop();
-    diis_timers::inmem_B_comm.start();
+    diis_timers::mix_B_dots.stop();
+    diis_timers::mix_B_comm.start();
     comm.all_reduce_in_place_n(col.data(), static_cast<long>(n), std::plus<>{});
-    diis_timers::inmem_B_comm.stop();
+    diis_timers::mix_B_comm.stop();
 
     nda::matrix<ComplexType> Bnew(n, n);
     Bnew() = 0;
@@ -338,12 +344,16 @@ private:
   }
 };
 
-/// State of the in-memory mixers (damping, or DIIS with a damping warmup): the slicing, the
-/// previous accepted state, and the DIIS engine for DIIS.
+/// State of the mixers (damping, or DIIS with a damping warmup): the slicing, the
+/// previous accepted state, and the DIIS history for DIIS.
 struct mixing_state {
   hist_vec_layout layout;
-  hist_vec prev;     ///< this rank's slices of the previous accepted (post-mix) state
-  bool has_prev = false;
+  /// This rank's slices of the previous accepted (post-mix) state. Read by every damping
+  /// step (the damping target), by the DIIS warmup and fallback steps, and by the
+  /// convergence measure of the damped steps; the mixed arrays are overwritten in place, so
+  /// this is the only in-run copy of the previous state.
+  hist_vec prev;
+  bool has_prev = false;  ///< whether prev is filled (false until the first step or a stage from the checkpoint)
   double mixing = 1.0;       ///< damping factor of the damping algorithm
   std::optional<diis_mixer> diis;  ///< DIIS only
 
@@ -375,18 +385,18 @@ struct mixing_state {
    */
   template<typename Comm, typename AF, typename AS>
   std::array<double, 2> step(Comm& comm, AF&& F, AS&& S, hist_vec const* residual) {
-    diis_timers::inmem_total.start();
+    diis_timers::mix_total.start();
     bool extrapolated = false;
     if (diis) {
       if (residual) diis->push(comm, layout, F, S, residual->F, residual->S);
       extrapolated = diis->mix(layout, F, S, prev);
     } else {
-      diis_timers::inmem_damp_mix.start();
+      diis_timers::mix_damp_mix.start();
       damp_slices(layout, mixing, F, S, prev);
-      diis_timers::inmem_damp_mix.stop();
+      diis_timers::mix_damp_mix.stop();
     }
 
-    diis_timers::inmem_conv.start();
+    diis_timers::mix_conv.start();
     hist_vec const& ref = extrapolated ? diis->newest_trial() : prev;
     auto max_absdiff = [](auto const& a, auto const& b) {
       double m = 0.0;
@@ -394,17 +404,17 @@ struct mixing_state {
       return m;
     };
     std::array<double, 2> conv{max_absdiff(ref.F, layout.F(F)), max_absdiff(ref.S, layout.S(S))};
-    diis_timers::inmem_conv.stop();
+    diis_timers::mix_conv.stop();
 
-    diis_timers::inmem_prev_store.start();
+    diis_timers::mix_prev_store.start();
     layout.store(prev, F, S);
     has_prev = true;
-    diis_timers::inmem_prev_store.stop();
-    diis_timers::inmem_total.stop();
+    diis_timers::mix_prev_store.stop();
+    diis_timers::mix_total.stop();
     return conv;
   }
 };
 
 } // namespace iter_scf
 
-#endif // COQUI_IN_MEMORY_MIXING_HPP
+#endif // COQUI_MIXING_HPP

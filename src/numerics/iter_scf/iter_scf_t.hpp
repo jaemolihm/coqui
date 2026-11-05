@@ -30,14 +30,14 @@
 
 #include "numerics/iter_scf/damp/damp_t.hpp"
 #include "numerics/iter_scf/diis/diis_t.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 
 #include "numerics/iter_scf/iter_scf_type_e.hpp"
 
 namespace iter_scf {
   /**
-   * Iterative self-consistent algorithm, damping or DIIS: its parameters and the in-memory
-   * mixing state (the previous accepted state and, for DIIS, the history).
+   * Iterative self-consistent algorithm, damping or DIIS: its parameters and the mixing
+   * state (the previous accepted state and, for DIIS, the history).
    */
   class iter_scf_t {
   public:
@@ -65,7 +65,7 @@ namespace iter_scf {
     // The DIIS parameters (nullptr when the active algorithm is not DIIS).
     diis_t const* diis() const { return std::get_if<diis_t>(&_params); }
 
-    // The element-sliced in-memory mixing state of the active algorithm.
+    // The element-sliced mixing state of the active algorithm.
     mixing_state& state() { return _state; }
 
     void metadata_log() const {

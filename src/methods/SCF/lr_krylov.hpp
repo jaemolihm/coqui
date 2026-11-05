@@ -30,7 +30,7 @@
 #include "nda/blas.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/element_partition.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 
 namespace methods {
 
@@ -89,7 +89,7 @@ namespace methods {
  * scalars are reduced over `comm`, one all_reduce per orthogonalization pass.
  * A breakdown (A z inside the span of the stored W) restarts with an empty basis.
  *
- * Why not iter_scf::diis_mixer: it extrapolates (trial, residual) pairs of a
+ * Why not iter_scf::diis_mixer: it extrapolates (trial, residual) entries of a
  * fixed-point iteration and has no notion of recycling a basis across right-hand sides.
  */
 class lr_gcr {
@@ -137,8 +137,8 @@ public:
   /**
    * @brief One GCR step on the iterate (ΔF, ΔΣ).
    *
-   * Two slots, each a full array plus this rank's slice of the probe. The second
-   * slot may be empty (a ΔF-only iterate, `layout.nS() == 0`). Internally the two
+   * The iterate is given as two arguments, each a full array (F_inout, S_inout), and the probe as this
+   * rank's slices of both. S_inout may be empty (a ΔF-only iterate, `layout.nS() == 0`). Internally the two
    * slices are concatenated into one vector [F; S], and every inner product is
    * Re⟨F, F'⟩ + Re⟨S, S'⟩, unweighted.
    *

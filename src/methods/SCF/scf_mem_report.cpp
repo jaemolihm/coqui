@@ -208,13 +208,14 @@ double print_scf_memory_estimate(const utils::mpi_context_t<mpi3::communicator>&
     }
   }
 
-  // In-memory DIIS history (iter_scf::diis_mixer): max_subsp trial (F, Sigma) pairs
-  // plus max_subsp Sigma residuals (the Fock block of the commutator is not stored),
-  // each element-sliced across the global comm, i.e. one whole copy per run. The mixing
-  // state also keeps the previous accepted state as one more sliced (F, Sigma) pair.
+  // DIIS history (iter_scf::diis_mixer): max_subsp trial vectors (F, Sigma) plus max_subsp
+  // Sigma residuals (the Fock block of the commutator is not stored), each element-sliced
+  // across the global comm, i.e. one whole copy per run. The mixing state also keeps the
+  // previous accepted state (F, Sigma), sliced the same way, for the damping steps and
+  // the convergence norm.
   if (p.iter_alg == "DIIS") {
     if (p.max_subsp >= 2)  // the history is stored only if max_subsp >= min_subsp = 2
-      arrays.push_back({"DIIS history (memory)",
+      arrays.push_back({"DIIS history",
                         fmt::format("{} x (|F| + 2|Sigma|)", p.max_subsp),
                         double(p.max_subsp) * (band4() + 2.0 * band5(p.nt_f)),
                         DIST, PERSIST});

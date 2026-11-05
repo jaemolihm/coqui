@@ -209,7 +209,7 @@ namespace methods {
     if (iter_solver != nullptr) {
       iter_solver->state() = {};  // the previous state is read from the checkpoint at every call
       if (iter_solver->iter_alg() == iter_scf::DIIS)
-        app_log(2, "dmft_embed: one mixing per call; DIIS damps");
+        app_log(2, "dmft_embed: GW+DMFT runs for one iteration, and DIIS becomes simple damping");
       std::tie(Vhf_conv, Sigma_conv) = solve_iterative(
           *_context, *iter_solver, (embed_iter==-1)? gw_iter+1 : embed_iter+1,
           mb_state.coqui_prefix, sVhf_skij, sSigma_tskij, &ft,
@@ -388,18 +388,22 @@ namespace methods {
     if (embed_iter >= 1) {
       iter_solver->metadata_log();
       if (iter_solver->iter_alg() == iter_scf::DIIS)
-        app_log(2, "dmft_embed: one mixing per call; DIIS damps");
-      // Mix with embed/iter{weiss_f_iter-1}: (Vhf, Sigma) in the state of the solver, Vcorr in a second state
+        app_log(2, "dmft_embed: GW+DMFT runs for one iteration, and DIIS becomes simple damping");
+      // Mix (Vhf, Sigma) and Vcorr with the result of the previous call, embed/iter{weiss_f_iter-1}.
+      // Every call starts from fresh mixing states and stages the previous state from that
+      // checkpoint iteration, so a call takes a single mixing step: no DIIS history exists.
+      // A mixing_state mixes one array plus an optional second one (Sigma): (Vhf, Sigma) use
+      // the solver's state, and Vcorr, which has no Sigma, gets its own.
       auto& hf_state = iter_solver->state();
       hf_state = {};
       iter_scf::mixing_state corr_state;
       sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Vcorr has no Sigma block
       init_mixing_state(*_context, *iter_solver, hf_state, sVhf_skij, &sSigma_tskij);
       init_mixing_state(*_context, *iter_solver, corr_state, sVcorr_skij, no_Sigma);
-      std::tie(Vhf_conv, Sigma_conv) = in_memory_mix_step(
+      std::tie(Vhf_conv, Sigma_conv) = mix_step(
           *_context, hf_state, mb_state.coqui_prefix, {"embed", "Vhf_skij", "Sigma_tskij"},
           weiss_f_iter, sVhf_skij, &sSigma_tskij, nullptr);
-      Vcorr_conv = std::get<0>(in_memory_mix_step(
+      Vcorr_conv = std::get<0>(mix_step(
           *_context, corr_state, mb_state.coqui_prefix, {"embed", "Vcorr_skij", ""},
           weiss_f_iter, sVcorr_skij, no_Sigma, nullptr));
     }

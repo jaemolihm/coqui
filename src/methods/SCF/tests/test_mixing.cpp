@@ -44,7 +44,7 @@
 #include "numerics/iter_scf/commutator_residual.hpp"
 
 /**
- * The in-memory mixing slices the flattened (F, Sigma) pair over the *global*
+ * The mixing slices the flattened (F, Sigma) arrays over the *global*
  * comm, so a node holds valid data only for its own contiguous element run and the
  * node-shared windows have to be completed by an allgatherv over the node roots.
  * Neither half of that can be exercised on one node.
@@ -132,7 +132,7 @@ auto make_shared(Ctx& ctx, Shape const& shape) {
 
 // iter_scf::mixing_state: the damping steps against out = mixing*new + (1-mixing)*prev
 // bit for bit (every layout), the extrapolation steps against agreement of every rank on
-// the completed window (zero spread), with a DIIS of 3 pairs and 2 warmup steps.
+// the completed window (zero spread), with a DIIS of 3 entries and 2 warmup steps.
 TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
   const shape_t<4> Fshape = {1, 3, 5, 5};      // |F|     = 75
   const shape_t<5> Sshape = {7, 1, 3, 5, 5};   // |Sigma| = 525
@@ -254,9 +254,9 @@ TEST_CASE("mixing_state_synthetic_nodes", "[methods_scf]") {
 }
 
 // iter_scf::mixing_state with an F-only layout (nS = 0, the qp SCF) and a supplied residual,
-// DIIS of 3 pairs, 1 warmup step: the damping steps against mixing*new + (1-mixing)*prev bit
+// DIIS of 3 entries, 1 warmup step: the damping steps against mixing*new + (1-mixing)*prev bit
 // for bit, the extrapolation steps against a dense reference on the full vectors (the
-// residual overlap B and the coefficients from compute_diis_coefs_c1, the newest pair
+// residual overlap B and the coefficients from compute_diis_coefs_c1, the newest entry
 // first) to round-off, and the agreement of every rank on the completed window.
 TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
   const shape_t<4> Fshape = {1, 3, 5, 5};      // |F| = 75
@@ -278,7 +278,7 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
     mix.layout.store(mix.prev, sF.local(), no_Sigma);
     mix.has_prev = true;
 
-    // Dense reference: previous accepted state, the stored pairs (oldest first).
+    // Dense reference: previous accepted state, the stored entries (oldest first).
     nda::array<ComplexType, 1> prev(nF);
     for (long i = 0; i < nF; ++i) prev(i) = val(i, 0, 0.0);
     std::vector<nda::array<ComplexType, 1>> xs, rs;
@@ -291,7 +291,7 @@ TEST_CASE("mixing_state_f_only_synthetic_nodes", "[methods_scf]") {
         res(i) = residual_val(i, iter);
       }
 
-      // DIIS extrapolates from two stored pairs; the first step stores none (needs_residual() is false
+      // DIIS extrapolates from two stored entries; the first step stores none (needs_residual() is false
       // at steps() == 0).
       std::optional<iter_scf::hist_vec> residual;
       if (mix.needs_residual()) {
@@ -638,7 +638,7 @@ TEST_CASE("diis_mixer_affine_fixed_point", "[methods_scf]") {
 }
 
 // compute_diis_coefs_c1 returns no coefficients when they do not exist, and diis_mixer then
-// damps; a subspace that can never reach min_subsp never stores a pair and always damps.
+// damps; a subspace that can never reach min_subsp never stores an entry and always damps.
 TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
   auto world = mpi3::environment::get_world_instance();
   auto self = world.split(world.rank(), 0);
@@ -694,7 +694,7 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
     REQUIRE(not diis.mix(layout, Fx, Sx, prev));
     check_damped(Fx, Sx);
   }
-  // max_subsp 1 < min_subsp 2: no pair is stored and every step damps.
+  // max_subsp 1 < min_subsp 2: no entry is stored and every step damps.
   {
     iter_scf::diis_mixer diis({m, 1, 0, 2, 2});
     REQUIRE(not diis.active());
@@ -709,7 +709,7 @@ TEST_CASE("diis_mixer_fallback_to_damping", "[methods_scf]") {
 
   // The mixing engine of an inactive DIIS (max_subsp 1 < min_subsp 2) never asks for a
   // residual and damps without one.
-  for_each_synthetic_layout("in_memory_mixing_inactive_diis", [&](auto& ctx, std::string const& tag) {
+  for_each_synthetic_layout("mixing_inactive_diis", [&](auto& ctx, std::string const& tag) {
     INFO(tag);
     auto sF = make_shared(ctx, shape_t<4>{1, 1, 2, 2});
     auto sS = make_shared(ctx, shape_t<5>{2, 1, 2, 2, 1});

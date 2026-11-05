@@ -42,8 +42,8 @@
  * *elements* of an array over the ranks of an existing communicator, so that a
  * quantity derived from a node-replicated array (an iterative-solver history, a
  * "previous iterate" copy, a norm) is stored and computed once globally instead
- * of once per node. Users: iter_scf::hist_vec_layout (the in-memory mixing of
- * the Dyson SCF and of the LR driver) and lr_hessian_t.
+ * of once per node. Users: iter_scf::hist_vec_layout (the mixing of
+ * the Dyson SCF, the qp SCF, dmft_embed and the LR driver) and lr_hessian_t.
  */
 namespace utils {
 
@@ -177,7 +177,7 @@ void complete_node_slices(Comm& internode_comm, part_map const& pmap,
  * on every rank, and every producer of the arrays ends in an internode all_reduce, so that
  * no node holds a private variant of the input.
  *
- * Used by the in-memory mixing (iter_scf::hist_vec_layout, scf_common.cpp and
+ * Used by the mixing (iter_scf::hist_vec_layout, scf_common.cpp and
  * lr_driver.cpp) and lr_hessian_t::rebuild_raw_kernel.
  */
 template<typename MPI_Context_t, typename... sArr_t>

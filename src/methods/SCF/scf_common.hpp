@@ -543,7 +543,7 @@ void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
  *           (damped) or the newest trial (extrapolated)
  */
 template<typename comm_t, typename X_t, typename Xt_t>
-auto in_memory_mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
+auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
                         std::string const& h5_prefix, std::array<std::string,3> const& datasets,
                         long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
                         iter_scf::hist_vec const* residual)

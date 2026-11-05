@@ -858,10 +858,10 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
     m.has_prev = true;
   } else {
     iter_solver.metadata_log();
-    // Restart: no in-memory previous state; in_memory_mix_step stages it from the checkpoint.
+    // Restart: no previous state in memory; mix_step stages it from the checkpoint.
     if (not m.initialized())
       init_mixing_state(context, iter_solver, m, sHeff_skij, no_Sigma);
-    // Residual of the trial Heff, for the DIIS steps that store a pair
+    // Residual of the trial Heff, for the DIIS steps that store an entry
     std::optional<iter_scf::hist_vec> residual;
     if (m.needs_residual()) {
       residual.emplace();
@@ -880,7 +880,7 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
         residual->F = m.layout.F(sC.local());
       }
     }
-    conv = std::get<0>(in_memory_mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
+    conv = std::get<0>(mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
                                           sHeff_skij, no_Sigma, residual ? &*residual : nullptr));
   }
   context.comm.barrier();

@@ -32,7 +32,7 @@
 #include "nda/nda.hpp"
 
 #include "utilities/element_partition.hpp"
-#include "numerics/iter_scf/in_memory_mixing.hpp"
+#include "numerics/iter_scf/mixing.hpp"
 #include "methods/SCF/lr_krylov.hpp"
 
 /**
