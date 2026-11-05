@@ -58,6 +58,9 @@
  * from the caller. The small dense solve for the DIIS coefficients is shared
  * (compute_diis_coefs_c1).
  *
+ * The LR has a third accelerator, GCR (methods::lr_gcr, methods/SCF/lr_krylov.hpp). It needs
+ * an affine fixed-point map, so only the LR offers it; it takes the same hist_vec_layout.
+ *
  * DIIS with the frequency-dependent commutator residual of the Dyson SCF:
  * P. Pokhilko, C.-N. Yeh, D. Zgid, J. Chem. Phys. 156, 094101 (2022),
  * https://doi.org/10.1063/5.0082586
@@ -402,6 +405,8 @@ struct mixing_state {
   template<typename Comm, typename AF, typename AS>
   std::array<double, 2> step(Comm& comm, AF&& F_skij, AS&& S_tskij, hist_vec const* residual_vec) {
     diis_timers::mix_total.start();
+    // In-place update of this rank's slices of F_skij and S_tskij by mixing (DIIS, or damping
+    // against prev_vec)
     bool extrapolated = false;
     if (diis) {
       if (residual_vec) diis->push(comm, layout, F_skij, S_tskij, residual_vec->F, residual_vec->S);
@@ -412,6 +417,7 @@ struct mixing_state {
       diis_timers::mix_damp.stop();
     }
 
+    // Check convergence
     diis_timers::mix_conv.start();
     hist_vec const& ref_vec = extrapolated ? diis->newest_trial() : prev_vec;
     auto max_absdiff = [](auto const& a, auto const& b) {
@@ -423,6 +429,7 @@ struct mixing_state {
                                max_absdiff(ref_vec.S, layout.S_view_slice(S_tskij))};
     diis_timers::mix_conv.stop();
 
+    // Store the mixed result to prev_vec to use in the next mixing step
     diis_timers::mix_prev_store.start();
     layout.store_slice(prev_vec, F_skij, S_tskij);
     has_prev = true;
