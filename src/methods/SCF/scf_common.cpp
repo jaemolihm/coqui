@@ -485,29 +485,33 @@ void read_prev_state_from_checkpoint(iter_scf::mixing_state& mix_state, std::str
   mix_state.has_prev = true;
 }
 
-template<typename comm_t, typename X_t, typename Xt_t>
+template<typename comm_t, typename X_t>
 auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& mix_state,
               std::string const& h5_prefix, std::array<std::string,3> const& datasets,
-              long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
-              iter_scf::hist_vec const* residual_vec)
+              long iteration, X_t &sF_skij, iter_scf::hist_vec const* residual_vec,
+              sArray_t<Array_view_5D_t> *sSigma_tskij)
   -> std::tuple<double, double> {
   // No previous accepted state in memory (restart, dmft_embed): read it from the checkpoint
   if (not mix_state.has_prev) read_prev_state_from_checkpoint(mix_state, h5_prefix, datasets, iteration);
   // Mix this rank's slices in place, after every rank's writes to the windows are visible
+  std::array<double, 2> conv;
   sF_skij.win().fence();
-  if (sSigma_tskij) sSigma_tskij->win().fence();
-  std::array<double, 2> conv = sSigma_tskij
-      ? mix_state.step(context.comm, sF_skij.local(), sSigma_tskij->local(), residual_vec)  // F and Sigma
-      : mix_state.step(context.comm, sF_skij.local(), residual_vec);                        // F only
+  if (sSigma_tskij) { // F and Sigma
+    sSigma_tskij->win().fence();
+    conv = mix_state.step(context.comm, sF_skij.local(), sSigma_tskij->local(), residual_vec);
+  } else { // F only
+    conv = mix_state.step(context.comm, sF_skij.local(), residual_vec);
+  }
   // Each rank wrote only its slices: fill every node's windows with the slices of the other ranks
   utils::complete_shared_slices(context, mix_state.layout.pmap(), sF_skij);
   if (sSigma_tskij) utils::complete_shared_slices(context, mix_state.layout.pmap(), *sSigma_tskij);
   return std::make_tuple(conv[0], conv[1]);  // convergence error of F and Sigma
 }
 
-template<typename comm_t, typename X_t, typename Xt_t>
+template<typename comm_t, typename X_t>
 void init_mixing_state(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t& iter_solver,
-                       iter_scf::mixing_state& mix_state, X_t &sF_skij, Xt_t *sSigma_tskij) {
+                       iter_scf::mixing_state& mix_state, X_t &sF_skij,
+                       sArray_t<Array_view_5D_t> *sSigma_tskij) {
   // DIIS parameters of iter_solver (none for damping). min_subsp = 2: with one stored entry
   // the coefficient is c = 1 and the step would return that trial unmixed, so DIIS starts at
   // two entries (as the SCF DIIS did before). The first step stores none (needs_residual()
@@ -616,8 +620,8 @@ auto solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf_t
     std::optional<iter_scf::diis_timers::ScopeLog> breakdown_log;
     if (iter_solver.iter_alg() == iter_scf::DIIS) breakdown_log.emplace();
     std::tie(conv_F, conv_Sigma) = mix_step(
-        context, mix_state, h5_prefix, datasets, iteration, sF_skij, &sSigma_tskij,
-        residual_vec ? &*residual_vec : nullptr);
+        context, mix_state, h5_prefix, datasets, iteration, sF_skij,
+        residual_vec ? &*residual_vec : nullptr, &sSigma_tskij);
     context.comm.barrier();
   }
   return std::make_tuple(conv_F, conv_Sigma);
@@ -743,8 +747,8 @@ template void init_mixing_state(utils::mpi_context_t<mpi3::communicator>&, iter_
 
 template auto mix_step(utils::mpi_context_t<mpi3::communicator>&, iter_scf::mixing_state&,
                        std::string const&, std::array<std::string,3> const&, long,
-                       sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>*,
-                       iter_scf::hist_vec const*)
+                       sArray_t<Array_view_4D_t>&, iter_scf::hist_vec const*,
+                       sArray_t<Array_view_5D_t>*)
          -> std::tuple<double, double>;
 
 template void write_mf_data(mf::MF&, const imag_axes_ft::IAFT&, simple_dyson&,

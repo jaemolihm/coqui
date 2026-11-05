@@ -397,15 +397,14 @@ namespace methods {
       auto& hf_state = iter_solver->state();
       hf_state = {};
       iter_scf::mixing_state corr_state;
-      sArray_t<Array_view_5D_t>* no_Sigma = nullptr;  // Vcorr has no Sigma block
       init_mixing_state(*_context, *iter_solver, hf_state, sVhf_skij, &sSigma_tskij);
-      init_mixing_state(*_context, *iter_solver, corr_state, sVcorr_skij, no_Sigma);
+      init_mixing_state(*_context, *iter_solver, corr_state, sVcorr_skij);  // Vcorr has no Sigma block
       std::tie(Vhf_conv, Sigma_conv) = mix_step(
           *_context, hf_state, mb_state.coqui_prefix, {"embed", "Vhf_skij", "Sigma_tskij"},
-          weiss_f_iter, sVhf_skij, &sSigma_tskij, nullptr);
+          weiss_f_iter, sVhf_skij, nullptr, &sSigma_tskij);
       Vcorr_conv = std::get<0>(mix_step(
           *_context, corr_state, mb_state.coqui_prefix, {"embed", "Vcorr_skij", ""},
-          weiss_f_iter, sVcorr_skij, no_Sigma, nullptr));
+          weiss_f_iter, sVcorr_skij, nullptr));  // Vcorr only
     }
     _Timer.stop("EMBED_ITERATIVE");
 
