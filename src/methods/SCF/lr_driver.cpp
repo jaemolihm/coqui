@@ -389,11 +389,12 @@ void lr_driver::lr_setup(
   }
 
   _Timer.start("LR_DRIVER_SETUP_ALLOC");
-  // _prev (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate that entered the
-  // current iteration, as this rank's slices of the flattened arrays. The mixing overwrites the
-  // shared arrays in place, so the entering iterate is gone afterwards unless it is saved:
-  // damping, DIIS and GCR read it (damping target, DIIS/GCR residual), and the convergence
-  // norms ‖Δ - Δ_prev‖ of every iteration read it; no other copy exists.
+  // _prev (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate y that entered the
+  // current iteration, as this rank's slices of the flattened arrays. apply_kernel (and lr_qp_approx
+  // in qp mode) writes g(y) into the same shared ΔF/ΔΣ, and the mixing then writes the next
+  // iterate there in place, so y survives only in this copy. The damping uses it as the target,
+  // DIIS as g(y) - y (and as the fallback target), GCR as the probe y, and every iteration's
+  // norms ‖Δ - Δ_prev‖ read it. _DeltaDm_prev: dyson_pass overwrites ΔDm.
   // ΔΣ is tracked only when the kernel carries a Σ and we are not in qp mode (qp mode
   // tracks the static ΔV_QPGW in its place).
   const long nF = _ns * _nkpts_ibz * _nbnd * _nbnd;
@@ -957,7 +958,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
       if (use_gcr) {
         // GCR
         gcr_rnorm = _gcr->step(_mpi->comm, _layout, F, S, _prev,
-                                  p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
+                               p.tol, gcr_converged, pc_fn ? &pc_fn : nullptr);
       } else if (_diis) {
         // DIIS: the residual is the difference of the successive iterates
         _diis->push(_mpi->comm, _layout, F, S, _layout.F(F) - _prev.F, _layout.S(S) - _prev.S);

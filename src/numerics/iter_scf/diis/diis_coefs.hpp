@@ -44,7 +44,8 @@ namespace iter_scf {
  * are constrained real) and inverted via a thresholded pseudoinverse, exactly
  * as in the original scheme (P. Pokhilko, C.-N. Yeh, D. Zgid, J. Chem. Phys. 156,
  * 094101 (2022), https://doi.org/10.1063/5.0082586).
- * Compare diis_alg::compute_coefs_c1. The DIIS of iter_scf::diis_mixer computes its coefficients with this function.
+ * The same arithmetic as diis_alg::compute_coefs_c1 of the serial DIIS (diis_alg.hpp, not compiled),
+ * plus the nullopt return for a singular B. iter_scf::diis_mixer computes its coefficients with this function.
  *
  * @param m_B       residual-overlap matrix (n x n).
  * @param log_level verbosity level of the condition-number message.
@@ -82,11 +83,14 @@ inline std::optional<nda::array<double, 1>> compute_diis_coefs_c1(const nda::mat
 
   auto eig_abs = nda::map([](double x) { return std::abs(x); })(eig);
   double eig_max = nda::max_element(eig);
-  double cond = nda::max_element(eig_abs) / nda::min_element(eig_abs);
+  double eig_min_abs = nda::min_element(eig_abs);
 
   const double eig_thresh = 1E-14;
 
-  app_log(log_level, "DIIS: Condition number of Jacobi-scaled B: {}", cond);
+  if (eig_min_abs > 0.0)
+    app_log(log_level, "DIIS: Condition number of Jacobi-scaled B: {}", nda::max_element(eig_abs) / eig_min_abs);
+  else
+    app_log(log_level, "DIIS: Jacobi-scaled B is singular");
 
   // Pseudoinverse: only keep positive eigenvalues above eig_thresh*eig_max.
   for (auto i : nda::range(0, eig.size())) {

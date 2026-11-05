@@ -49,7 +49,7 @@ namespace iter_scf::diis_timers {
   inline utils::Watch mix_coefs      {"mix_coefs_solve"};
   inline utils::Watch mix_lincomb    {"mix_lincomb"};
   inline utils::Watch mix_conv       {"mix_conv_maxdiff"};
-  inline utils::Watch mix_damp_mix   {"mix_damp_mix"};
+  inline utils::Watch mix_damp       {"mix_damp"};
   inline utils::Watch mix_prev_store {"mix_prev_state_store"};
 
   inline void log() {
@@ -71,7 +71,7 @@ namespace iter_scf::diis_timers {
     row(mix_coefs);
     row(mix_lincomb);
     row(mix_conv);
-    row(mix_damp_mix);
+    row(mix_damp);
     row(mix_prev_store);
     app_log(2, "");
   }

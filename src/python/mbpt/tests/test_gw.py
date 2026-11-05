@@ -248,7 +248,7 @@ print("KEY_ACCEPTED", flush=True)
 @pytest.mark.parametrize("alg", ["diis", "damping"])
 @pytest.mark.parametrize("key", ["storage", "diis_storage"])
 def test_iter_alg_storage_key_rejected(mpi, alg, key):
-    # iter_alg (DIIS or damping) with the unrecognized key "storage" or "diis_storage" (the DIIS history has
+    # iter_alg (DIIS or damping) with the key "storage" or "diis_storage" (the DIIS history has
     # no storage option) vs the input parsing: the run aborts with a message naming the key that was written.
     # utils::check aborts MPI, so the run is its own mpirun -np 1 job, spawned by rank 0.
     import subprocess
@@ -261,7 +261,7 @@ def test_iter_alg_storage_key_rejected(mpi, alg, key):
                                sys.executable, "-c", _STORAGE_KEY_RUNNER, alg, key, "memory"],
                               env=env, capture_output=True, text=True, timeout=900)
         out = proc.stdout + proc.stderr
-        expected = f'the key "{key}" is not recognized'
+        expected = f'remove the key "{key}"'
         if proc.returncode == 0 or "KEY_ACCEPTED" in out:
             msg = f"the key {key} was accepted:\n{out[-2000:]}"
         elif expected not in out:

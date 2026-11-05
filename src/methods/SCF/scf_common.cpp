@@ -491,9 +491,9 @@ void stage_prev_state(iter_scf::mixing_state& m, std::string h5_prefix,
 
 template<typename comm_t, typename X_t, typename Xt_t>
 auto mix_step(utils::mpi_context_t<comm_t> &context, iter_scf::mixing_state& m,
-                        std::string const& h5_prefix, std::array<std::string,3> const& datasets,
-                        long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
-                        iter_scf::hist_vec const* residual)
+              std::string const& h5_prefix, std::array<std::string,3> const& datasets,
+              long iteration, X_t &sF_skij, Xt_t *sSigma_tskij,
+              iter_scf::hist_vec const* residual)
   -> std::tuple<double, double> {
   if (not m.has_prev) stage_prev_state(m, h5_prefix, datasets, iteration, sF_skij, sSigma_tskij);
   nda::array<ComplexType, 5> no_Sigma;
@@ -738,9 +738,9 @@ template void init_mixing_state(utils::mpi_context_t<mpi3::communicator>&, iter_
                                 sArray_t<Array_view_5D_t>*);
 
 template auto mix_step(utils::mpi_context_t<mpi3::communicator>&, iter_scf::mixing_state&,
-                                 std::string const&, std::array<std::string,3> const&, long,
-                                 sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>*,
-                                 iter_scf::hist_vec const*)
+                       std::string const&, std::array<std::string,3> const&, long,
+                       sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>*,
+                       iter_scf::hist_vec const*)
          -> std::tuple<double, double>;
 
 template void write_mf_data(mf::MF&, const imag_axes_ft::IAFT&, simple_dyson&,

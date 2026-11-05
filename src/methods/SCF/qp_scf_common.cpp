@@ -881,7 +881,7 @@ double solve_iterative(utils::mpi_context_t<comm_t> &context, iter_scf::iter_scf
       }
     }
     conv = std::get<0>(mix_step(context, m, h5_prefix, {"scf", "Heff_skij", ""}, it,
-                                          sHeff_skij, no_Sigma, residual ? &*residual : nullptr));
+                                    sHeff_skij, no_Sigma, residual ? &*residual : nullptr));
   }
   context.comm.barrier();
   return conv;

@@ -609,11 +609,13 @@ private:
   iter_scf::hist_vec_layout _layout;
   /// The same slicing of ΔF alone (the preconditioner's inner GCR).
   iter_scf::hist_vec_layout _layout_F;
-  /// This rank's slices of the iterate that entered the current iteration (ΔF and the second
-  /// block), saved because the mixing overwrites the shared arrays in place. Read by the
-  /// damping / DIIS / GCR step and by the convergence norms ‖Δ - Δ_prev‖.
+  /// This rank's slices of the iterate y that entered the current iteration (ΔF and the second
+  /// block). apply_kernel (and lr_qp_approx in qp mode) writes g(y) into the shared arrays and
+  /// the mixing then overwrites them with the next iterate, so y survives only here. The damping
+  /// uses it as the target, DIIS as g(y) - y (and as the fallback target), GCR as the probe y,
+  /// and the convergence norms ‖Δ - Δ_prev‖ read it.
   iter_scf::hist_vec _prev;
-  /// The same for ΔDm, which is not mixed: read only by the convergence norm ‖ΔDm - ΔDm_prev‖.
+  /// The same for ΔDm, which is not mixed (dyson_pass overwrites it): read only by the convergence norm ‖ΔDm - ΔDm_prev‖.
   nda::array<ComplexType, 1> _DeltaDm_prev;
 
   // --- ΔDm-only Dyson pass (Σ-free operator kernel).

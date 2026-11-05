@@ -215,9 +215,9 @@ public:
     ++_steps;
     const int L = _cfg.log_level;
     auto damp = [&]() {
-      diis_timers::mix_damp_mix.start();
+      diis_timers::mix_damp.start();
       damp_slices(layout, _cfg.mixing, F, S, prev);
-      diis_timers::mix_damp_mix.stop();
+      diis_timers::mix_damp.stop();
     };
     if (_steps <= _cfg.warmup) {
       app_log(L, "DIIS: warmup iteration {}/{}: damping (mixing = {}, subspace size {})",
@@ -391,9 +391,9 @@ struct mixing_state {
       if (residual) diis->push(comm, layout, F, S, residual->F, residual->S);
       extrapolated = diis->mix(layout, F, S, prev);
     } else {
-      diis_timers::mix_damp_mix.start();
+      diis_timers::mix_damp.start();
       damp_slices(layout, mixing, F, S, prev);
-      diis_timers::mix_damp_mix.stop();
+      diis_timers::mix_damp.stop();
     }
 
     diis_timers::mix_conv.start();
