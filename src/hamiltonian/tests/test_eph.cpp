@@ -42,6 +42,9 @@
 #include "mean_field/mf_utils.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "orbitals/eph_vertex.h"
+#include "mean_field/default_MF.hpp"
+#include "mean_field/symmetry/unfold_bz.h"
+#include "utilities/lr_utils.hpp"
 
 namespace bdft_tests
 {
@@ -152,6 +155,124 @@ TEST_CASE("eph_bare_vertex", "[eph]")
             q_cryst(0), q_cryst(1), q_cryst(2), rel);
     CHECK(rel < tol);
   }
+}
+
+/**
+ * Bare e-ph vertex on the full-BZ view of a symmetric system (mf::unfold_mf, projectors unfolded with D^l(S) and the
+ * per-atom phase) against the one on a no-symmetry calculation of the same system (separate QE run, so its orbital
+ * gauge, band phases and k order are its own), at q = 0 and q != 0. Compared through the correlation matrix of the modes
+ *   C(mode1,mode2) = sum_{s,k} sum_{m,n in occ} conj(g(s,mode1,k,m,n)) g(s,mode2,k,m,n)
+ * which is invariant under unitary rotations of the occupied manifold at k and k+q and under the k order. The full
+ * matrix is compared, so the cross-atom blocks (Li-H), which see the per-atom phase exp(+i k'.T) at q != 0, are included
+ * (the diagonal sum|g|^2 does not). At q = 0 the phase cancels inside each g, so the cross-atom block at q = 0 does not
+ * test it; the q != 0 points do. Nonlocal part only: no symmetric fixture carries the vloc_radial group that the local
+ * part needs, so the local part of the view (compute_bare_eph_vertex) is not tested here.
+ * Negative controls (views written by mf::detail::unfold_mf_impl): without D^l, without the phase, with the conjugated
+ * phase exp(-i k'.T), and without both D^l and phase. At every q != 0, "noD" and "neither" must differ from the
+ * no-symmetry C. "nophase" and "conjphase" are seen only in the cross-atom block (the per-atom phase cancels inside each
+ * g), where the error must be above threshold at some q != 0 (maximum over the q points; both are blind at some q).
+ * The conjugated phase differs from the phase only if k'.T is not 0 or 1/2 (mod 1): lih222 cannot see it, so it is
+ * required on lih223 only (k3 = 1/3).
+ * At q != 0 the number of k whose k and k+q are unfolded by different operations is required to be non-zero.
+ */
+TEST_CASE("unfold_mf_eph_vertex", "[eph]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto& comm = mpi->comm;
+
+  // correlation matrix C of the modes of g (root only), broadcast
+  auto correlation = [&](nda::array<ComplexType,5> const& g, long nocc) {
+    long nmodes = 0;
+    if(comm.root()) nmodes = g.shape(1);
+    comm.broadcast_n(&nmodes, 1, 0);
+    nda::array<ComplexType,2> C = nda::zeros<ComplexType>(nmodes, nmodes);
+    if(comm.root()) {
+      for(long s=0; s<g.shape(0); ++s)
+        for(long k=0; k<g.shape(2); ++k)
+          for(long m=0; m<nocc; ++m)
+            for(long n=0; n<nocc; ++n)
+              for(long a=0; a<nmodes; ++a)
+                for(long b=0; b<nmodes; ++b)
+                  C(a,b) += std::conj(g(s,a,k,m,n)) * g(s,b,k,m,n);
+    }
+    comm.broadcast_n(C.data(), C.size(), 0);
+    return C;
+  };
+
+  auto frobenius = [](nda::array<ComplexType,2> const& A) {
+    double x = 0.0;
+    for(auto const& v : A) x += std::norm(v);
+    return std::sqrt(x);
+  };
+
+  auto run = [&](std::string src_sym, std::string src_nosym, mf::mf_input_file_type_e ft, std::string prefix,
+                 std::vector<std::array<double,3>> qs, bool conj_phase_visible) {
+    auto mf_sym = mf::default_MF(mpi, src_sym, ft);
+    auto mf_nosym = mf::default_MF(mpi, src_nosym, ft);
+    long nocc = 0;
+    for(long n=0; n<mf_nosym.nbnd(); ++n) if(mf_nosym.occ()(0,0,n) > 0.5) ++nocc;
+    REQUIRE(nocc > 0);
+
+    // views: full, without D^l, without the phase, with the conjugated phase, without D^l and phase
+    struct variant { std::string name; bool rotate_m; int phase_sign; };
+    std::vector<variant> variants = {{"full", true, 1}, {"noD", false, 1}, {"nophase", true, 0}, {"conjphase", true, -1},
+                                     {"neither", false, 0}};
+    std::vector<nda::array<ComplexType,2>> C_view_all; // [iv*nq + iq]
+    std::vector<nda::array<ComplexType,2>> C_nosym;
+    for(auto const& v : variants) {
+      mf::detail::unfold_mf_impl(mf_sym, prefix + "_" + v.name + ".h5", v.rotate_m, v.phase_sign);
+      comm.barrier();
+    }
+    double phase_ctrl_err = 0.0, conj_ctrl_err = 0.0; // largest cross-atom error of the "nophase" / "conjphase" view over the q != 0 points, relative to |C|
+    for(auto const& qa : qs) {
+      nda::array<double,1> q = {qa[0], qa[1], qa[2]};
+      hamilt::pseudopot pp_n(mf_nosym);
+      auto C_n = correlation(pp_n.eph_vertex_nonlocal(mf_nosym, q()), nocc);
+      double nC = frobenius(C_n);
+      REQUIRE(nC > 1e-6);
+      bool q0 = (std::abs(qa[0]) + std::abs(qa[1]) + std::abs(qa[2]) < 1e-12);
+      // number of k whose k and k+q are unfolded by different operations
+      nda::array<int,1> kpq(mf_sym.nkpts());
+      auto kc = mf_sym.kpts_crystal();
+      utils::calculate_kpq_map(kc, q, kpq);
+      long n_diff_ops = 0;
+      for(long ik=0; ik<mf_sym.nkpts(); ++ik) if(mf_sym.kp_symm(ik) != mf_sym.kp_symm(kpq(ik))) ++n_diff_ops;
+      for(auto const& v : variants) {
+        auto mf_view = mf::make_MF(mpi, mf::bdft_source, "./", prefix + "_" + v.name, mf::h5_input_type);
+        REQUIRE(mf_view.nkpts() == mf_nosym.nkpts());
+        hamilt::pseudopot pp(mf_view);
+        auto C_v = correlation(pp.eph_vertex_nonlocal(mf_view, q()), nocc);
+        double eC = frobenius(nda::array<ComplexType,2>(C_v - C_n)) / nC;
+        // cross-atom block: the largest |C(a,b)| with a, b on different atoms
+        double x_n = 0.0, x_err = 0.0;
+        for(long a=0; a<C_n.shape(0); ++a)
+          for(long b=0; b<C_n.shape(1); ++b)
+            if(a/3 != b/3) { x_n = std::max(x_n, std::abs(C_n(a,b))); x_err = std::max(x_err, std::abs(C_v(a,b) - C_n(a,b))); }
+        app_log(2, "unfold_mf_eph_vertex {} q=({},{},{}) [{}]: rel err of C = {:.3e}, |C| = {:.3e}; cross-atom: max|C| = {:.3e}, max err = {:.3e}; k,k+q with different ops: {}/{}",
+                prefix, qa[0], qa[1], qa[2], v.name, eC, nC, x_n, x_err, n_diff_ops, mf_sym.nkpts());
+        if(q0) REQUIRE(x_n > 1e-6 * nC); // the cross-atom block is not zero at q = 0 (it is ~1e-10 at the q != 0 points below)
+        if(v.name == "full") {
+          REQUIRE(eC < 1e-6);
+          REQUIRE(x_err < 1e-6 * nC);
+        } else if(not q0) {
+          REQUIRE(n_diff_ops > 0);
+          if(v.name == "noD" or v.name == "neither") REQUIRE(eC > 1e-2); // negative control: no D^l
+          if(v.name == "nophase") phase_ctrl_err = std::max(phase_ctrl_err, x_err / nC);
+          if(v.name == "conjphase") conj_ctrl_err = std::max(conj_ctrl_err, x_err / nC);
+        }
+      }
+    }
+    REQUIRE(phase_ctrl_err > 1e-5); // negative control: no phase (seen only in the cross-atom blocks)
+    if(conj_phase_visible) REQUIRE(conj_ctrl_err > 1e-5); // negative control: conjugated phase
+    comm.barrier();
+    if(comm.root()) for(auto const& v : variants) std::filesystem::remove(prefix + "_" + v.name + ".h5");
+    comm.barrier();
+  };
+
+  SECTION("lih222") { run("qe_lih222_sym", "qe_lih222", mf::h5_input_type, "unfold_mf_eph_lih222",
+                          {{0,0,0}, {0.5,0,0}, {0.5,0.5,0}, {0,0.5,0.5}, {0.5,0.5,0.5}}, false); }
+  SECTION("lih223") { run("qe_lih223_sym", "qe_lih223", mf::h5_input_type, "unfold_mf_eph_lih223",
+                          {{0,0,0}, {0.5,0,0}, {0.5,0.5,1.0/3.0}, {0,0.5,1.0/3.0}, {0.5,0,2.0/3.0}}, true); }
 }
 
 /**

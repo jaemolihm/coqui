@@ -31,6 +31,7 @@
 
 #include "IO/ptree/InputParser.hpp"
 #include "mean_field/mf_utils.hpp"
+#include "mean_field/symmetry/unfold_bz.h"
 #include "orbitals/orbital_augmenter.h"
 #include "orbitals/orbital_generator.h"
 #include "orbitals/eph_vertex.h"
@@ -148,6 +149,14 @@ namespace coqui_py {
       auto new_mf = orbitals::add_augmentation<HOST_MEMORY>(*_mf, fn, augmenter,
                                                             nbnd_aug, epstol, dtau_step);
       return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
+    }
+
+    /**
+     * @brief Write the full-BZ view of this symmetry-reduced mean-field system to the bdft h5 file fn.
+     * See mf::unfold_mf.
+     */
+    void unfold_mf(const std::string& fn) const {
+      mf::unfold_mf(*_mf, fn);
     }
 
     /**

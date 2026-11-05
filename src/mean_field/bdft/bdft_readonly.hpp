@@ -55,6 +55,28 @@ auto make_wfc(bdft_system const& sys) -> grids::truncated_g_grid;
 
 auto make_ksymms(bz_symm const& bz) -> nda::array<int, 1>;
 
+// Writes the plane-wave basis metadata of the truncated wfc grid into Orbitals/
+inline void write_wfc_metadata(h5::group& ogrp, grids::truncated_g_grid const& wfc_g) {
+  long ngm = wfc_g.size();
+  nda::array<int,2> miller(ngm,3);
+  utils::generate_miller_index(wfc_g.gv_to_fft(),miller,wfc_g.mesh());
+  nda::h5_write(ogrp,"miller_wfc",miller,false);
+  h5::h5_write(ogrp,"wfc_ecut",wfc_g.ecut());
+  nda::array<int,1> mesh(wfc_g.mesh());
+  nda::h5_write(ogrp,"wfc_fft_grid",mesh,false);
+  h5::h5_write(ogrp,"wfc_ngm",int(wfc_g.size()));
+}
+
+// Copies the Hamiltonian/ group (local + nonlocal pseudopotential, per k of mf) into grp
+template<class MF>
+void write_pseudopot(MF const& mf, h5::group& grp) {
+  if(mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) {
+    hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.outdir(),mf::xml_input_type);
+  } else if(mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source) {
+    hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.filename(),mf::h5_input_type);
+  }
+}
+
 auto make_swfc_maps(bdft_system const &sys,
                     nda::array<int, 1> const &ksymms,
                     nda::ArrayOfRank<1> auto const &fft_mesh,
@@ -465,15 +487,7 @@ public:
       h5::group grp(file);
       sys.save(grp);
       h5::group ogrp = grp.open_group("Orbitals");
-      {
-        nda::array<int,2> miller(ngm,3);
-        utils::generate_miller_index(wfc_g.gv_to_fft(),miller,wfc_g.mesh());
-        nda::h5_write(ogrp,"miller_wfc",miller,false);
-        h5::h5_write(ogrp,"wfc_ecut",wfc_g.ecut());
-        nda::array<int,1> mesh(wfc_g.mesh());
-        nda::h5_write(ogrp,"wfc_fft_grid",mesh,false);
-        h5::h5_write(ogrp,"wfc_ngm",int(wfc_g.size()));
-      }
+      detail::write_wfc_metadata(ogrp,wfc_g);
       nda::array<ComplexType,2> psik(norb,ngm);
       for( int ik=0; ik<nkpts_ibz; ++ik ) {
         for( int is=0; is<sys.nspin; ++is ) {
@@ -495,12 +509,7 @@ public:
       if(H_KS_ibz != nullptr)
         nda::h5_write(ogrp,"H_KS_skij",*H_KS_ibz,false);
       h5::group hgrp = grp.create_group("Hamiltonian");
-      // write pseudopot so H0 can be recomputed in the augmented basis
-      if(mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) {
-        hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.outdir(),mf::xml_input_type);
-      } else if(mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source) {
-        hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.filename(),mf::h5_input_type);
-      }
+      detail::write_pseudopot(mf,grp);
     } else {
       nda::array<ComplexType,2> psik(norb,ngm);
       for( int ik=0; ik<nkpts_ibz; ++ik ) {

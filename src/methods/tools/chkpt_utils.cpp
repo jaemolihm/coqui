@@ -21,6 +21,8 @@
 
 #include "chkpt_utils.h"
 #include "utilities/check.hpp"
+#include "mean_field/symmetry/unfold_bz.h"
+#include "numerics/imag_axes_ft/iaft_utils.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -615,6 +617,90 @@ template void read_qp_hamilt_components(
     double &, std::string, long);
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
+
+void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_full,
+                std::string in_prefix, std::string out_prefix) {
+  std::string in_file = in_prefix + ".mbpt.h5";
+  utils::check(in_prefix != out_prefix, "unfold_scf: the output prefix must differ from the input prefix.");
+  utils::check(mf_full.nkpts_ibz() == mf_full.nkpts() and mf_full.nkpts() == mf_ibz.nkpts() and
+               mf_ibz.nkpts_ibz() < mf_ibz.nkpts(),
+               "unfold_scf: mf_full must be the full-BZ view of mf_ibz (nkpts: {}/{}, nkpts_ibz: {}/{}).",
+               mf_full.nkpts(), mf_ibz.nkpts(), mf_full.nkpts_ibz(), mf_ibz.nkpts_ibz());
+  utils::check(mf_full.nspin() == mf_ibz.nspin() and mf_full.nbnd() == mf_ibz.nbnd(),
+               "unfold_scf: mf_full and mf_ibz differ in nspin or nbnd.");
+  {
+    auto k_ibz = mf_ibz.kpts_crystal();
+    auto k_full = mf_full.kpts_crystal();
+    for (long ik = 0; ik < mf_full.nkpts(); ++ik)
+      for (int i = 0; i < 3; ++i)
+        utils::check(std::abs(k_ibz(ik, i) - k_full(ik, i)) < 1e-10,
+                     "unfold_scf: k-point {} of mf_full differs from mf_ibz.", ik);
+  }
+
+  long iter = 0;
+  double mu = 0.0;
+  std::string div_treatment, hf_div_treatment;
+  bool has_div = false, has_hf_div = false;
+  if (ctx.comm.root()) {
+    h5::file file(in_file, 'r');
+    {
+      auto sys_grp = h5::group(file).open_group("system");
+      int nki_in = 0, nb_in = 0;
+      h5::h5_read(sys_grp, "number_of_kpoints_ibz", nki_in);
+      h5::h5_read(sys_grp, "number_of_orbitals", nb_in);
+      utils::check(nki_in == mf_ibz.nkpts_ibz() and nb_in == mf_ibz.nbnd(),
+                   "unfold_scf: {} has {} IBZ k-points and {} orbitals, mf_ibz has {} and {}.",
+                   in_file, nki_in, nb_in, mf_ibz.nkpts_ibz(), mf_ibz.nbnd());
+      nda::array<double, 2> kc;
+      nda::h5_read(sys_grp, "kpoints_crys", kc);
+      utils::check(kc.extent(0) == mf_ibz.nkpts() and kc.extent(1) == 3,
+                   "unfold_scf: kpoints_crys of {} has shape ({}, {}), expected ({}, 3).",
+                   in_file, kc.extent(0), kc.extent(1), mf_ibz.nkpts());
+      for (long ik = 0; ik < mf_ibz.nkpts(); ++ik)
+        for (int i = 0; i < 3; ++i)
+          utils::check(std::abs(kc(ik, i) - mf_ibz.kpts_crystal(ik, i)) < 1e-10,
+                       "unfold_scf: k-point {} of {} differs from mf_ibz (different k list or order).", ik, in_file);
+    }
+    auto scf_grp = h5::group(file).open_group("scf");
+    h5::h5_read(scf_grp, "final_iter", iter);
+    auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
+    utils::check(iter_grp.has_dataset("F_skij"),
+                 "unfold_scf: {} scf/iter{} is not a dyson-type solution (no F_skij).", in_file, iter);
+    utils::check(iter_grp.has_dataset("G_tskij") and iter_grp.has_dataset("Dm_skij"),
+                 "unfold_scf: {} scf/iter{} has no G_tskij or Dm_skij.", in_file, iter);
+    bool sigma_not_stored = false;
+    if (iter_grp.has_dataset("Sigma_not_stored"))
+      h5::h5_read(iter_grp, "Sigma_not_stored", sigma_not_stored);
+    utils::check(not sigma_not_stored, "unfold_scf: Sigma_tskij was omitted from {} scf/iter{}.", in_file, iter);
+    h5::h5_read(iter_grp, "mu", mu);
+    has_div = scf_grp.has_dataset("div_treatment");
+    if (has_div) h5::h5_read(scf_grp, "div_treatment", div_treatment);
+    has_hf_div = scf_grp.has_dataset("hf_div_treatment");
+    if (has_hf_div) h5::h5_read(scf_grp, "hf_div_treatment", hf_div_treatment);
+  }
+  ctx.comm.broadcast_n(&iter, 1, 0);
+  ctx.comm.broadcast_n(&mu, 1, 0);
+
+  std::string iter_path = "scf/iter" + std::to_string(iter);
+  auto sH0 = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, "system/H0_skij");
+  auto sS = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, "system/S_skij");
+  auto sDm = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/Dm_skij");
+  auto sF = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/F_skij");
+  auto sG = unfold_dynamic_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/G_tskij");
+  auto sSigma = unfold_dynamic_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/Sigma_tskij");
+
+  auto ft = imag_axes_ft::read_iaft(in_file, false);
+  write_metadata(ctx.comm, mf_full, ft, sH0, sS, out_prefix);
+  dump_scf(ctx.comm, iter, sDm, sG, sF, sSigma, mu, out_prefix, "scf", iter);
+
+  if (ctx.comm.root()) {
+    h5::file file(out_prefix + ".mbpt.h5", 'a');
+    auto scf_grp = h5::group(file).open_group("scf");
+    if (has_div) h5::h5_write(scf_grp, "div_treatment", div_treatment);
+    if (has_hf_div) h5::h5_write(scf_grp, "hf_div_treatment", hf_div_treatment);
+  }
+  ctx.comm.barrier();
+}
 
 h5::group lr_group(h5::file& file, std::optional<long> imode) {
   h5::group grp(file);

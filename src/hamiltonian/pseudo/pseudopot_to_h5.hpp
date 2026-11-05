@@ -61,9 +61,14 @@ void h5_read_write_attribute(h5::group& r_grp, h5::group& w_grp, std::string nam
 
 }
 
+// copy_projectors = false (h5 input only) leaves out everything that is per k point (the attributes
+// number_of_kpoints and max_npw, and the datasets npw, miller_k*, projector_k*); the caller writes them.
 void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0, 
-                     std::string input_file_name, mf::mf_input_file_type_e input_file_type) 
+                     std::string input_file_name, mf::mf_input_file_type_e input_file_type,
+                     bool copy_projectors = true) 
 {
+  utils::check(copy_projectors or input_file_type == mf::h5_input_type,
+               "pseudopot_to_h5: copy_projectors = false requires an h5 input.");
   using detail::h5_read_write_attribute;
   if(not grp0.has_subgroup("Hamiltonian") )
     grp0.create_group("Hamiltonian");
@@ -231,11 +236,13 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
     h5::h5_write_attribute(grp1, "pp_type", type);
     h5::group grp = grp1.create_group(type);
 
-    int nspin, nk, npwx, npol, nat, nsp, nkb, nhm, ngm, lspinorb_nl, lspinorb_loc;
+    int nspin, nk = 0, npwx = 0, npol, nat, nsp, nkb, nhm, ngm, lspinorb_nl, lspinorb_loc;
     h5_read_write_attribute<int>(grp_,grp,"number_of_nspins",nspin);
     h5_read_write_attribute<int>(grp_,grp,"number_of_polarizations",npol);
-    h5_read_write_attribute<int>(grp_,grp,"number_of_kpoints",nk);
-    h5_read_write_attribute<int>(grp_,grp,"max_npw",npwx);
+    if(copy_projectors) {
+      h5_read_write_attribute<int>(grp_,grp,"number_of_kpoints",nk);
+      h5_read_write_attribute<int>(grp_,grp,"max_npw",npwx);
+    }
     h5_read_write_attribute<int>(grp_,grp,"lspinorbit_nl",lspinorb_nl);
     h5_read_write_attribute<int>(grp_,grp,"lspinorbit_loc",lspinorb_loc);
     h5_read_write_attribute<int>(grp_,grp,"number_of_atoms",nat);
@@ -283,10 +290,6 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
       nda::h5_write(grp,"atomic_id",T);
     }
 
-    nda::array<int,1> npw(nk);
-    nda::h5_read(grp_,"npw",npw);
-    nda::h5_write(grp,"npw",npw);
-
     if(type == "ncpp") {
       if(lspinorb_nl!=0) { // nc
         nda::array<ComplexType,4> Dnn; //(nsp,nhm,nhm);
@@ -327,15 +330,20 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
       }
     }
 
-    nda::array<ComplexType,2> buff(nkb,npwx);
-    for(int ik=0; ik<nk; ++ik)
-    {
-      nda::array<int,2> mill(npw(ik),3);
-      nda::h5_read(grp_,"miller_k"+std::to_string(ik),mill);
-      nda::h5_write(grp,"miller_k"+std::to_string(ik),mill);
+    if(copy_projectors) {
+      nda::array<int,1> npw(nk);
+      nda::h5_read(grp_,"npw",npw);
+      nda::h5_write(grp,"npw",npw);
+      nda::array<ComplexType,2> buff(nkb,npwx);
+      for(int ik=0; ik<nk; ++ik)
+      {
+        nda::array<int,2> mill(npw(ik),3);
+        nda::h5_read(grp_,"miller_k"+std::to_string(ik),mill);
+        nda::h5_write(grp,"miller_k"+std::to_string(ik),mill);
 
-      nda::h5_read(grp_,"projector_k"+std::to_string(ik),buff);
-      nda::h5_write(grp,"projector_k"+std::to_string(ik),buff);
+        nda::h5_read(grp_,"projector_k"+std::to_string(ik),buff);
+        nda::h5_write(grp,"projector_k"+std::to_string(ik),buff);
+      }
     }
 
   } else {
