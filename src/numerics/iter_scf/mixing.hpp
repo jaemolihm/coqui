@@ -409,7 +409,10 @@ struct mixing_state {
     // against prev_vec)
     bool extrapolated = false;
     if (diis) {
+      // Store the trial (F_skij, S_tskij) and its residual as the newest DIIS entry (none at the first step)
       if (residual_vec) diis->push(comm, layout, F_skij, S_tskij, residual_vec->F, residual_vec->S);
+      // Extrapolate from the stored trials, or damp against prev_vec (warmup, too few entries,
+      // singular B). The entries are pre-mix trials, so the previous accepted state is only in prev_vec.
       extrapolated = diis->mix(layout, F_skij, S_tskij, prev_vec);
     } else {
       diis_timers::mix_damp.start();
