@@ -606,9 +606,10 @@ private:
   /// handles one slice and the whole job stores each of them once instead of once per
   /// node. The second block is ΔΣ(iω) when the kernel carries a Σ, ΔV_QPGW in qp mode,
   /// and absent otherwise.
-  iter_scf::hist_vec_layout _layout;
-  /// The same slicing of ΔF alone (the preconditioner's inner GCR).
-  iter_scf::hist_vec_layout _layout_F;
+  iter_scf::hist_vec_layout _hist_layout;
+  /// The same slicing of ΔF alone, for the preconditioner's inner GCR (_pc_gcr);
+  /// built only when a precond_kernel is set.
+  iter_scf::hist_vec_layout _hist_layout_pc;
   /// This rank's slices of the iterate y that entered the current iteration (ΔF and the second
   /// block). apply_kernel (and lr_qp_approx in qp mode) writes g(y) into the shared arrays and
   /// the mixing then overwrites them with the next iterate, so y survives only here. The damping
