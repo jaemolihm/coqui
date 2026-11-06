@@ -701,8 +701,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     if exclude_hartree_head:
         # Same check as run_lr_calc, before any collective
         from .lr_driver import resolve_kernel
-        if not resolve_kernel(method, include_hartree, include_exchange, gw_mode,
-                              caller="run_lr")[0]:
+        hartree, _, _ = resolve_kernel(method, include_hartree, include_exchange, gw_mode,
+                                       caller="run_lr")
+        if not hartree:
             raise ValueError("run_lr: exclude_hartree_head=True requires the Hartree rung "
                              "(include_hartree=True, or a method alias with Hartree); the "
                              "kernel here has none.")
