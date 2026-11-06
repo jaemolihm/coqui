@@ -356,22 +356,22 @@ namespace {
   // Returns the pp_type of the pseudopotential of the pw2coqui h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz
   // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
   // writes anything, so that a missing group (or a mean field that is not a pw2coqui h5) aborts without a partial file.
-  std::string check_full_bz_projectors(MF const& mf) {
+  std::string read_full_bz_projector_type(MF const& mf) {
     bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
     std::string fn = from_h5 ? mf.filename() : mf.outdir();
 
     // pp_type (attribute of Hamiltonian/) names the group that holds the projectors
-    std::string type;
+    std::string pp_type;
     if (from_h5 and utils::h5_group_exists(fn, "Hamiltonian")) {
       h5::file f(fn, 'r');
       h5::group pp = h5::group(f).open_group("Hamiltonian");
-      h5::h5_read_attribute(pp, "pp_type", type);
+      h5::h5_read_attribute(pp, "pp_type", pp_type);
     }
 
-    utils::check(not type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + type + "/fullbz"),
+    utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
                  "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
                  "rerun pw2coqui.x with add_pp_fullbz = .true.", fn);
-    return type;
+    return pp_type;
   }
 
   // Writes the nonlocal projectors of the unfolded mean field (number_of_kpoints, max_npw, npw, miller_k*, projector_k*
@@ -432,7 +432,7 @@ namespace {
     utils::check(not mf.is_augmented(), "unfold_mf: augmented orbital bases are not supported.");
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
-    std::string pp_type = check_full_bz_projectors(mf);
+    std::string pp_type = read_full_bz_projector_type(mf);
 
     // System of the unfolded mean field: full-BZ k list in the order of mf, identity as the only symmetry
     bdft::bdft_system sys(mf, filename, false);
