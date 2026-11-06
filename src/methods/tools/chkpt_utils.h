@@ -86,19 +86,19 @@ namespace methods {
    * Write a full-BZ checkpoint from a dyson-type checkpoint of a calculation on the IBZ.
    *
    * out_prefix.mbpt.h5 has the standard layout, with one iteration scf/iter{N} (N = final_iter of the input)
-   * holding Dm, G, F, Sigma and mu unfolded to the k list of mf_full, plus the IAFT group,
+   * holding Dm, G, F, Sigma and mu unfolded to the k list of mf_unfold, plus the IAFT group,
    * system/H0_skij, system/S_skij (unfolded from the input) and scf/div_treatment, scf/hf_div_treatment if present.
    * Matrices are copied from the IBZ k and conjugated at time-reversal k (see unfold_1e_hamiltonian).
-   * It requires mf_full to be the full-BZ view of mf_ibz written by mf::unfold_mf.
+   * It requires mf_unfold to be the unfolded mean field of mf_ibz written by mf::unfold_mf.
    * The checkpoint carries no screened interaction, so a run_lr on it needs recompute_W=True.
    *
    * @param ctx        - [INPUT] MPI context
    * @param mf_ibz     - [INPUT] mean-field instance of the IBZ calculation
-   * @param mf_full    - [INPUT] full-BZ view of mf_ibz (mf::unfold_mf)
+   * @param mf_unfold  - [INPUT] unfolded mean field of mf_ibz (mf::unfold_mf)
    * @param in_prefix  - [INPUT] prefix of the IBZ checkpoint: in_prefix.mbpt.h5
    * @param out_prefix - [INPUT] prefix of the full-BZ checkpoint: out_prefix.mbpt.h5
    */
-  void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_full,
+  void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
                   std::string in_prefix, std::string out_prefix);
 
   template<typename X_4D_t>

@@ -153,7 +153,7 @@ namespace bdft_tests {
   // Also checks final_iter, mu, the IAFT grid, the divergence treatments and the k list of the output.
   // The reference applies the same kp_to_ibz / kp_trev copy-conj rule as unfold_1e/dynamic_hamiltonian, so this tests
   // the plumbing (datasets, mu, final_iter, div strings), not the gauge rule; the gauge is tested by the H0 and HF
-  // restart comparisons on the view. err_noconj only shows that the data can tell conj from copy.
+  // restart comparisons on the unfolded mean field. err_noconj only shows that the data can tell conj from copy.
   TEST_CASE("unfold_scf", "[methods][mbpt][chkpt]") {
     auto& mpi = utils::make_unit_test_mpi_context();
     auto& comm = mpi->comm;
@@ -190,7 +190,7 @@ namespace bdft_tests {
     auto sSigma = math::shm::make_shared_array<Array_view_5D_t>(*mpi, std::array<long,5>{nt, ns, nki, nb, nb});
     fill(sH0); fill(sS); fill(sDm); fill(sF); fill(sG); fill(sSigma);
 
-    std::string in = "unfold_scf_in", out = "unfold_scf_out", view = "unfold_scf_view";
+    std::string in = "unfold_scf_in", out = "unfold_scf_out", unfold_prefix = "unfold_scf_unfolded";
     double mu = 0.37;
     methods::chkpt::write_metadata(comm, mf_ibz, ft, sH0, sS, in);
     methods::chkpt::dump_scf(comm, 3, sDm, sG, sF, sSigma, mu, in);
@@ -202,10 +202,10 @@ namespace bdft_tests {
     }
     comm.barrier();
 
-    mf::unfold_mf(mf_ibz, view + ".h5");
+    mf::unfold_mf(mf_ibz, unfold_prefix + ".h5");
     comm.barrier();
-    auto mf_full = mf::make_MF(mpi, mf::bdft_source, "./", view, mf::h5_input_type);
-    methods::chkpt::unfold_scf(*mpi, mf_ibz, mf_full, in, out);
+    auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type);
+    methods::chkpt::unfold_scf(*mpi, mf_ibz, mf_unfold, in, out);
     // k_weight of the output: 1/nkpts at every k, summing to 1
     int kw_ok = 0;
     if (comm.root()) {
@@ -315,7 +315,7 @@ namespace bdft_tests {
     if (comm.root()) {
       std::remove((in + ".mbpt.h5").c_str());
       std::remove((out + ".mbpt.h5").c_str());
-      std::remove((view + ".h5").c_str());
+      std::remove((unfold_prefix + ".h5").c_str());
     }
     comm.barrier();
   }

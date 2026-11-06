@@ -82,11 +82,11 @@ namespace methods {
    *   - eta: shift above the real-frequency axis
    * Optional arguments for pp_type = unfold_bz (unfold BZ from irreducible to the 1st BZ)
    *   - output: prefix (in outdir) of a new full-BZ checkpoint written by chkpt::unfold_scf instead of the
-   *             *_unfold datasets in the input checkpoint. Requires mf_full, the full-BZ view of mf (mf::unfold_mf).
-   * @param [INPUT] mf_full - full-BZ view of mf; used only by pp_type = unfold_bz with output
+   *             *_unfold datasets in the input checkpoint. Requires mf_unfold, the unfolded mean field of mf (mf::unfold_mf).
+   * @param [INPUT] mf_unfold - unfolded mean field of mf; used only by pp_type = unfold_bz with output
    */
   void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt,
-                       std::shared_ptr<mf::MF> mf_full = nullptr) {
+                       std::shared_ptr<mf::MF> mf_unfold = nullptr) {
     auto mpi = mf->mpi();
     if (mpi->comm.size()%mpi->node_comm.size()!=0) {
       APP_ABORT("pproc: number of processors on each node should be the same.");
@@ -116,11 +116,11 @@ namespace methods {
       std::string scf_output = outdir+"/"+prefix;
       auto output = io::get_value_with_default<std::string>(pt,"output","");
       if (output.empty()) { // Unfold into *_unfold datasets of the input checkpoint
-        utils::check(mf_full == nullptr, "unfold_bz: mf_full is used only with the 'output' keyword.");
+        utils::check(mf_unfold == nullptr, "unfold_bz: mf_unfold is used only with the 'output' keyword.");
         unfold_bz(*mpi, *mf, scf_output);
       } else { // Write a new full-BZ checkpoint
-        utils::check(mf_full != nullptr, "unfold_bz: 'output' requires the full-BZ view mf (Python: post_proc.unfold_bz(..., mf_full_bz=))");
-        chkpt::unfold_scf(*mpi, *mf, *mf_full, scf_output, outdir+"/"+output);
+        utils::check(mf_unfold != nullptr, "unfold_bz: 'output' requires the unfolded mean field mf (Python: post_proc.unfold_bz(..., mf_unfold=))");
+        chkpt::unfold_scf(*mpi, *mf, *mf_unfold, scf_output, outdir+"/"+output);
       }
 
     } else if (pp_type == "band_interpolation") {

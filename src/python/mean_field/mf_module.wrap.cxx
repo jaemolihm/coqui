@@ -209,10 +209,10 @@ static auto const fun_32 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 
 // unfold_mf
 static auto const fun_35 = c2py::dispatcher_f_kw_t{c2py::cmethod(
-    [](coqui_py::Mf const &self, const std::string &fn) {
-      return self.unfold_mf(fn);
+    [](coqui_py::Mf const &self, const std::string &filename) {
+      return self.unfold_mf(filename);
     },
-    "self", "fn")};
+    "self", "filename")};
 
 // volume
 static auto const fun_33 = c2py::dispatcher_f_kw_t{c2py::cmethod(

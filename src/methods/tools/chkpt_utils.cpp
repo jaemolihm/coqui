@@ -618,23 +618,23 @@ template void read_qp_hamilt_components(
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
 
-void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_full,
+void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
                 std::string in_prefix, std::string out_prefix) {
   std::string in_file = in_prefix + ".mbpt.h5";
   utils::check(in_prefix != out_prefix, "unfold_scf: the output prefix must differ from the input prefix.");
-  utils::check(mf_full.nkpts_ibz() == mf_full.nkpts() and mf_full.nkpts() == mf_ibz.nkpts() and
+  utils::check(mf_unfold.nkpts_ibz() == mf_unfold.nkpts() and mf_unfold.nkpts() == mf_ibz.nkpts() and
                mf_ibz.nkpts_ibz() < mf_ibz.nkpts(),
-               "unfold_scf: mf_full must be the full-BZ view of mf_ibz (nkpts: {}/{}, nkpts_ibz: {}/{}).",
-               mf_full.nkpts(), mf_ibz.nkpts(), mf_full.nkpts_ibz(), mf_ibz.nkpts_ibz());
-  utils::check(mf_full.nspin() == mf_ibz.nspin() and mf_full.nbnd() == mf_ibz.nbnd(),
-               "unfold_scf: mf_full and mf_ibz differ in nspin or nbnd.");
+               "unfold_scf: mf_unfold must be the unfolded mean field of mf_ibz (nkpts: {}/{}, nkpts_ibz: {}/{}).",
+               mf_unfold.nkpts(), mf_ibz.nkpts(), mf_unfold.nkpts_ibz(), mf_ibz.nkpts_ibz());
+  utils::check(mf_unfold.nspin() == mf_ibz.nspin() and mf_unfold.nbnd() == mf_ibz.nbnd(),
+               "unfold_scf: mf_unfold and mf_ibz differ in nspin or nbnd.");
   {
     auto k_ibz = mf_ibz.kpts_crystal();
-    auto k_full = mf_full.kpts_crystal();
-    for (long ik = 0; ik < mf_full.nkpts(); ++ik)
+    auto k_unfold = mf_unfold.kpts_crystal();
+    for (long ik = 0; ik < mf_unfold.nkpts(); ++ik)
       for (int i = 0; i < 3; ++i)
-        utils::check(std::abs(k_ibz(ik, i) - k_full(ik, i)) < 1e-10,
-                     "unfold_scf: k-point {} of mf_full differs from mf_ibz.", ik);
+        utils::check(std::abs(k_ibz(ik, i) - k_unfold(ik, i)) < 1e-10,
+                     "unfold_scf: k-point {} of mf_unfold differs from mf_ibz.", ik);
   }
 
   long iter = 0;
@@ -690,7 +690,7 @@ void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, m
   auto sSigma = unfold_dynamic_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/Sigma_tskij");
 
   auto ft = imag_axes_ft::read_iaft(in_file, false);
-  write_metadata(ctx.comm, mf_full, ft, sH0, sS, out_prefix);
+  write_metadata(ctx.comm, mf_unfold, ft, sH0, sS, out_prefix);
   dump_scf(ctx.comm, iter, sDm, sG, sF, sSigma, mu, out_prefix, "scf", iter);
 
   if (ctx.comm.root()) {

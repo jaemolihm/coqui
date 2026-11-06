@@ -618,14 +618,14 @@ TEST_CASE("pyscf_ovlp", "[hamilt]") {
 }
 */
 
-// Full-BZ view written by mf::unfold_mf, whose nonlocal projectors are the IBZ ones unfolded (G map, conjugation at
+// Unfolded mean field written by mf::unfold_mf, whose nonlocal projectors are the IBZ ones unfolded (G map, conjugation at
 // time-reversal k, atom permutation, D^l(S) and the phase exp(+i k'.T)).
-// (1) H0 of the view (set_H0 on the view, with its own pseudopotential) against H0 of the IBZ system, copied from
+// (1) H0 of the unfolded mean field (set_H0 on the unfolded mean field, with its own pseudopotential) against H0 of the IBZ system, copied from
 //     kp_to_ibz(k) and conjugated at time-reversal k. Without the conjugation at time-reversal k the comparison
 //     fails at the size of Im H0 (qe_lih223_sym and qe_si333_sym have time-reversal k, qe_lih222_sym does not).
-// (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the view against that
+// (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the unfolded mean field against that
 //     of a no-symmetry calculation of the same system (separate QE run), k points matched by crystal coordinates. N_b
-//     is invariant under unitary rotations of the occupied manifold and does not involve the atom map of the view's
+//     is invariant under unitary rotations of the occupied manifold and does not involve the atom map of the unfolded mean field's
 //     own construction. All atom permutations of the LiH, Si and GaAs fixtures are the identity (Td/Oh operations fix the
 //     atoms); the atom permutation, D^l(S) and the phase are tested in unfold_mf_projector_little_group below and, for
 //     LiH, in the e-ph vertex test in test_eph.cpp (D^l(S) and the phase cancel in N_b).
@@ -638,24 +638,24 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     long nat = mf_sym.number_of_atoms();
     mf::unfold_mf(mf_sym, prefix + ".h5");
     comm.barrier();
-    auto mf_view = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
+    auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
 
     auto psp_sym = hamilt::make_pseudopot(mf_sym);
-    auto psp_view = hamilt::make_pseudopot(mf_view);
+    auto psp_unfold = hamilt::make_pseudopot(mf_unfold);
     auto sH0_sym = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts_ibz, nbnd, nbnd});
-    auto sH0_view = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts, nbnd, nbnd});
+    auto sH0_unfold = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts, nbnd, nbnd});
     hamilt::set_H0(mf_sym, psp_sym.get(), sH0_sym);
-    hamilt::set_H0(mf_view, psp_view.get(), sH0_view);
+    hamilt::set_H0(mf_unfold, psp_unfold.get(), sH0_unfold);
 
-    // k_weight of the view: 1/nkpts for every k
-    REQUIRE(mf_view.k_weight().size() == nkpts);
-    for (long ik = 0; ik < nkpts; ++ik) REQUIRE(std::abs(mf_view.k_weight(ik) - 1.0/double(nkpts)) < 1e-14);
-    REQUIRE(mf_view.occ().shape(1) == nkpts);
+    // k_weight of the unfolded mean field: 1/nkpts for every k
+    REQUIRE(mf_unfold.k_weight().size() == nkpts);
+    for (long ik = 0; ik < nkpts; ++ik) REQUIRE(std::abs(mf_unfold.k_weight(ik) - 1.0/double(nkpts)) < 1e-14);
+    REQUIRE(mf_unfold.occ().shape(1) == nkpts);
 
     double err = 0.0, err_noconj = 0.0, nrm = 0.0;
     if (mpi->node_comm.root()) {
       auto H_sym = sH0_sym.local();
-      auto H_view = sH0_view.local();
+      auto H_unfold = sH0_unfold.local();
       for (long is = 0; is < nspin; ++is)
         for (long ik = 0; ik < nkpts; ++ik) {
           long iks = mf_sym.kp_to_ibz(ik);
@@ -663,10 +663,10 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
           for (long i = 0; i < nbnd; ++i)
             for (long j = 0; j < nbnd; ++j) {
               ComplexType ref = tr ? std::conj(H_sym(is, iks, i, j)) : H_sym(is, iks, i, j);
-              err = std::max(err, std::abs(H_view(is, ik, i, j) - ref));
+              err = std::max(err, std::abs(H_unfold(is, ik, i, j) - ref));
               nrm = std::max(nrm, std::abs(ref));
               // what copying without the conjugation at time-reversal k would give
-              if (tr) err_noconj = std::max(err_noconj, std::abs(H_view(is, ik, i, j) - H_sym(is, iks, i, j)));
+              if (tr) err_noconj = std::max(err_noconj, std::abs(H_unfold(is, ik, i, j) - H_sym(is, iks, i, j)));
             }
         }
     }
@@ -681,8 +681,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
       REQUIRE(mf_nosym.nkpts() == nkpts);
       REQUIRE(mf_nosym.number_of_atoms() == nat);
       auto psp_nosym = hamilt::make_pseudopot(mf_nosym);
-      nda::array<ComplexType,5> P_nosym, P_view;
-      psp_view->eph_projector_overlaps(mf_view, P_view);
+      nda::array<ComplexType,5> P_nosym, P_unfold;
+      psp_unfold->eph_projector_overlaps(mf_unfold, P_unfold);
       psp_nosym->eph_projector_overlaps(mf_nosym, P_nosym);
       auto ofs = psp_nosym->proj_offset();
       auto nh = psp_nosym->proj_per_species();
@@ -697,25 +697,25 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
         return N;
       };
       for (long ik = 0; ik < nkpts; ++ik) {
-        // k point of the no-symmetry system equal to the view's k modulo a reciprocal lattice vector
+        // k point of the no-symmetry system equal to the unfolded mean field's k modulo a reciprocal lattice vector
         long ikn = -1;
         for (long jk = 0; jk < nkpts and ikn < 0; ++jk) {
           double d = 0.0;
           for (int i = 0; i < 3; ++i) {
-            double x = mf_view.kpts_crystal(ik)(i) - mf_nosym.kpts_crystal(jk)(i);
+            double x = mf_unfold.kpts_crystal(ik)(i) - mf_nosym.kpts_crystal(jk)(i);
             d = std::max(d, std::abs(x - std::round(x)));
           }
           if (d < 1e-6) ikn = jk;
         }
         REQUIRE(ikn >= 0);
         for (long b = 0; b < nat; ++b) {
-          double Nv = weight(P_view, ik, b), Nn = weight(P_nosym, ikn, b);
-          err_N = std::max(err_N, std::abs(Nv - Nn));
+          double N_unfold = weight(P_unfold, ik, b), Nn = weight(P_nosym, ikn, b);
+          err_N = std::max(err_N, std::abs(N_unfold - Nn));
           nrm_N = std::max(nrm_N, Nn);
         }
       }
     }
-    app_log(2, "unfold_mf_projectors {}: max|H0_view - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
+    app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
             "per-atom weight vs no-symmetry: err = {}, max N = {}",
             prefix, err, err_noconj, nrm, err_N, nrm_N);
     REQUIRE(err < 1e-12);
@@ -751,26 +751,22 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
 // projectors beta(k) by an operation (with or without time reversal) that maps k to k + G0 must reproduce the stored
 // projectors at the rotated G, q' = R q, relative L2 error over all (k, operation) pairs. It needs no no-symmetry
 // calculation, so it covers qe_svo222_sym: V with l = 2 projectors (18 projectors on an atom), permuted O atoms and
-// improper operations. Negative controls (views of mf::detail::projector_little_group_residual): without D^l and
-// without the phase exp(+i k'.T) the error is O(1) (the phase at k != Gamma); the phase sign is not seen here since
-// k'.T is 0 or 1/2 on the 2x2x2 grid (test_eph.cpp tests it on lih223). The largest l assigned must be 2 for SVO and
-// 1 for LiH.
+// improper operations. Measured negative controls (unfolding with the rotation of the m components switched off, or the
+// phase exp(+i k'.T) switched off): the error without D^l is 1.46 for SVO; without the phase it is 1.67 for SVO (the
+// phase sign is not seen here since k'.T is 0 or 1/2 on the 2x2x2 grid; test_eph.cpp tests it on lih223). The largest l
+// assigned must be 2 for SVO and 1 for LiH.
 TEST_CASE("unfold_mf_projector_little_group", "[hamilt]") {
   auto& mpi = utils::make_unit_test_mpi_context();
   auto& comm = mpi->comm;
 
   auto run = [&](std::string src, std::string tag, int l_max_expected) {
     auto mf = mf::default_MF(mpi, src, mf::h5_input_type);
-    auto full = mf::detail::projector_little_group_residual(mf, tag + "_full.tmp", true, 1);
-    auto noD = mf::detail::projector_little_group_residual(mf, tag + "_noD.tmp", false, 1);
-    auto nophase = mf::detail::projector_little_group_residual(mf, tag + "_nophase.tmp", true, 0);
-    app_log(2, "unfold_mf_projector_little_group {}: {} checks, max l = {}; rel err: full = {:.3e}, without D^l = {:.3e}, without phase = {:.3e}",
-            src, full.n_checks, full.l_max, full.rel_err, noD.rel_err, nophase.rel_err);
-    REQUIRE(full.l_max == l_max_expected);
-    REQUIRE(full.n_checks > mf.nkpts_ibz()); // more than the identity at each k
-    REQUIRE(full.rel_err < 1e-10);
-    REQUIRE(noD.rel_err > 1e-2);
-    REQUIRE(nophase.rel_err > 1e-2);
+    auto res = mf::detail::projector_little_group_residual(mf, tag + ".tmp");
+    app_log(2, "unfold_mf_projector_little_group {}: {} checks, max l = {}; rel err = {:.3e}",
+            src, res.n_checks, res.l_max, res.rel_err);
+    REQUIRE(res.l_max == l_max_expected);
+    REQUIRE(res.n_checks > mf.nkpts_ibz()); // more than the identity at each k
+    REQUIRE(res.rel_err < 1e-10);
     comm.barrier();
   };
 

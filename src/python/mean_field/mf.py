@@ -168,20 +168,17 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
 
 
 def unfold_mf(mf, prefix, outdir="./"):
-    """Write the full-BZ view of a symmetry-reduced mean-field system.
+    """Write the unfolded mean field of a symmetry-reduced mean-field system.
 
-    The view is a bdft mean-field written to ``{outdir}/{prefix}.h5`` with the
+    The unfolded mean field is a bdft mean-field written to ``{outdir}/{prefix}.h5`` with the
     k list of ``mf`` (same order, unfolded k vectors), the identity as its only
     symmetry and ``nkpts_ibz = nkpts``. Its orbitals at k are the IBZ orbitals
     rotated to k (conjugated at time-reversal k), i.e. the orbital gauge in
     which an IBZ calculation on ``mf`` is solved. The nonlocal projectors are
-    unfolded to the true projectors at each view k (G map, atom permutation,
-    D^l(R) in the convention of QE's ylmr2, phase exp(+i k'.T)), so the view gives
-    H0 and the nonlocal e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
-    Load it with
-    ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``.
-
-    ``nuclear_energy()`` of the view is 0 (as for any bdft file), not that of ``mf``.
+    unfolded to the projectors of the symmetric system at each k, so the unfolded
+    mean field gives H0 and the nonlocal e-ph vertex at any q. ``k_weight`` is
+    1/nkpts at every k.
+    Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``.
 
     Only symmorphic systems (``force_symmorphic``) with ``npol = 1`` and
     non-augmented orbitals are supported; ``mf`` must have ``nkpts_ibz < nkpts``.

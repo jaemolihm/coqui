@@ -141,11 +141,11 @@ namespace bdft_tests
       remove("Vq0.h5");
     }
   }
-  // THC collocation matrix X(is,k) of the full-BZ view (mf::unfold_mf, no symmetry) against that of its symmetry-reduced
+  // THC collocation matrix X(is,k) of the unfolded mean field (mf::unfold_mf, no symmetry) against that of its symmetry-reduced
   // parent, both built on the same interpolating points (pivot_file), for every k of qe_lih223_sym (incl. time-reversal k).
-  // The parent builds X(k) from its IBZ orbitals by rotation (conjugation at time-reversal k); the view reads rotated
-  // orbitals. A missing or doubled conjugation at a time-reversal k of the view gives an O(1) difference.
-  TEST_CASE("thc_unfold_view_collocation", "[methods]") {
+  // The parent builds X(k) from its IBZ orbitals by rotation (conjugation at time-reversal k); the unfolded mean field reads rotated
+  // orbitals. A missing or doubled conjugation at a time-reversal k of the unfolded mean field gives an O(1) difference.
+  TEST_CASE("thc_unfold_mf_collocation", "[methods]") {
     auto& mpi = utils::make_unit_test_mpi_context();
     auto& comm = mpi->comm;
     auto mf_ibz = std::make_shared<mf::MF>(mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type));
@@ -154,10 +154,10 @@ namespace bdft_tests
     auto trev = mf_ibz->kp_trev();
     REQUIRE(std::any_of(trev.begin(), trev.end(), [](bool b) { return b; }));
 
-    std::string view_prefix = "thc_view_mf", pivots = "thc_view_pivots.h5";
-    mf::unfold_mf(*mf_ibz, view_prefix + ".h5");
+    std::string unfold_prefix = "thc_unfold_mf", pivots = "thc_unfold_pivots.h5";
+    mf::unfold_mf(*mf_ibz, unfold_prefix + ".h5");
     comm.barrier();
-    auto mf_view = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", view_prefix, mf::h5_input_type));
+    auto mf_unfold = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type));
 
     int nIpts = mf_ibz->nbnd()*15;
     double ecut = mf_ibz->ecutrho();
@@ -173,28 +173,28 @@ namespace bdft_tests
       return pt;
     };
     thc_reader_t thc_ibz(mf_ibz, make_pt());
-    thc_reader_t thc_view(mf_view, make_pt());
-    REQUIRE(thc_ibz.Np() == thc_view.Np());
+    thc_reader_t thc_unfold(mf_unfold, make_pt());
+    REQUIRE(thc_ibz.Np() == thc_unfold.Np());
 
     double err_max = 0.0, err_noconj_max = 0.0;
     for (long is = 0; is < ns; ++is)
       for (long ik = 0; ik < nk; ++ik) {
         nda::array<ComplexType,2> Xi = thc_ibz.X(is, 0, ik);
-        nda::array<ComplexType,2> Xv = thc_view.X(is, 0, ik);
+        nda::array<ComplexType,2> X_unfold = thc_unfold.X(is, 0, ik);
         double nrm = nda::frobenius_norm(Xi);
-        err_max = std::max(err_max, nda::frobenius_norm(Xv - Xi) / nrm);
+        err_max = std::max(err_max, nda::frobenius_norm(X_unfold - Xi) / nrm);
         if (mf_ibz->kp_trev(ik))
-          err_noconj_max = std::max(err_noconj_max, nda::frobenius_norm(nda::conj(Xv) - Xi) / nrm);
+          err_noconj_max = std::max(err_noconj_max, nda::frobenius_norm(nda::conj(X_unfold) - Xi) / nrm);
       }
-    app_log(2, "thc_unfold_view_collocation: max ||X_view - X_ibz||/||X_ibz|| = {}, with conj at TR k = {}",
+    app_log(2, "thc_unfold_mf_collocation: max ||X_unfold - X_ibz||/||X_ibz|| = {}, with conj at TR k = {}",
             err_max, err_noconj_max);
     REQUIRE(err_max < 1e-12);
-    // sensitivity: conjugating X of the view at time-reversal k would be O(1) off
+    // sensitivity: conjugating X of the unfolded mean field at time-reversal k would be O(1) off
     REQUIRE(err_noconj_max > 0.1);
 
     comm.barrier();
     if (comm.root()) {
-      remove((view_prefix + ".h5").c_str());
+      remove((unfold_prefix + ".h5").c_str());
       remove(pivots.c_str());
     }
     comm.barrier();

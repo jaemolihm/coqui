@@ -533,14 +533,14 @@ namespace {
     std::vector<std::vector<int>> l_of;  // [species][projector within the atom]
   };
 
-  // Writes the pseudopotential of mf in bdft format to fn; false if mf has none.
-  bool write_ibz_pseudopot(MF &mf, std::string const& fn) {
+  // Writes the pseudopotential of mf in bdft format to filename; false if mf has none.
+  bool write_ibz_pseudopot(MF &mf, std::string const& filename) {
     {
-      h5::file f_ibz(fn, 'w');
+      h5::file f_ibz(filename, 'w');
       h5::group g_ibz(f_ibz);
       bdft::detail::write_pseudopot(mf, g_ibz);
     }
-    h5::file f_ibz(fn, 'r');
+    h5::file f_ibz(filename, 'r');
     return h5::group(f_ibz).has_subgroup("Hamiltonian");
   }
 
@@ -569,38 +569,34 @@ namespace {
 
   // Action of one symmetry operation on the projectors
   struct op_projector_t {
-    nda::array<int,1> inv_perm;  // block b of the view <- block inv_perm(b) of mf
+    nda::array<int,1> inv_perm;  // block b of the unfolded mean field <- block inv_perm(b) of mf
     nda::array<long,2> T;        // T(a,:) = R tau_a - tau_perm(a)
     std::array<nda::array<double,2>,4> D;  // D^l(R)
   };
-  op_projector_t make_op_projector(MF const& mf, nda::array<double,2> const& tau, utils::symm_op const& S, bool rotate_m) {
+  op_projector_t make_op_projector(MF const& mf, nda::array<double,2> const& tau, utils::symm_op const& S) {
     long nat = mf.number_of_atoms();
     auto m = atom_map(mf, tau, S);
     op_projector_t op{nda::array<int,1>(nat), m.T, {}};
     for (int a=0; a<nat; ++a) op.inv_perm(m.perm(a)) = a;
     auto Rc = cartesian_rotation(mf, S);
-    for (int l=0; l<4; ++l) {
-      if (rotate_m) op.D[l] = utils::ylm_rotation_qe(l, Rc);
-      else { op.D[l] = nda::zeros<double>(2*l+1, 2*l+1); for (int m2=0; m2<2*l+1; ++m2) op.D[l](m2,m2) = 1.0; }
-    }
+    for (int l=0; l<4; ++l) op.D[l] = utils::ylm_rotation_qe(l, Rc);
     return op;
   }
 
-  // Projectors at the view k' (crystal coordinates kview) from the projectors of the IBZ k of the operation; the
+  // Projectors at the unfolded k' (crystal coordinates kunfold) from the projectors of the IBZ k of the operation; the
   // projector (atom a, radial function, l, m) at the IBZ k is
   //   beta_a,lm(q) = (-i)^l F(|q|) Y_lm(q^) exp(-i q.tau_a),  q = k+G   (QE vkb)
-  // and the true projector of the symmetric system at the view k' = R k (R the cartesian rotation of the operation;
+  // and the true projector of the symmetric system at the unfolded k' = R k (R the cartesian rotation of the operation;
   // k' = -R k with q' = -R q at time-reversal k, where beta(-q) = conj(beta(q))) on the atom b = perm(a),
   // R tau_a = tau_b + T, is, with q' = R q (G' = G.Rinv):
   //   beta_b,lm(q') = exp(+i k'.T) sum_m' D^l(R)(m,m') beta_a,lm'(q),   Y_lm(R q^) = sum_m' D^l(m,m') Y_lm'(q^),
   // (conj of beta_a at time-reversal k; D^l real; (-i)^l commutes with D^l). D^l is in the QE convention
-  // (utils::ylm_rotation_qe), and the atom blocks are permuted, so block b of the view holds the projectors
-  // centred on atom b. Symmorphic operations only. phase_sign = +1 is the phase exp(+i k'.T) above; 0 and -1 (no phase,
-  // exp(-i k'.T)) are negative controls of the tests.
+  // (utils::ylm_rotation_qe), and the atom blocks are permuted, so block b of the unfolded mean field holds the projectors
+  // centred on atom b. Symmorphic operations only.
   void unfold_projectors_k(projector_layout_t const& L, op_projector_t const& op, bool trev,
-                           nda::array<double,1> const& kview, int phase_sign, long npw,
-                           nda::array<ComplexType,2> const& proj_ibz, nda::array<ComplexType,2> &proj_view) {
-    proj_view() = 0.0;
+                           nda::array<double,1> const& kunfold, long npw,
+                           nda::array<ComplexType,2> const& proj_ibz, nda::array<ComplexType,2> &proj_unfold) {
+    proj_unfold() = 0.0;
     for (int b=0; b<L.nat; ++b) {
       int a = op.inv_perm(b);
       long n_proj = L.nh(L.ityp(b));
@@ -608,8 +604,8 @@ namespace {
                    "unfold_mf: inconsistent projector layout.");
       // exp(+i k'.T), T = R tau_a - tau_b
       double kT = 0.0;
-      for (int d=0; d<3; ++d) kT += kview(d) * double(op.T(a,d));
-      ComplexType phase = std::exp(ComplexType(0.0, 2.0*std::acos(-1.0)*phase_sign*kT));
+      for (int d=0; d<3; ++d) kT += kunfold(d) * double(op.T(a,d));
+      ComplexType phase = std::exp(ComplexType(0.0, 2.0*std::acos(-1.0)*kT));
       auto const& lv = L.l_of[L.ityp(b)];
       for (long j0=0; j0<n_proj; j0 += 2*lv[j0]+1) {
         int l = lv[j0];
@@ -621,15 +617,14 @@ namespace {
               ComplexType x = proj_ibz(L.ofs(a)+j0+m2, i);
               v += D(m1,m2) * (trev ? std::conj(x) : x);
             }
-            proj_view(L.ofs(b)+j0+m1, i) = phase * v;
+            proj_unfold(L.ofs(b)+j0+m1, i) = phase * v;
           }
       }
     }
   }
 } // anonymous
 
-  namespace detail {
-  void unfold_mf_impl(MF &mf, std::string fn, bool rotate_m, int phase_sign) {
+  void unfold_mf(MF &mf, std::string filename) {
     auto mpi = mf.mpi();
     utils::check(mf.nkpts() != mf.nkpts_ibz(),
                  "unfold_mf: the mean-field system has no symmetry reduction (nkpts = nkpts_ibz = {}).", mf.nkpts());
@@ -637,7 +632,7 @@ namespace {
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
 
-    bdft::bdft_system sys(mf, fn, false);
+    bdft::bdft_system sys(mf, filename, false);
     {
       // full-BZ k list in the order of mf, identity as the only symmetry
       nda::array<double,2> latt(3,3), recv(3,3);
@@ -655,7 +650,7 @@ namespace {
       symm_list.emplace_back(utils::symm_op{E, E, ft});
       sys._symm = bz_symm(mpi->comm, true, latt, recv, kp_grid, kpts, symm_list, false);
     }
-    // k_weight of mf is per IBZ k; the view has nkpts equivalent k
+    // k_weight of mf is per IBZ k; the unfolded mean field has nkpts equivalent k
     sys.k_weight = nda::array<double,1>(mf.nkpts(), 1.0/double(mf.nkpts()));
     long nkpts = mf.nkpts();
     utils::check(sys._symm.nkpts == nkpts and sys._symm.nkpts_ibz == nkpts,
@@ -670,7 +665,7 @@ namespace {
     std::optional<h5::file> file;
     std::optional<h5::group> ogrp;
     if (comm.root()) {
-      file.emplace(fn, 'w');
+      file.emplace(filename, 'w');
       h5::group grp(*file);
       sys.save(grp);
       ogrp.emplace(grp.open_group("Orbitals"));
@@ -696,9 +691,9 @@ namespace {
     if (comm.root()) {
       h5::group grp(*file);
       grp.create_group("Hamiltonian");
-      // The IBZ pseudopotential is written to a scratch file, then copied to the view with its nonlocal
+      // The IBZ pseudopotential is written to a scratch file, then copied to the unfolded mean field with its nonlocal
       // projectors unfolded (unfold_projectors_k).
-      std::string fn_ibz = fn + ".pp_ibz.tmp";
+      std::string fn_ibz = filename + ".pp_ibz.tmp";
       bool has_pp = write_ibz_pseudopot(mf, fn_ibz);
       if (has_pp) {
         hamilt::pseudopot_to_h5(mf.fft_grid_dim(), grp, fn_ibz, mf::h5_input_type, false);
@@ -711,30 +706,30 @@ namespace {
 
         auto tau = atomic_positions_crystal(mf);
         auto L = read_projector_layout(mf, tgrp_ibz, tau);
-        nda::array<int,1> npw_view(nkpts);
-        for (long ik=0; ik<nkpts; ++ik) npw_view(ik) = L.npw_ibz(mf.kp_to_ibz(ik));
+        nda::array<int,1> npw_unfold(nkpts);
+        for (long ik=0; ik<nkpts; ++ik) npw_unfold(ik) = L.npw_ibz(mf.kp_to_ibz(ik));
         h5::h5_write_attribute(tgrp, "number_of_kpoints", int(nkpts));
         h5::h5_write_attribute(tgrp, "max_npw", L.npwx);
-        nda::h5_write(tgrp, "npw", npw_view);
+        nda::h5_write(tgrp, "npw", npw_unfold);
 
         auto symm_list = mf.symm_list();
         std::vector<op_projector_t> ops;
-        for (auto const& S : symm_list) ops.push_back(make_op_projector(mf, tau, S, rotate_m));
+        for (auto const& S : symm_list) ops.push_back(make_op_projector(mf, tau, S));
         nda::stack_array<double,3> Gs;
         Gs() = 0.0;
-        nda::array<ComplexType,2> proj_ibz(L.nkb, L.npwx), proj_view(L.nkb, L.npwx);
+        nda::array<ComplexType,2> proj_ibz(L.nkb, L.npwx), proj_unfold(L.nkb, L.npwx);
         for (long ik=0; ik<nkpts; ++ik) {
           long ik_ibz = mf.kp_to_ibz(ik);
           long isym = mf.kp_symm(ik);
-          nda::array<int,2> mill(npw_view(ik), 3);
+          nda::array<int,2> mill(npw_unfold(ik), 3);
           nda::h5_read(tgrp_ibz, "miller_k"+std::to_string(ik_ibz), mill);
           utils::transform_miller_indices(mf.kp_trev(ik), symm_list[isym], Gs, mill);
           nda::h5_write(tgrp, "miller_k"+std::to_string(ik), mill);
 
           nda::h5_read(tgrp_ibz, "projector_k"+std::to_string(ik_ibz), proj_ibz);
-          nda::array<double,1> kview(mf.kpts_crystal(ik));
-          unfold_projectors_k(L, ops[isym], mf.kp_trev(ik), kview, phase_sign, npw_view(ik), proj_ibz, proj_view);
-          nda::h5_write(tgrp, "projector_k"+std::to_string(ik), proj_view);
+          nda::array<double,1> kunfold(mf.kpts_crystal(ik));
+          unfold_projectors_k(L, ops[isym], mf.kp_trev(ik), kunfold, npw_unfold(ik), proj_ibz, proj_unfold);
+          nda::h5_write(tgrp, "projector_k"+std::to_string(ik), proj_unfold);
         }
       }
       std::filesystem::remove(fn_ibz);
@@ -744,7 +739,8 @@ namespace {
     comm.barrier();
   }
 
-  projector_residual_t projector_little_group_residual(MF &mf, std::string fn_scratch, bool rotate_m, int phase_sign) {
+  namespace detail {
+  projector_residual_t projector_little_group_residual(MF &mf, std::string fn_scratch) {
     auto& comm = mf.mpi()->comm;
     double rel_err = 0.0;
     long n_checks = 0;
@@ -762,10 +758,10 @@ namespace {
       for (auto const& lv : L.l_of) for (int l : lv) l_max = std::max(l_max, l);
       auto symm_list = mf.symm_list();
       std::vector<op_projector_t> ops;
-      for (auto const& S : symm_list) ops.push_back(make_op_projector(mf, tau, S, rotate_m));
+      for (auto const& S : symm_list) ops.push_back(make_op_projector(mf, tau, S));
       nda::stack_array<double,3> Gs;
       Gs() = 0.0;
-      nda::array<ComplexType,2> proj_ibz(L.nkb, L.npwx), proj_view(L.nkb, L.npwx);
+      nda::array<ComplexType,2> proj_ibz(L.nkb, L.npwx), proj_unfold(L.nkb, L.npwx);
       for (long ik=0; ik<mf.nkpts_ibz(); ++ik) {
         utils::check(mf.kp_to_ibz(ik) == ik, "projector_little_group_residual: IBZ k-points are not the first nkpts_ibz.");
         long npw = L.npw_ibz(ik);
@@ -776,29 +772,29 @@ namespace {
         for (long i=0; i<npw; ++i) index_of[{mill(i,0), mill(i,1), mill(i,2)}] = i;
         for (long isym=0; isym<long(symm_list.size()); ++isym)
           for (int trev=0; trev<2; ++trev) {
-            // view k' = (+-) k.Rinv (G' = G.Rinv); only the operations with k' = k + G0 map the k to itself
-            nda::array<double,1> kview(3);
+            // unfolded k' = (+-) k.Rinv (G' = G.Rinv); only the operations with k' = k + G0 map the k to itself
+            nda::array<double,1> kunfold(3);
             std::array<int,3> G0;
             bool little = true;
             for (int d=0; d<3; ++d) {
-              kview(d) = 0.0;
-              for (int e=0; e<3; ++e) kview(d) += mf.kpts_crystal(ik, e) * symm_list[isym].Rinv(e,d);
-              if (trev) kview(d) = -kview(d);
-              double dk = kview(d) - mf.kpts_crystal(ik, d);
+              kunfold(d) = 0.0;
+              for (int e=0; e<3; ++e) kunfold(d) += mf.kpts_crystal(ik, e) * symm_list[isym].Rinv(e,d);
+              if (trev) kunfold(d) = -kunfold(d);
+              double dk = kunfold(d) - mf.kpts_crystal(ik, d);
               G0[d] = int(std::lround(dk));
               if (std::abs(dk - G0[d]) > 1e-8) little = false;
             }
             if (not little) continue;
-            nda::array<int,2> mill_v(mill);
-            utils::transform_miller_indices(bool(trev), symm_list[isym], Gs, mill_v);
-            unfold_projectors_k(L, ops[isym], bool(trev), kview, phase_sign, npw, proj_ibz, proj_view);
-            // the view projector at q' = k' + G' is the stored one at k + G, G = G' + G0
+            nda::array<int,2> mill_unfold(mill);
+            utils::transform_miller_indices(bool(trev), symm_list[isym], Gs, mill_unfold);
+            unfold_projectors_k(L, ops[isym], bool(trev), kunfold, npw, proj_ibz, proj_unfold);
+            // the unfolded projector at q' = k' + G' is the stored one at k + G, G = G' + G0
             double err2 = 0.0, ref2 = 0.0;
             for (long i=0; i<npw; ++i) {
-              auto it = index_of.find({mill_v(i,0)+G0[0], mill_v(i,1)+G0[1], mill_v(i,2)+G0[2]});
+              auto it = index_of.find({mill_unfold(i,0)+G0[0], mill_unfold(i,1)+G0[1], mill_unfold(i,2)+G0[2]});
               utils::check(it != index_of.end(), "projector_little_group_residual: rotated G is outside the sphere.");
               for (long j=0; j<L.nkb; ++j) {
-                err2 += std::norm(proj_view(j,i) - proj_ibz(j,it->second));
+                err2 += std::norm(proj_unfold(j,i) - proj_ibz(j,it->second));
                 ref2 += std::norm(proj_ibz(j,it->second));
               }
             }
@@ -815,6 +811,4 @@ namespace {
     return {rel_err, n_checks, l_max};
   }
   } // detail
-
-  void unfold_mf(MF &mf, std::string fn) { detail::unfold_mf_impl(mf, fn, true, 1); }
 } // mf

@@ -17,7 +17,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==========================================================================
 
-Tests of mean_field.unfold_mf and post_proc.unfold_bz(..., mf_full_bz=) on qe_lih223_sym.
+Tests of mean_field.unfold_mf and post_proc.unfold_bz(..., mf_unfold=) on qe_lih223_sym.
 
 The input guards of chkpt::unfold_scf end in MPI_Abort (utils::check), so they are run out of process:
 this file is also the runner,  mpirun -np 1 python test_unfold_bz.py <checkpoint prefix>  (exit status 0 = accepted).
@@ -38,12 +38,12 @@ from coqui.utils.tests.test_coqui_env import mpi
 from coqui.mean_field.tests.test_qe import construct_qe_mf
 from coqui._lib.utils_module import utest_filename
 
-VIEW = "unfold_view"
+UNFOLD_PREFIX = "unfold_mf_out"
 
 
 def _unfold(mpi_ctx, mf, in_prefix, out_prefix):
-    view = coqui.make_mf(mpi_ctx, {"prefix": VIEW, "outdir": "./"}, "bdft")
-    coqui.post_proc.unfold_bz(mf, {"prefix": in_prefix, "output": out_prefix}, mf_full_bz=view)
+    mf_unfold = coqui.make_mf(mpi_ctx, {"prefix": UNFOLD_PREFIX, "outdir": "./"}, "bdft")
+    coqui.post_proc.unfold_bz(mf, {"prefix": in_prefix, "output": out_prefix}, mf_unfold=mf_unfold)
 
 
 def _run_unfold_in_process(in_prefix):
@@ -56,7 +56,7 @@ def _run_unfold_mf_in_process(scratch):
     # unfold_mf on the fixture copy in the directory scratch (see _scratch_fixture)
     mpi_ctx = coqui.MpiHandler()
     mf = coqui.make_mf(mpi_ctx, {"prefix": "pwscf", "outdir": scratch, "filetype": "h5"}, "qe")
-    coqui.mean_field.unfold_mf(mf, VIEW, "./")
+    coqui.mean_field.unfold_mf(mf, UNFOLD_PREFIX, "./")
     if mpi_ctx.root():
         print("UNFOLD_OK")
 
@@ -90,7 +90,7 @@ def _runner(in_prefix, mode="unfold"):
 
 
 def test_unfold_mf_and_unfold_bz(mpi):
-    # Smoke test of the c2py overloads (mean_field.unfold_mf, post_proc.unfold_bz with mf_full_bz) on a GW checkpoint of
+    # Smoke test of the c2py overloads (mean_field.unfold_mf, post_proc.unfold_bz with mf_unfold) on a GW checkpoint of
     # qe_lih223_sym, and of the input guards of chkpt::unfold_scf against a copy of that checkpoint with a swapped
     # k list (guard on mf_ibz vs the checkpoint) and with a G, Sigma and tau mesh of one point fewer than the grid rebuilt from beta, wmax, prec (read_iaft validates the stored tau mesh against the grid rebuilt from the metadata, which is the
     # guard that keeps G_tskij, sized from the stored tau mesh, consistent with the IAFT written to the output).
@@ -102,9 +102,9 @@ def test_unfold_mf_and_unfold_bz(mpi):
                   "iter_alg": {"alg": "damping", "mixing": 0.7}}, h_int=thc)
     mpi.barrier()
 
-    coqui.mean_field.unfold_mf(mf, VIEW, "./")
+    coqui.mean_field.unfold_mf(mf, UNFOLD_PREFIX, "./")
     mpi.barrier()
-    assert os.path.exists(VIEW + ".h5")
+    assert os.path.exists(UNFOLD_PREFIX + ".h5")
     _unfold(mpi, mf, "unfold_gw", "unfold_gw_full")
     mpi.barrier()
 
@@ -145,7 +145,7 @@ def test_unfold_mf_and_unfold_bz(mpi):
     mpi.barrier()
 
     if mpi.root():
-        for fn in files + [VIEW + ".h5"]:
+        for fn in files + [UNFOLD_PREFIX + ".h5"]:
             if os.path.exists(fn):
                 os.remove(fn)
         for fn in ("unfold_kswap_runner_out.mbpt.h5", "unfold_truncG_runner_out.mbpt.h5"):
@@ -183,15 +183,15 @@ def test_unfold_mf_guards(mpi):
         assert rc != 0 and "cannot assign an angular momentum" in out, out
         for d in ("unfold_guard_ok", "unfold_guard_l", "unfold_guard_flip"):
             shutil.rmtree(d, ignore_errors=True)
-        if os.path.exists(VIEW + ".h5"):
-            os.remove(VIEW + ".h5")
+        if os.path.exists(UNFOLD_PREFIX + ".h5"):
+            os.remove(UNFOLD_PREFIX + ".h5")
     mpi.barrier()
 
 
 @pytest.mark.parametrize("system", ["qe_lih223_sym", "qe_si333_sym"])
-def test_hf_restart_on_view(mpi, system):
-    # End-to-end gauge gate of the full-BZ view (orbitals, THC collocation, H0 from the unfolded projectors, unfolded
-    # checkpoint): one HF iteration restarted on the view from the unfolded checkpoint against the unfolded result of
+def test_hf_restart_on_unfold(mpi, system):
+    # End-to-end gauge gate of the unfolded mean field (orbitals, THC collocation, H0 from the unfolded projectors, unfolded
+    # checkpoint): one HF iteration restarted on the unfolded mean field from the unfolded checkpoint against the unfolded result of
     # the same iteration restarted on the IBZ system (both fixtures have time-reversal k; the conjugation of the unfolded
     # projectors at time-reversal k changes F only for qe_si333_sym, whose projectors are complex there). F_skij is compared in
     # L2 norm; the two runs differ by the THC fit of each system (separate fits, fit not run-to-run reproducible),
@@ -207,38 +207,38 @@ def test_hf_restart_on_view(mpi, system):
     if mpi.root():
         shutil.copy("uh_ibz.mbpt.h5", "uh_start.mbpt.h5")
     mpi.barrier()
-    coqui.mean_field.unfold_mf(mf, VIEW, "./")
+    coqui.mean_field.unfold_mf(mf, UNFOLD_PREFIX, "./")
     mpi.barrier()
-    view = coqui.make_mf(mpi, {"prefix": VIEW, "outdir": "./"}, "bdft")
-    # starting checkpoint on the view
-    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_start", "output": "uh_view"}, mf_full_bz=view)
-    # one more iteration, on the IBZ system and on the view
+    mf_unfold = coqui.make_mf(mpi, {"prefix": UNFOLD_PREFIX, "outdir": "./"}, "bdft")
+    # starting checkpoint on the unfolded mean field
+    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_start", "output": "uh_unfold"}, mf_unfold=mf_unfold)
+    # one more iteration, on the IBZ system and on the unfolded mean field
     coqui.run_hf(dict(hf, restart=True, prefix="uh_ibz", niter=1), h_int=thc)
-    thc_view = coqui.make_thc_coulomb(view, dict(thc_params, ecut=view.ecutrho()))
-    coqui.run_hf(dict(hf, restart=True, prefix="uh_view", niter=1), h_int=thc_view)
+    thc_unfold = coqui.make_thc_coulomb(mf_unfold, dict(thc_params, ecut=mf_unfold.ecutrho()))
+    coqui.run_hf(dict(hf, restart=True, prefix="uh_unfold", niter=1), h_int=thc_unfold)
     mpi.barrier()
-    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_ibz", "output": "uh_ibz_full"}, mf_full_bz=view)
+    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_ibz", "output": "uh_ibz_full"}, mf_unfold=mf_unfold)
     mpi.barrier()
 
     err = None
     if mpi.root():
-        with h5py.File("uh_ibz_full.mbpt.h5", "r") as fa, h5py.File("uh_view.mbpt.h5", "r") as fb:
+        with h5py.File("uh_ibz_full.mbpt.h5", "r") as fa, h5py.File("uh_unfold.mbpt.h5", "r") as fb:
             assert fa["scf/final_iter"][()] == fb["scf/final_iter"][()] == 3
             Fa = _final_iter_group(fa)["F_skij"][...]
             Fb = _final_iter_group(fb)["F_skij"][...]
             Fa = Fa[..., 0] + 1j * Fa[..., 1] if Fa.dtype != complex and Fa.shape[-1] == 2 else Fa
             Fb = Fb[..., 0] + 1j * Fb[..., 1] if Fb.dtype != complex and Fb.shape[-1] == 2 else Fb
             err = np.linalg.norm(Fa - Fb) / np.linalg.norm(Fb)
-            print(f"HF restart on the view vs unfolded IBZ restart: |dF|/|F| = {err:.3e}")
+            print(f"HF restart on the unfolded mean field vs unfolded IBZ restart: |dF|/|F| = {err:.3e}")
     err = MPI.COMM_WORLD.bcast(err, root=0)
     assert err < 2e-3
     mpi.barrier()
     if mpi.root():
-        for fn in ("uh_ibz", "uh_start", "uh_view", "uh_ibz_full"):
+        for fn in ("uh_ibz", "uh_start", "uh_unfold", "uh_ibz_full"):
             if os.path.exists(fn + ".mbpt.h5"):
                 os.remove(fn + ".mbpt.h5")
-        if os.path.exists(VIEW + ".h5"):
-            os.remove(VIEW + ".h5")
+        if os.path.exists(UNFOLD_PREFIX + ".h5"):
+            os.remove(UNFOLD_PREFIX + ".h5")
     mpi.barrier()
 
 

@@ -100,48 +100,38 @@ namespace methods {
 
 namespace mf {
   /**
-   * Write a full-BZ view of a symmetry-reduced mean-field system as a bdft h5 file.
+   * Write the unfolded mean field of a symmetry-reduced mean-field system as a bdft h5 file.
    *
-   * The view has the k list of mf (same order, unfolded k vectors), the identity as its only
-   * symmetry, no time reversal and nkpts_ibz = nkpts. Its orbitals at k are those returned by
-   * mf.get_orbital_set('w', is, k, ...), i.e. the IBZ orbitals rotated to k (conjugated at
-   * time-reversal k), so the view is in the orbital gauge in which an IBZ calculation on mf is solved.
-   * The pseudopotential group is copied from mf with its nonlocal projectors unfolded to the true projectors of the
-   * symmetric system at each view k: G' = G.Rinv (conjugated with G' = -G.Rinv at time-reversal k), the per-atom blocks
-   * permuted by the atom map R tau_a = tau_b + T, the m components of each (radial function, l) shell rotated by
-   * D^l(R) in the convention of QE's ylmr2 (utils::ylm_rotation_qe), and the phase exp(+i k'.T) applied. The angular
-   * momentum of each projector is inferred from the stored projectors (aborts if it cannot be decided). So the view
-   * gives the e-ph vertex of the symmetric system at any q. Checked: against a no-symmetry calculation for LiH (s and p
-   * projectors, identity atom map); for SrVO3 (l = 2 projectors, permuted O atoms, improper operations) by the invariance
-   * of the projectors of each IBZ k under its little group (detail::projector_little_group_residual).
-   * k_weight of the view is 1/nkpts at every k.
-   * nuclear_energy() of the view is 0 (as for any bdft file), not that of mf.
+   * The file has the k list of mf (same order, unfolded k vectors), the identity as its only symmetry, no time
+   * reversal and nkpts_ibz = nkpts. Its orbitals at k are those returned by mf.get_orbital_set('w', is, k, ...),
+   * i.e. the IBZ orbitals rotated to k (conjugated at time-reversal k), the orbital gauge in which an IBZ
+   * calculation on mf is solved. The pseudopotential group is copied from mf with its nonlocal projectors unfolded
+   * to the projectors of the symmetric system at each k. k_weight is 1/nkpts at every k.
    * Only symmorphic systems (the loader rejects fractional translations) with npol = 1 and non-augmented orbitals
    * are supported.
    *
-   * @param mf - [INPUT] mean-field instance with nkpts_ibz < nkpts
-   * @param fn - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
+   * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
+   * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
    */
-  void unfold_mf(MF &mf, std::string fn);
+  void unfold_mf(MF &mf, std::string filename);
 
   /** Cartesian orthogonal matrix of the operation S (stored in crystal coordinates) of mf, acting on column vectors. */
   nda::matrix<double> cartesian_rotation(MF const& mf, utils::symm_op const& S);
 
   namespace detail {
-    /** unfold_mf with the rotation of the m components (rotate_m) and the per-atom phase exp(i phase_sign 2pi k'.T)
-     *  switchable: rotate_m = true, phase_sign = +1 is unfold_mf; rotate_m = false or phase_sign in {0, -1} are
-     *  negative controls for the tests. */
-    void unfold_mf_impl(MF &mf, std::string fn, bool rotate_m, int phase_sign);
-
     struct projector_residual_t {
       double rel_err;  // largest relative L2 error over the checks
       long n_checks;   // number of (IBZ k, operation, time reversal) with k' = k + G0
       int l_max;       // largest angular momentum assigned to a projector
     };
-    /** For every IBZ k and every operation (with or without time reversal) that maps k to itself modulo G, the
-     *  unfolding of the stored projectors of k (the code of unfold_mf) is compared with the stored projectors at the
-     *  rotated G, relative L2 norm. fn_scratch is a scratch file (removed). Same on all ranks. */
-    projector_residual_t projector_little_group_residual(MF &mf, std::string fn_scratch, bool rotate_m, int phase_sign);
+    /** Test-only helper. For every IBZ k and every operation S (with or without time reversal) with S k = k + G0,
+     *  the stored projectors of k, unfolded with the code of unfold_mf, are compared with the stored projectors at
+     *  the rotated G, because
+     *    beta(k', G R^-1) = e^{i k'.T} D^l beta(k, G),   k' = k + G0,
+     *  (T the lattice vector of the atom map R tau_a = tau_b + T, block b <- atom a; D^l the rotation of the (l, m) components; beta(k, G) conjugated at time reversal).
+     *  Returns the largest relative L2 error, the number of checks and the largest l. It lives in unfold_bz.cpp
+     *  because unfold_projectors_k is internal. fn_scratch is a scratch file (removed). Same on all ranks. */
+    projector_residual_t projector_little_group_residual(MF &mf, std::string fn_scratch);
   }
 } // mf
 
