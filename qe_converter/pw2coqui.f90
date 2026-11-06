@@ -774,6 +774,8 @@ subroutine write_pp(h5_f)
         if ( ipsour .NE. ionode_id ) then 
           call mp_get ( vkb_g_root(:,ikb), vkb_g, mpime, ionode_id, ipsour, ikb, &
             world_comm )
+        else if ( ionode ) then  ! k owned by the pool of ionode
+          vkb_g_root(:,ikb) = vkb_g(:)
         endif
       else
         vkb_g = ( 0.0D0, 0.0D0 )
