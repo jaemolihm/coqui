@@ -158,20 +158,21 @@ TEST_CASE("eph_bare_vertex", "[eph]")
 }
 
 /**
- * Bare e-ph vertex on the unfolded mean field of a symmetric system (mf::unfold_mf, projectors unfolded with D^l(S) and the
- * per-atom phase) against the one on a no-symmetry calculation of the same system (separate QE run, so its orbital
- * gauge, band phases and k order are its own), at q = 0 and q != 0. Compared through the correlation matrix of the modes
+ * Bare e-ph vertex on the unfolded mean field of a symmetric system (mf::unfold_mf, projectors copied from the pw2coqui
+ * full-BZ group with the Miller shift -G0) against the one on a no-symmetry calculation of the same system (separate QE
+ * run, so its orbital gauge, band phases and k order are its own), at q = 0 and q != 0. Compared through the correlation
+ * matrix of the modes
  *   C(mode1,mode2) = sum_{s,k} sum_{m,n in occ} conj(g(s,mode1,k,m,n)) g(s,mode2,k,m,n)
  * which is invariant under unitary rotations of the occupied manifold at k and k+q and under the k order. The full
- * matrix is compared, so the cross-atom blocks (Li-H), which see the per-atom phase exp(+i k'.T) at q != 0, are included
- * (the diagonal sum|g|^2 does not). At q = 0 the phase cancels inside each g, so the cross-atom block at q = 0 does not
- * test it; the q != 0 points do. Nonlocal part only: no symmetric fixture carries the vloc_radial group that the local
- * part needs, so the local part of the unfolded mean field (compute_bare_eph_vertex) is not tested here.
- * Measured negative controls (unfold_mf with the rotation of the m components switched off, with the phase
- * switched off, with the conjugated phase exp(-i k'.T)): without D^l the rel err of C is 0.10-0.32 at the q != 0 points
- * of LiH; without the phase the cross-atom block of C is off by ~1e-4 (relative to |C|); the conjugated phase on
- * lih223 is off by 7e-4 of |C| (it differs from the phase only if k'.T is not 0 or 1/2 mod 1, so lih222 cannot see it).
- * At q != 0 the number of k whose k and k+q are unfolded by different operations is required to be non-zero.
+ * matrix is compared, including the cross-atom blocks (Li-H). Nonlocal part only: no symmetric fixture carries the
+ * vloc_radial group that the local part needs, so the local part of the unfolded mean field (compute_bare_eph_vertex)
+ * is not tested here.
+ * The rel err of C is 8e-9 (two independent QE runs: the orbitals of the two runs agree to the diagonalization
+ * threshold); the tolerances are 10x that.
+ * Measured negative controls (rel err of C at q = 0, lih222 / lih223): unfold_mf without the Miller shift -G0 (4 of the 8
+ * k of lih222 and 1 of the 12 k of lih223 have G0 != 0): 0.17 / 0.068; unfold_mf copying the projectors of the IBZ k
+ * instead of those of the matched full-BZ k: 0.078 / 0.092.
+ * At q != 0 the number of k whose k and k+q have different symmetry operations is required to be non-zero.
  */
 TEST_CASE("unfold_mf_eph_vertex", "[eph]")
 {
@@ -240,8 +241,8 @@ TEST_CASE("unfold_mf_eph_vertex", "[eph]")
               prefix, qa[0], qa[1], qa[2], eC, nC, x_n, x_err, n_diff_ops, mf_sym.nkpts());
       if(q0) REQUIRE(x_n > 1e-6 * nC); // the cross-atom block is not zero at q = 0 (it is ~1e-10 at the q != 0 points below)
       else REQUIRE(n_diff_ops > 0);
-      REQUIRE(eC < 1e-6);
-      REQUIRE(x_err < 1e-6 * nC);
+      REQUIRE(eC < 1e-7);
+      REQUIRE(x_err < 1e-7 * nC);
     }
     comm.barrier();
     if(comm.root()) std::filesystem::remove(prefix + ".h5");

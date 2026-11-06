@@ -156,32 +156,17 @@ def test_unfold_mf_and_unfold_bz(mpi):
 
 def test_unfold_mf_guards(mpi):
     # Out-of-process (utils::check calls MPI_Abort). unfold_mf on an unmodified copy of qe_lih223_sym is accepted
-    # (control), and rejected on a copy of it with the Li projectors 1 and 2 swapped at every k (the angular momentum
-    # of the projectors cannot be assigned: projector 1 is an s radial function, projector 2 the first p function), and
-    # on a copy with the sign of the first p function (projector 2) flipped at every k: that function is still
-    # F(|q|) Y_1m(q) up to a constant sign, so a check of each m on its own accepts it, while the p shell is no longer
-    # parallel to (Y_10, Y_11, Y_1-1) at any q.
-    def swap_projectors(f):
-        g = f["Hamiltonian/ncpp"]
-        for ik in range(int(g.attrs["number_of_kpoints"])):
-            d = g["projector_k%d" % ik]
-            tmp = d[1, ...].copy()
-            d[1, ...] = d[2, ...]
-            d[2, ...] = tmp
-
-    def flip_projector(f):
-        g = f["Hamiltonian/ncpp"]
-        for ik in range(int(g.attrs["number_of_kpoints"])):
-            g["projector_k%d" % ik][2, ...] = -g["projector_k%d" % ik][2, ...]
+    # (control), and rejected, with the message that asks for add_pp_fullbz, on a copy without the group
+    # Hamiltonian/ncpp/fullbz.
+    def drop_fullbz(f):
+        del f["Hamiltonian/ncpp/fullbz"]
 
     if mpi.root():
         rc, out = _runner(_scratch_fixture("unfold_guard_ok", lambda f: None), mode="unfold_mf")
         assert rc == 0 and "UNFOLD_OK" in out, out
-        rc, out = _runner(_scratch_fixture("unfold_guard_l", swap_projectors), mode="unfold_mf")
-        assert rc != 0 and "cannot assign an angular momentum" in out, out
-        rc, out = _runner(_scratch_fixture("unfold_guard_flip", flip_projector), mode="unfold_mf")
-        assert rc != 0 and "cannot assign an angular momentum" in out, out
-        for d in ("unfold_guard_ok", "unfold_guard_l", "unfold_guard_flip"):
+        rc, out = _runner(_scratch_fixture("unfold_guard_nofullbz", drop_fullbz), mode="unfold_mf")
+        assert rc != 0 and "has no full-BZ projectors" in out and "add_pp_fullbz" in out, out
+        for d in ("unfold_guard_ok", "unfold_guard_nofullbz"):
             shutil.rmtree(d, ignore_errors=True)
         if os.path.exists(UNFOLD_PREFIX + ".h5"):
             os.remove(UNFOLD_PREFIX + ".h5")

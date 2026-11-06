@@ -618,22 +618,19 @@ TEST_CASE("pyscf_ovlp", "[hamilt]") {
 }
 */
 
-// Unfolded mean field written by mf::unfold_mf, whose nonlocal projectors are the IBZ ones unfolded (G map, conjugation at
-// time-reversal k, atom permutation, D^l(S) and the phase exp(+i k'.T)).
+// Unfolded mean field written by mf::unfold_mf, whose nonlocal projectors are copied from the full-BZ projectors of
+// pw2coqui (Hamiltonian/<pp_type>/fullbz, Miller indices shifted by -G0).
 // (1) H0 of the unfolded mean field (set_H0 on the unfolded mean field, with its own pseudopotential) against H0 of the IBZ system, copied from
 //     kp_to_ibz(k) and conjugated at time-reversal k. Without the conjugation at time-reversal k the comparison
 //     fails at the size of Im H0 (qe_lih223_sym and qe_si333_sym have time-reversal k, qe_lih222_sym does not).
 // (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the unfolded mean field against that
 //     of a no-symmetry calculation of the same system (separate QE run), k points matched by crystal coordinates. N_b
-//     is invariant under unitary rotations of the occupied manifold and does not involve the atom map of the unfolded mean field's
-//     own construction. All atom permutations of the LiH, Si and GaAs fixtures are the identity (Td/Oh operations fix the
-//     atoms); the atom permutation, D^l(S) and the phase are tested in unfold_mf_projector_little_group below and, for
-//     LiH, in the e-ph vertex test in test_eph.cpp (D^l(S) and the phase cancel in N_b).
+//     is invariant under unitary rotations of the occupied manifold.
 TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   auto& mpi = utils::make_unit_test_mpi_context();
   auto& comm = mpi->comm;
 
-  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name) {
+  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0) {
     long nspin = mf_sym.nspin(), nkpts = mf_sym.nkpts(), nkpts_ibz = mf_sym.nkpts_ibz(), nbnd = mf_sym.nbnd();
     long nat = mf_sym.number_of_atoms();
     mf::unfold_mf(mf_sym, prefix + ".h5");
@@ -718,7 +715,7 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
             "per-atom weight vs no-symmetry: err = {}, max N = {}",
             prefix, err, err_noconj, nrm, err_N, nrm_N);
-    REQUIRE(err < 1e-12);
+    REQUIRE(err < tol_H0);
     if (has_trev) REQUIRE(err_noconj > 1e-3);
     if (not nosym_name.empty()) {
       REQUIRE(nrm_N > 1e-3);
@@ -729,49 +726,22 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     comm.barrier();
   };
 
-  SECTION("qe_xml") {
-    auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym");
-    check(mf_sym, "unfold_mf_H0_xml", false, "");
-  }
+  // The IBZ projectors of the LiH fixtures were written by an older pw2coqui build than their fullbz group: the two
+  // differ by 4.1e-8 in relative L2 norm (the fullbz group is identical to the new build's IBZ projectors to 6e-17),
+  // so H0 agrees at 4.8e-8 instead of round-off. The Si fixture agrees to 8e-16.
+  const double tol_H0_lih = 1e-7;
   SECTION("qe_h5_lih222") {
     auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym", mf::h5_input_type);
-    check(mf_sym, "unfold_mf_H0_h5_222", false, "qe_lih222");
+    check(mf_sym, "unfold_mf_H0_h5_222", false, "qe_lih222", tol_H0_lih);
   }
   SECTION("qe_h5") {
     auto mf_sym = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
-    check(mf_sym, "unfold_mf_H0_h5", true, "qe_lih223");
+    check(mf_sym, "unfold_mf_H0_h5", true, "qe_lih223", tol_H0_lih);
   }
   SECTION("qe_h5_si333") {
     auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);
-    check(mf_sym, "unfold_mf_H0_si333", true, "");
+    check(mf_sym, "unfold_mf_H0_si333", true, "", 1e-12);
   }
-}
-
-// Projector unfolding (the code of mf::unfold_mf) on the little group of every IBZ k: the unfolding of the stored
-// projectors beta(k) by an operation (with or without time reversal) that maps k to k + G0 must reproduce the stored
-// projectors at the rotated G, q' = R q, relative L2 error over all (k, operation) pairs. It needs no no-symmetry
-// calculation, so it covers qe_svo222_sym: V with l = 2 projectors (18 projectors on an atom), permuted O atoms and
-// improper operations. Measured negative controls (unfolding with the rotation of the m components switched off, or the
-// phase exp(+i k'.T) switched off): the error without D^l is 1.46 for SVO; without the phase it is 1.67 for SVO (the
-// phase sign is not seen here since k'.T is 0 or 1/2 on the 2x2x2 grid; test_eph.cpp tests it on lih223). The largest l
-// assigned must be 2 for SVO and 1 for LiH.
-TEST_CASE("unfold_mf_projector_little_group", "[hamilt]") {
-  auto& mpi = utils::make_unit_test_mpi_context();
-  auto& comm = mpi->comm;
-
-  auto run = [&](std::string src, std::string tag, int l_max_expected) {
-    auto mf = mf::default_MF(mpi, src, mf::h5_input_type);
-    auto res = mf::detail::projector_little_group_residual(mf, tag + ".tmp");
-    app_log(2, "unfold_mf_projector_little_group {}: {} checks, max l = {}; rel err = {:.3e}",
-            src, res.n_checks, res.l_max, res.rel_err);
-    REQUIRE(res.l_max == l_max_expected);
-    REQUIRE(res.n_checks > mf.nkpts_ibz()); // more than the identity at each k
-    REQUIRE(res.rel_err < 1e-10);
-    comm.barrier();
-  };
-
-  SECTION("svo222") { run("qe_svo222_sym", "unfold_lg_svo", 2); }
-  SECTION("lih223") { run("qe_lih223_sym", "unfold_lg_lih223", 1); }
 }
 
 template<MEMORY_SPACE MEM>

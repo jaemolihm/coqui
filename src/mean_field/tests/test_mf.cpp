@@ -437,7 +437,7 @@ TEST_CASE("symmetry_tools", "[mean_field]")
 // mf::unfold_mf: the unfolded mean field written from a symmetry-reduced mean field and reloaded as bdft against the
 // mean field it came from. Orbitals of the unfolded mean field at every k equal get_orbital_set of the parent
 // bitwise (rotated at symmetry k, conjugated at time-reversal k), the k list and eigenvalues are the parent's,
-// and the unfolded mean field has the identity as its only symmetry. qe_lih222_sym and bdft_lih222_sym have no time-reversal k;
+// and the unfolded mean field has the identity as its only symmetry. qe_lih222_sym has no time-reversal k;
 // qe_lih223_sym and qe_si333_sym do. This is a round trip (the writer is get_orbital_set), so it tests the writer
 // and loader plumbing; the gauge rule itself is tested by the THC collocation, H0 and HF restart comparisons on the unfolded mean field.
 TEST_CASE("unfold_mf", "[mean_field]")
@@ -499,9 +499,9 @@ TEST_CASE("unfold_mf", "[mean_field]")
     comm.barrier();
   };
 
-  SECTION("qe_xml") {
-    auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym");
-    check_unfold(mf_sym, "unfold_mf_qe_xml", false);
+  SECTION("qe_h5_lih222") {
+    auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym", mf::h5_input_type);
+    check_unfold(mf_sym, "unfold_mf_qe_h5_222", false);
   }
   SECTION("qe_h5") {
     auto mf_sym = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
@@ -511,9 +511,25 @@ TEST_CASE("unfold_mf", "[mean_field]")
     auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);
     check_unfold(mf_sym, "unfold_mf_qe_si333", true);
   }
-  SECTION("bdft") {
-    auto mf_sym = mf::default_MF(mpi, "bdft_lih222_sym", mf::h5_input_type);
-    check_unfold(mf_sym, "unfold_mf_bdft", false);
+}
+
+// mf::detail::match_fullbz_k (the k matching of unfold_mf: k = k_j + G0) against full-BZ lists whose rows are the k
+// shifted by known reciprocal lattice vectors G_j: every k is matched to its own row with G0 = -G_j, and a k that is
+// not in the list (offset 1e-3 in one coordinate, above the 1e-6 tolerance) is not matched. The qe_lih222_sym and
+// qe_lih223_sym fixtures have unfolded k with G0 != 0 (4 of 8 and 1 of 12), tested through unfold_mf in test_eph.cpp.
+TEST_CASE("unfold_mf_match_fullbz_k", "[mean_field]")
+{
+  nda::array<double,2> kref = {{0.0, 0.0, 0.0}, {0.5, 0.0, 0.0}, {0.25, -0.25, 0.5}, {1.0/3.0, 1.0/3.0, -1.0/3.0}};
+  int G[4][3] = {{0, 0, 0}, {1, -2, 0}, {0, 3, -1}, {-1, 0, 2}};
+  nda::array<double,2> kfull(4, 3);
+  for (long j=0; j<4; ++j) for (int d=0; d<3; ++d) kfull(j,d) = kref(j,d) + G[j][d];
+  for (long j=0; j<4; ++j) {
+    nda::array<double,1> k = {kref(j,0), kref(j,1), kref(j,2)};
+    std::array<int,3> G0;
+    REQUIRE( mf::detail::match_fullbz_k(kfull, k, G0) == j );
+    for (int d=0; d<3; ++d) REQUIRE( G0[d] == -G[j][d] );
+    k(1) += 1e-3;
+    REQUIRE( mf::detail::match_fullbz_k(kfull, k, G0) == -1 );
   }
 }
 

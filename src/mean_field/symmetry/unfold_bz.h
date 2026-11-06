@@ -22,6 +22,7 @@
 #ifndef COQUI_UNFOLD_BZ_H
 #define COQUI_UNFOLD_BZ_H
 
+#include <array>
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "nda/h5.hpp"
@@ -105,33 +106,22 @@ namespace mf {
    * The file has the k list of mf (same order, unfolded k vectors), the identity as its only symmetry, no time
    * reversal and nkpts_ibz = nkpts. Its orbitals at k are those returned by mf.get_orbital_set('w', is, k, ...),
    * i.e. the IBZ orbitals rotated to k (conjugated at time-reversal k), the orbital gauge in which an IBZ
-   * calculation on mf is solved. The pseudopotential group is copied from mf with its nonlocal projectors unfolded
-   * to the projectors of the symmetric system at each k. k_weight is 1/nkpts at every k.
-   * Only symmorphic systems (the loader rejects fractional translations) with npol = 1 and non-augmented orbitals
-   * are supported.
+   * calculation on mf is solved. The local pseudopotential is copied from mf. The nonlocal projectors at k are copied
+   * from the group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (pw2coqui add_pp_fullbz), which holds
+   * the projectors at every full-BZ k_j: k = k_j + G0 (G0 a reciprocal lattice vector), and the stored
+   * projector at k_j with Miller index n is beta(k_j + n), so the projector at k has the Miller index m = n - G0.
+   * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
+   * is not in its k list. Only npol = 1 and non-augmented orbitals are supported.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
    * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
    */
   void unfold_mf(MF &mf, std::string filename);
 
-  /** Cartesian orthogonal matrix of the operation S (stored in crystal coordinates) of mf, acting on column vectors. */
-  nda::matrix<double> cartesian_rotation(MF const& mf, utils::symm_op const& S);
-
   namespace detail {
-    struct projector_residual_t {
-      double rel_err;  // largest relative L2 error over the checks
-      long n_checks;   // number of (IBZ k, operation, time reversal) with k' = k + G0
-      int l_max;       // largest angular momentum assigned to a projector
-    };
-    /** Test-only helper. For every IBZ k and every operation S (with or without time reversal) with S k = k + G0,
-     *  the stored projectors of k, unfolded with the code of unfold_mf, are compared with the stored projectors at
-     *  the rotated G, because
-     *    beta(k', G R^-1) = e^{i k'.T} D^l beta(k, G),   k' = k + G0,
-     *  (T the lattice vector of the atom map R tau_a = tau_b + T, block b <- atom a; D^l the rotation of the (l, m) components; beta(k, G) conjugated at time reversal).
-     *  Returns the largest relative L2 error, the number of checks and the largest l. It lives in unfold_bz.cpp
-     *  because unfold_projectors_k is internal. fn_scratch is a scratch file (removed). Same on all ranks. */
-    projector_residual_t projector_little_group_residual(MF &mf, std::string fn_scratch);
+    /** Index j of the row of kfull (nk,3; k_j in crystal coordinates) with k - k_j = G0 integer (tolerance 1e-6),
+     *  and G0 in the output argument; -1 if no row matches. Used by unfold_mf to find the full-BZ k of an unfolded k. */
+    long match_fullbz_k(nda::array<double,2> const& kfull, nda::array<double,1> const& k, std::array<int,3> &G0);
   }
 } // mf
 

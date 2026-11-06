@@ -174,14 +174,15 @@ def unfold_mf(mf, prefix, outdir="./"):
     k list of ``mf`` (same order, unfolded k vectors), the identity as its only
     symmetry and ``nkpts_ibz = nkpts``. Its orbitals at k are the IBZ orbitals
     rotated to k (conjugated at time-reversal k), i.e. the orbital gauge in
-    which an IBZ calculation on ``mf`` is solved. The nonlocal projectors are
-    unfolded to the projectors of the symmetric system at each k, so the unfolded
-    mean field gives H0 and the nonlocal e-ph vertex at any q. ``k_weight`` is
-    1/nkpts at every k.
+    which an IBZ calculation on ``mf`` is solved. The nonlocal projectors at each
+    k are copied from the full-BZ projectors that ``pw2coqui.x`` writes with
+    ``add_pp_fullbz = .true.`` (group ``Hamiltonian/<pp_type>/fullbz`` of the
+    mean-field h5 file), so the unfolded mean field gives H0 and the nonlocal
+    e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
     Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``.
 
-    Only symmorphic systems (``force_symmorphic``) with ``npol = 1`` and
-    non-augmented orbitals are supported; ``mf`` must have ``nkpts_ibz < nkpts``.
+    ``mf`` must be a ``pw2coqui`` h5 mean field with the full-BZ projectors, with
+    ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
 
     Parameters
     ----------

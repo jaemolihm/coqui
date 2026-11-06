@@ -26,7 +26,6 @@ SET(UTILITIES
   math.cpp
   parser.cpp
   harmonics.cpp
-  ylm_qe.cpp
   freemem.cpp
   mpi_context.cpp
 )
