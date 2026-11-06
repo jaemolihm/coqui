@@ -42,6 +42,9 @@
 #include "mean_field/mf_utils.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "orbitals/eph_vertex.h"
+#include "mean_field/default_MF.hpp"
+#include "mean_field/symmetry/unfold_bz.h"
+#include "utilities/lr_utils.hpp"
 
 namespace bdft_tests
 {
@@ -152,6 +155,109 @@ TEST_CASE("eph_bare_vertex", "[eph]")
             q_cryst(0), q_cryst(1), q_cryst(2), rel);
     CHECK(rel < tol);
   }
+}
+
+/**
+ * Bare e-ph vertex on the unfolded mean field of a symmetric system (mf::unfold_mf, projectors copied from the pw2coqui
+ * full-BZ group with the Miller shift -G0) against the one on a no-symmetry calculation of the same system (separate QE
+ * run, so its orbital gauge, band phases and k order are its own), at q = 0 and q != 0. Compared through the correlation
+ * matrix of the modes
+ *   C(mode1,mode2) = sum_{s,k} sum_{m,n in occ} conj(g(s,mode1,k,m,n)) g(s,mode2,k,m,n)
+ * which is invariant under unitary rotations of the occupied manifold at k and k+q and under the k order. The full
+ * matrix is compared, including the cross-atom blocks (Li-H). Nonlocal part only: no symmetric fixture carries the
+ * vloc_radial group that the local part needs, so the local part of the unfolded mean field (compute_bare_eph_vertex)
+ * is not tested here.
+ * The rel err of C is 7.5e-9 to 9e-9 (cause not verified); the tolerances are 1e-7.
+ * Measured negative controls (rel err of C at q = 0, lih222 / lih223): unfold_mf without the Miller shift -G0 (4 of the 8
+ * k of lih222 and 1 of the 12 k of lih223 have G0 != 0): 0.17 / 0.068; unfold_mf copying the projectors of the IBZ k
+ * instead of those of the matched full-BZ k: 0.078 / 0.092.
+ * At q != 0 the number of k whose k and k+q have different symmetry operations is required to be non-zero.
+ */
+TEST_CASE("unfold_mf_eph_vertex", "[eph]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto& comm = mpi->comm;
+
+  // correlation matrix C of the modes of g (root only), broadcast
+  auto correlation = [&](nda::array<ComplexType,5> const& g, long nocc) {
+    long nmodes = 0;
+    if(comm.root()) nmodes = g.shape(1);
+    comm.broadcast_n(&nmodes, 1, 0);
+    nda::array<ComplexType,2> C = nda::zeros<ComplexType>(nmodes, nmodes);
+    if(comm.root()) {
+      for(long s=0; s<g.shape(0); ++s)
+        for(long k=0; k<g.shape(2); ++k)
+          for(long m=0; m<nocc; ++m)
+            for(long n=0; n<nocc; ++n)
+              for(long a=0; a<nmodes; ++a)
+                for(long b=0; b<nmodes; ++b)
+                  C(a,b) += std::conj(g(s,a,k,m,n)) * g(s,b,k,m,n);
+    }
+    comm.broadcast_n(C.data(), C.size(), 0);
+    return C;
+  };
+
+  auto frobenius = [](nda::array<ComplexType,2> const& A) {
+    double x = 0.0;
+    for(auto const& v : A) x += std::norm(v);
+    return std::sqrt(x);
+  };
+
+  auto run = [&](std::string src_sym, std::string src_nosym, mf::mf_input_file_type_e ft, std::string prefix,
+                 std::vector<std::array<double,3>> qs) {
+    // Symmetric and no-symmetry systems; occupied bands of the latter
+    auto mf_sym = mf::default_MF(mpi, src_sym, ft);
+    auto mf_nosym = mf::default_MF(mpi, src_nosym, ft);
+    long nocc = 0;
+    for(long n=0; n<mf_nosym.nbnd(); ++n) if(mf_nosym.occ()(0,0,n) > 0.5) ++nocc;
+    REQUIRE(nocc > 0);
+
+    // Unfolded mean field and its pseudopotential
+    mf::unfold_mf(mf_sym, prefix + ".h5");
+    comm.barrier();
+    auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
+    REQUIRE(mf_unfold.nkpts() == mf_nosym.nkpts());
+    hamilt::pseudopot pp(mf_unfold);
+    for(auto const& qa : qs) {
+      // Reference C of the no-symmetry system
+      nda::array<double,1> q = {qa[0], qa[1], qa[2]};
+      hamilt::pseudopot pp_n(mf_nosym);
+      auto C_n = correlation(pp_n.eph_vertex_nonlocal(mf_nosym, q()), nocc);
+      double nC = frobenius(C_n);
+      REQUIRE(nC > 1e-6);
+      bool q0 = (std::abs(qa[0]) + std::abs(qa[1]) + std::abs(qa[2]) < 1e-12);
+
+      // number of k whose k and k+q are unfolded by different operations
+      nda::array<int,1> kpq(mf_sym.nkpts());
+      auto kc = mf_sym.kpts_crystal();
+      utils::calculate_kpq_map(kc, q, kpq);
+      long n_diff_ops = 0;
+      for(long ik=0; ik<mf_sym.nkpts(); ++ik) if(mf_sym.kp_symm(ik) != mf_sym.kp_symm(kpq(ik))) ++n_diff_ops;
+
+      // C of the unfolded mean field and its error, in total and in the cross-atom block
+      auto C_unfold = correlation(pp.eph_vertex_nonlocal(mf_unfold, q()), nocc);
+      double eC = frobenius(nda::array<ComplexType,2>(C_unfold - C_n)) / nC;
+      // cross-atom block: the largest |C(a,b)| with a, b on different atoms
+      double x_n = 0.0, x_err = 0.0;
+      for(long a=0; a<C_n.shape(0); ++a)
+        for(long b=0; b<C_n.shape(1); ++b)
+          if(a/3 != b/3) { x_n = std::max(x_n, std::abs(C_n(a,b))); x_err = std::max(x_err, std::abs(C_unfold(a,b) - C_n(a,b))); }
+      app_log(2, "unfold_mf_eph_vertex {} q=({},{},{}): rel err of C = {:.3e}, |C| = {:.3e}; cross-atom: max|C| = {:.3e}, max err = {:.3e}; k,k+q with different ops: {}/{}",
+              prefix, qa[0], qa[1], qa[2], eC, nC, x_n, x_err, n_diff_ops, mf_sym.nkpts());
+      if(q0) REQUIRE(x_n > 1e-6 * nC); // the cross-atom block is not zero at q = 0 (it is ~1e-10 at the q != 0 points below)
+      else REQUIRE(n_diff_ops > 0);
+      REQUIRE(eC < 1e-7);
+      REQUIRE(x_err < 1e-7 * nC);
+    }
+    comm.barrier();
+    if(comm.root()) std::filesystem::remove(prefix + ".h5");
+    comm.barrier();
+  };
+
+  SECTION("lih222") { run("qe_lih222_sym", "qe_lih222", mf::h5_input_type, "unfold_mf_eph_lih222",
+                          {{0,0,0}, {0.5,0,0}, {0.5,0.5,0}, {0,0.5,0.5}, {0.5,0.5,0.5}}); }
+  SECTION("lih223") { run("qe_lih223_sym", "qe_lih223", mf::h5_input_type, "unfold_mf_eph_lih223",
+                          {{0,0,0}, {0.5,0,0}, {0.5,0.5,1.0/3.0}, {0,0.5,1.0/3.0}, {0.5,0,2.0/3.0}}); }
 }
 
 /**

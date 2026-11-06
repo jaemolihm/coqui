@@ -30,7 +30,7 @@ PROGRAM pw2coqui
   character ( len = 256 ) :: fname 
   type(qeh5_file) :: h5f
   character ( len = 256 ) :: h5name
-  logical :: add_system, add_pp, add_orbs 
+  logical :: add_system, add_pp, add_pp_fullbz, add_orbs 
   integer :: ios, iks, ike, i, k, npwx_g, maxg
   integer, allocatable :: npw_g(:)
   character (len=256), external :: trimcheck
@@ -38,7 +38,7 @@ PROGRAM pw2coqui
   real(dp), external :: ewald
   integer, external :: global_kpoint_index
 
-  NAMELIST / input_pw2coqui / prefix, outdir, fname, add_system, add_pp, add_orbs 
+  NAMELIST / input_pw2coqui / prefix, outdir, fname, add_system, add_pp, add_pp_fullbz, add_orbs 
 
 #if defined(__MPI)
   CALL mp_startup ( )
@@ -50,6 +50,7 @@ PROGRAM pw2coqui
   fname = ' '
   add_system = .true.
   add_pp = .true.
+  add_pp_fullbz = .false.
   add_orbs = .false.
   CALL get_environment_variable ( 'ESPRESSO_TMPDIR', outdir )
   IF ( TRIM ( outdir ) == ' ' ) outdir = './'
@@ -67,6 +68,7 @@ PROGRAM pw2coqui
   CALL mp_bcast ( fname, ionode_id, world_comm )
   CALL mp_bcast ( add_system, ionode_id, world_comm )
   CALL mp_bcast ( add_pp, ionode_id, world_comm )
+  CALL mp_bcast ( add_pp_fullbz, ionode_id, world_comm )
   CALL mp_bcast ( add_orbs, ionode_id, world_comm )
   CALL read_file ( )
 
@@ -772,6 +774,8 @@ subroutine write_pp(h5_f)
         if ( ipsour .NE. ionode_id ) then 
           call mp_get ( vkb_g_root(:,ikb), vkb_g, mpime, ionode_id, ipsour, ikb, &
             world_comm )
+        else if ( ionode ) then  ! k owned by the pool of ionode
+          vkb_g_root(:,ikb) = vkb_g(:)
         endif
       else
         vkb_g = ( 0.0D0, 0.0D0 )
@@ -794,6 +798,9 @@ subroutine write_pp(h5_f)
   enddo
 
   deallocate ( itmp, igk_g )
+
+  if(add_pp_fullbz) call write_pp_fullbz(h5_n, mill_g)
+
   if(allocated(mill_g)) deallocate(mill_g)
   if(allocated(mill_k)) deallocate(mill_k)
 
@@ -803,6 +810,183 @@ subroutine write_pp(h5_f)
   endif
 
 end subroutine write_pp
+
+subroutine write_pp_fullbz(h5_n, mill_g)
+  !! Writes Hamiltonian/<pp_type>/fullbz: the nonlocal projectors at every k of the full BZ, i.e. the
+  !! star of each IBZ k under the symmetry operations (k -> S k in crystal coordinates, as in kpoint_grid;
+  !! -S k if t_rev) and time reversal (-k) unless the system is noncollinear magnetic. With an automatic k grid,
+  !! every rotated k must lie on the grid (errore otherwise). Same datasets as the
+  !! IBZ ones: attributes number_of_kpoints, max_npw; datasets kpoints (crystal), npw, miller_k*, projector_k*.
+  !! Only pool 0 computes (the other pools return at once: after read_file only pool 0 holds xk(:,1:nkstot));
+  !! band groups are not supported; mill_g is allocated on ionode only. The module npwx is set to the largest
+  !! full-BZ list during the loop (init_us_2 sizes its output with it) and restored; the module vkb is not touched.
+
+  USE qeh5_base_module, ONLY : qeh5_open_group, qeh5_close, qeh5_add_attribute
+  USE cell_base, ONLY : at, bg
+  USE gvect, ONLY : ngm, ngm_g, g
+  USE gvecw, ONLY : gcutw
+  USE klist, ONLY : xk, nkstot
+  USE start_k, ONLY : nk1, nk2, nk3, k1, k2, k3
+  USE lsda_mod, ONLY : lsda
+  USE symm_base, ONLY : nsym, s, t_rev
+  USE constants, ONLY : eps8
+  USE noncollin_module, ONLY : noncolin, domag
+  USE uspp, ONLY : nkb
+  USE wvfct, ONLY : npwx
+  USE mp_pools, ONLY : my_pool_id
+  USE mp_bands, ONLY : me_bgrp, nproc_bgrp, root_bgrp
+  USE mp_wave, ONLY : mergewf
+  USE uspp_init, ONLY : init_us_2
+
+  IMPLICIT NONE
+
+  type(qeh5_file), intent(inout) :: h5_n
+  integer, allocatable, intent(in) :: mill_g(:,:)
+
+  type(qeh5_file) :: h5_fb
+  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, npw_global_ik, ikb, npwx_fbz, npwx_save
+  real(dp) :: xkg(3), sxk(3), sxk_int(3), dxk(3), q
+  real(dp), allocatable :: xk_fbz(:,:), xk_fbz_cart(:,:)
+  integer, allocatable :: npw_fbz(:), igk(:), igk_l2g(:), g_in_sphere(:), g_sphere_pos(:), mill_k(:,:)
+  complex(dp), allocatable :: vkb_fbz(:,:), vkb_g(:), vkb_g_root(:,:)
+  logical :: use_tr, in_list
+  character(len=8) str_ik
+
+  if (nbgrp > 1) call errore('write_pp_fullbz', 'band groups are not supported', 1)
+  ! After read_file only pool 0 holds the global k list in xk(:,1:nkstot), so only pool 0 (which contains ionode) computes
+  if (my_pool_id /= 0) return
+  use_tr = .not. (noncolin .and. domag)
+
+  ! Full-BZ k list: star of the IBZ k (first nkstot/ns entries of xk, spin up only for lsda)
+  nk_ibz = nkstot
+  if (lsda) nk_ibz = nkstot/2
+  nk_fbz_max = nk_ibz*nsym*2
+  allocate(xk_fbz(3,nk_fbz_max))
+  nk_fbz = 0
+  do ik = 1, nk_ibz
+    xkg(:) = xk(:,ik)
+    call cryst_to_cart(1, xkg, at, -1)   ! cartesian (2pi/alat) -> crystal
+    do isym = 1, nsym
+      do itr = 0, merge(1, 0, use_tr)
+        ! compute symmetry rotated k point
+        sxk(:) = matmul(real(s(:,:,isym), dp), xkg)
+        if (t_rev(isym) == 1) sxk = -sxk
+        if (itr == 1) sxk = -sxk
+        ! For k points from a grid, check that the rotated k point lies on the grid
+        if (nk1*nk2*nk3 > 0) then
+          sxk_int = sxk*[nk1,nk2,nk3] - 0.5d0*[k1,k2,k3]
+          if (any(abs(sxk_int - nint(sxk_int)) > 1.d-5)) &
+            call errore('write_pp_fullbz', 'symmetry-rotated k point is not on the automatic k grid', isym)
+        endif
+        ! skip if already in the list, modulo a reciprocal lattice vector
+        in_list = .false.
+        do ikf = 1, nk_fbz
+          dxk = xk_fbz(:,ikf) - sxk
+          if (all(abs(dxk - nint(dxk)) < 1.d-6)) then
+            in_list = .true.
+            exit
+          endif
+        enddo
+        if (in_list) cycle
+        nk_fbz = nk_fbz + 1
+        xk_fbz(:,nk_fbz) = sxk
+      enddo
+    enddo
+  enddo
+
+  ! Cartesian k of the full-BZ list
+  allocate(xk_fbz_cart(3,nk_fbz), npw_fbz(nk_fbz))
+  xk_fbz_cart(:,:) = xk_fbz(:,1:nk_fbz)
+  call cryst_to_cart(nk_fbz, xk_fbz_cart, bg, 1)   ! crystal -> cartesian (2pi/alat)
+
+  ! Size of the G list of each k, |k+G|^2 <= gcutw (as in gk_sort); counted first, since npwx_fbz sizes vkb_fbz
+  allocate(igk(ngm))
+  npw_fbz = 0
+  do ik = 1, nk_fbz
+    do ig = 1, ngm
+      q = sum((xk_fbz_cart(:,ik) + g(:,ig))**2)
+      if (q <= eps8) q = 0.0_dp
+      if (q <= gcutw) npw_fbz(ik) = npw_fbz(ik) + 1
+    enddo
+  enddo
+  CALL mp_sum(npw_fbz, intra_bgrp_comm)
+  npwx_fbz = maxval(npw_fbz)
+
+  ! init_us_2 writes vkb_(npwx,nkb): set npwx to the largest full-BZ list for the loop below (restored after it)
+  npwx_save = npwx
+  npwx = npwx_fbz
+  allocate(vkb_fbz(npwx_fbz,nkb))
+
+  ! Group fullbz: k list and sizes (ionode)
+  if (ionode) then
+    call qeh5_open_group(h5_n, "fullbz", h5_fb)
+    call qeh5_add_attribute(h5_fb%id,"number_of_kpoints",nk_fbz)
+    call qeh5_add_attribute(h5_fb%id,"max_npw",npwx_fbz)
+    call h5_write_mat_r(h5_fb,xk_fbz(:,1:nk_fbz),"kpoints")
+    call h5_write_vector_int(h5_fb,npw_fbz,"npw")
+    allocate(mill_k(3,npwx_fbz))
+  endif
+
+  ! Miller indices and projectors at each full-BZ k
+  allocate(g_in_sphere(ngm_g), g_sphere_pos(ngm_g))
+  do ik = 1, nk_fbz
+    ! local G of this k (igk), and g_in_sphere(ig) = 1 if global G ig is in the k+G sphere
+    npw = 0
+    g_in_sphere = 0
+    do ig = 1, ngm
+      q = sum((xk_fbz_cart(:,ik) + g(:,ig))**2)
+      if (q <= eps8) q = 0.0_dp
+      if (q > gcutw) cycle
+      npw = npw + 1
+      igk(npw) = ig
+      g_in_sphere(ig_l2g(ig)) = 1
+    enddo
+    CALL mp_sum(g_in_sphere, intra_bgrp_comm)
+    ! Number the G of this k's sphere 1, 2, ... in increasing global G index; this order is used for miller_k and projector_k
+    g_sphere_pos = 0
+    npw_global_ik = 0
+    do ig = 1, ngm_g
+      if (g_in_sphere(ig) == 1) then
+        npw_global_ik = npw_global_ik + 1
+        g_sphere_pos(ig) = npw_global_ik                    ! position of global G ig in this k's list
+        if (ionode) mill_k(:,npw_global_ik) = mill_g(:,ig)  ! mill_g exists on ionode only
+      endif
+    enddo
+    ! position in this k's list of each local G of this rank, for mergewf
+    allocate(igk_l2g(npw))
+    do i = 1, npw
+      igk_l2g(i) = g_sphere_pos(ig_l2g(igk(i)))
+    enddo
+    if (ionode) then
+      write ( str_ik, '(I8)') ik-1
+      call h5_write_mat_int(h5_fb,mill_k(1:3,1:npw_global_ik),"miller_k"//adjustl(trim(str_ik)))
+    endif
+
+    ! projectors of this k, gathered to ionode in the global G order
+    CALL init_us_2(npw, igk, xk_fbz_cart(1,ik), vkb_fbz)
+    if (ionode) allocate(vkb_g_root(npw_global_ik,nkb))
+    allocate(vkb_g(npw_global_ik))
+    do ikb = 1, nkb
+      vkb_g = (0.0D0, 0.0D0)
+      CALL mergewf(vkb_fbz(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
+      if (ionode) vkb_g_root(:,ikb) = vkb_g(:)
+    enddo
+    if (ionode) then
+      call h5_write_mat_c(h5_fb,vkb_g_root,"projector_k"//adjustl(trim(str_ik)))
+      deallocate(vkb_g_root)
+    endif
+    deallocate(vkb_g, igk_l2g)
+  enddo
+
+  ! Close the group, free the buffers and restore npwx
+  if (ionode) then
+    deallocate(mill_k)
+    call qeh5_close(h5_fb)
+  endif
+  deallocate(xk_fbz, xk_fbz_cart, npw_fbz, igk, g_in_sphere, g_sphere_pos, vkb_fbz)
+  npwx = npwx_save
+
+end subroutine write_pp_fullbz
 
 !
 SUBROUTINE write_factorized_paw_one_center( )

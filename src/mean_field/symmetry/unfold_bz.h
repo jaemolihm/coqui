@@ -22,6 +22,7 @@
 #ifndef COQUI_UNFOLD_BZ_H
 #define COQUI_UNFOLD_BZ_H
 
+#include <array>
 #include "mpi3/communicator.hpp"
 #include "nda/nda.hpp"
 #include "nda/h5.hpp"
@@ -97,6 +98,28 @@ namespace methods {
   void check_is_G(double ni_d, double nj_d, double nk_d);
 
 } // methods
+
+namespace mf {
+  /**
+   * Write the unfolded mean field of a symmetry-reduced mean-field system as a bdft h5 file.
+   *
+   * The file has the k list of mf (same order, unfolded k vectors), the identity as its only symmetry, no time
+   * reversal and nkpts_ibz = nkpts. Its orbitals at k are those returned by mf.get_orbital_set('w', is, k, ...),
+   * i.e. the IBZ orbitals rotated to k (conjugated at time-reversal k), the orbital gauge in which an IBZ
+   * calculation on mf is solved. The local pseudopotential is copied from mf. The nonlocal projectors at k are copied
+   * from the group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (pw2coqui add_pp_fullbz), which holds
+   * the projectors at every full-BZ k_qe: k = k_qe + G0 (G0 a reciprocal lattice vector), and the stored
+   * projector at k_qe with Miller index mill_qe is beta(k_qe + mill_qe), so the projector at k has the Miller index
+   * mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
+   * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
+   * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
+   * Called by Python mean_field.unfold_mf (Mf.unfold_mf); the file is the mean field of post_proc.unfold_checkpoint.
+   *
+   * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
+   * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
+   */
+  void unfold_mf(MF &mf, std::string filename);
+} // mf
 
 
 #endif //COQUI_UNFOLD_BZ_H

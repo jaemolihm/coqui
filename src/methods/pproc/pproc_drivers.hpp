@@ -37,6 +37,7 @@
 #include "numerics/ac/ac_context.h"
 #include "methods/pproc/pproc_t.h"
 #include "mean_field/symmetry/unfold_bz.h"
+#include "methods/tools/chkpt_utils.h"
 #include "hamiltonian/one_body_hamiltonian.hpp"
 
 namespace methods {
@@ -248,6 +249,31 @@ namespace methods {
     } else {
       APP_ABORT("pproc: Unkonw post-processing type: {}", pp_type);
     }
+  }
+
+  /**
+   * Write the full-BZ checkpoint outdir/prefix_unfold.mbpt.h5 of the IBZ checkpoint outdir/prefix.mbpt.h5
+   * (chkpt::unfold_scf_checkpoint).
+   * Called by Python post_proc.unfold_checkpoint. It is separate from post_processing, which takes one mean field:
+   * the system/ group of the new checkpoint (nkpts_ibz = nkpts, k_weight, q-point maps) is that of mf_unfold.
+   * @param [INPUT] mf_ibz - mean field of the IBZ checkpoint
+   * @param [INPUT] mf_unfold - unfolded mean field of mf_ibz (mf::unfold_mf)
+   * Requires:
+   *   - prefix: prefix of the IBZ checkpoint outdir/prefix.mbpt.h5
+   *   - prefix_unfold: prefix of the new checkpoint outdir/prefix_unfold.mbpt.h5
+   * Optional arguments:
+   *   - outdir: location of directory with files
+   */
+  void unfold_checkpoint(std::shared_ptr<mf::MF> mf_ibz, std::shared_ptr<mf::MF> mf_unfold, ptree const& pt) {
+    auto mpi = mf_ibz->mpi();
+    std::string err = std::string("unfold_checkpoint - Incorrect input - ");
+    auto prefix = io::get_value<std::string>(pt,"prefix",err+"prefix");
+    auto prefix_unfold = io::get_value<std::string>(pt,"prefix_unfold",err+"prefix_unfold");
+    auto outdir = io::get_value_with_default<std::string>(pt,"outdir","./");
+    utils::check(prefix_unfold != prefix, "unfold_checkpoint: prefix_unfold must differ from prefix ({}).", prefix);
+    utils::check(std::filesystem::exists(outdir+"/"+prefix+".mbpt.h5"),
+                 "unfold_checkpoint: input checkpoint {} not found.", outdir+"/"+prefix+".mbpt.h5");
+    chkpt::unfold_scf_checkpoint(*mpi, *mf_ibz, *mf_unfold, outdir+"/"+prefix, outdir+"/"+prefix_unfold);
   }
 
 } // methods

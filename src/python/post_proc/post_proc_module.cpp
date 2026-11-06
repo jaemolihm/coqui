@@ -48,6 +48,11 @@ namespace coqui_py::post_proc {
     methods::post_processing("unfold_bz", mf.get_mf(), parser.get_root());
   }
 
+  void unfold_checkpoint(const Mf &mf, const Mf &mf_unfold, const std::string &params) {
+    auto parser = InputParser(params);
+    methods::unfold_checkpoint(mf.get_mf(), mf_unfold.get_mf(), parser.get_root());
+  }
+
   void dump_vxc(const Mf &mf, const std::string &params) {
     auto parser = InputParser(params);
     methods::post_processing("dump_vxc", mf.get_mf(), parser.get_root());

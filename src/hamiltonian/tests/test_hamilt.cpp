@@ -52,6 +52,8 @@
 #include "methods/SCF/mb_solver_t.h"
 #include "methods/SCF/scf_common.hpp"
 #include "orbitals/orbital_augmenter.h"
+#include "mean_field/symmetry/unfold_bz.h"
+#include "utilities/kpoint_utils.hpp"
 
 namespace bdft_tests
 {
@@ -616,6 +618,130 @@ TEST_CASE("pyscf_ovlp", "[hamilt]") {
 
 }
 */
+
+// Unfolded mean field written by mf::unfold_mf, whose nonlocal projectors are copied from the full-BZ projectors of
+// pw2coqui (Hamiltonian/<pp_type>/fullbz, Miller indices shifted by -G0).
+// (1) H0 of the unfolded mean field (set_H0 on the unfolded mean field, with its own pseudopotential) against H0 of the IBZ system, copied from
+//     kp_to_ibz(k) and conjugated at time-reversal k. Without the conjugation at time-reversal k the comparison
+//     fails at the size of Im H0 (qe_lih223_sym and qe_si333_sym have time-reversal k, qe_lih222_sym does not).
+// (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the unfolded mean field against that
+//     of a no-symmetry calculation of the same system (separate QE run), k points matched by crystal coordinates. N_b
+//     is invariant under unitary rotations of the occupied manifold.
+TEST_CASE("unfold_mf_projectors", "[hamilt]") {
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto& comm = mpi->comm;
+
+  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0) {
+    long nspin = mf_sym.nspin(), nkpts = mf_sym.nkpts(), nkpts_ibz = mf_sym.nkpts_ibz(), nbnd = mf_sym.nbnd();
+    long nat = mf_sym.number_of_atoms();
+
+    // Unfolded mean field; H0 of the IBZ system and of the unfolded mean field, each with its own pseudopotential
+    mf::unfold_mf(mf_sym, prefix + ".h5");
+    comm.barrier();
+    auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
+
+    auto psp_sym = hamilt::make_pseudopot(mf_sym);
+    auto psp_unfold = hamilt::make_pseudopot(mf_unfold);
+    auto sH0_sym = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts_ibz, nbnd, nbnd});
+    auto sH0_unfold = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts, nbnd, nbnd});
+    hamilt::set_H0(mf_sym, psp_sym.get(), sH0_sym);
+    hamilt::set_H0(mf_unfold, psp_unfold.get(), sH0_unfold);
+
+    // k_weight of the unfolded mean field: 1/nkpts for every k
+    REQUIRE(mf_unfold.k_weight().size() == nkpts);
+    for (long ik = 0; ik < nkpts; ++ik) REQUIRE(std::abs(mf_unfold.k_weight(ik) - 1.0/double(nkpts)) < 1e-14);
+    REQUIRE(mf_unfold.occ().shape(1) == nkpts);
+
+    // (1) H0 against the IBZ H0 copied from kp_to_ibz(k), conjugated at time-reversal k
+    double err = 0.0, err_noconj = 0.0, nrm = 0.0;
+    if (mpi->node_comm.root()) {
+      auto H_sym = sH0_sym.local();
+      auto H_unfold = sH0_unfold.local();
+      for (long is = 0; is < nspin; ++is)
+        for (long ik = 0; ik < nkpts; ++ik) {
+          long iks = mf_sym.kp_to_ibz(ik);
+          bool tr = mf_sym.kp_trev(ik);
+          for (long i = 0; i < nbnd; ++i)
+            for (long j = 0; j < nbnd; ++j) {
+              ComplexType ref = tr ? std::conj(H_sym(is, iks, i, j)) : H_sym(is, iks, i, j);
+              err = std::max(err, std::abs(H_unfold(is, ik, i, j) - ref));
+              nrm = std::max(nrm, std::abs(ref));
+              // what copying without the conjugation at time-reversal k would give
+              if (tr) err_noconj = std::max(err_noconj, std::abs(H_unfold(is, ik, i, j) - H_sym(is, iks, i, j)));
+            }
+        }
+    }
+    comm.all_reduce_in_place_n(&err, 1, boost::mpi3::max<>{});
+    comm.all_reduce_in_place_n(&err_noconj, 1, boost::mpi3::max<>{});
+    comm.all_reduce_in_place_n(&nrm, 1, boost::mpi3::max<>{});
+
+    // (2) per-atom projector weights against the no-symmetry system (eph_projector_overlaps needs h5 input)
+    double err_N = 0.0, nrm_N = 0.0;
+    if (not nosym_name.empty()) {
+      auto mf_nosym = mf::default_MF(mpi, nosym_name, mf::h5_input_type);
+      REQUIRE(mf_nosym.nkpts() == nkpts);
+      REQUIRE(mf_nosym.number_of_atoms() == nat);
+      auto psp_nosym = hamilt::make_pseudopot(mf_nosym);
+      nda::array<ComplexType,5> P_nosym, P_unfold;
+      psp_unfold->eph_projector_overlaps(mf_unfold, P_unfold);
+      psp_nosym->eph_projector_overlaps(mf_nosym, P_nosym);
+      auto ofs = psp_nosym->proj_offset();
+      auto nh = psp_nosym->proj_per_species();
+      auto ityp = psp_nosym->species_of_atom();
+      long nocc = 0;
+      for (long n = 0; n < nbnd; ++n) if (mf_nosym.occ()(0,0,n) > 0.5) ++nocc;
+      REQUIRE(nocc > 0);
+      auto weight = [&](nda::array<ComplexType,5> const& P, long ik, long b) {
+        double N = 0.0;
+        for (long n = 0; n < nocc; ++n)
+          for (long j = 0; j < nh(ityp(b)); ++j) N += std::norm(P(0, 0, ik, ofs(b)+j, n));
+        return N;
+      };
+      for (long ik = 0; ik < nkpts; ++ik) {
+        // k point of the no-symmetry system equal to the unfolded mean field's k modulo a reciprocal lattice vector
+        long ikn = utils::find_kpoint(mf_nosym.kpts_crystal(), mf_unfold.kpts_crystal(ik, 0),
+                                      mf_unfold.kpts_crystal(ik, 1), mf_unfold.kpts_crystal(ik, 2));
+        REQUIRE(ikn >= 0);
+        for (long b = 0; b < nat; ++b) {
+          double N_unfold = weight(P_unfold, ik, b), Nn = weight(P_nosym, ikn, b);
+          err_N = std::max(err_N, std::abs(N_unfold - Nn));
+          nrm_N = std::max(nrm_N, Nn);
+        }
+      }
+    }
+
+    // Report and compare
+    app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
+            "per-atom weight vs no-symmetry: err = {}, max N = {}",
+            prefix, err, err_noconj, nrm, err_N, nrm_N);
+    REQUIRE(err < tol_H0);
+    if (has_trev) REQUIRE(err_noconj > 1e-3);
+    if (not nosym_name.empty()) {
+      REQUIRE(nrm_N > 1e-3);
+      REQUIRE(err_N < 1e-7); // two QE runs; measured 4e-9 (cause not verified)
+    }
+    comm.barrier();
+    if (comm.root()) remove((prefix + ".h5").c_str());
+    comm.barrier();
+  };
+
+  // The IBZ projectors of the LiH fixtures were written by an older pw2coqui build than their fullbz group: the two
+  // differ by 4.1e-8 in relative L2 norm (the fullbz group is identical to the new build's IBZ projectors to 6e-17),
+  // so H0 agrees at 4.8e-8 instead of round-off. The Si fixture agrees to 8e-16.
+  const double tol_H0_lih = 1e-7;
+  SECTION("qe_h5_lih222") {
+    auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym", mf::h5_input_type);
+    check(mf_sym, "unfold_mf_H0_h5_222", false, "qe_lih222", tol_H0_lih);
+  }
+  SECTION("qe_h5") {
+    auto mf_sym = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
+    check(mf_sym, "unfold_mf_H0_h5", true, "qe_lih223", tol_H0_lih);
+  }
+  SECTION("qe_h5_si333") {
+    auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);
+    check(mf_sym, "unfold_mf_H0_si333", true, "", 1e-12);
+  }
+}
 
 template<MEMORY_SPACE MEM>
 void test_F_impl(std::shared_ptr<mpi_context_t> &mpi)

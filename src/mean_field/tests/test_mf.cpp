@@ -50,6 +50,7 @@
 #include "mean_field/properties.hpp"
 
 #include "mean_field/symmetry/bz_symmetry.hpp"
+#include "mean_field/symmetry/unfold_bz.h"
 //#include "hamiltonian/one_body_hamiltonian.hpp"
 
 namespace bdft_tests
@@ -429,6 +430,89 @@ TEST_CASE("symmetry_tools", "[mean_field]")
     auto k2g_d_h = nda::to_host(k2g_d); 
     ARRAY_EQUAL(k2g_d_h,k2g_h); 
 #endif
+  }
+}
+
+
+// mf::unfold_mf: the unfolded mean field written from a symmetry-reduced mean field and reloaded as bdft against the
+// mean field it came from. Orbitals of the unfolded mean field at every k equal get_orbital_set of the parent
+// bitwise (rotated at symmetry k, conjugated at time-reversal k), the k list and eigenvalues are the parent's,
+// and the unfolded mean field has the identity as its only symmetry. qe_lih222_sym has no time-reversal k;
+// qe_lih223_sym and qe_si333_sym do. This is a round trip (the writer is get_orbital_set), so it tests the writer
+// and loader plumbing; the gauge rule itself is tested by the THC collocation, H0 and HF restart comparisons on the unfolded mean field.
+TEST_CASE("unfold_mf", "[mean_field]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto& comm = mpi->comm;
+
+  auto check_unfold = [&](mf::MF& mf_sym, std::string prefix, bool has_trev) {
+    long nkpts = mf_sym.nkpts();
+    long nbnd = mf_sym.nbnd();
+    long nspin = mf_sym.nspin();
+    long ngm = mf_sym.wfc_truncated_grid()->size();
+    REQUIRE( mf_sym.nkpts_ibz() < nkpts );
+    // only the fixtures with time-reversal k exercise the conjugation
+    auto trev = mf_sym.kp_trev();
+    REQUIRE( std::any_of(trev.begin(), trev.end(), [](bool b) { return b; }) == has_trev );
+
+    // Unfolded mean field, reloaded as bdft
+    mf::unfold_mf(mf_sym, prefix + ".h5");
+    comm.barrier();
+    auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
+
+    // Sizes, symmetry, k weights, k list and eigenvalues against the parent
+    REQUIRE( mf_unfold.nkpts() == nkpts );
+    REQUIRE( mf_unfold.nkpts_ibz() == nkpts );
+    REQUIRE( mf_unfold.nspin() == nspin );
+    REQUIRE( mf_unfold.nbnd() == nbnd );
+    REQUIRE( mf_unfold.symm_list().size() == 1 );
+    // the unfolded mean field has nkpts equivalent k: its k_weight is 1/nkpts at every k (the parent's is per IBZ k)
+    REQUIRE( mf_unfold.k_weight().size() == nkpts );
+    for(long ik=0; ik<nkpts; ++ik) VALUE_EQUAL( mf_unfold.k_weight(ik), 1.0/double(nkpts), 1e-14 );
+    REQUIRE( mf_unfold.occ().shape(1) == nkpts );
+    REQUIRE( mf_unfold.wfc_truncated_grid()->size() == ngm );
+    auto kv = mf_unfold.kp_trev();
+    REQUIRE( not std::any_of(kv.begin(), kv.end(), [](bool b) { return b; }) );
+    for(long ik=0; ik<nkpts; ++ik)
+      for(int i=0; i<3; ++i) {
+        VALUE_EQUAL( mf_unfold.kpts_crystal(ik,i), mf_sym.kpts_crystal(ik,i), 1e-10 );
+        VALUE_EQUAL( mf_unfold.kpts(ik,i), mf_sym.kpts(ik,i), 1e-10 );
+      }
+    for(long is=0; is<nspin; ++is)
+      for(long ik=0; ik<nkpts; ++ik)
+        for(long n=0; n<nbnd; ++n)
+          REQUIRE( mf_unfold.eigval()(is,ik,n) == mf_sym.eigval()(is,ik,n) );
+
+    // Orbitals at every k against get_orbital_set of the parent
+    nda::array<ComplexType,2> psi_sym(nbnd, ngm), psi_unfold(nbnd, ngm);
+    double max_diff = 0.0, max_conj_gap = 0.0;
+    for(long is=0; is<nspin; ++is)
+      for(long ik=0; ik<nkpts; ++ik) {
+        mf_sym.get_orbital_set('w', is, ik, nda::range(nbnd), psi_sym);
+        mf_unfold.get_orbital_set('w', is, ik, nda::range(nbnd), psi_unfold);
+        max_diff = std::max(max_diff, nda::max_element(nda::abs(psi_sym - psi_unfold)));
+        // size of the error a missing conjugation at time-reversal k would give
+        if(mf_sym.kp_trev(ik))
+          max_conj_gap = std::max(max_conj_gap, nda::max_element(nda::abs(nda::conj(psi_sym) - psi_sym)));
+      }
+    REQUIRE( max_diff == 0.0 );
+    if(has_trev) REQUIRE( max_conj_gap > 1e-2 );
+    comm.barrier();
+    if(comm.root()) std::filesystem::remove(prefix + ".h5");
+    comm.barrier();
+  };
+
+  SECTION("qe_h5_lih222") {
+    auto mf_sym = mf::default_MF(mpi, "qe_lih222_sym", mf::h5_input_type);
+    check_unfold(mf_sym, "unfold_mf_qe_h5_222", false);
+  }
+  SECTION("qe_h5") {
+    auto mf_sym = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
+    check_unfold(mf_sym, "unfold_mf_qe_h5", true);
+  }
+  SECTION("qe_h5_si333") {
+    auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);
+    check_unfold(mf_sym, "unfold_mf_qe_si333", true);
   }
 }
 

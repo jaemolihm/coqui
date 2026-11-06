@@ -19,11 +19,16 @@
  */
 
 
+#include <filesystem>
+#include <algorithm>
+#include <array>
+#include <map>
 #include <nda/h5.hpp>
 #include "numerics/sparse/csr_blas.hpp"
 #include "numerics/nda_functions.hpp"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 #include "utilities/kpoint_utils.hpp"
+#include "utilities/h5_utils.hpp"
 #include "unfold_bz.h"
 
 namespace methods {
@@ -345,3 +350,134 @@ namespace methods {
 
 
 } // methods
+
+namespace mf {
+namespace {
+  // Returns the pp_type of the pseudopotential of the pw2coqui h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz
+  // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
+  // writes anything, so that a missing group (or a mean field that is not a pw2coqui h5) aborts without a partial file.
+  std::string read_full_bz_projector_type(MF const& mf) {
+    bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
+    std::string fn = from_h5 ? mf.filename() : mf.outdir();
+
+    // pp_type (attribute of Hamiltonian/) names the group that holds the projectors
+    std::string pp_type;
+    if (from_h5 and utils::h5_group_exists(fn, "Hamiltonian")) {
+      h5::file f(fn, 'r');
+      h5::group pp = h5::group(f).open_group("Hamiltonian");
+      h5::h5_read_attribute(pp, "pp_type", pp_type);
+    }
+
+    utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
+                 "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
+                 "rerun pw2coqui.x with add_pp_fullbz = .true.", fn);
+    return pp_type;
+  }
+
+  // Writes the nonlocal projectors of the unfolded mean field (number_of_kpoints, max_npw, npw, miller_k*, projector_k*
+  // in out_grp) by copying, for every k of mf, those of the k_qe of qe_pp_grp with k = k_qe + G0. The stored projector
+  // at k_qe with Miller index mill_qe is beta(k_qe + mill_qe), so at k it has
+  // mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
+  //   mf        - the symmetry-reduced (IBZ) mean field; only its full k list (mf.kpts_crystal(), nkpts entries, the k
+  //               of the unfolded mean field) is used
+  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (projectors at every
+  //               full-BZ k_qe, in pw2coqui's own k order)
+  //   out_grp   - output: group Hamiltonian/<pp_type> of the unfolded mean-field file
+  // Called by unfold_mf on the root rank; there is no other source of the projectors at the unfolded k, because the
+  // projectors of a rotated k are not obtained from the IBZ ones by the symmetry operations of the orbitals alone.
+  void copy_full_bz_projectors(MF const& mf, h5::group& qe_pp_grp, h5::group& out_grp) {
+    long nkpts = mf.nkpts();
+
+    // k list (k_qe) and sizes of the pw2coqui full-BZ group
+    int max_npw;
+    nda::array<double,2> k_qe;
+    nda::array<int,1> npw_qe;
+    h5::h5_read_attribute(qe_pp_grp, "max_npw", max_npw);
+    nda::h5_read(qe_pp_grp, "kpoints", k_qe);
+    nda::h5_read(qe_pp_grp, "npw", npw_qe);
+    h5::h5_write_attribute(out_grp, "number_of_kpoints", int(nkpts));
+    h5::h5_write_attribute(out_grp, "max_npw", max_npw);
+
+    nda::array<int,1> npw(nkpts);
+    nda::array<int,2> mill_qe, mill;
+    for (long ik=0; ik<nkpts; ++ik) {
+      // k_qe equal to k modulo a reciprocal lattice vector G0 = k - k_qe
+      nda::array<double,1> k(mf.kpts_crystal(ik));
+      long ik_qe = utils::find_kpoint(k_qe, k(0), k(1), k(2));
+      utils::check(ik_qe >= 0, "unfold_mf: k-point {} ({}, {}, {}) is not in the full-BZ k list of the projectors.",
+                   ik, k(0), k(1), k(2));
+      std::array<int,3> G0;
+      for (int d=0; d<3; ++d) G0[d] = int(std::lround(k(d) - k_qe(ik_qe,d)));
+
+      // mill = mill_qe - G0 (same plane waves: mill + k = mill_qe + k_qe); the projector values are copied unchanged
+      nda::h5_read(qe_pp_grp, "miller_k"+std::to_string(ik_qe), mill_qe);
+      mill.resize(mill_qe.shape());
+      for (long i=0; i<mill.shape(0); ++i)
+        for (int d=0; d<3; ++d) mill(i,d) = mill_qe(i,d) - G0[d];
+      nda::h5_write(out_grp, "miller_k"+std::to_string(ik), mill);
+      utils::h5_copy(qe_pp_grp, "projector_k"+std::to_string(ik_qe), out_grp, "projector_k"+std::to_string(ik));
+      npw(ik) = npw_qe(ik_qe);
+    }
+    nda::h5_write(out_grp, "npw", npw);
+  }
+} // anonymous
+
+  void unfold_mf(MF &mf, std::string filename) {
+    auto mpi = mf.mpi();
+    auto& comm = mpi->comm;
+
+    // Supported inputs; the full-BZ projectors are checked before anything is written
+    utils::check(mf.nkpts() != mf.nkpts_ibz(),
+                 "unfold_mf: the mean-field system has no symmetry reduction (nkpts = nkpts_ibz = {}).", mf.nkpts());
+    utils::check(not mf.is_augmented(), "unfold_mf: augmented orbital bases are not supported.");
+    utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
+    utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
+    std::string pp_type = read_full_bz_projector_type(mf);
+
+    // System of the unfolded mean field: full-BZ k list in the order of mf, identity as the only symmetry
+    bdft::bdft_system sys(mf, filename, false);
+    {
+      nda::array<double,2> latt(3,3), recv(3,3);
+      latt() = mf.lattv();
+      recv() = mf.recv();
+      nda::array<double,1> kp_grid(3);
+      for (int i=0; i<3; ++i) kp_grid(i) = mf.kp_grid()(i);
+      nda::array<double,2> kpts(mf.kpts());
+      // Setup trivial symmetry (identity operation only)
+      nda::stack_array<double,3,3> E;
+      E() = 0.0;
+      for (int i=0; i<3; ++i) E(i,i) = 1.0;
+      nda::stack_array<double,3> ft;
+      ft() = 0.0;
+      std::vector<utils::symm_op> symm_list;
+      symm_list.emplace_back(utils::symm_op{E, E, ft});
+      sys._symm = bz_symm(mpi->comm, true, latt, recv, kp_grid, kpts, symm_list, false);
+    }
+    // k_weight of mf is per IBZ k; the unfolded mean field has nkpts equivalent k
+    sys.k_weight = nda::array<double,1>(mf.nkpts(), 1.0/double(mf.nkpts()));
+    long nkpts = mf.nkpts();
+    utils::check(sys._symm.nkpts == nkpts and sys._symm.nkpts_ibz == nkpts,
+                 "unfold_mf: failed to build the full-BZ k list.");
+
+    // Write the file on the root (get_orbital_set and the source h5 reads are not collective)
+    if (comm.root()) {
+      h5::file file(filename, 'w');
+      h5::group grp(file);
+      sys.save(grp);
+
+      // Orbitals/: plane-wave basis, and the orbitals rotated to every k (conjugated at time-reversal k)
+      h5::group ogrp = grp.open_group("Orbitals");
+      bdft::detail::write_wfc_metadata(ogrp, *mf.wfc_truncated_grid());
+      bdft::detail::write_orbitals(mf, ogrp, nkpts, mf.nbnd());
+
+      // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group
+      grp.create_group("Hamiltonian");
+      hamilt::pseudopot_to_h5(mf.fft_grid_dim(), grp, mf.filename(), mf::h5_input_type, false);
+      h5::file file_qe_h5(mf.filename(), 'r');
+      h5::group qe_pp_grp = h5::group(file_qe_h5).open_group("Hamiltonian").open_group(pp_type).open_group("fullbz");
+      h5::group out_grp = grp.open_group("Hamiltonian").open_group(pp_type);
+      copy_full_bz_projectors(mf, qe_pp_grp, out_grp);
+    }
+    comm.barrier();
+  }
+} // mf

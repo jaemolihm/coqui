@@ -1,6 +1,7 @@
 &input_pw2coqui
 
 prefix = 'pwscf'
+add_pp_fullbz = .true.
 outdir = './'
 
 /
