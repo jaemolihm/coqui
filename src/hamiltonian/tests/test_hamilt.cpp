@@ -785,6 +785,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
             "per-atom weight vs no-symmetry: err = {}, max N = {}",
             prefix, err, err_noconj, nrm, err_N, nrm_N);
+    // augmented case measured 4.78e-8: the IBZ H0 uses the IBZ projectors, the view the parent's fullbz ones (the
+    // older-pw2coqui projector floor, as for the plain H0 checks)
     REQUIRE(err < tol_H0);
     if (has_trev) REQUIRE(err_noconj > 1e-3);
     if (not nosym_name.empty()) {
@@ -811,7 +813,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   SECTION("qe_h5_aug") {
     auto mf_parent = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
     auto augmenter = std::make_shared<orbitals::momentum_augmenter>(mf_parent);
-    // 3 bands = complete multiplets at every IBZ k of this fixture (see aug_ibz_symmetry in test_orbitals.cpp)
+    // 3 bands = complete multiplets at every IBZ k of this fixture (the R that closed_band_count gives in
+    // aug_ibz_symmetry in test_orbitals.cpp; its log line prints R)
     auto mf_sym = orbitals::add_augmentation<HOST_MEMORY>(mf_parent, "unfold_mf_aug_ibz.h5", augmenter, 3, 1e-3, 1e-1);
     REQUIRE(mf_sym.is_augmented());
     auto [outdir, pf] = utils::utest_filename("qe_lih223_sym");

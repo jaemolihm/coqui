@@ -353,8 +353,8 @@ namespace methods {
 
 namespace mf {
 namespace {
-  // Returns the pp_type of the pseudopotential of the pw2coqui h5 file `fn`, whose group Hamiltonian/<pp_type>/fullbz
-  // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
+  // Returns the pp_type of the pseudopotential of projector_file (mf's own file if it is empty), whose group
+  // Hamiltonian/<pp_type>/fullbz holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
   // writes anything, so that a missing group (or a file that is not a pw2coqui h5) aborts without a partial file.
   // The projectors are checked to belong to mf: same number of atoms and of projectors as its own pseudopotential.
   std::string read_full_bz_projector_type(MF const& mf, std::string const& projector_file) {
@@ -370,7 +370,11 @@ namespace {
       h5::h5_read_attribute(pp, "pp_type", pp_type);
     }
 
-    utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
+    bool has_fullbz = not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz");
+    if (not has_fullbz and mf.is_augmented() and projector_file.empty()) // an augmented h5 never has a fullbz group
+      utils::check(false, "unfold_mf: {} has no full-BZ projectors (an augmented mean field has none); "
+                          "pass projector_file = the pw2coqui h5 of its parent.", fn);
+    utils::check(has_fullbz,
                  "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
                  "rerun pw2coqui.x with add_pp_fullbz = .true.", fn);
 
@@ -453,6 +457,8 @@ namespace {
                  "unfold_mf: the mean-field system has no symmetry reduction (nkpts = nkpts_ibz = {}).", mf.nkpts());
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
+    utils::check(not mf.is_augmented() or mf.has_hks_matrix(),
+                 "unfold_mf: the augmented mean field {} has no Orbitals/H_KS_skij.", mf.filename());
     std::string pp_type = read_full_bz_projector_type(mf, projector_file);
     std::string projector_fn = not projector_file.empty() ? projector_file : mf.filename();
 
@@ -503,8 +509,6 @@ namespace {
       // Augmented mf: Kohn-Sham matrix of the basis at every k, H_KS(k) = H_KS(kp_to_ibz(k)) (conjugated at
       // time-reversal k), the rule of the orbitals above
       if (mf.is_augmented()) {
-        utils::check(mf.has_hks_matrix(), "unfold_mf: the augmented mean field {} has no Orbitals/H_KS_skij.",
-                     mf.filename());
         long ns = mf.nspin(), nb = mf.nbnd();
         nda::array<ComplexType,4> H_ibz(ns, mf.nkpts_ibz(), nb, nb);
         mf.read_hks_matrix(H_ibz());

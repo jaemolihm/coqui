@@ -981,7 +981,7 @@ auto generate_dmatrix(MF_t &mf,
   // Unitarity defect of D: eps_D = max_{s,k} ||D D^dagger - 1||_max, taken before the row normalization
   // (a D that does not close on the kept bands has eps_D = O(1); the row-norm warning below hides it).
   double eps_D = 0.0;
-  long isk_eps_D = 0;
+  long isk_eps_D = -1;   // (s,k) index of the largest defect; -1 while eps_D = 0
   auto update_eps_D = [&](auto const& Dblk, long isk) {
     long n = Dblk.extent(0);
     nda::array<ComplexType,2> Dh = nda::conj(nda::transpose(Dblk));
@@ -1104,9 +1104,12 @@ auto generate_dmatrix(MF_t &mf,
   {
     double eps_D_max = comm.all_reduce_value(eps_D, boost::mpi3::max<>{});
     long isk_max = comm.all_reduce_value(eps_D == eps_D_max ? isk_eps_D : long(sk.size()), boost::mpi3::min<>{});
-    if(isk_max < long(sk.size()))
+    if(eps_D_max > 0.0 and isk_max >= 0 and isk_max < long(sk.size()))
       app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} at isym = {}, ik = {} "
-                 "(before row normalization)", eps_D_max, sk[isk_max].first, sk[isk_max].second);
+                 "(before row normalization; O(1) if nbnd splits a degenerate set, see the warning below)",
+              eps_D_max, sk[isk_max].first, sk[isk_max].second);
+    else
+      app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} (before row normalization)", eps_D_max);
   }
 
   // check # of Bloch orbitals with a incomplete degenerate set

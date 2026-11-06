@@ -467,8 +467,9 @@ double stored_D_unitarity_defect(mf::MF& mf)
 //  (b) Its stored rotations D(s,k), built by the dense branch of generate_dmatrix (assume_irreducible = not augmented),
 //      are unitary: ||D D^dagger - 1||_max against the floor measured on this fixture. Negative control: the
 //      eigenvalue-based branch (assume_irreducible = true), which needs sorted eigval; the eigval of an augmented basis
-//      is diag(H_KS), which is not sorted. A second control cuts the first R bands inside a degenerate multiplet, which
-//      makes D non unitary at the size of the missing weight.
+//      is diag(H_KS), which is not sorted. Control 0 is momentum_augmenter with dirs {0} (not a vector set, so the aug
+//      span is not invariant and D is non unitary); control 1 is the unsortedness of diag(H_KS) (the eigenvalue-based
+//      branch aborts); control 2 is the eigenvalue-based branch on sorted eigval, which differs from the dense D.
 //  (c) THC with band weights, nbnd_protected and exclude_unprotected_pairs on the IBZ augmented MF, then the HF Fock
 //      matrix of the diagonal initial density, against the same THC/HF on its mf::unfold_mf view (full BZ, pivot_file
 //      = the IBZ pivots). Negative control: the view's THC refit without the band weights.
@@ -499,7 +500,7 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
   double eps_D = stored_D_unitarity_defect(aug_mf);
   app_log(2, "aug_ibz_symmetry: R = {}, nbnd {} -> {}; max ||D D^dagger - 1||_max (stored D) = {:.3e}",
           R, nbnd, aug_mf.nbnd(), eps_D);
-  REQUIRE(eps_D < 1e-6);   // measured floor ~ see the log line above; the controls below are O(1e-2) or abort
+  REQUIRE(eps_D < 3e-8);   // measured 2.99e-9 (floor of the 1e-8 sparsifier of to_csr); 10x per DB2. Controls: dirs {0} 9.4e-1, 7.4e-4 (control 2)
 
   // (b) control 0: momentum states along x only are not a vector set, so the aug span is not invariant under the
   // symmetry operations
@@ -562,48 +563,108 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
   }
 
   // (c) THC (weights + protected bands + pair exclusion) and the HF Fock matrix, IBZ vs unfolded view
+  const long N_P = 4;
+  // THC reader ptree; nbnd_orig is meaningful for an augmented mean field only
+  auto make_pt = [&](std::shared_ptr<mf::MF> m, std::string pivot_file, bool band_weights, bool protect = true,
+                     bool exclude = true) {
+    auto pt = methods::make_thc_reader_ptree(0, "", "incore", "", "bdft", 1e-4, 1.4*m->wfc_truncated_grid()->ecut());
+    if (protect) {   // energy weights of the band tail [N_P, nbnd_orig) (+ augmentation weights if augmented)
+      pt.put("nbnd_protected", N_P);
+      if (m->is_augmented()) pt.put("nbnd_orig", nbnd);
+      pt.put("exclude_unprotected_pairs", exclude);
+    }
+    pt.put("band_weights", band_weights);
+    pt.put("pivot_file", pivot_file);
+    pt.put("save", "");
+    return pt;
+  };
+  // pivots of m, fitted on the IBZ k (weights + exclusion on the IBZ path)
+  auto make_pivots = [&](std::shared_ptr<mf::MF> m, std::string pivot_file, bool protect = true, bool exclude = true) {
+    auto pt = make_pt(m, "", true, protect, exclude);
+    pt.put("save", pivot_file);
+    methods::make_thc_pivots(m, pt);
+  };
+  // HF Fock matrix of the diagonal initial density (occupations of the parent bands, 0 on the augmentation states;
+  // the occupations of an augmented mean field are zero), refit on the pivots of pt
+  auto fock = [&](std::shared_ptr<mf::MF> m, auto const& pt) {
+    methods::thc_reader_t thc(m, pt);
+    methods::solvers::hf_t hf("ignore_g0");
+    long ns = m->nspin(), nk = m->nkpts_ibz(), nb = m->nbnd();
+    auto sS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
+    hamilt::set_ovlp(*m, sS);
+    auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
+    nda::array<ComplexType,4> Dm(ns, nk, nb, nb);
+    Dm() = ComplexType(0.0);
+    auto occ = qe_mf.occ();
+    for (long s = 0; s < ns; ++s)
+      for (long k = 0; k < nk; ++k) {
+        long kp = (nk == qe_mf.nkpts_ibz()) ? k : qe_mf.kp_to_ibz(k);   // IBZ list or full-BZ list
+        for (long a = 0; a < nbnd; ++a) Dm(s,k,a,a) = occ(s,kp,a);
+      }
+    hf.evaluate(sF, Dm, thc, sS.local(), true, true);
+    mpi->node_comm.barrier();
+    nda::array<ComplexType,4> F(sF.local());
+    comm.broadcast_n(F.data(), F.size(), 0);
+    return F;
+  };
+  auto fnorm = [](nda::array<ComplexType,4> const& A) {
+    double n2 = 0.0;
+    for (long i = 0; i < A.size(); ++i) n2 += std::norm(A.data()[i]);
+    return std::sqrt(n2);
+  };
+  // ||A - B|| / ||B|| of two Fock matrices of the same mean field (repeat-fit floor)
+  auto rel_repeat = [&](nda::array<ComplexType,4> const& A, nda::array<ComplexType,4> const& B) {
+    nda::array<ComplexType,4> d(A - B);
+    return fnorm(d) / fnorm(B);
+  };
+  // ||F_ibz(copy/conj to k) - F_view(k)|| / ||F_view|| on the leading nb_blk x nb_blk block
+  auto rel_diff = [&](mf::MF& m, nda::array<ComplexType,4> const& Fi, nda::array<ComplexType,4> const& Fv, long nb_blk) {
+    double num = 0.0, den = 0.0;
+    for (long s = 0; s < m.nspin(); ++s)
+      for (long k = 0; k < m.nkpts(); ++k) {
+        long kib = m.kp_to_ibz(k);
+        bool tr = m.kp_trev(k);
+        for (long i = 0; i < nb_blk; ++i)
+          for (long j = 0; j < nb_blk; ++j) {
+            ComplexType ref = tr ? std::conj(Fi(s,kib,i,j)) : Fi(s,kib,i,j);
+            num += std::norm(ref - Fv(s,k,i,j));
+            den += std::norm(Fv(s,k,i,j));
+          }
+      }
+    return std::sqrt(num / den);
+  };
+
+  // (c) separation of the cause of the whole-matrix gap: the same IBZ-vs-view comparison on the plain parent with no
+  // weights, energy weights only, and energy weights + pair exclusion
+  {
+    auto qe_ptr = std::shared_ptr<mf::MF>(std::shared_ptr<void>{}, &qe_mf);   // non-owning
+    mf::unfold_mf(qe_mf, "plain_view.h5");
+    comm.barrier();
+    auto view = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", "plain_view", mf::h5_input_type));
+    REQUIRE(view->nkpts_ibz() == view->nkpts());
+    for (auto [protect, exclude] : {std::pair{false, false}, std::pair{true, false}, std::pair{true, true}}) {
+      make_pivots(qe_ptr, "plain_ibz_pivots.h5", protect, exclude);
+      auto F_ibz = fock(qe_ptr, make_pt(qe_ptr, "plain_ibz_pivots.h5", true, protect, exclude));
+      auto F_view = fock(view, make_pt(view, "plain_ibz_pivots.h5", true, protect, exclude));
+      auto F_view2 = fock(view, make_pt(view, "plain_ibz_pivots.h5", true, protect, exclude));
+      app_log(2, "aug_ibz_symmetry: PLAIN parent: two refits of the same view differ by {:.3e}", rel_repeat(F_view2, F_view));
+      app_log(2, "aug_ibz_symmetry: PLAIN parent, energy weights {}, pair exclusion {}: ||F_ibz,unfolded - F_view||/||F_view|| "
+                 "whole matrix {:.3e}, protected block {:.3e}", protect, exclude,
+              rel_diff(qe_mf, F_ibz, F_view, nbnd), rel_diff(qe_mf, F_ibz, F_view, N_P));
+      // measured whole matrix 1.1e-3 / 4.8e-3 / 2.2e-2 (none / weights / weights + exclusion), protected block 2.3-2.5e-4
+      // (Stage A's IBZ -> full-BZ refit asymmetry, 2.5e-4 on LiH in dev_ibz/README.md); the whole-matrix gap grows
+      // with the weights and the exclusion already on the plain parent, so it is not specific to the augmented basis
+      REQUIRE(rel_diff(qe_mf, F_ibz, F_view, N_P) < 5e-4);
+      if (not protect) REQUIRE(rel_diff(qe_mf, F_ibz, F_view, nbnd) < 5e-3);
+      cleanup("plain_ibz_pivots.h5");
+    }
+    cleanup("plain_view.h5");
+  }
+
   {
     auto aug_ptr = std::make_shared<mf::MF>(std::move(aug_mf));
-    const long N_P = 4;
-    auto make_pt = [&](std::string pivot_file, bool band_weights) {
-      auto pt = methods::make_thc_reader_ptree(0, "", "incore", "", "bdft", 1e-4,
-                                               1.4*aug_ptr->wfc_truncated_grid()->ecut());
-      pt.put("nbnd_protected", N_P);
-      pt.put("nbnd_orig", nbnd);
-      pt.put("exclude_unprotected_pairs", true);
-      pt.put("band_weights", band_weights);
-      if (not pivot_file.empty()) pt.put("pivot_file", pivot_file);
-      pt.put("save", pivot_file.empty() ? "aug_ibz_pivots.h5" : "");
-      return pt;
-    };
-    // pivots of the IBZ augmented basis (weights + exclusion on the IBZ path)
-    methods::make_thc_pivots(aug_ptr, make_pt("", true));
-
-    auto fock = [&](std::shared_ptr<mf::MF> m, auto const& pt) {
-      methods::thc_reader_t thc(m, pt);
-      methods::solvers::hf_t hf("ignore_g0");
-      long ns = m->nspin(), nk = m->nkpts_ibz(), nb = m->nbnd();
-      auto sS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
-      hamilt::set_ovlp(*m, sS);
-      auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
-      nda::array<ComplexType,4> Dm(ns, nk, nb, nb);
-      Dm() = ComplexType(0.0);
-      // density matrix diag(occupations of the parent bands), 0 on the augmentation states; the occupations of the
-      // augmented mean field are zero
-      auto occ = qe_mf.occ();
-      for (long s = 0; s < ns; ++s)
-        for (long k = 0; k < nk; ++k) {
-          long kp = (nk == qe_mf.nkpts_ibz()) ? k : qe_mf.kp_to_ibz(k);   // IBZ list or full-BZ list
-          for (long a = 0; a < nbnd; ++a) Dm(s,k,a,a) = occ(s,kp,a);
-        }
-      hf.evaluate(sF, Dm, thc, sS.local(), true, true);
-      mpi->node_comm.barrier();
-      nda::array<ComplexType,4> F(sF.local());
-      comm.broadcast_n(F.data(), F.size(), 0);
-      return F;
-    };
-    auto pt_ibz = make_pt("aug_ibz_pivots.h5", true);
-    auto F_ibz = fock(aug_ptr, pt_ibz);
+    make_pivots(aug_ptr, "aug_ibz_pivots.h5");
+    auto F_ibz = fock(aug_ptr, make_pt(aug_ptr, "aug_ibz_pivots.h5", true));
 
     // unfolded view of the IBZ augmented MF, projectors from the pw2coqui h5 of the parent
     mf::unfold_mf(*aug_ptr, "aug_ibz_view.h5", parent_fn);
@@ -611,39 +672,20 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
     auto view = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", "aug_ibz_view", mf::h5_input_type));
     REQUIRE(view->is_augmented());
     REQUIRE(view->nkpts_ibz() == view->nkpts());
-    auto F_view = fock(view, make_pt("aug_ibz_pivots.h5", true));
-    auto F_view_nw = fock(view, make_pt("aug_ibz_pivots.h5", false));
+    auto F_view = fock(view, make_pt(view, "aug_ibz_pivots.h5", true));
+    auto F_view_nw = fock(view, make_pt(view, "aug_ibz_pivots.h5", false));
+    auto F_view2 = fock(view, make_pt(view, "aug_ibz_pivots.h5", true));
+    app_log(2, "aug_ibz_symmetry: two refits of the same view differ by {:.3e}", rel_repeat(F_view2, F_view));
 
-    auto fnorm = [](nda::array<ComplexType,4> const& A) {
-      double n2 = 0.0;
-      for (long i = 0; i < A.size(); ++i) n2 += std::norm(A.data()[i]);
-      return std::sqrt(n2);
-    };
-    // ||F_ibz(copy/conj to k) - F_view(k)|| / ||F_view||
-    auto rel_diff = [&](nda::array<ComplexType,4> const& Fv, long nb_blk) {
-      double num = 0.0, den = 0.0;
-      for (long s = 0; s < aug_ptr->nspin(); ++s)
-        for (long k = 0; k < aug_ptr->nkpts(); ++k) {
-          long kib = aug_ptr->kp_to_ibz(k);
-          bool tr = aug_ptr->kp_trev(k);
-          for (long i = 0; i < nb_blk; ++i)
-            for (long j = 0; j < nb_blk; ++j) {
-              ComplexType ref = tr ? std::conj(F_ibz(s,kib,i,j)) : F_ibz(s,kib,i,j);
-              num += std::norm(ref - Fv(s,k,i,j));
-              den += std::norm(Fv(s,k,i,j));
-            }
-        }
-      return std::sqrt(num / den);
-    };
     app_log(2, "aug_ibz_symmetry: ||F_ibz|| = {}, ||F_view|| = {}, ||F_view_nw|| = {}", fnorm(F_ibz), fnorm(F_view), fnorm(F_view_nw));
-    // The fit constrains the pair densities of the protected bands only (the unprotected pairs are excluded from the
-    // fit and weighted down), so the F block of the protected bands is the compared quantity; the whole matrix is logged
-    double d_w = rel_diff(F_view, N_P), d_nw = rel_diff(F_view_nw, N_P);
-    app_log(2, "aug_ibz_symmetry: ||F_ibz,unfolded - F_view||/||F_view||, protected block [0,{}): {:.3e} (view refit with "
-               "band weights), {:.3e} (view refit without band weights); whole matrix: {:.3e}, {:.3e}",
-            N_P, d_w, d_nw, rel_diff(F_view, aug_ptr->nbnd()), rel_diff(F_view_nw, aug_ptr->nbnd()));
-    REQUIRE(d_w < 5e-4);          // measured 1.2e-4; Stage A's IBZ -> full-BZ refit asymmetry is 2.5e-4 on LiH (dev_ibz/README.md)
-    REQUIRE(d_nw > 3.0 * d_w);    // the weights carried to the view matter: measured 1.3e-3 without them
+    double d_w = rel_diff(*aug_ptr, F_ibz, F_view, aug_ptr->nbnd()), d_nw = rel_diff(*aug_ptr, F_ibz, F_view_nw, aug_ptr->nbnd());
+    double d_w_P = rel_diff(*aug_ptr, F_ibz, F_view, N_P), d_nw_P = rel_diff(*aug_ptr, F_ibz, F_view_nw, N_P);
+    app_log(2, "aug_ibz_symmetry: ||F_ibz,unfolded - F_view||/||F_view||, whole matrix: {:.3e} (view refit with band "
+               "weights), {:.3e} (without); protected block [0,{}): {:.3e}, {:.3e}", d_w, d_nw, N_P, d_w_P, d_nw_P);
+    // The protected block is the part of F that the fit constrains (the unprotected pairs are excluded from the fit and
+    // weighted down); the whole-matrix gap is logged above and discussed in the plan (docs/plan_ibz_unfold_stage_b.md)
+    REQUIRE(d_w_P < 5e-4);        // measured 1.5e-4 (plain parent: 2.3e-4)
+    REQUIRE(d_nw_P > 3.0 * d_w_P);   // the weights carried to the view matter: measured 1.3e-3 without them
 
     cleanup("aug_ibz_view.h5");
     cleanup("aug_ibz_pivots.h5");

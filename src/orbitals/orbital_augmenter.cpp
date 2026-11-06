@@ -18,6 +18,7 @@
  * ==========================================================================
  */
 
+#include <set>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -697,11 +698,17 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   utils::check(mf.npol() == 1,
                "add_augmentation_dpsi: only npol==1 is supported.");
   // An IBZ base MF is rotated by the reader to the other star members (O_S δψ(k_ibz)), which spans
-  // the δψ space of S·k_ibz only if all modes are present (checked per iq at Γ below).
-  utils::check(nkpts == nkpts_ibz or long(modes.size()) == nmodes,
-               "add_augmentation_dpsi: an IBZ mean field (nkpts_ibz {} < nkpts {}) needs all {} modes "
-               "(a mode subset is not invariant under the symmetry operations).",
-               nkpts_ibz, nkpts, nmodes);
+  // the δψ space of S·k_ibz only if every mode 1..3*natom is present exactly once; the q = Γ condition is checked
+  // per iq below.
+  {
+    bool all_modes = (nmodes == 3*natom) and
+                     (std::set<long>(modes.begin(), modes.end()).size() == size_t(3*natom)) and
+                     (long(modes.size()) == 3*natom);   // all_modes: modes is a permutation of 1..3*natom
+    utils::check(nkpts == nkpts_ibz or all_modes,
+                 "add_augmentation_dpsi: an IBZ mean field (nkpts_ibz {} < nkpts {}) needs all {} modes, each once "
+                 "(a mode subset is not invariant under the symmetry operations).",
+                 nkpts_ibz, nkpts, 3*natom);
+  }
   utils::check(nq > 0, "add_augmentation_dpsi: empty iq_list.");
   utils::check(dtau_step > 0.0, "add_augmentation_dpsi: dtau_step must be > 0, got {}.", dtau_step);
 
