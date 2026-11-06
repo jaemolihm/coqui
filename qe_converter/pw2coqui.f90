@@ -818,8 +818,8 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   !! every rotated k must lie on the grid (errore otherwise). Same datasets as the
   !! IBZ ones: attributes number_of_kpoints, max_npw; datasets kpoints (crystal), npw, miller_k*, projector_k*.
   !! Only pool 0 computes (the other pools return at once: after read_file only pool 0 holds xk(:,1:nkstot));
-  !! band groups are not supported; mill_g is allocated on ionode only. Assumes a non-OpenACC build (vkb is
-  !! reallocated on the host).
+  !! band groups are not supported; mill_g is allocated on ionode only. The module npwx is set to the largest
+  !! full-BZ list during the loop (init_us_2 sizes its output with it) and restored; the module vkb is not touched.
 
   USE qeh5_base_module, ONLY : qeh5_open_group, qeh5_close, qeh5_add_attribute
   USE cell_base, ONLY : at, bg
@@ -831,7 +831,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   USE symm_base, ONLY : nsym, s, t_rev
   USE constants, ONLY : eps8
   USE noncollin_module, ONLY : noncolin, domag
-  USE uspp, ONLY : nkb, vkb
+  USE uspp, ONLY : nkb
   USE wvfct, ONLY : npwx
   USE mp_pools, ONLY : my_pool_id
   USE mp_bands, ONLY : me_bgrp, nproc_bgrp, root_bgrp
@@ -844,11 +844,11 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   integer, allocatable, intent(in) :: mill_g(:,:)
 
   type(qeh5_file) :: h5_fb
-  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, ngg, ikb, maxnpw
+  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, npw_ik, ikb, npwx_fbz, npwx_save
   real(dp) :: xkg(3), sxk(3), sxk_int(3), dxk(3), q
   real(dp), allocatable :: xk_fbz(:,:), xk_fbz_cart(:,:)
-  integer, allocatable :: npw_fbz(:), igk(:), igk_l2g(:), itmp(:), ipos(:), mill_k(:,:)
-  complex(dp), allocatable :: vkb_g(:), vkb_g_root(:,:)
+  integer, allocatable :: npw_fbz(:), igk(:), igk_l2g(:), g_in_sphere(:), g_sphere_pos(:), mill_k(:,:)
+  complex(dp), allocatable :: vkb_fbz(:,:), vkb_g(:), vkb_g_root(:,:)
   logical :: use_tr, in_list
   character(len=8) str_ik
 
@@ -899,7 +899,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   xk_fbz_cart(:,:) = xk_fbz(:,1:nk_fbz)
   call cryst_to_cart(nk_fbz, xk_fbz_cart, bg, 1)   ! crystal -> cartesian (2pi/alat)
 
-  ! G list of each k: |k+G|^2 <= gcutw (as in gk_sort), local G of this band group
+  ! Size of the G list of each k, |k+G|^2 <= gcutw (as in gk_sort); counted first, since npwx_fbz sizes vkb_fbz
   allocate(igk(ngm))
   npw_fbz = 0
   do ik = 1, nk_fbz
@@ -910,70 +910,68 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     enddo
   enddo
   CALL mp_sum(npw_fbz, intra_bgrp_comm)
-  maxnpw = maxval(npw_fbz)
+  npwx_fbz = maxval(npw_fbz)
+
+  ! init_us_2 writes vkb_(npwx,nkb): set npwx to the largest full-BZ list for the loop below (restored after it)
+  npwx_save = npwx
+  npwx = npwx_fbz
+  allocate(vkb_fbz(npwx_fbz,nkb))
 
   ! Group fullbz: k list and sizes (ionode)
   if (ionode) then
     call qeh5_open_group(h5_n, "fullbz", h5_fb)
     call qeh5_add_attribute(h5_fb%id,"number_of_kpoints",nk_fbz)
-    call qeh5_add_attribute(h5_fb%id,"max_npw",maxnpw)
+    call qeh5_add_attribute(h5_fb%id,"max_npw",npwx_fbz)
     call h5_write_mat_r(h5_fb,xk_fbz(:,1:nk_fbz),"kpoints")
     call h5_write_vector_int(h5_fb,npw_fbz,"npw")
-    allocate(mill_k(3,maxnpw))
-  endif
-
-  ! init_us_2 writes vkb(npwx,nkb): enlarge npwx to the largest full-BZ k (nothing after write_pp uses npwx or vkb)
-  if (maxnpw > npwx) then
-    npwx = maxnpw
-    deallocate(vkb)
-    allocate(vkb(npwx,nkb))
+    allocate(mill_k(3,npwx_fbz))
   endif
 
   ! Miller indices and projectors at each full-BZ k
-  allocate(itmp(ngm_g), ipos(ngm_g))
+  allocate(g_in_sphere(ngm_g), g_sphere_pos(ngm_g))
   do ik = 1, nk_fbz
-    ! local G of this k and their global indices
+    ! local G of this k (igk), and g_in_sphere(ig) = 1 if global G ig is in the k+G sphere
     npw = 0
-    itmp = 0
+    g_in_sphere = 0
     do ig = 1, ngm
       q = sum((xk_fbz_cart(:,ik) + g(:,ig))**2)
       if (q <= eps8) q = 0.0_dp
       if (q > gcutw) cycle
       npw = npw + 1
       igk(npw) = ig
-      itmp(ig_l2g(ig)) = 1
+      g_in_sphere(ig_l2g(ig)) = 1
     enddo
-    CALL mp_sum(itmp, intra_bgrp_comm)
-    ! position of each global G in the sorted list of this k
-    ipos(1) = itmp(1)
+    CALL mp_sum(g_in_sphere, intra_bgrp_comm)
+    ! g_sphere_pos(ig): position of global G ig in the list of this k (sorted by global G index)
+    g_sphere_pos(1) = g_in_sphere(1)
     do ig = 2, ngm_g
-      ipos(ig) = ipos(ig-1) + itmp(ig)
+      g_sphere_pos(ig) = g_sphere_pos(ig-1) + g_in_sphere(ig)
     enddo
     allocate(igk_l2g(npw))
     do i = 1, npw
-      igk_l2g(i) = ipos(ig_l2g(igk(i)))
+      igk_l2g(i) = g_sphere_pos(ig_l2g(igk(i)))
     enddo
-    ngg = npw_fbz(ik)
+    npw_ik = npw_fbz(ik)
     if (ionode) then
       ! miller indices of the k+G list, in increasing global G index
       i = 0
       do ig = 1, ngm_g
-        if (itmp(ig) == 1) then
+        if (g_in_sphere(ig) == 1) then
           i = i + 1
           mill_k(:,i) = mill_g(:,ig)
         endif
       enddo
       write ( str_ik, '(I8)') ik-1
-      call h5_write_mat_int(h5_fb,mill_k(1:3,1:ngg),"miller_k"//adjustl(trim(str_ik)))
-      allocate(vkb_g_root(ngg,nkb))
+      call h5_write_mat_int(h5_fb,mill_k(1:3,1:npw_ik),"miller_k"//adjustl(trim(str_ik)))
     endif
 
     ! projectors of this k, gathered to ionode in the global G order
-    CALL init_us_2(npw, igk, xk_fbz_cart(1,ik), vkb)
-    allocate(vkb_g(ngg))
+    CALL init_us_2(npw, igk, xk_fbz_cart(1,ik), vkb_fbz)
+    if (ionode) allocate(vkb_g_root(npw_ik,nkb))
+    allocate(vkb_g(npw_ik))
     do ikb = 1, nkb
       vkb_g = (0.0D0, 0.0D0)
-      CALL mergewf(vkb(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
+      CALL mergewf(vkb_fbz(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
       if (ionode) vkb_g_root(:,ikb) = vkb_g(:)
     enddo
     if (ionode) then
@@ -983,12 +981,13 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     deallocate(vkb_g, igk_l2g)
   enddo
 
-  ! Close the group and free the buffers
+  ! Close the group, free the buffers and restore npwx
   if (ionode) then
     deallocate(mill_k)
     call qeh5_close(h5_fb)
   endif
-  deallocate(xk_fbz, xk_fbz_cart, npw_fbz, igk, itmp, ipos)
+  deallocate(xk_fbz, xk_fbz_cart, npw_fbz, igk, g_in_sphere, g_sphere_pos, vkb_fbz)
+  npwx = npwx_save
 
 end subroutine write_pp_fullbz
 
