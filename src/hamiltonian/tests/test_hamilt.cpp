@@ -719,7 +719,7 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     if (has_trev) REQUIRE(err_noconj > 1e-3);
     if (not nosym_name.empty()) {
       REQUIRE(nrm_N > 1e-3);
-      REQUIRE(err_N < 1e-7); // two QE runs: orbitals converged to the diagonalization threshold, not round-off (measured 4e-9)
+      REQUIRE(err_N < 1e-7); // two QE runs; measured 4e-9 (cause not verified)
     }
     comm.barrier();
     if (comm.root()) remove((prefix + ".h5").c_str());

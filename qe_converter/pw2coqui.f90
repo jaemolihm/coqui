@@ -815,7 +815,9 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   !! -S k if t_rev) and time reversal (-k) unless the system is noncollinear magnetic, restricted to the
   !! automatic k grid (as kpoint_grid does) when there is one. Same datasets as the
   !! IBZ ones: attributes number_of_kpoints, max_npw; datasets kpoints (crystal), npw, miller_k*, projector_k*.
-  !! The first band group of the first pool computes all k (the other pools wait); mill_g is allocated on ionode only.
+  !! Only pool 0 computes (the other pools return at once: after read_file only pool 0 holds xk(:,1:nkstot));
+  !! band groups are not supported; mill_g is allocated on ionode only. Assumes a non-OpenACC build (vkb is
+  !! reallocated on the host).
 
   USE qeh5_base_module, ONLY : qeh5_open_group, qeh5_close, qeh5_add_attribute
   USE cell_base, ONLY : at, bg
