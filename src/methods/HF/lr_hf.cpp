@@ -28,6 +28,8 @@
 #include "nda/blas.hpp"
 #include "numerics/gemm_guard.hpp"
 
+#include <numbers>
+
 using thc_reader_t = methods::thc_reader_t;
 
 namespace methods {
@@ -111,6 +113,7 @@ lr_hf::lr_hf(std::shared_ptr<mpi_context_t> mpi,
 
 void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
                         nda::range P_rng, nda::range Q_rng, bool compute_xc,
+                        bool exclude_hartree_head,
                         nda::array<ComplexType, 2>& Uq_PQ) {
   if (not _Vq_cached) {
     // One (P,Q) tile at the perturbation q, instead of the whole (nq, NP, NP)
@@ -126,6 +129,55 @@ void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
 
   if (Uq_PQ.shape() != _Vq_PQ.shape()) Uq_PQ.resize(_Vq_PQ.shape());
   Uq_PQ() = _Vq_PQ();
+
+  // Hartree kernel without the G = 0 term of v(q+G). The THC builder assembles
+  //   V_PQ(q) = 1/(Ω N_k) Σ_G Zloc_P(q,G) v(q+G) conj(Zloc_Q(q,G))
+  // and thc_reader_t rescales it by N_k (thc_reader_t.hpp, "scale by nkpts"), which is
+  // the V that thc.Z returns. With basis_head()(q,P) = conj(Zloc_P(q,G=0)) the G = 0
+  // term of that V is rank 1:
+  //   V̄_PQ(q) = V_PQ(q) - v(q)/Ω conj(h_P) h_Q.
+  // It is removed from this private copy only; the cached V(q) and the exchange
+  // path keep the full kernel.
+  if (exclude_hartree_head) {
+    // The removed plane wave is the THC's own q image, so it must be the caller's q
+    auto Q_thc = _MF->Qpts(_q_ibz_idx);
+    auto recv = _MF->recv();
+    double dq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      double q_cart = 0.0;
+      for (int d = 0; d < 3; ++d) q_cart += _q_vec(d) * recv(d, a);
+      dq = std::max(dq, std::abs(q_cart - Q_thc(a)));
+    }
+    utils::check(dq < 1e-8,
+                 "lr_hf: exclude_hartree_head needs the q of the THC's q image "
+                 "Q_thc = ({:.8f}, {:.8f}, {:.8f}) a.u. (Cartesian); the perturbation q = "
+                 "({:.8f}, {:.8f}, {:.8f}) (crystal) differs from it by {:.2e}. Pass the "
+                 "q_vec that maps to Q_thc.",
+                 Q_thc(0), Q_thc(1), Q_thc(2), _q_vec(0), _q_vec(1), _q_vec(2), dq);
+    double q2 = Q_thc(0)*Q_thc(0) + Q_thc(1)*Q_thc(1) + Q_thc(2)*Q_thc(2);
+    if (q2 <= 1e-8) { // Gamma: the THC has no G = 0 term, so V is already V̄
+      app_log(2, "  exclude_hartree_head: q = Gamma, the THC Coulomb has no G = 0 term; no-op.");
+    } else { // Subtract the rank-1 G = 0 term
+      auto h_q = nda::array<ComplexType, 1>(thc.basis_head()(_q_ibz_idx, nda::range::all));
+      double h_norm2 = 0.0;
+      for (long iP = 0; iP < h_q.size(); ++iP) h_norm2 += std::norm(h_q(iP));
+      utils::check(h_norm2 > 0.0,
+                   "lr_hf: exclude_hartree_head needs the THC basis head "
+                   "(interpolating_vectors_G0), which is identically zero at q index {}. "
+                   "This THC was built by the path that leaves it zero; rebuild the THC "
+                   "with the path that stores it.", _q_ibz_idx);
+      const double coeff = 4.0 * std::numbers::pi / q2 / _MF->volume();
+      app_log(2, "  exclude_hartree_head: q_thc = ({:.6f}, {:.6f}, {:.6f}) a.u., "
+              "v(q) = {:.6f}, q_vec = ({:.6f}, {:.6f}, {:.6f}) (crystal).",
+              Q_thc(0), Q_thc(1), Q_thc(2), 4.0 * std::numbers::pi / q2,
+              _q_vec(0), _q_vec(1), _q_vec(2));
+      for (long iP = 0; iP < P_rng.size(); ++iP) {
+        const ComplexType hP_conj = std::conj(h_q(P_rng.first() + iP));
+        for (long iQ = 0; iQ < Q_rng.size(); ++iQ)
+          Uq_PQ(iP, iQ) -= coeff * hP_conj * h_q(Q_rng.first() + iQ);
+      }
+    }
+  }
 
   // LR-DFT: the direct channel uses (V + Vxc)(q). Vxc goes into this private copy,
   // read only by the ΔJ gemv — the exchange path works off U(R)_PQ, so the xc
@@ -169,13 +221,15 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                      const nda::array<ComplexType, 4>* Dm_skij_unpert,
                      nda::array<ComplexType, 4>* DeltaF_PQ_out,
                      bool compute_xc,
-                     const hsex_kernel_t* hsex) {
+                     const hsex_kernel_t* hsex,
+                     bool exclude_hartree_head) {
   _Timer.start("LR_HF");
   app_log(3, "Evaluating LR Fock matrix (ΔF from ΔDm):");
   app_log(3, "  - Compute Hartree (ΔJ): {}", compute_hartree ? "yes" : "no");
   app_log(3, "  - Compute Exchange (ΔK): {}", compute_exchange ? "yes" : "no");
   app_log(3, "  - Static screened exchange: {}", hsex ? "yes" : "no");
   app_log(3, "  - Semilocal xc kernel in ΔJ: {}", compute_xc ? "yes" : "no");
+  app_log(3, "  - Hartree kernel without the G = 0 term: {}", exclude_hartree_head ? "yes" : "no");
   app_log(3, "  - DeltaX correction: {}", ibc ? "yes" : "no");
   app_log(3, "  - DeltaV correction: {}", DeltaV_qPQ ? "yes" : "no");
 
@@ -188,7 +242,8 @@ void lr_hf::evaluate(sArray_t<AF_t>& sDeltaF_skij,
                "(pass Dm_skij_unpert or an lr_ibc_DeltaX with Dm_ab set).");
 
   thc_lr_hf(sDeltaDm_skij, sDeltaF_skij, thc, compute_hartree, compute_exchange,
-            ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc, hsex);
+            ibc, DeltaV_qPQ, Dm_unpert_for_dV, DeltaF_PQ_out, compute_xc, hsex,
+            exclude_hartree_head);
 
   // Add LR finite-size correction for exchange. Under HSEX the contracted
   // kernel is W(iν=0), whose q→0 head is ε⁻¹(iν=0) times the bare one — the
@@ -218,7 +273,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
                       const nda::array<ComplexType, 4>* Dm_skij_unpert,
                       nda::array<ComplexType, 4>* DeltaF_PQ_out,
                       bool compute_xc,
-                      const hsex_kernel_t* hsex) {
+                      const hsex_kernel_t* hsex,
+                      bool exclude_hartree_head) {
   // LR version of hf_t::thc_hf_Xqindep (thc_hf.icc).
   // LR differences: uses lr_thc_comm (left X at k+q, right X at k),
   // V(q) at _q_ibz_idx instead of q=0, and _MF->Qpts() for U FT.
@@ -247,7 +303,8 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   // allocated at all. IBC and δV fall through to the dense branch.
   if (compute_hartree and not compute_exchange and
       ibc == nullptr and DeltaV_qPQ == nullptr) {
-    thc_lr_hartree_only(sDeltaDm_skij, sDeltaF_skij, thc, DeltaF_PQ_out, compute_xc);
+    thc_lr_hartree_only(sDeltaDm_skij, sDeltaF_skij, thc, DeltaF_PQ_out, compute_xc,
+                        exclude_hartree_head);
     return;
   }
 
@@ -314,7 +371,7 @@ void lr_hf::thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
   nda::range Q_rng(Q_origin, Q_origin + NQ_loc);
   // Read only by the Hartree (ΔJ) gemvs.
   nda::array<ComplexType, 2> Uq_PQ;
-  if (compute_hartree) build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
+  if (compute_hartree) build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, exclude_hartree_head, Uq_PQ);
 
   // Accumulate diagonal indices of ΔDm for the Hartree term
   nda::array<ComplexType, 1> DeltaDm_QQ(NP, ComplexType(0.0));
@@ -708,7 +765,8 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
                                 sArray_t<AF_t>& sDeltaF_skij,
                                 THC_ERI auto& thc,
                                 nda::array<ComplexType, 4>* DeltaF_PQ_out,
-                                bool compute_xc) {
+                                bool compute_xc,
+                                bool exclude_hartree_head) {
   long NP = thc.Np();
   long ns = sDeltaDm_skij.shape()[0];
   long npol = _npol;
@@ -732,7 +790,7 @@ void lr_hf::thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
   nda::range P_rng(dPQ.origin()[0], dPQ.origin()[0] + dPQ.local_shape()[0]);
   nda::range Q_rng(dPQ.origin()[1], dPQ.origin()[1] + dPQ.local_shape()[1]);
   nda::array<ComplexType, 2> Uq_PQ;
-  build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, Uq_PQ);
+  build_Uq_PQ(thc, np_P, np_Q, P_rng, Q_rng, compute_xc, exclude_hartree_head, Uq_PQ);
 
   // (1) aux-basis density diagonal, averaged over the full BZ and summed over the
   //     diagonal polarization blocks — the only ones the direct channel sees.
@@ -874,7 +932,8 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const nda::array<ComplexType, 4>*,
                                nda::array<ComplexType, 4>*,
                                bool,
-                               const lr_hf::hsex_kernel_t*);
+                               const lr_hf::hsex_kernel_t*,
+                               bool);
 
 template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const sArray_t<Arrv4D>&,
@@ -886,7 +945,8 @@ template void lr_hf::evaluate(sArray_t<Arrv4D>&,
                                const nda::array<ComplexType, 4>*,
                                nda::array<ComplexType, 4>*,
                                bool,
-                               const lr_hf::hsex_kernel_t*);
+                               const lr_hf::hsex_kernel_t*,
+                               bool);
 
 } // namespace solvers
 } // namespace methods

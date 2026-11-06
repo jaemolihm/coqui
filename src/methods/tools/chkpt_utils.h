@@ -193,6 +193,8 @@ namespace methods {
    *   iteration and gave its start ("Hartree"/"HF"/"HSEX"), written as
    *   "precond_method" when non-empty. It changes the convergence rate only, not
    *   the result of a converged run.
+   * @param exclude_hartree_head - [INPUT] the Hartree rung used V̄ (no G = 0 term of
+   *   v(q+G)); written as "exclude_hartree_head" next to include_hartree.
    */
   template<typename communicator_t, typename G_t, typename Dm_t, typename F_t, typename Sigma_t>
   void dump_lr(communicator_t& comm,
@@ -213,7 +215,8 @@ namespace methods {
                std::optional<long> nbnd_save,
                std::string const& gw_mode,
                std::string const& precond_method,
-               std::optional<double> exchange_static_W_head);
+               std::optional<double> exchange_static_W_head,
+               bool exclude_hartree_head);
 
   /// The "linear_response" group of an open checkpoint, or its "mode{imode}"
   /// subgroup, each created if absent.

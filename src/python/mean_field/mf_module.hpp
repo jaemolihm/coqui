@@ -107,9 +107,9 @@ namespace coqui_py {
     auto nkpts_ibz() const { return _mf->nkpts_ibz(); }
     auto kpts_ibz() const { return _mf->kpts_ibz(); }
     auto nqpts() const { return _mf->nqpts(); }
-    auto qpts() const { return _mf->Qpts(); }
+    auto qpts() const { return nda::array<double,2>(_mf->Qpts()); }
     auto nqpts_ibz() const { return _mf->nqpts_ibz(); }
-    auto qpts_ibz() const { return _mf->Qpts_ibz(); }
+    auto qpts_ibz() const { return nda::array<double,2>(_mf->Qpts_ibz()); }
 
     auto nuclear_energy() const { return _mf->nuclear_energy(); }
 
