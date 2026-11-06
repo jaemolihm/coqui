@@ -181,8 +181,8 @@ def unfold_mf(mf, prefix, outdir="./"):
     e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
     Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``.
 
-    ``mf`` must be a ``pw2coqui`` h5 mean field with the full-BZ projectors, with
-    ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
+    ``mf`` must be a symmorphic (``force_symmorphic``) ``pw2coqui`` h5 mean field with the
+    full-BZ projectors, with ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
 
     Parameters
     ----------

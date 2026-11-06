@@ -111,7 +111,7 @@ namespace mf {
    * the projectors at every full-BZ k_j: k = k_j + G0 (G0 a reciprocal lattice vector), and the stored
    * projector at k_j with Miller index n is beta(k_j + n), so the projector at k has the Miller index m = n - G0.
    * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
-   * is not in its k list. Only npol = 1 and non-augmented orbitals are supported.
+   * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
    * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")

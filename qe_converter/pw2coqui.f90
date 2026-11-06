@@ -830,7 +830,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   USE uspp, ONLY : nkb, vkb
   USE wvfct, ONLY : npwx
   USE mp_pools, ONLY : my_pool_id
-  USE mp_bands, ONLY : my_bgrp_id, me_bgrp, nproc_bgrp, root_bgrp
+  USE mp_bands, ONLY : me_bgrp, nproc_bgrp, root_bgrp
   USE mp_wave, ONLY : mergewf
   USE uspp_init, ONLY : init_us_2
 
@@ -840,7 +840,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   integer, allocatable, intent(in) :: mill_g(:,:)
 
   type(qeh5_file) :: h5_fb
-  integer :: nk_ibz, nkf, nkf_max, ik, isym, itr, i, ig, npw, ngg, ikb, maxnpw
+  integer :: npwx_old, nk_ibz, nkf, nkf_max, ik, isym, itr, i, ig, npw, ngg, ikb, maxnpw
   real(dp) :: xkg(3), xkr(3), xgrid(3), q
   real(dp), allocatable :: kf(:,:), kf_cart(:,:)
   integer, allocatable :: npw_f(:), igk(:), igk_l2g(:), itmp(:), ipos(:), mill_k(:,:)
@@ -849,6 +849,8 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   character(len=8) str_ik
 
   if (nbgrp > 1) call errore('write_pp_fullbz', 'band groups are not supported', 1)
+  ! After read_file only pool 0 holds the global k list in xk(:,1:nkstot), so only pool 0 (which contains ionode) computes
+  if (my_pool_id /= 0) return
   use_tr = .not. (noncolin .and. domag)
 
   ! Full-BZ k list: star of the IBZ k (first nkstot/ns entries of xk, spin up only for lsda)
@@ -885,17 +887,14 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   ! G list of each k: |k+G|^2 <= gcutw (as in gk_sort), local G of this band group
   allocate(igk(ngm))
   npw_f = 0
-  if (my_pool_id == 0 .and. my_bgrp_id == 0) then
-    do ik = 1, nkf
-      do ig = 1, ngm
-        q = sum((kf_cart(:,ik) + g(:,ig))**2)
-        if (q <= eps8) q = 0.0_dp
-        if (q <= gcutw) npw_f(ik) = npw_f(ik) + 1
-      enddo
+  do ik = 1, nkf
+    do ig = 1, ngm
+      q = sum((kf_cart(:,ik) + g(:,ig))**2)
+      if (q <= eps8) q = 0.0_dp
+      if (q <= gcutw) npw_f(ik) = npw_f(ik) + 1
     enddo
-    CALL mp_sum(npw_f, intra_bgrp_comm)
-  endif
-  CALL mp_bcast(npw_f, ionode_id, world_comm)
+  enddo
+  CALL mp_sum(npw_f, intra_bgrp_comm)
   maxnpw = maxval(npw_f)
 
   if (ionode) then
@@ -907,7 +906,8 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     allocate(mill_k(3,maxnpw))
   endif
 
-  ! init_us_2 writes vkb(npwx,nkb): enlarge npwx to the largest full-BZ k
+  ! init_us_2 writes vkb(npwx,nkb): enlarge npwx to the largest full-BZ k (restored below; nothing after write_pp uses it)
+  npwx_old = npwx
   if (maxnpw > npwx) then
     npwx = maxnpw
     deallocate(vkb)
@@ -916,56 +916,54 @@ subroutine write_pp_fullbz(h5_n, mill_g)
 
   allocate(itmp(ngm_g), ipos(ngm_g))
   do ik = 1, nkf
-    if (my_pool_id == 0 .and. my_bgrp_id == 0) then
-      ! local G of this k and their global indices
-      npw = 0
-      itmp = 0
-      do ig = 1, ngm
-        q = sum((kf_cart(:,ik) + g(:,ig))**2)
-        if (q <= eps8) q = 0.0_dp
-        if (q > gcutw) cycle
-        npw = npw + 1
-        igk(npw) = ig
-        itmp(ig_l2g(ig)) = 1
+    ! local G of this k and their global indices
+    npw = 0
+    itmp = 0
+    do ig = 1, ngm
+      q = sum((kf_cart(:,ik) + g(:,ig))**2)
+      if (q <= eps8) q = 0.0_dp
+      if (q > gcutw) cycle
+      npw = npw + 1
+      igk(npw) = ig
+      itmp(ig_l2g(ig)) = 1
+    enddo
+    CALL mp_sum(itmp, intra_bgrp_comm)
+    ! position of each global G in the sorted list of this k
+    ipos(1) = itmp(1)
+    do ig = 2, ngm_g
+      ipos(ig) = ipos(ig-1) + itmp(ig)
+    enddo
+    allocate(igk_l2g(npw))
+    do i = 1, npw
+      igk_l2g(i) = ipos(ig_l2g(igk(i)))
+    enddo
+    ngg = npw_f(ik)
+    if (ionode) then
+      ! miller indices of the k+G list, in increasing global G index
+      i = 0
+      do ig = 1, ngm_g
+        if (itmp(ig) == 1) then
+          i = i + 1
+          mill_k(:,i) = mill_g(:,ig)
+        endif
       enddo
-      CALL mp_sum(itmp, intra_bgrp_comm)
-      ! position of each global G in the sorted list of this k
-      ipos(1) = itmp(1)
-      do ig = 2, ngm_g
-        ipos(ig) = ipos(ig-1) + itmp(ig)
-      enddo
-      allocate(igk_l2g(npw))
-      do i = 1, npw
-        igk_l2g(i) = ipos(ig_l2g(igk(i)))
-      enddo
-      ngg = npw_f(ik)
-      if (ionode) then
-        ! miller indices of the k+G list, in increasing global G index
-        i = 0
-        do ig = 1, ngm_g
-          if (itmp(ig) == 1) then
-            i = i + 1
-            mill_k(:,i) = mill_g(:,ig)
-          endif
-        enddo
-        write ( str_ik, '(I8)') ik-1
-        call h5_write_mat_int(h5_fb,mill_k(1:3,1:ngg),"miller_k"//adjustl(trim(str_ik)))
-        allocate(vkb_g_root(ngg,nkb))
-      endif
-
-      CALL init_us_2(npw, igk, kf_cart(1,ik), vkb)
-      allocate(vkb_g(ngg))
-      do ikb = 1, nkb
-        vkb_g = (0.0D0, 0.0D0)
-        CALL mergewf(vkb(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
-        if (ionode) vkb_g_root(:,ikb) = vkb_g(:)
-      enddo
-      if (ionode) then
-        call h5_write_mat_c(h5_fb,vkb_g_root,"projector_k"//adjustl(trim(str_ik)))
-        deallocate(vkb_g_root)
-      endif
-      deallocate(vkb_g, igk_l2g)
+      write ( str_ik, '(I8)') ik-1
+      call h5_write_mat_int(h5_fb,mill_k(1:3,1:ngg),"miller_k"//adjustl(trim(str_ik)))
+      allocate(vkb_g_root(ngg,nkb))
     endif
+
+    CALL init_us_2(npw, igk, kf_cart(1,ik), vkb)
+    allocate(vkb_g(ngg))
+    do ikb = 1, nkb
+      vkb_g = (0.0D0, 0.0D0)
+      CALL mergewf(vkb(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
+      if (ionode) vkb_g_root(:,ikb) = vkb_g(:)
+    enddo
+    if (ionode) then
+      call h5_write_mat_c(h5_fb,vkb_g_root,"projector_k"//adjustl(trim(str_ik)))
+      deallocate(vkb_g_root)
+    endif
+    deallocate(vkb_g, igk_l2g)
   enddo
 
   if (ionode) then
@@ -973,6 +971,11 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     call qeh5_close(h5_fb)
   endif
   deallocate(kf, kf_cart, npw_f, igk, itmp, ipos)
+  if (npwx /= npwx_old) then
+    npwx = npwx_old
+    deallocate(vkb)
+    allocate(vkb(npwx,nkb))
+  endif
 
 end subroutine write_pp_fullbz
 

@@ -370,7 +370,7 @@ namespace {
   // Returns the pp_type of the pseudopotential of the pw2coqui h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz
   // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
   // writes anything, so that a missing group (or a mean field that is not a pw2coqui h5) aborts without a partial file.
-  std::string full_bz_pp_type(MF const& mf) {
+  std::string check_full_bz_projectors(MF const& mf) {
     bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
     std::string fn = from_h5 ? mf.filename() : mf.outdir();
     std::string type;
@@ -434,7 +434,7 @@ namespace {
     utils::check(not mf.is_augmented(), "unfold_mf: augmented orbital bases are not supported.");
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
-    std::string pp_type = full_bz_pp_type(mf);
+    std::string pp_type = check_full_bz_projectors(mf);
 
     bdft::bdft_system sys(mf, filename, false);
     {

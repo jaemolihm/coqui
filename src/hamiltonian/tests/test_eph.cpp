@@ -167,8 +167,7 @@ TEST_CASE("eph_bare_vertex", "[eph]")
  * matrix is compared, including the cross-atom blocks (Li-H). Nonlocal part only: no symmetric fixture carries the
  * vloc_radial group that the local part needs, so the local part of the unfolded mean field (compute_bare_eph_vertex)
  * is not tested here.
- * The rel err of C is 8e-9 (two independent QE runs: the orbitals of the two runs agree to the diagonalization
- * threshold); the tolerances are 10x that.
+ * The rel err of C is 7.5e-9 to 9e-9 (cause not verified); the tolerances are 1e-7.
  * Measured negative controls (rel err of C at q = 0, lih222 / lih223): unfold_mf without the Miller shift -G0 (4 of the 8
  * k of lih222 and 1 of the 12 k of lih223 have G0 != 0): 0.17 / 0.068; unfold_mf copying the projectors of the IBZ k
  * instead of those of the matched full-BZ k: 0.078 / 0.092.
