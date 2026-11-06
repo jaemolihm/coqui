@@ -443,6 +443,7 @@ namespace {
       nda::array<double,1> kp_grid(3);
       for (int i=0; i<3; ++i) kp_grid(i) = mf.kp_grid()(i);
       nda::array<double,2> kpts(mf.kpts());
+      // Setup trivial symmetry (identity operation only)
       nda::stack_array<double,3,3> E;
       E() = 0.0;
       for (int i=0; i<3; ++i) E(i,i) = 1.0;
@@ -458,52 +459,25 @@ namespace {
     utils::check(sys._symm.nkpts == nkpts and sys._symm.nkpts_ibz == nkpts,
                  "unfold_mf: failed to build the full-BZ k list.");
 
-    auto const* wfc_g = mf.wfc_truncated_grid();
-    long ngm = wfc_g->size();
-    long nbnd = mf.nbnd();
-    long nspin = mf.nspin();
-
-    // System/ and the plane-wave basis of Orbitals/, written by the root
-    std::optional<h5::file> file;
-    std::optional<h5::group> ogrp;
+    // Write the file on the root (get_orbital_set and the source h5 reads are not collective)
     if (comm.root()) {
-      file.emplace(filename, 'w');
-      h5::group grp(*file);
+      h5::file file(filename, 'w');
+      h5::group grp(file);
       sys.save(grp);
-      ogrp.emplace(grp.open_group("Orbitals"));
-      bdft::detail::write_wfc_metadata(*ogrp, *wfc_g);
-    }
 
-    // Orbitals rotated to every k: (s,k) pairs are read round-robin over ranks and written by the root
-    nda::array<ComplexType,2> psik(nbnd, ngm);
-    for (long is=0; is<nspin; ++is) {
-      for (long ik=0; ik<nkpts; ++ik) {
-        int owner = int((is*nkpts + ik) % comm.size());
-        if (comm.rank() == owner)
-          mf.get_orbital_set('w', is, ik, nda::range(nbnd), psik);
-        if (owner != 0) {
-          if (comm.rank() == owner)
-            comm.send_n(psik.data(), psik.size(), 0, 0);
-          else if (comm.root())
-            comm.receive_n(psik.data(), psik.size(), owner, 0);
-        }
-        if (comm.root())
-          nda::h5_write(*ogrp, "psi_s"+std::to_string(is)+"_k"+std::to_string(ik), psik, false);
-      }
-    }
+      // Orbitals/: plane-wave basis, and the orbitals rotated to every k (conjugated at time-reversal k)
+      h5::group ogrp = grp.open_group("Orbitals");
+      bdft::detail::write_wfc_metadata(ogrp, *mf.wfc_truncated_grid());
+      bdft::detail::write_orbitals(mf, ogrp, nkpts, mf.nbnd());
 
-    // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group
-    if (comm.root()) {
-      h5::group grp(*file);
+      // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group
       grp.create_group("Hamiltonian");
       hamilt::pseudopot_to_h5(mf.fft_grid_dim(), grp, mf.filename(), mf::h5_input_type, false);
-      h5::file f_src(mf.filename(), 'r');
-      h5::group qe_pp_grp = h5::group(f_src).open_group("Hamiltonian").open_group(pp_type).open_group("fullbz");
+      h5::file file_qe_h5(mf.filename(), 'r');
+      h5::group qe_pp_grp = h5::group(file_qe_h5).open_group("Hamiltonian").open_group(pp_type).open_group("fullbz");
       h5::group out_grp = grp.open_group("Hamiltonian").open_group(pp_type);
       copy_full_bz_projectors(mf, qe_pp_grp, out_grp);
     }
-    ogrp.reset();
-    file.reset();
     comm.barrier();
   }
 } // mf
