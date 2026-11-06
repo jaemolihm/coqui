@@ -63,6 +63,7 @@ void h5_read_write_attribute(h5::group& r_grp, h5::group& w_grp, std::string nam
 
 // copy_projectors = false (h5 input only) leaves out everything that is per k point (the attributes
 // number_of_kpoints and max_npw, and the datasets npw, miller_k*, projector_k*); the caller writes them.
+// copy_projectors = false is used to write unfolded mf h5 file (different projectors than irreducible BZ mf h5)
 void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0, 
                      std::string input_file_name, mf::mf_input_file_type_e input_file_type,
                      bool copy_projectors = true) 
