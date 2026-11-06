@@ -248,6 +248,7 @@ private:
   // depends on the per-call channel flags — V(q) only in the direct channel, U(R)
   // only in the exchange channel, Vxc only when compute_xc.
 
+  bool _hartree_head_checked = false;     // q image / basis head validated for exclude_hartree_head
   bool _Vq_cached = false;
   nda::array<ComplexType, 2> _Vq_PQ;      // V(q)_PQ tile at _q_ibz_idx
   bool _Vxc_q_cached = false;
@@ -265,6 +266,8 @@ private:
 
   /**
    * @brief Internal THC-based LR-HF implementation
+   *
+   * @param exclude_hartree_head - [INPUT] see evaluate().
    */
   template<nda::MemoryArray AF_t>
   void thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
@@ -307,6 +310,8 @@ private:
    * configuration takes the dense branch, which stays the reference implementation. Extending it to IBC (three more row dots, one per DeltaX term) or
    * to δV (one more cached diagonal) is mechanical, and worth doing only if such a
    * configuration ever shows up in a profile.
+   *
+   * @param exclude_hartree_head - [INPUT] see evaluate().
    */
   template<nda::MemoryArray AF_t>
   void thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
