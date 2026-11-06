@@ -844,12 +844,12 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   integer, allocatable, intent(in) :: mill_g(:,:)
 
   type(qeh5_file) :: h5_fb
-  integer :: npwx_old, nk_ibz, nkf, nkf_max, ik, isym, itr, i, ig, npw, ngg, ikb, maxnpw
-  real(dp) :: xkg(3), xkr(3), xgrid(3), q
-  real(dp), allocatable :: kf(:,:), kf_cart(:,:)
-  integer, allocatable :: npw_f(:), igk(:), igk_l2g(:), itmp(:), ipos(:), mill_k(:,:)
+  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, ngg, ikb, maxnpw
+  real(dp) :: xkg(3), sxk(3), sxk_int(3), dxk(3), q
+  real(dp), allocatable :: xk_fbz(:,:), xk_fbz_cart(:,:)
+  integer, allocatable :: npw_fbz(:), igk(:), igk_l2g(:), itmp(:), ipos(:), mill_k(:,:)
   complex(dp), allocatable :: vkb_g(:), vkb_g_root(:,:)
-  logical :: use_tr
+  logical :: use_tr, in_list
   character(len=8) str_ik
 
   if (nbgrp > 1) call errore('write_pp_fullbz', 'band groups are not supported', 1)
@@ -860,60 +860,69 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   ! Full-BZ k list: star of the IBZ k (first nkstot/ns entries of xk, spin up only for lsda)
   nk_ibz = nkstot
   if (lsda) nk_ibz = nkstot/2
-  nkf_max = nk_ibz*nsym*2
-  allocate(kf(3,nkf_max))
-  nkf = 0
+  nk_fbz_max = nk_ibz*nsym*2
+  allocate(xk_fbz(3,nk_fbz_max))
+  nk_fbz = 0
   do ik = 1, nk_ibz
-    xkg(:) = matmul(transpose(at), xk(:,ik))   ! cartesian (2pi/alat) -> crystal
+    xkg(:) = xk(:,ik)
+    call cryst_to_cart(1, xkg, at, -1)   ! cartesian (2pi/alat) -> crystal
     do isym = 1, nsym
       do itr = 0, merge(1, 0, use_tr)
-        xkr(:) = matmul(real(s(:,:,isym), dp), xkg)
-        if (t_rev(isym) == 1) xkr = -xkr
-        if (itr == 1) xkr = -xkr
-        ! skip if not on the automatic k grid (symmetry operations that do not map the grid onto itself)
+        ! compute symmetry rotated k point
+        sxk(:) = matmul(real(s(:,:,isym), dp), xkg)
+        if (t_rev(isym) == 1) sxk = -sxk
+        if (itr == 1) sxk = -sxk
+        ! For k points from a grid, check that the rotated k point lies on the grid; skip it if not (an operation
+        ! that does not map the grid onto itself, e.g. LiH 2x2x3; kpoint_grid skips these points too)
         if (nk1*nk2*nk3 > 0) then
-          xgrid = xkr*[nk1,nk2,nk3] - 0.5d0*[k1,k2,k3]
-          if (any(abs(xgrid - nint(xgrid)) > 1.d-5)) cycle
+          sxk_int = sxk*[nk1,nk2,nk3] - 0.5d0*[k1,k2,k3]
+          if (any(abs(sxk_int - nint(sxk_int)) > 1.d-5)) cycle
         endif
         ! skip if already in the list, modulo a reciprocal lattice vector
-        if (nkf > 0) then
-          if (any(all(abs(kf(:,1:nkf) - spread(xkr,2,nkf) - nint(kf(:,1:nkf) - spread(xkr,2,nkf))) < 1.d-6, dim=1))) cycle
-        endif
-        nkf = nkf + 1
-        kf(:,nkf) = xkr
+        in_list = .false.
+        do ikf = 1, nk_fbz
+          dxk = xk_fbz(:,ikf) - sxk
+          if (all(abs(dxk - nint(dxk)) < 1.d-6)) then
+            in_list = .true.
+            exit
+          endif
+        enddo
+        if (in_list) cycle
+        nk_fbz = nk_fbz + 1
+        xk_fbz(:,nk_fbz) = sxk
       enddo
     enddo
   enddo
 
   ! Cartesian k of the full-BZ list
-  allocate(kf_cart(3,nkf), npw_f(nkf))
-  kf_cart(:,1:nkf) = matmul(bg, kf(:,1:nkf))   ! crystal -> cartesian (2pi/alat)
+  allocate(xk_fbz_cart(3,nk_fbz), npw_fbz(nk_fbz))
+  xk_fbz_cart(:,:) = xk_fbz(:,1:nk_fbz)
+  call cryst_to_cart(nk_fbz, xk_fbz_cart, bg, 1)   ! crystal -> cartesian (2pi/alat)
 
   ! G list of each k: |k+G|^2 <= gcutw (as in gk_sort), local G of this band group
   allocate(igk(ngm))
-  npw_f = 0
-  do ik = 1, nkf
+  npw_fbz = 0
+  do ik = 1, nk_fbz
     do ig = 1, ngm
-      q = sum((kf_cart(:,ik) + g(:,ig))**2)
+      q = sum((xk_fbz_cart(:,ik) + g(:,ig))**2)
       if (q <= eps8) q = 0.0_dp
-      if (q <= gcutw) npw_f(ik) = npw_f(ik) + 1
+      if (q <= gcutw) npw_fbz(ik) = npw_fbz(ik) + 1
     enddo
   enddo
-  CALL mp_sum(npw_f, intra_bgrp_comm)
-  maxnpw = maxval(npw_f)
+  CALL mp_sum(npw_fbz, intra_bgrp_comm)
+  maxnpw = maxval(npw_fbz)
 
   ! Group fullbz: k list and sizes (ionode)
   if (ionode) then
     call qeh5_open_group(h5_n, "fullbz", h5_fb)
-    call qeh5_add_attribute(h5_fb%id,"number_of_kpoints",nkf)
+    call qeh5_add_attribute(h5_fb%id,"number_of_kpoints",nk_fbz)
     call qeh5_add_attribute(h5_fb%id,"max_npw",maxnpw)
-    call h5_write_mat_r(h5_fb,kf(:,1:nkf),"kpoints")
-    call h5_write_vector_int(h5_fb,npw_f,"npw")
+    call h5_write_mat_r(h5_fb,xk_fbz(:,1:nk_fbz),"kpoints")
+    call h5_write_vector_int(h5_fb,npw_fbz,"npw")
     allocate(mill_k(3,maxnpw))
   endif
 
-  ! init_us_2 writes vkb(npwx,nkb): enlarge npwx to the largest full-BZ k (restored below; nothing after write_pp uses it)
-  npwx_old = npwx
+  ! init_us_2 writes vkb(npwx,nkb): enlarge npwx to the largest full-BZ k (nothing after write_pp uses npwx or vkb)
   if (maxnpw > npwx) then
     npwx = maxnpw
     deallocate(vkb)
@@ -922,12 +931,12 @@ subroutine write_pp_fullbz(h5_n, mill_g)
 
   ! Miller indices and projectors at each full-BZ k
   allocate(itmp(ngm_g), ipos(ngm_g))
-  do ik = 1, nkf
+  do ik = 1, nk_fbz
     ! local G of this k and their global indices
     npw = 0
     itmp = 0
     do ig = 1, ngm
-      q = sum((kf_cart(:,ik) + g(:,ig))**2)
+      q = sum((xk_fbz_cart(:,ik) + g(:,ig))**2)
       if (q <= eps8) q = 0.0_dp
       if (q > gcutw) cycle
       npw = npw + 1
@@ -944,7 +953,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     do i = 1, npw
       igk_l2g(i) = ipos(ig_l2g(igk(i)))
     enddo
-    ngg = npw_f(ik)
+    ngg = npw_fbz(ik)
     if (ionode) then
       ! miller indices of the k+G list, in increasing global G index
       i = 0
@@ -960,7 +969,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     endif
 
     ! projectors of this k, gathered to ionode in the global G order
-    CALL init_us_2(npw, igk, kf_cart(1,ik), vkb)
+    CALL init_us_2(npw, igk, xk_fbz_cart(1,ik), vkb)
     allocate(vkb_g(ngg))
     do ikb = 1, nkb
       vkb_g = (0.0D0, 0.0D0)
@@ -974,17 +983,12 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     deallocate(vkb_g, igk_l2g)
   enddo
 
-  ! Close the group, free the buffers and restore npwx and vkb
+  ! Close the group and free the buffers
   if (ionode) then
     deallocate(mill_k)
     call qeh5_close(h5_fb)
   endif
-  deallocate(kf, kf_cart, npw_f, igk, itmp, ipos)
-  if (npwx /= npwx_old) then
-    npwx = npwx_old
-    deallocate(vkb)
-    allocate(vkb(npwx,nkb))
-  endif
+  deallocate(xk_fbz, xk_fbz_cart, npw_fbz, igk, itmp, ipos)
 
 end subroutine write_pp_fullbz
 

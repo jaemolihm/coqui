@@ -377,6 +377,11 @@ namespace {
   // Writes the nonlocal projectors of the unfolded mean field (number_of_kpoints, max_npw, npw, miller_k*, projector_k*
   // in tgrp) by copying, for every k of mf, those of the full-BZ k_j of fb with k = k_j + G0. The stored projector at
   // k_j with Miller index n is beta(k_j + n), so at k it has Miller index m = n - G0 (k + m = k_j + n).
+  //   mf   - the symmetry-reduced (IBZ) mean field; only its full k list (mf.kpts_crystal(), nkpts entries, the k
+  //          of the unfolded mean field) is used
+  //   fb   - input: group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (projectors at every full-BZ k_j,
+  //          in pw2coqui's own k order)
+  //   tgrp - output: group Hamiltonian/<pp_type> of the unfolded mean-field file
   // Called by unfold_mf on the root rank; there is no other source of the projectors at the unfolded k, because the
   // projectors of a rotated k are not obtained from the IBZ ones by the symmetry operations of the orbitals alone.
   void copy_full_bz_projectors(MF const& mf, h5::group& fb, h5::group& tgrp) {

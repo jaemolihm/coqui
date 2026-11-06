@@ -35,12 +35,15 @@
 namespace utils {
 
 /**
- * True if the file exists and holds a group at path (e.g. "Hamiltonian/ncpp/fullbz"), at any depth below the root;
- * false if the file does not exist. Throws if the file exists but is not HDF5.
+ * True if filename is an HDF5 file holding a group at path, given from the root group (e.g.
+ * "Hamiltonian/ncpp/fullbz"); false otherwise, including a missing file or one that is not HDF5.
  * Each component is checked in turn, since H5Lexists requires every intermediate link to exist.
  */
 inline bool h5_group_exists(std::string const& filename, std::string const& path) {
-  if (not std::filesystem::is_regular_file(filename)) return false;
+  // A missing file or a file that is not HDF5 holds no group
+  if (not std::filesystem::is_regular_file(filename) or H5Fis_hdf5(filename.c_str()) <= 0) return false;
+
+  // Walk the path from the root group, one component at a time
   h5::file file(filename, 'r');
   h5::group grp(file);
   std::size_t start = 0;
