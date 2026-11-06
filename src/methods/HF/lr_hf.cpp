@@ -132,10 +132,13 @@ void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
 
   // Hartree kernel without the G = 0 term of v(q+G). The THC builder assembles
   //   V_PQ(q) = 1/(Ω N_k) Σ_G Zloc_P(q,G) v(q+G) conj(Zloc_Q(q,G))
-  // and thc_reader_t rescales it by N_k (thc_reader_t.hpp, "scale by nkpts"), which is
-  // the V that thc.Z returns. With basis_head()(q,P) = conj(Zloc_P(q,G=0)) the G = 0
-  // term of that V is rank 1:
+  // (thc::intvec_impl in ERI/thc.icc, the "VCoul" block) and thc_reader_t rescales it
+  // by N_k (thc_reader_t.hpp, "scale by nkpts"), which is the V that thc.Z returns.
+  // With basis_head()(q,P) = conj(Zloc_P(q,G=0)) (same function, the block storing
+  // "Chi^{q}_{u}(G=0)") the G = 0 term of that V is rank 1:
   //   V̄_PQ(q) = V_PQ(q) - v(q)/Ω conj(h_P) h_Q.
+  // The same pairing conj(h_P) M_PQ h_Q gives the head of M in head_from_prod_basis
+  // (GW/g0_div_utils.hpp), and eval_eps_inv_q there uses the inverse factor Ω|q|²/(4π).
   // It is removed from this private copy only; the cached V(q) and the exchange
   // path keep the full kernel.
   if (exclude_hartree_head) {
