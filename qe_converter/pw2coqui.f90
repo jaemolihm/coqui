@@ -844,7 +844,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   integer, allocatable, intent(in) :: mill_g(:,:)
 
   type(qeh5_file) :: h5_fb
-  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, npw_ik, ikb, npwx_fbz, npwx_save
+  integer :: nk_ibz, nk_fbz, nk_fbz_max, ik, ikf, isym, itr, i, ig, npw, npw_global_ik, ikb, npwx_fbz, npwx_save
   real(dp) :: xkg(3), sxk(3), sxk_int(3), dxk(3), q
   real(dp), allocatable :: xk_fbz(:,:), xk_fbz_cart(:,:)
   integer, allocatable :: npw_fbz(:), igk(:), igk_l2g(:), g_in_sphere(:), g_sphere_pos(:), mill_k(:,:)
@@ -942,33 +942,30 @@ subroutine write_pp_fullbz(h5_n, mill_g)
       g_in_sphere(ig_l2g(ig)) = 1
     enddo
     CALL mp_sum(g_in_sphere, intra_bgrp_comm)
-    ! g_sphere_pos(ig): position of global G ig in the list of this k (sorted by global G index)
-    g_sphere_pos(1) = g_in_sphere(1)
-    do ig = 2, ngm_g
-      g_sphere_pos(ig) = g_sphere_pos(ig-1) + g_in_sphere(ig)
+    ! Number the G of this k's sphere 1, 2, ... in increasing global G index; this order is used for miller_k and projector_k
+    g_sphere_pos = 0
+    npw_global_ik = 0
+    do ig = 1, ngm_g
+      if (g_in_sphere(ig) == 1) then
+        npw_global_ik = npw_global_ik + 1
+        g_sphere_pos(ig) = npw_global_ik                    ! position of global G ig in this k's list
+        if (ionode) mill_k(:,npw_global_ik) = mill_g(:,ig)  ! mill_g exists on ionode only
+      endif
     enddo
+    ! position in this k's list of each local G of this rank, for mergewf
     allocate(igk_l2g(npw))
     do i = 1, npw
       igk_l2g(i) = g_sphere_pos(ig_l2g(igk(i)))
     enddo
-    npw_ik = npw_fbz(ik)
     if (ionode) then
-      ! miller indices of the k+G list, in increasing global G index
-      i = 0
-      do ig = 1, ngm_g
-        if (g_in_sphere(ig) == 1) then
-          i = i + 1
-          mill_k(:,i) = mill_g(:,ig)
-        endif
-      enddo
       write ( str_ik, '(I8)') ik-1
-      call h5_write_mat_int(h5_fb,mill_k(1:3,1:npw_ik),"miller_k"//adjustl(trim(str_ik)))
+      call h5_write_mat_int(h5_fb,mill_k(1:3,1:npw_global_ik),"miller_k"//adjustl(trim(str_ik)))
     endif
 
     ! projectors of this k, gathered to ionode in the global G order
     CALL init_us_2(npw, igk, xk_fbz_cart(1,ik), vkb_fbz)
-    if (ionode) allocate(vkb_g_root(npw_ik,nkb))
-    allocate(vkb_g(npw_ik))
+    if (ionode) allocate(vkb_g_root(npw_global_ik,nkb))
+    allocate(vkb_g(npw_global_ik))
     do ikb = 1, nkb
       vkb_g = (0.0D0, 0.0D0)
       CALL mergewf(vkb_fbz(:,ikb), vkb_g, npw, igk_l2g, me_bgrp, nproc_bgrp, root_bgrp, intra_bgrp_comm)
