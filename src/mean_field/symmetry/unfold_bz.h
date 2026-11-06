@@ -108,8 +108,9 @@ namespace mf {
    * i.e. the IBZ orbitals rotated to k (conjugated at time-reversal k), the orbital gauge in which an IBZ
    * calculation on mf is solved. The local pseudopotential is copied from mf. The nonlocal projectors at k are copied
    * from the group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (pw2coqui add_pp_fullbz), which holds
-   * the projectors at every full-BZ k_j: k = k_j + G0 (G0 a reciprocal lattice vector), and the stored
-   * projector at k_j with Miller index n is beta(k_j + n), so the projector at k has the Miller index m = n - G0.
+   * the projectors at every full-BZ k_qe: k = k_qe + G0 (G0 a reciprocal lattice vector), and the stored
+   * projector at k_qe with Miller index mill_qe is beta(k_qe + mill_qe), so the projector at k has the Miller index
+   * mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
    * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
    * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
    * Called by the post-processing step unfold_checkpoint (Python post_proc.unfold_checkpoint), which loads the file
