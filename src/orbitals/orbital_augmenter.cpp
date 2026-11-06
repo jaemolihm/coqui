@@ -569,6 +569,7 @@ struct elph_bare_data_t {
   math::shm::shared_array<nda::array_view<ComplexType,4>> g_scr;  // (nk,nmode,m,n) Ha
   nda::array<double,2>       et_k;   // (nk, N) Ha, e(n,k)
   nda::array<double,2>       et_kq;  // (nk, N) Ha, e(m,k+q)
+  nda::array<double,2>       xk_cryst; // (nk, 3) k-points of the elph run, crystal coords
   nda::stack_array<double,3> xq;     // phonon wavevector, crystal coords
 };
 
@@ -596,7 +597,7 @@ elph_bare_data_t read_elph_bare(
 
   auto g_scr = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(
       mpi_ctx, {nk, nm, Nb, Nb});
-  nda::array<double,2> et_k, et_kq;
+  nda::array<double,2> et_k, et_kq, xk_cryst;
   nda::stack_array<double,3> xq;
 
   // Global root reads + decodes g_scr into its node's window and the small
@@ -621,6 +622,10 @@ elph_bare_data_t read_elph_bare(
 
     nda::h5_read(f, "et_k",  et_k);   et_k()  *= Ry2Ha;
     nda::h5_read(f, "et_kq", et_kq);  et_kq() *= Ry2Ha;
+    nda::h5_read(f, "xk_cryst", xk_cryst);
+    utils::check(xk_cryst.shape(0) == nk and xk_cryst.shape(1) == 3,
+                 "read_elph_bare: xk_cryst shape ({}, {}) != ({}, 3).",
+                 xk_cryst.shape(0), xk_cryst.shape(1), nk);
     nda::array<double,1> xqr;
     nda::h5_read(f, "xq_cryst", xqr);
     utils::check(xqr.shape(0) == 3, "read_elph_bare: xq_cryst size {} != 3.", xqr.shape(0));
@@ -628,6 +633,7 @@ elph_bare_data_t read_elph_bare(
   } else {
     et_k  = nda::array<double,2>(nk, Nb);
     et_kq = nda::array<double,2>(nk, Nb);
+    xk_cryst = nda::array<double,2>(nk, 3);
   }
 
   // g_scr: one broadcast per node (node roots), then intra-node ranks share it.
@@ -636,10 +642,11 @@ elph_bare_data_t read_elph_bare(
   // et/xq are small: broadcast to every rank.
   mpi_ctx.comm.broadcast_n(et_k.data(),  et_k.size(),  0);
   mpi_ctx.comm.broadcast_n(et_kq.data(), et_kq.size(), 0);
+  mpi_ctx.comm.broadcast_n(xk_cryst.data(), xk_cryst.size(), 0);
   mpi_ctx.comm.broadcast_n(xq.data(),    3,            0);
   mpi_ctx.comm.barrier();
 
-  return elph_bare_data_t{std::move(g_scr), std::move(et_k), std::move(et_kq), xq};
+  return elph_bare_data_t{std::move(g_scr), std::move(et_k), std::move(et_kq), std::move(xk_cryst), xq};
 }
 
 } // anonymous namespace
@@ -689,9 +696,12 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                "supported; the elph data is spin-agnostic.");
   utils::check(mf.npol() == 1,
                "add_augmentation_dpsi: only npol==1 is supported.");
-  utils::check(nkpts == nkpts_ibz,
-               "add_augmentation_dpsi: requires a full-BZ k-grid "
-               "(nkpts == nkpts_ibz); disable k-point symmetry.");
+  // An IBZ base MF is rotated by the reader to the other star members (O_S δψ(k_ibz)), which spans
+  // the δψ space of S·k_ibz only if all modes are present (checked per iq at Γ below).
+  utils::check(nkpts == nkpts_ibz or long(modes.size()) == nmodes,
+               "add_augmentation_dpsi: an IBZ mean field (nkpts_ibz {} < nkpts {}) needs all {} modes "
+               "(a mode subset is not invariant under the symmetry operations).",
+               nkpts_ibz, nkpts, nmodes);
   utils::check(nq > 0, "add_augmentation_dpsi: empty iq_list.");
   utils::check(dtau_step > 0.0, "add_augmentation_dpsi: dtau_step must be > 0, got {}.", dtau_step);
 
@@ -771,7 +781,9 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   fft2row.reserve(size_t(ngm)*2);
   for(long r=0; r<ngm; ++r) fft2row[wfc_g.gv_to_fft()(r)] = r;
 
-  auto kpts_cr = mf.kpts_crystal();              // (nkpts, 3) crystal
+  // k-point list of the deposit/source indices: the IBZ list (leading nkpts_ibz rows; all of them
+  // when nkpts == nkpts_ibz)
+  nda::array<double,2> kpts_cr = mf.kpts_crystal()(nda::range(0,nkpts_ibz), nda::range::all);
 
   // raw (non-orthonormal) augmentation states on the 'w' grid, zeroed
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
@@ -794,19 +806,35 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     long iq = iq_list[iq_idx];
     auto ed = read_elph_bare(mpi, elph_dir, iq);
     auto g_loc = ed.g_scr.local();   // node-shared g_scr(ik,mode,m,n), Ha
-    utils::check(g_loc.shape()[0] == nkpts,
-                 "add_augmentation_dpsi: elph nk {} != nkpts {}.", g_loc.shape()[0], nkpts);
+    utils::check(g_loc.shape()[0] == nkpts_ibz,
+                 "add_augmentation_dpsi: elph nk {} != nkpts_ibz {}.", g_loc.shape()[0], nkpts_ibz);
+    // The elph run must use the k list (and order) of this mean field, modulo G
+    for(long ik=0; ik<nkpts_ibz; ++ik)
+      for(int d=0; d<3; ++d) {
+        double dk = ed.xk_cryst(ik,d) - kpts_cr(ik,d);
+        utils::check(std::abs(dk - std::round(dk)) < 1e-8,
+                     "add_augmentation_dpsi: elph k-point {} = ({}, {}, {}) differs from the mean field's "
+                     "({}, {}, {}) (crystal coords, mod G).", ik,
+                     ed.xk_cryst(ik,0), ed.xk_cryst(ik,1), ed.xk_cryst(ik,2),
+                     kpts_cr(ik,0), kpts_cr(ik,1), kpts_cr(ik,2));
+      }
     utils::check(g_loc.shape()[1] >= nmodes,
                  "add_augmentation_dpsi: elph nmode {} < nmodes {}.", g_loc.shape()[1], nmodes);
     utils::check(g_loc.shape()[2] >= N and ed.et_k.shape(1) >= N and ed.et_kq.shape(1) >= N,
                  "add_augmentation_dpsi: elph band count {} < N {}.", g_loc.shape()[2], N);
 
     nda::array<double,1> qv(3); qv(0)=ed.xq(0); qv(1)=ed.xq(1); qv(2)=ed.xq(2);
-    nda::array<int,1> kpq_map(nkpts);
+    // Rotating the IBZ δψ to the star is valid only at q = Γ (e^{iq·L} = 1)
+    utils::check(nkpts == nkpts_ibz or
+                 (std::abs(qv(0) - std::round(qv(0))) < 1e-8 and std::abs(qv(1) - std::round(qv(1))) < 1e-8
+                  and std::abs(qv(2) - std::round(qv(2))) < 1e-8),
+                 "add_augmentation_dpsi: an IBZ mean field supports only q = Gamma; iq {} has "
+                 "xq_cryst = ({}, {}, {}).", iq, qv(0), qv(1), qv(2));
+    nda::array<int,1> kpq_map(nkpts_ibz);
     utils::calculate_kpq_map(kpts_cr, qv, kpq_map);
     // invert: deposit index j → source k (kpq_map(ik)=j)
-    nda::array<int,1> inv_map(nkpts); inv_map() = -1;
-    for(long ik=0; ik<nkpts; ++ik) inv_map(kpq_map(ik)) = int(ik);
+    nda::array<int,1> inv_map(nkpts_ibz); inv_map() = -1;
+    for(long ik=0; ik<nkpts_ibz; ++ik) inv_map(kpq_map(ik)) = int(ik);
 
     for(long jl=0; jl<k_range.size(); ++jl) {
       long j  = k_range.first()+jl;               // deposit index (global)

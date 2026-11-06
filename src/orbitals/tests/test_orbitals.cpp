@@ -46,6 +46,11 @@
 #include "hamiltonian/pseudo/pseudopot.h"
 #include "orbitals/orbital_generator.h"
 #include "orbitals/orbital_augmenter.h"
+#include "methods/ERI/eri_utils.hpp"
+#include "methods/HF/hf_t.h"
+#include "mean_field/symmetry/unfold_bz.h"
+#include "utilities/symmetry.hpp"
+#include <filesystem>
 #include "utilities/mpi_context.h"
 
 namespace bdft_tests
@@ -376,6 +381,275 @@ TEST_CASE("aug_ks_seed_partial", "[orbit]")
     if(mpi->comm.root()) remove("dummy_aug_p.h5");
     mpi->comm.barrier();
   }
+}
+
+// Directory ./prefix_dir/ holding the QE fixture `fixture` with a midgap Fermi energy added to its pw2coqui h5
+// (System/fermi_energy; thc nbnd_protected needs one and the LiH fixtures lack it). The other fixture files are
+// symlinks. Returns the h5 path; the directory is written on the root. The copy keeps the Hamiltonian/<pp_type>/fullbz
+// group (projector source of unfold_mf).
+std::string make_fixture_dir_with_efermi(utils::mpi_context_t<boost::mpi3::communicator,boost::mpi3::shared_communicator>& mpi,
+                                         std::string const& fixture, std::string const& dir, double efermi)
+{
+  auto [outdir, pf] = utils::utest_filename(fixture);
+  std::string fn = dir + "/" + pf + ".coqui.h5";
+  if (mpi.comm.root()) {
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    for (auto const& e : std::filesystem::directory_iterator(outdir))
+      if (e.path().filename() != pf + ".coqui.h5")
+        std::filesystem::create_symlink(std::filesystem::absolute(e.path()), dir + "/" + e.path().filename().string());
+    std::filesystem::copy_file(outdir + pf + ".coqui.h5", fn);
+    h5::file f(fn, 'a');
+    h5::group sgrp = h5::group(f).open_group("System");
+    h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
+  }
+  mpi.comm.barrier();
+  return fn;
+}
+
+// Smallest R >= R_min such that the gap eigval(R) - eigval(R-1) of the parent exceeds gap_min at every IBZ k, i.e. the
+// first R bands form complete degenerate multiplets everywhere.
+long closed_band_count(mf::MF& mf, long R_min, double gap_min)
+{
+  auto ev = mf.eigval();
+  for (long R = R_min; R < mf.nbnd(); ++R) {
+    bool closed = true;
+    for (long k = 0; k < mf.nkpts_ibz(); ++k) closed = closed and (ev(0,k,R) - ev(0,k,R-1) > gap_min);
+    if (closed) return R;
+  }
+  APP_ABORT("closed_band_count: no closed band count");
+  return -1;
+}
+
+// Dense copy of a sparse nb x nb rotation matrix D
+template<class Sparse_t>
+nda::array<ComplexType,2> dense_of(Sparse_t const& D, long nb)
+{
+  nda::array<ComplexType,2> Dd(nb, nb);
+  Dd() = ComplexType(0.0);
+  for (long r = 0; r < nb; ++r) {
+    auto vals = D[r].values();
+    auto cols = D[r].columns();
+    for (long i = 0; i < vals.size(); ++i) Dd(r, cols(i)) = vals(i);
+  }
+  return Dd;
+}
+
+// ||D D^dagger - 1||_max of a sparse nb x nb rotation matrix D
+template<class Sparse_t>
+double unitarity_defect(Sparse_t const& D, long nb)
+{
+  auto Dd = dense_of(D, nb);
+  double err = 0.0;
+  for (long a = 0; a < nb; ++a)
+    for (long b = 0; b < nb; ++b) {
+      ComplexType dd = 0.0;
+      for (long c = 0; c < nb; ++c) dd += Dd(a,c) * std::conj(Dd(b,c));
+      err = std::max(err, std::abs(dd - (a==b ? ComplexType(1.0) : ComplexType(0.0))));
+    }
+  return err;
+}
+
+// max_(s,k) ||D D^dagger - 1||_max of the stored symmetry rotations D(s,k) of mf, over all s > 0 and all k of the full BZ
+double stored_D_unitarity_defect(mf::MF& mf)
+{
+  double err = 0.0;
+  for (long s = 1; s < mf.qsymms().extent(0); ++s)
+    for (long k = 0; k < mf.nkpts(); ++k) {
+      auto [cjg, Dp] = mf.symmetry_rotation(s, k);
+      err = std::max(err, unitarity_defect(*Dp, mf.nbnd()));
+    }
+  return err;
+}
+
+// IBZ augmented basis: symmetry rotations and the IBZ -> full-BZ chain.
+//  (a) The IBZ augmented mean field builds (add_augmentation on a symmetry-reduced MF).
+//  (b) Its stored rotations D(s,k), built by the dense branch of generate_dmatrix (assume_irreducible = not augmented),
+//      are unitary: ||D D^dagger - 1||_max against the floor measured on this fixture. Negative control: the
+//      eigenvalue-based branch (assume_irreducible = true), which needs sorted eigval; the eigval of an augmented basis
+//      is diag(H_KS), which is not sorted. A second control cuts the first R bands inside a degenerate multiplet, which
+//      makes D non unitary at the size of the missing weight.
+//  (c) THC with band weights, nbnd_protected and exclude_unprotected_pairs on the IBZ augmented MF, then the HF Fock
+//      matrix of the diagonal initial density, against the same THC/HF on its mf::unfold_mf view (full BZ, pivot_file
+//      = the IBZ pivots). Negative control: the view's THC refit without the band weights.
+TEST_CASE("aug_ibz_symmetry", "[orbit]")
+{
+  auto& mpi = utils::make_unit_test_mpi_context();
+  auto& comm = mpi->comm;
+  const double efermi = 0.07;  // midgap of qe_lih223_sym: max VB 0.0163, min CB 0.1268 (Ha)
+  const std::string parent_dir = "./aug_ibz_parent";
+  std::string parent_fn = make_fixture_dir_with_efermi(*mpi, "qe_lih223_sym", parent_dir, efermi);
+  auto qe_mf = mf::make_MF(mpi, mf::qe_source, parent_dir + "/", "pwscf", mf::h5_input_type);
+  REQUIRE(qe_mf.nkpts_ibz() < qe_mf.nkpts());
+  long nbnd = qe_mf.nbnd();
+
+  auto make_aug = [&](long R, std::string fn) {
+    auto augmenter = std::make_shared<orbitals::momentum_augmenter>(qe_mf);
+    return orbitals::add_augmentation<HOST_MEMORY>(qe_mf, fn, augmenter, R, 1e-3, 1e-1);
+  };
+  auto cleanup = [&](std::string fn) { comm.barrier(); if (comm.root()) remove(fn.c_str()); comm.barrier(); };
+
+  long R = closed_band_count(qe_mf, 3, 1e-3);
+  auto aug_mf = make_aug(R, "aug_ibz.h5");
+  REQUIRE(aug_mf.is_augmented());
+  REQUIRE(aug_mf.nkpts_ibz() < aug_mf.nkpts());
+  REQUIRE(aug_mf.nbnd() > nbnd);
+
+  // (b) unitarity of the stored D
+  double eps_D = stored_D_unitarity_defect(aug_mf);
+  app_log(2, "aug_ibz_symmetry: R = {}, nbnd {} -> {}; max ||D D^dagger - 1||_max (stored D) = {:.3e}",
+          R, nbnd, aug_mf.nbnd(), eps_D);
+  REQUIRE(eps_D < 1e-6);   // measured floor ~ see the log line above; the controls below are O(1e-2) or abort
+
+  // (b) control 0: momentum states along x only are not a vector set, so the aug span is not invariant under the
+  // symmetry operations
+  {
+    auto augmenter_x = std::make_shared<orbitals::momentum_augmenter>(qe_mf, std::vector<int>{0});
+    auto aug_x = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "aug_ibz_x.h5", augmenter_x, R, 1e-3, 1e-1);
+    double eps_x = stored_D_unitarity_defect(aug_x);
+    app_log(2, "aug_ibz_symmetry: dirs {{0}} (not invariant): max ||D D^dagger - 1||_max = {:.3e} (dirs {{0,1,2}}: {:.3e})",
+            eps_x, eps_D);
+    REQUIRE(eps_x > 1e-3);
+    cleanup("aug_ibz_x.h5");
+  }
+  // (b) control 1: assume_irreducible = true needs sorted eigval at every k, which diag(H_KS) is not
+  {
+    auto eigv = aug_mf.eigval();
+    bool sorted = true;
+    for (long k = 0; k < aug_mf.nkpts(); ++k)
+      sorted = sorted and std::is_sorted(eigv(0,k,nda::range::all).begin(), eigv(0,k,nda::range::all).end(),
+                                         [](double a, double b) { return a < b - 1e-6; });
+    app_log(2, "aug_ibz_symmetry: diag(H_KS) sorted at every k: {} (generate_dmatrix(assume_irreducible=true) "
+               "aborts if not)", sorted);
+    REQUIRE(not sorted);
+  }
+
+  // (b) control 2: the eigenvalue-based branch (assume_irreducible = true) on the same basis, with the eigval
+  // sorted so that it does not abort. It builds D block-diagonally over groups of diag(H_KS) closer than 1e-4, which
+  // cuts the couplings between the states of different groups; after the row normalization such a D is still unitary,
+  // so it is compared entrywise with the stored (dense) D.
+  {
+    comm.barrier();
+    if (comm.root()) {
+      std::filesystem::copy_file("aug_ibz.h5", "aug_ibz_sorted.h5", std::filesystem::copy_options::overwrite_existing);
+      h5::file f("aug_ibz_sorted.h5", 'a');
+      h5::group og = h5::group(f).open_group("Orbitals");
+      nda::array<double,3> ev;
+      nda::h5_read(og, "eigval", ev);
+      for (long s = 0; s < ev.extent(0); ++s)
+        for (long k = 0; k < ev.extent(1); ++k) std::sort(ev(s,k,nda::range::all).begin(), ev(s,k,nda::range::all).end());
+      nda::h5_write(og, "eigval", ev, false);
+    }
+    comm.barrier();
+    mf::bdft::bdft_readonly aug_sorted(mpi, "./", "aug_ibz_sorted");
+    auto slist = utils::find_inverse_symmetry(aug_sorted.bz().qsymms, aug_sorted.bz().symm_list);
+    auto [sk_to_n, dmat] = utils::generate_dmatrix<true>(aug_sorted, aug_sorted.bz().symm_list, slist, true);
+    // same (s,k) -> index map in both builds, since both use the same symmetries
+    double dD_irred = 0.0;
+    for (long s = 1; s < aug_mf.qsymms().extent(0); ++s)
+      for (long k = 0; k < aug_mf.nkpts(); ++k) {
+        auto [cjg, Dp] = aug_mf.symmetry_rotation(s, k);
+        long n = aug_sorted.bz().kp_trev(k) ? sk_to_n(s-1, aug_sorted.bz().kp_trev_pair(k)) : sk_to_n(s-1, k);
+        auto D_dense = dense_of(*Dp, aug_mf.nbnd());
+        auto D_irred = dense_of(dmat.at(n), aug_mf.nbnd());
+        for (long a = 0; a < aug_mf.nbnd(); ++a)
+          for (long b = 0; b < aug_mf.nbnd(); ++b) dD_irred = std::max(dD_irred, std::abs(D_irred(a,b) - D_dense(a,b)));
+      }
+    app_log(2, "aug_ibz_symmetry: assume_irreducible = true (sorted eigval) vs dense D: max|D_irred - D_dense| = {:.3e}",
+            dD_irred);
+    REQUIRE(dD_irred > 100.0 * eps_D);
+    cleanup("aug_ibz_sorted.h5");
+  }
+
+  // (c) THC (weights + protected bands + pair exclusion) and the HF Fock matrix, IBZ vs unfolded view
+  {
+    auto aug_ptr = std::make_shared<mf::MF>(std::move(aug_mf));
+    const long N_P = 4;
+    auto make_pt = [&](std::string pivot_file, bool band_weights) {
+      auto pt = methods::make_thc_reader_ptree(0, "", "incore", "", "bdft", 1e-4,
+                                               1.4*aug_ptr->wfc_truncated_grid()->ecut());
+      pt.put("nbnd_protected", N_P);
+      pt.put("nbnd_orig", nbnd);
+      pt.put("exclude_unprotected_pairs", true);
+      pt.put("band_weights", band_weights);
+      if (not pivot_file.empty()) pt.put("pivot_file", pivot_file);
+      pt.put("save", pivot_file.empty() ? "aug_ibz_pivots.h5" : "");
+      return pt;
+    };
+    // pivots of the IBZ augmented basis (weights + exclusion on the IBZ path)
+    methods::make_thc_pivots(aug_ptr, make_pt("", true));
+
+    auto fock = [&](std::shared_ptr<mf::MF> m, auto const& pt) {
+      methods::thc_reader_t thc(m, pt);
+      methods::solvers::hf_t hf("ignore_g0");
+      long ns = m->nspin(), nk = m->nkpts_ibz(), nb = m->nbnd();
+      auto sS = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
+      hamilt::set_ovlp(*m, sS);
+      auto sF = math::shm::make_shared_array<nda::array_view<ComplexType,4>>(*mpi, {ns, nk, nb, nb});
+      nda::array<ComplexType,4> Dm(ns, nk, nb, nb);
+      Dm() = ComplexType(0.0);
+      // density matrix diag(occupations of the parent bands), 0 on the augmentation states; the occupations of the
+      // augmented mean field are zero
+      auto occ = qe_mf.occ();
+      for (long s = 0; s < ns; ++s)
+        for (long k = 0; k < nk; ++k) {
+          long kp = (nk == qe_mf.nkpts_ibz()) ? k : qe_mf.kp_to_ibz(k);   // IBZ list or full-BZ list
+          for (long a = 0; a < nbnd; ++a) Dm(s,k,a,a) = occ(s,kp,a);
+        }
+      hf.evaluate(sF, Dm, thc, sS.local(), true, true);
+      mpi->node_comm.barrier();
+      nda::array<ComplexType,4> F(sF.local());
+      comm.broadcast_n(F.data(), F.size(), 0);
+      return F;
+    };
+    auto pt_ibz = make_pt("aug_ibz_pivots.h5", true);
+    auto F_ibz = fock(aug_ptr, pt_ibz);
+
+    // unfolded view of the IBZ augmented MF, projectors from the pw2coqui h5 of the parent
+    mf::unfold_mf(*aug_ptr, "aug_ibz_view.h5", parent_fn);
+    comm.barrier();
+    auto view = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", "aug_ibz_view", mf::h5_input_type));
+    REQUIRE(view->is_augmented());
+    REQUIRE(view->nkpts_ibz() == view->nkpts());
+    auto F_view = fock(view, make_pt("aug_ibz_pivots.h5", true));
+    auto F_view_nw = fock(view, make_pt("aug_ibz_pivots.h5", false));
+
+    auto fnorm = [](nda::array<ComplexType,4> const& A) {
+      double n2 = 0.0;
+      for (long i = 0; i < A.size(); ++i) n2 += std::norm(A.data()[i]);
+      return std::sqrt(n2);
+    };
+    // ||F_ibz(copy/conj to k) - F_view(k)|| / ||F_view||
+    auto rel_diff = [&](nda::array<ComplexType,4> const& Fv, long nb_blk) {
+      double num = 0.0, den = 0.0;
+      for (long s = 0; s < aug_ptr->nspin(); ++s)
+        for (long k = 0; k < aug_ptr->nkpts(); ++k) {
+          long kib = aug_ptr->kp_to_ibz(k);
+          bool tr = aug_ptr->kp_trev(k);
+          for (long i = 0; i < nb_blk; ++i)
+            for (long j = 0; j < nb_blk; ++j) {
+              ComplexType ref = tr ? std::conj(F_ibz(s,kib,i,j)) : F_ibz(s,kib,i,j);
+              num += std::norm(ref - Fv(s,k,i,j));
+              den += std::norm(Fv(s,k,i,j));
+            }
+        }
+      return std::sqrt(num / den);
+    };
+    app_log(2, "aug_ibz_symmetry: ||F_ibz|| = {}, ||F_view|| = {}, ||F_view_nw|| = {}", fnorm(F_ibz), fnorm(F_view), fnorm(F_view_nw));
+    // The fit constrains the pair densities of the protected bands only (the unprotected pairs are excluded from the
+    // fit and weighted down), so the F block of the protected bands is the compared quantity; the whole matrix is logged
+    double d_w = rel_diff(F_view, N_P), d_nw = rel_diff(F_view_nw, N_P);
+    app_log(2, "aug_ibz_symmetry: ||F_ibz,unfolded - F_view||/||F_view||, protected block [0,{}): {:.3e} (view refit with "
+               "band weights), {:.3e} (view refit without band weights); whole matrix: {:.3e}, {:.3e}",
+            N_P, d_w, d_nw, rel_diff(F_view, aug_ptr->nbnd()), rel_diff(F_view_nw, aug_ptr->nbnd()));
+    REQUIRE(d_w < 5e-4);          // measured 1.2e-4; Stage A's IBZ -> full-BZ refit asymmetry is 2.5e-4 on LiH (dev_ibz/README.md)
+    REQUIRE(d_nw > 3.0 * d_w);    // the weights carried to the view matter: measured 1.3e-3 without them
+
+    cleanup("aug_ibz_view.h5");
+    cleanup("aug_ibz_pivots.h5");
+  }
+  cleanup("aug_ibz.h5");
+  comm.barrier(); if (comm.root()) std::filesystem::remove_all(parent_dir); comm.barrier();
 }
 
 TEST_CASE("eig_select", "[orbit]")

@@ -209,10 +209,11 @@ static auto const fun_32 = c2py::dispatcher_f_kw_t{c2py::cmethod(
 
 // unfold_mf
 static auto const fun_35 = c2py::dispatcher_f_kw_t{c2py::cmethod(
-    [](coqui_py::Mf const &self, const std::string &filename) {
-      return self.unfold_mf(filename);
+    [](coqui_py::Mf const &self, const std::string &filename,
+       const std::string &projector_file) {
+      return self.unfold_mf(filename, projector_file);
     },
-    "self", "filename")};
+    "self", "filename", "projector_file")};
 
 // volume
 static auto const fun_33 = c2py::dispatcher_f_kw_t{c2py::cmethod(

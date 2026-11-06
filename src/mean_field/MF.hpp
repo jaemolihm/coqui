@@ -339,6 +339,10 @@ class MF
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
 
+    // Provenance tag of the augmentation ("momentum", "dpsi", ...); empty if not augmented.
+    std::string augment_type() const
+    { return is_augmented() ? std::get<bdft::bdft_readonly>(var).get_sys().augment_type : std::string(); }
+
     // True if the h5 carries the full Kohn-Sham matrix Orbitals/H_KS_skij (IBZ only).
     // Every augmented basis is required to; hamilt::set_fock aborts on one that is
     // not. Only the bdft backend can carry it.
