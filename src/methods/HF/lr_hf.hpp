@@ -251,7 +251,6 @@ private:
   // depends on the per-call channel flags — V(q) only in the direct channel, U(R)
   // only in the exchange channel, Vxc only when compute_xc.
 
-  bool _hartree_head_logged = false;      // exclude_hartree_head's q image logged (once per instance)
   bool _Vq_cached = false;
   nda::array<ComplexType, 2> _Vq_PQ;      // V(q)_PQ tile at _q_ibz_idx
   bool _Vxc_q_cached = false;

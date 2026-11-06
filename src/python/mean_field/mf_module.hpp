@@ -99,6 +99,8 @@ namespace coqui_py {
     auto fft_grid_wfc() const { return _mf->wfc_truncated_grid()->mesh(); }
 
     /* k-points info*/
+    // For quantities that need access in Python, return an nda::array copy instead of a
+    // view. Otherwise c2py does not work.
     auto kp_grid() const { return _mf->kp_grid(); }
     auto nkpts() const { return _mf->nkpts(); }
     auto kpts() const { return _mf->kpts(); }

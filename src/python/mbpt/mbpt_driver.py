@@ -648,19 +648,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         head of the contracted kernel enters there).
 
     exclude_hartree_head : bool, optional
-        Hartree rung with v̄ (default False): ΔJ uses
-        V̄_PQ(q) = V_PQ(q) - v(q)/Ω conj(h_P) h_Q, i.e. the Coulomb kernel without its
-        G = 0 term (h = THC ``interpolating_vectors_G0`` at q), so the self-consistency
-        yields the macroscopically unscreened response χ̄. Only the explicit Hartree rung
-        changes: exchange, HSEX, W and the GW terms keep the full v. A no-op at q = Γ,
-        where the THC has no G = 0 term. The removed plane wave is the G = 0 term of the
-        THC's own q image, which may differ from ``q_vec`` by a reciprocal vector
-        (``run_chi`` checks that they agree), and h is used as stored: a THC file with a
-        zero head removes nothing. Requires the Hartree rung (``include_hartree=True``
-        or a ``method`` with Hartree) and a THC not built from Cholesky ERIs (LS-THC,
-        ``cd_dir``), which has no basis head; both are hard errors. Assumes a bare-Coulomb
-        THC, v(q) = 4π/|q|² (not checked: a THC read from file does not record its
-        potential). Written as ``linear_response/exclude_hartree_head``.
+        Default False. Drop the G = 0 term of v(q+G) from the Hartree rung (ΔJ), so the
+        solve yields the macroscopically unscreened χ̄; exchange, W and GW keep the full v.
+        The removed term is that of the THC's q image, from its stored basis head; a
+        no-op at q = Γ. Requires the Hartree rung. Assumes a bare-Coulomb THC.
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions

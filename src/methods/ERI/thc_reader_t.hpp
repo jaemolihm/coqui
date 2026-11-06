@@ -489,6 +489,8 @@ namespace methods {
         auto Z_loc = _dZ.local();
         Z_loc(q, nda::ellipsis{}) = Zq_loc;
       }
+      // The LS-THC fit never forms the interpolating vectors in G-space, so it neglects the
+      // head: basis_head() is zero, and its users (e.g. LR exclude_hartree_head) remove nothing.
       _Chi_head() = 0.0;
       _Chi_bar_head() = 0.0;
       _Timer.stop("BUILD_THC");
@@ -970,10 +972,6 @@ namespace methods {
     // this accessor and never through Z()/dZ(), so it cannot leak into the
     // exchange channel, which contracts V(R) with the off-diagonal density.
     bool has_Vxc() const { return _Vxc.has_value(); }
-
-    // True for an LS-THC fitted to Cholesky ERIs (cd_dir set). That fit never forms the
-    // interpolating vectors in G-space, so basis_head() is zero, not the G = 0 component.
-    bool built_from_cholesky() const { return _cd_dir != ""; }
 
     // Path of the kernel dump the stored Vxc was built from; empty when the THC file
     // predates Vxc_source. Used to reject reuse of a Vxc built from a different dump.

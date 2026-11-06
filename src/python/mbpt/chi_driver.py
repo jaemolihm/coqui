@@ -150,12 +150,8 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         with mixing 1, a ``precond_method``, ``max_iter = n``, ``tol = 0``.
         ``chi_plain`` is returned either way. "none", bools and other values raise.
     exclude_hartree_head : bool, optional
-        Default False. Solve with the Hartree rung v-bar (no G = 0 term of v(q+G)), so
-        the LR solve returns chi_bar; ``chi`` is rebuilt from it (see Returns). Exchange,
-        W and the ladder keep the full v; see run_lr. A no-op at q = 0, where the THC
-        has no G = 0 term. Requires the Hartree rung, ``G = 0`` in ``G_mill``, and a
-        ``q_vec`` that is one of ``mf.qpts_ibz()`` (the removed plane wave is the THC's
-        own q image). Assumes a bare-Coulomb THC, as ``v_qpG`` does.
+        Default False. Solve for chi_bar (see run_lr) and rebuild ``chi`` from it (see
+        Returns). Requires ``G = 0`` in ``G_mill`` and ``q_vec`` in ``mf.qpts_ibz()``.
     **kwargs
         Forwarded to run_lr unchanged (e.g. recompute_W, screened_interaction_file,
         precond_method, precond_tol, precond_max_iter, reuse_W); see run_lr.

@@ -130,35 +130,25 @@ void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
   if (Uq_PQ.shape() != _Vq_PQ.shape()) Uq_PQ.resize(_Vq_PQ.shape());
   Uq_PQ() = _Vq_PQ();
 
-  // Hartree kernel without the G = 0 term of v(q+G). The THC builder assembles
-  //   V_PQ(q) = 1/(Ω N_k) Σ_G Zloc_P(q,G) v(q+G) conj(Zloc_Q(q,G))
-  // (thc::intvec_impl in ERI/thc.icc, the "VCoul" block) and thc_reader_t rescales it
-  // by N_k (thc_reader_t.hpp, "scale by nkpts"), which is the V that thc.Z returns.
-  // With basis_head()(q,P) = conj(Zloc_P(q,G=0)) (same function, the block storing
-  // "Chi^{q}_{u}(G=0)") the G = 0 term of that V is rank 1:
-  //   V̄_PQ(q) = V_PQ(q) - v(q)/Ω conj(h_P) h_Q.
-  // The same pairing conj(h_P) M_PQ h_Q gives the head of M in head_from_prod_basis
-  // (GW/g0_div_utils.hpp), and eval_eps_inv_q there uses the inverse factor Ω|q|²/(4π).
-  // It is removed from this private copy only; the cached V(q) and the exchange
-  // path keep the full kernel. The removed plane wave is the THC's own q image
-  // Q_thc, which may differ from the perturbation q by a reciprocal vector
-  // (find_q_ibz_index matches modulo G); run_chi checks that they agree.
+  // Hartree kernel without the G = 0 term of v(q+G) at the THC's q image Q_thc, in this
+  // private copy only (the cached V(q) and the exchange path keep the full kernel).
   if (exclude_hartree_head) {
     auto Q_thc = _MF->Qpts(_q_ibz_idx);
     double q2 = Q_thc(0)*Q_thc(0) + Q_thc(1)*Q_thc(1) + Q_thc(2)*Q_thc(2);
     const bool is_gamma = (q2 <= 1e-8);  // the THC has no G = 0 term, so V is already V̄
-    if (not _hartree_head_logged) { // Log the removed plane wave once per instance
-      if (is_gamma) { // Gamma: nothing to remove
-        app_log(2, "  exclude_hartree_head: q = Gamma, the THC Coulomb has no G = 0 term; no-op.");
-      } else { // Finite q: name the THC image whose G = 0 term is removed
-        app_log(2, "  exclude_hartree_head: q_thc = ({:.6f}, {:.6f}, {:.6f}) a.u., "
-                "v(q) = {:.6f}, q_vec = ({:.6f}, {:.6f}, {:.6f}) (crystal).",
-                Q_thc(0), Q_thc(1), Q_thc(2), 4.0 * std::numbers::pi / q2,
-                _q_vec(0), _q_vec(1), _q_vec(2));
-      }
-      _hartree_head_logged = true;
+    if (is_gamma) { // Gamma: nothing to remove
+      app_log(2, "  exclude_hartree_head: q = Gamma, the THC Coulomb has no G = 0 term; no-op.");
+    } else { // Finite q: name the THC image whose G = 0 term is removed
+      app_log(2, "  exclude_hartree_head: q_thc = ({:.6f}, {:.6f}, {:.6f}) a.u., "
+              "v(q) = {:.6f}, q_vec = ({:.6f}, {:.6f}, {:.6f}) (crystal).",
+              Q_thc(0), Q_thc(1), Q_thc(2), 4.0 * std::numbers::pi / q2,
+              _q_vec(0), _q_vec(1), _q_vec(2));
     }
-    if (not is_gamma) { // Subtract the rank-1 G = 0 term
+    if (not is_gamma) {
+      // Subtract the head (G=G'=0 term) of the bare interaction. thc::intvec_impl
+      // (ERI/thc.icc) builds V_PQ(q) = 1/Ω Σ_G Zloc_P(q,G) v(q+G) conj(Zloc_Q(q,G)) and
+      // stores h_P = basis_head()(q,P) = conj(Zloc_P(q,G=0)), so the head is
+      // v(q)/Ω conj(h_P) h_Q.
       auto h_q = thc.basis_head()(_q_ibz_idx, nda::range::all);
       const double coeff = 4.0 * std::numbers::pi / q2 / _MF->volume();
       for (long iP = 0; iP < P_rng.size(); ++iP) {
