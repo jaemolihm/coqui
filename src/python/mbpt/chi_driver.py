@@ -155,7 +155,7 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         W and the ladder keep the full v; see run_lr. A no-op at q = 0, where the THC
         has no G = 0 term. Requires the Hartree rung, ``G = 0`` in ``G_mill``, and a
         ``q_vec`` that is one of ``mf.qpts_ibz()`` (the removed plane wave is the THC's
-        own q image).
+        own q image). Assumes a bare-Coulomb THC, as ``v_qpG`` does.
     **kwargs
         Forwarded to run_lr unchanged (e.g. recompute_W, screened_interaction_file,
         precond_method, precond_tol, precond_max_iter, reuse_W); see run_lr.

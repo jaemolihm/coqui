@@ -143,7 +143,8 @@ public:
    *                           in ΔJ, i.e. drop the G = 0 term of v(q+G) from the
    *                           Hartree kernel (h = thc.basis_head() at q). Exchange
    *                           and the HSEX kernel keep the full V. No-op at q = Γ,
-   *                           where the THC carries no G = 0 term.
+   *                           where the THC carries no G = 0 term. Assumes a
+   *                           bare-Coulomb THC, v(q) = 4π/|q|².
    */
   template<nda::MemoryArray AF_t>
   void evaluate(sArray_t<AF_t>& sDeltaF_skij,

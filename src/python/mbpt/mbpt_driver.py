@@ -656,8 +656,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         where the THC has no G = 0 term. ``q_vec`` must be the q of the THC's own q image
         (the removed plane wave is that image's G = 0), and the THC must carry its basis
         head; both are hard errors otherwise. Requires the Hartree rung
-        (``include_hartree=True`` or a ``method`` with Hartree). Written as
-        ``linear_response/exclude_hartree_head``.
+        (``include_hartree=True`` or a ``method`` with Hartree). Assumes a bare-Coulomb
+        THC, v(q) = 4π/|q|² (not checked: a THC read from file does not record its
+        potential). Written as ``linear_response/exclude_hartree_head``.
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
