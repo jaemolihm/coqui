@@ -23,6 +23,7 @@ from .post_proc import (
   spectral_interpolation,
   local_dos,
   unfold_bz,
+  unfold_to_new_h5,
   dump_vxc,
   dump_hartree,
   pade,
@@ -61,7 +62,7 @@ def __getattr__(name):
 
 __all__ = [
   "band_interpolation", "spectral_interpolation",
-  "local_dos", "unfold_bz", "dump_vxc", "dump_hartree",
+  "local_dos", "unfold_bz", "unfold_to_new_h5", "dump_vxc", "dump_hartree",
   "pade", "aaa_adapol_on_mesh", "aaa_adapol", "aaa_adapol_imag", "minipole",
   "band_plot", "spectral_plot",
 ]

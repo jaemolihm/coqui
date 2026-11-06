@@ -48,9 +48,9 @@ namespace coqui_py::post_proc {
     methods::post_processing("unfold_bz", mf.get_mf(), parser.get_root());
   }
 
-  void unfold_bz(const Mf &mf, const std::string &params, const Mf &mf_unfold) {
+  void unfold_to_new_h5(const Mf &mf, const Mf &mf_unfold, const std::string &params) {
     auto parser = InputParser(params);
-    methods::post_processing("unfold_bz", mf.get_mf(), parser.get_root(), mf_unfold.get_mf());
+    methods::post_processing("unfold_to_new_h5", mf.get_mf(), parser.get_root(), mf_unfold.get_mf());
   }
 
   void dump_vxc(const Mf &mf, const std::string &params) {

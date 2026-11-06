@@ -78,18 +78,19 @@ static auto const _c2py_fun_5 = c2py::dispatcher_f_kw_t{c2py::cfun(
     "mf", "params")};
 
 // unfold_bz
-static auto const _c2py_fun_6 = c2py::dispatcher_f_kw_t{
-    c2py::cfun(
-        [](const coqui_py::Mf &mf, const std::string &params) {
-          return coqui_py::post_proc::unfold_bz(mf, params);
-        },
-        "mf", "params"),
-    c2py::cfun(
-        [](const coqui_py::Mf &mf, const std::string &params,
-           const coqui_py::Mf &mf_unfold) {
-          return coqui_py::post_proc::unfold_bz(mf, params, mf_unfold);
-        },
-        "mf", "params", "mf_unfold")};
+static auto const _c2py_fun_6 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const std::string &params) {
+      return coqui_py::post_proc::unfold_bz(mf, params);
+    },
+    "mf", "params")};
+
+// unfold_to_new_h5
+static auto const _c2py_fun_7 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const coqui_py::Mf &mf, const coqui_py::Mf &mf_unfold,
+       const std::string &params) {
+      return coqui_py::post_proc::unfold_to_new_h5(mf, mf_unfold, params);
+    },
+    "mf", "mf_unfold", "params")};
 
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");
@@ -98,6 +99,7 @@ static const auto _c2py_doc_3 = _c2py_fun_3.doc(R"DOC()DOC");
 static const auto _c2py_doc_4 = _c2py_fun_4.doc(R"DOC()DOC");
 static const auto _c2py_doc_5 = _c2py_fun_5.doc(R"DOC()DOC");
 static const auto _c2py_doc_6 = _c2py_fun_6.doc(R"DOC()DOC");
+static const auto _c2py_doc_7 = _c2py_fun_7.doc(R"DOC()DOC");
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -115,6 +117,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_5.c_str()},
     {"unfold_bz", (PyCFunction)c2py::pyfkw<_c2py_fun_6>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_6.c_str()},
+    {"unfold_to_new_h5", (PyCFunction)c2py::pyfkw<_c2py_fun_7>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_7.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

@@ -17,7 +17,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==========================================================================
 
-Tests of mean_field.unfold_mf and post_proc.unfold_bz(..., mf_unfold=) on qe_lih223_sym.
+Tests of mean_field.unfold_mf and post_proc.unfold_to_new_h5 on qe_lih223_sym.
 
 The input guards of chkpt::unfold_scf end in MPI_Abort (utils::check), so they are run out of process:
 this file is also the runner,  mpirun -np 1 python test_unfold_bz.py <checkpoint prefix>  (exit status 0 = accepted).
@@ -43,7 +43,7 @@ UNFOLD_PREFIX = "unfold_mf_out"
 
 def _unfold(mpi_ctx, mf, in_prefix, out_prefix):
     mf_unfold = coqui.make_mf(mpi_ctx, {"prefix": UNFOLD_PREFIX, "outdir": "./"}, "bdft")
-    coqui.post_proc.unfold_bz(mf, {"prefix": in_prefix, "output": out_prefix}, mf_unfold=mf_unfold)
+    coqui.post_proc.unfold_to_new_h5(mf, mf_unfold, {"prefix": in_prefix, "output": out_prefix})
 
 
 def _run_unfold_in_process(in_prefix):
@@ -80,7 +80,7 @@ def _final_iter_group(f):
 
 
 def _runner(in_prefix, mode="unfold"):
-    """Returns the (exit status, output) of unfold_bz on the checkpoint in_prefix (mode "unfold"), or of unfold_mf on the
+    """Returns the (exit status, output) of unfold_to_new_h5 on the checkpoint in_prefix (mode "unfold"), or of unfold_mf on the
     fixture copy in the directory in_prefix (mode "unfold_mf"), in a separate process."""
     # Strip the launcher's MPI environment so that the child is a fresh job.
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
@@ -89,8 +89,8 @@ def _runner(in_prefix, mode="unfold"):
     return res.returncode, res.stdout + res.stderr
 
 
-def test_unfold_mf_and_unfold_bz(mpi):
-    # Smoke test of the c2py overloads (mean_field.unfold_mf, post_proc.unfold_bz with mf_unfold) on a GW checkpoint of
+def test_unfold_mf_and_unfold_to_new_h5(mpi):
+    # Smoke test of the c2py overloads (mean_field.unfold_mf, post_proc.unfold_to_new_h5) on a GW checkpoint of
     # qe_lih223_sym, and of the input guards of chkpt::unfold_scf against a copy of that checkpoint with a swapped
     # k list (guard on mf_ibz vs the checkpoint) and with a G, Sigma and tau mesh of one point fewer than the grid rebuilt from beta, wmax, prec (read_iaft validates the stored tau mesh against the grid rebuilt from the metadata, which is the
     # guard that keeps G_tskij, sized from the stored tau mesh, consistent with the IAFT written to the output).
@@ -196,13 +196,13 @@ def test_hf_restart_on_unfold(mpi, system):
     mpi.barrier()
     mf_unfold = coqui.make_mf(mpi, {"prefix": UNFOLD_PREFIX, "outdir": "./"}, "bdft")
     # starting checkpoint on the unfolded mean field
-    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_start", "output": "uh_unfold"}, mf_unfold=mf_unfold)
+    coqui.post_proc.unfold_to_new_h5(mf, mf_unfold, {"prefix": "uh_start", "output": "uh_unfold"})
     # one more iteration, on the IBZ system and on the unfolded mean field
     coqui.run_hf(dict(hf, restart=True, prefix="uh_ibz", niter=1), h_int=thc)
     thc_unfold = coqui.make_thc_coulomb(mf_unfold, dict(thc_params, ecut=mf_unfold.ecutrho()))
     coqui.run_hf(dict(hf, restart=True, prefix="uh_unfold", niter=1), h_int=thc_unfold)
     mpi.barrier()
-    coqui.post_proc.unfold_bz(mf, {"prefix": "uh_ibz", "output": "uh_ibz_full"}, mf_unfold=mf_unfold)
+    coqui.post_proc.unfold_to_new_h5(mf, mf_unfold, {"prefix": "uh_ibz", "output": "uh_ibz_full"})
     mpi.barrier()
 
     err = None

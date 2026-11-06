@@ -81,9 +81,9 @@ namespace methods {
    *   - Nw: number of real frequency points
    *   - eta: shift above the real-frequency axis
    * Optional arguments for pp_type = unfold_bz (unfold BZ from irreducible to the 1st BZ)
-   *   - output: prefix (in outdir) of a new full-BZ checkpoint written by chkpt::unfold_scf instead of the
-   *             *_unfold datasets in the input checkpoint. Requires mf_unfold, the unfolded mean field of mf (mf::unfold_mf).
-   * @param [INPUT] mf_unfold - unfolded mean field of mf; used only by pp_type = unfold_bz with output
+   * Required arguments for pp_type = unfold_to_new_h5 (write a new full-BZ checkpoint, chkpt::unfold_scf)
+   *   - output: prefix (in outdir) of the new checkpoint outdir/output.mbpt.h5
+   * @param [INPUT] mf_unfold - unfolded mean field of mf (mf::unfold_mf); used only by pp_type = unfold_to_new_h5
    */
   void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt,
                        std::shared_ptr<mf::MF> mf_unfold = nullptr) {
@@ -114,14 +114,13 @@ namespace methods {
     } else if (pp_type == "unfold_bz") {
 
       std::string scf_output = outdir+"/"+prefix;
-      auto output = io::get_value_with_default<std::string>(pt,"output","");
-      if (output.empty()) { // Unfold into *_unfold datasets of the input checkpoint
-        utils::check(mf_unfold == nullptr, "unfold_bz: mf_unfold is used only with the 'output' keyword.");
-        unfold_bz(*mpi, *mf, scf_output);
-      } else { // Write a new full-BZ checkpoint
-        utils::check(mf_unfold != nullptr, "unfold_bz: 'output' requires the unfolded mean field mf (Python: post_proc.unfold_bz(..., mf_unfold=))");
-        chkpt::unfold_scf(*mpi, *mf, *mf_unfold, scf_output, outdir+"/"+output);
-      }
+      unfold_bz(*mpi, *mf, scf_output);
+
+    } else if (pp_type == "unfold_to_new_h5") {
+
+      utils::check(mf_unfold != nullptr, "unfold_to_new_h5: requires the unfolded mean field mf_unfold.");
+      auto output = io::get_value<std::string>(pt,"output",err+"output");
+      chkpt::unfold_scf(*mpi, *mf, *mf_unfold, outdir+"/"+prefix, outdir+"/"+output);
 
     } else if (pp_type == "band_interpolation") {
 

@@ -231,7 +231,7 @@ def local_dos(mf, params):
     pproc_mod.local_dos(mf, json.dumps(params))
 
 
-def unfold_bz(mf, params, mf_unfold=None):
+def unfold_bz(mf, params):
     """
     Unfold IBZ-sampled MBPT quantities to the full Brillouin zone.
 
@@ -250,28 +250,48 @@ def unfold_bz(mf, params, mf_unfold=None):
           (``outdir/prefix.mbpt.h5``).
         - ``outdir`` *(str, optional, default ``"./"``)*  — directory containing the
           MBPT checkpoint file.
-        - ``output`` *(str, optional)* — prefix of a new full-BZ checkpoint
-          (``outdir/output.mbpt.h5``). Requires ``mf_unfold``.
-    mf_unfold : Mf, optional
-        Unfolded mean field of ``mf`` written by :func:`coqui.mean_field.unfold_mf`.
-        Used only together with ``params["output"]``.
 
     Returns
     -------
     None
-        Without ``output``, full-BZ quantities are written back to
-        ``outdir/prefix.mbpt.h5`` under the same HDF5 group with the `_unfold` suffix.
-        With ``output`` (dyson-type checkpoint only), ``outdir/output.mbpt.h5`` is a new
-        checkpoint in the standard layout on the k list of ``mf_unfold``, holding the
-        last iteration of the input (Dm, G, F, Sigma, mu), the IAFT grid, H0, S and the
-        div_treatment settings. It carries no screened interaction, so ``run_lr`` on it
-        needs ``recompute_W=True``.
+        Full-BZ quantities are written back to ``outdir/prefix.mbpt.h5`` under 
+        the same HDF5 group with the `_unfold` suffix.
     """
-    if mf_unfold is None:
-        pproc_mod.unfold_bz(mf, json.dumps(params))
-    else:
-        pproc_mod.unfold_bz(mf, json.dumps(params), mf_unfold)
+    pproc_mod.unfold_bz(mf, json.dumps(params))
 
+
+def unfold_to_new_h5(mf, mf_unfold, params):
+    """
+    Write the last iteration of an IBZ MBPT checkpoint as a new full-BZ checkpoint.
+
+    Unlike :func:`unfold_bz`, which adds `_unfold` datasets to the input checkpoint,
+    this writes a new checkpoint in the standard layout on the k list of the unfolded
+    mean field, so that full-BZ methods (e.g. ``run_lr``) can start from it.
+
+    Parameters
+    ----------
+    mf : Mf
+        Symmetry-reduced (IBZ) mean field of the input checkpoint.
+    mf_unfold : Mf
+        Unfolded mean field of ``mf`` written by :func:`coqui.mean_field.unfold_mf`.
+    params : dict
+        Supported keys:
+
+        - ``prefix`` *(str, required)* — prefix of the input (IBZ) MBPT checkpoint
+          (``outdir/prefix.mbpt.h5``, dyson type).
+        - ``output`` *(str, required)* — prefix of the new checkpoint
+          (``outdir/output.mbpt.h5``).
+        - ``outdir`` *(str, optional, default ``"./"``)* — directory of both files.
+
+    Returns
+    -------
+    None
+        ``outdir/output.mbpt.h5`` holds the last iteration of the input (Dm, G, F,
+        Sigma, mu) unfolded by copy/conj to the k list of ``mf_unfold``, the IAFT
+        grid, H0, S and the div_treatment settings. It carries no screened
+        interaction, so ``run_lr`` on it needs ``recompute_W=True``.
+    """
+    pproc_mod.unfold_to_new_h5(mf, mf_unfold, json.dumps(params))
 
 def dump_vxc(mf, params):
     """
