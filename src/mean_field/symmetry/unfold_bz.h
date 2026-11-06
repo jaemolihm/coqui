@@ -112,13 +112,18 @@ namespace mf {
    * projector at k_qe with Miller index mill_qe is beta(k_qe + mill_qe), so the projector at k has the Miller index
    * mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
    * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
-   * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
+   * is not in its k list. Only symmorphic systems (force_symmorphic) and npol = 1 are supported.
+   * An augmented mf (basis augmentation, bdft h5) is unfolded with its flags, per-band fit weights and Kohn-Sham
+   * matrix Orbitals/H_KS_skij (IBZ k copied to every k of its star, conjugated at time-reversal k). The augmented h5
+   * has no full-BZ projectors, so they are read from projector_file, the pw2coqui h5 file of the parent mean field.
    * Called by Python mean_field.unfold_mf (Mf.unfold_mf); the file is the mean field of post_proc.unfold_checkpoint.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
    * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
+   * @param projector_file - [INPUT] pw2coqui h5 file with Hamiltonian/<pp_type>/fullbz; "" = the file of mf. Its number
+   *                         of atoms and of projectors must equal those of the pseudopotential of mf.
    */
-  void unfold_mf(MF &mf, std::string filename);
+  void unfold_mf(MF &mf, std::string filename, std::string projector_file = "");
 } // mf
 
 

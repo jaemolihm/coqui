@@ -135,8 +135,10 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 // R·|mode_list|·nq raw states per k are scaled by dtau_step (bohr, they
 // are δψ/δτ responses with units 1/bohr), orthonormalized against the M
 // originals, SVD-truncated at the dimensionless singular-value cutoff epstol,
-// and uniformized (shared tail with add_augmentation). Requires npol==1 and a
-// full-BZ k-grid (nkpts==nkpts_ibz).
+// and uniformized (shared tail with add_augmentation). Requires npol==1. The δψ files and
+// elph_bare.iq*.h5 are indexed by the k list of mf (its IBZ list when nkpts_ibz < nkpts; the
+// elph xk_cryst is checked against it). An IBZ mf is accepted only if every iq is Γ and all
+// modes are used; the reader then rotates the IBZ δψ to the star members.
 template<MEMORY_SPACE MEM = HOST_MEMORY>
 mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                              std::string deltapsi_dir, std::string elph_dir,

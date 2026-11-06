@@ -353,12 +353,15 @@ namespace methods {
 
 namespace mf {
 namespace {
-  // Returns the pp_type of the pseudopotential of the pw2coqui h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz
-  // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
-  // writes anything, so that a missing group (or a mean field that is not a pw2coqui h5) aborts without a partial file.
-  std::string read_full_bz_projector_type(MF const& mf) {
+  // Returns the pp_type of the pseudopotential of projector_file (mf's own file if it is empty), whose group
+  // Hamiltonian/<pp_type>/fullbz holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf
+  // on every rank before it writes anything, so that a missing group (or a file that is not a pw2coqui h5) aborts
+  // without a partial file. The projectors are checked to belong to mf: same pp_type, number of atoms and number of
+  // projectors as its own pseudopotential.
+  std::string read_full_bz_projector_type(MF const& mf, std::string const& projector_file) {
     bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
-    std::string fn = from_h5 ? mf.filename() : mf.outdir();
+    std::string fn = not projector_file.empty() ? projector_file : (from_h5 ? mf.filename() : mf.outdir());
+    from_h5 = from_h5 or not projector_file.empty();
 
     // pp_type (attribute of Hamiltonian/) names the group that holds the projectors
     std::string pp_type;
@@ -368,9 +371,34 @@ namespace {
       h5::h5_read_attribute(pp, "pp_type", pp_type);
     }
 
-    utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
+    bool has_fullbz = not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz");
+    if (not has_fullbz and mf.is_augmented() and projector_file.empty()) // an augmented h5 never has a fullbz group
+      utils::check(false, "unfold_mf: {} has no full-BZ projectors (an augmented mean field has none); "
+                          "pass projector_file = the pw2coqui h5 of its parent.", fn);
+    utils::check(has_fullbz,
                  "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
                  "rerun pw2coqui.x with add_pp_fullbz = .true.", fn);
+
+    // Compare with the pseudopotential of mf itself (Hamiltonian/<pp_type> of mf.filename())
+    if (fn != mf.filename() and mf.input_file_type() == mf::h5_input_type) {
+      auto read_pp_type_and_sizes = [&](std::string const& file) {
+        h5::file f(file, 'r');
+        h5::group pp = h5::group(f).open_group("Hamiltonian");
+        std::string type;
+        h5::h5_read_attribute(pp, "pp_type", type);
+        h5::group g = pp.open_group(type);
+        int nat = 0, nproj = 0;
+        h5::h5_read_attribute(g, "number_of_atoms", nat);
+        h5::h5_read_attribute(g, "total_num_of_proj", nproj);
+        return std::make_tuple(type, nat, nproj);
+      };
+      auto own = read_pp_type_and_sizes(mf.filename());
+      auto other = read_pp_type_and_sizes(fn);
+      utils::check(own == other,
+                   "unfold_mf: projector_file {} has pp_type {}, {} atoms and {} projectors; the mean field {} has pp_type "
+                   "{}, {} atoms and {} projectors.", fn, std::get<0>(other), std::get<1>(other), std::get<2>(other),
+                   mf.filename(), std::get<0>(own), std::get<1>(own), std::get<2>(own));
+    }
     return pp_type;
   }
 
@@ -380,8 +408,8 @@ namespace {
   // mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
   //   mf        - the symmetry-reduced (IBZ) mean field; only its full k list (mf.kpts_crystal(), nkpts entries, the k
   //               of the unfolded mean field) is used
-  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (projectors at every
-  //               full-BZ k_qe, in pw2coqui's own k order)
+  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the projector file (projector_file, or the pw2coqui h5
+  //               of mf): projectors at every full-BZ k_qe, in pw2coqui's own k order
   //   out_grp   - output: group Hamiltonian/<pp_type> of the unfolded mean-field file
   // Called by unfold_mf on the root rank; there is no other source of the projectors at the unfolded k, because the
   // projectors of a rotated k are not obtained from the IBZ ones by the symmetry operations of the orbitals alone.
@@ -422,17 +450,19 @@ namespace {
   }
 } // anonymous
 
-  void unfold_mf(MF &mf, std::string filename) {
+  void unfold_mf(MF &mf, std::string filename, std::string projector_file) {
     auto mpi = mf.mpi();
     auto& comm = mpi->comm;
 
     // Supported inputs; the full-BZ projectors are checked before anything is written
     utils::check(mf.nkpts() != mf.nkpts_ibz(),
                  "unfold_mf: the mean-field system has no symmetry reduction (nkpts = nkpts_ibz = {}).", mf.nkpts());
-    utils::check(not mf.is_augmented(), "unfold_mf: augmented orbital bases are not supported.");
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
-    std::string pp_type = read_full_bz_projector_type(mf);
+    utils::check(not mf.is_augmented() or mf.has_hks_matrix(),
+                 "unfold_mf: the augmented mean field {} has no Orbitals/H_KS_skij.", mf.filename());
+    std::string pp_type = read_full_bz_projector_type(mf, projector_file);
+    std::string projector_fn = not projector_file.empty() ? projector_file : mf.filename();
 
     // System of the unfolded mean field: full-BZ k list in the order of mf, identity as the only symmetry
     bdft::bdft_system sys(mf, filename, false);
@@ -459,6 +489,14 @@ namespace {
     utils::check(sys._symm.nkpts == nkpts and sys._symm.nkpts_ibz == nkpts,
                  "unfold_mf: failed to build the full-BZ k list.");
 
+    // Augmented mf: carry the flag and the per-band THC fit weights (full BZ), so that THC on the view
+    // is weighted like the IBZ one and the view is read as an augmented basis
+    if (mf.is_augmented()) {
+      sys.augmented = true;
+      sys.augment_type = mf.augment_type();
+      sys.aug_band_weight = mf.augmented_band_weights();
+    }
+
     // Write the file on the root (get_orbital_set and the source h5 reads are not collective)
     if (comm.root()) {
       h5::file file(filename, 'w');
@@ -470,10 +508,29 @@ namespace {
       bdft::detail::write_wfc_metadata(ogrp, *mf.wfc_truncated_grid());
       bdft::detail::write_orbitals(mf, ogrp, nkpts, mf.nbnd());
 
+      // Augmented mf: Kohn-Sham matrix of the basis at every k, H_KS(k) = H_KS(kp_to_ibz(k)) (conjugated at
+      // time-reversal k), the rule of the orbitals above
+      if (mf.is_augmented()) {
+        long ns = mf.nspin(), nb = mf.nbnd();
+        nda::array<ComplexType,4> H_ibz(ns, mf.nkpts_ibz(), nb, nb);
+        mf.read_hks_matrix(H_ibz());
+        nda::array<ComplexType,4> H_full(ns, nkpts, nb, nb);
+        auto kp_to_ibz = mf.kp_to_ibz();
+        auto kp_trev = mf.kp_trev();
+        for (long is=0; is<ns; ++is)
+          for (long ik=0; ik<nkpts; ++ik) {
+            if (kp_trev(ik))
+              H_full(is, ik, nda::ellipsis{}) = nda::conj(H_ibz(is, kp_to_ibz(ik), nda::ellipsis{}));
+            else
+              H_full(is, ik, nda::ellipsis{}) = H_ibz(is, kp_to_ibz(ik), nda::ellipsis{});
+          }
+        nda::h5_write(ogrp, "H_KS_skij", H_full, false);
+      }
+
       // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group
       grp.create_group("Hamiltonian");
       hamilt::pseudopot_to_h5(mf.fft_grid_dim(), grp, mf.filename(), mf::h5_input_type, false);
-      h5::file file_qe_h5(mf.filename(), 'r');
+      h5::file file_qe_h5(projector_fn, 'r');
       h5::group qe_pp_grp = h5::group(file_qe_h5).open_group("Hamiltonian").open_group(pp_type).open_group("fullbz");
       h5::group out_grp = grp.open_group("Hamiltonian").open_group(pp_type);
       copy_full_bz_projectors(mf, qe_pp_grp, out_grp);

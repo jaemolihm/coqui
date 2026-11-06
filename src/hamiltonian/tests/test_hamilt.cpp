@@ -627,18 +627,89 @@ TEST_CASE("pyscf_ovlp", "[hamilt]") {
 // (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the unfolded mean field against that
 //     of a no-symmetry calculation of the same system (separate QE run), k points matched by crystal coordinates. N_b
 //     is invariant under unitary rotations of the occupied manifold.
+// (3) An augmented IBZ mean field (momentum augmentation of qe_lih223_sym), whose h5 has no full-BZ projectors, is
+//     unfolded with projector_file = the pw2coqui h5 of its parent: the view is augmented, carries the IBZ band
+//     weights (expanded by kp_to_ibz), its stored Orbitals/H_KS_skij is the IBZ one copied at kp_to_ibz(k) and
+//     conjugated at time-reversal k, and H0 + V_Hxc rebuilt on the view reproduces that stored matrix.
 TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   auto& mpi = utils::make_unit_test_mpi_context();
   auto& comm = mpi->comm;
 
-  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0) {
+  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0,
+                   std::string projector_file = "") {
     long nspin = mf_sym.nspin(), nkpts = mf_sym.nkpts(), nkpts_ibz = mf_sym.nkpts_ibz(), nbnd = mf_sym.nbnd();
     long nat = mf_sym.number_of_atoms();
 
     // Unfolded mean field; H0 of the IBZ system and of the unfolded mean field, each with its own pseudopotential
-    mf::unfold_mf(mf_sym, prefix + ".h5");
+    mf::unfold_mf(mf_sym, prefix + ".h5", projector_file);
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
+
+    // (3) augmented mean field: flag, band weights, stored H_KS, H0 + V_Hxc
+    if (mf_sym.is_augmented()) {
+      REQUIRE(mf_unfold.is_augmented());
+      REQUIRE(mf_unfold.has_hks_matrix());
+      REQUIRE(mf_unfold.augment_type() == mf_sym.augment_type());
+      auto w_sym = mf_sym.augmented_band_weights();
+      auto w_unfold = mf_unfold.augmented_band_weights();
+      double err_w = 0.0;
+      for (long is = 0; is < nspin; ++is)
+        for (long ik = 0; ik < nkpts; ++ik)
+          for (long i = 0; i < nbnd; ++i)
+            err_w = std::max(err_w, std::abs(w_unfold(is,ik,i) - w_sym(is,mf_sym.kp_to_ibz(ik),i)));
+      app_log(2, "unfold_mf_projectors {}: max|w_unfold - w_ibz(kp_to_ibz)| = {}", prefix, err_w);
+      REQUIRE(err_w == 0.0);
+
+      nda::array<ComplexType,4> Hks_sym(nspin, nkpts_ibz, nbnd, nbnd), Hks_unfold(nspin, nkpts, nbnd, nbnd);
+      if (comm.root()) {
+        mf_sym.read_hks_matrix(Hks_sym());
+        mf_unfold.read_hks_matrix(Hks_unfold());
+      }
+      comm.broadcast_n(Hks_sym.data(), Hks_sym.size(), 0);
+      comm.broadcast_n(Hks_unfold.data(), Hks_unfold.size(), 0);
+      double err_hks = 0.0, err_hks_noconj = 0.0, nrm_hks = 0.0;
+      for (long is = 0; is < nspin; ++is)
+        for (long ik = 0; ik < nkpts; ++ik) {
+          long iks = mf_sym.kp_to_ibz(ik);
+          bool tr = mf_sym.kp_trev(ik);
+          for (long i = 0; i < nbnd; ++i)
+            for (long j = 0; j < nbnd; ++j) {
+              ComplexType ref = tr ? std::conj(Hks_sym(is,iks,i,j)) : Hks_sym(is,iks,i,j);
+              err_hks = std::max(err_hks, std::abs(Hks_unfold(is,ik,i,j) - ref));
+              nrm_hks = std::max(nrm_hks, std::abs(ref));
+              if (tr) err_hks_noconj = std::max(err_hks_noconj, std::abs(Hks_unfold(is,ik,i,j) - Hks_sym(is,iks,i,j)));
+            }
+        }
+      app_log(2, "unfold_mf_projectors {}: max|H_KS_unfold - H_KS_ibz(copy/conj)| = {}, without conj at TR k = {}, "
+              "max|H_KS| = {}", prefix, err_hks, err_hks_noconj, nrm_hks);
+      REQUIRE(err_hks < 1e-12);
+      if (has_trev) REQUIRE(err_hks_noconj > 1e-3);
+
+      // H0 + V_Hxc rebuilt on the view, hermitized as in the augmenter (build_ks_matrix_ibz), against its stored H_KS
+      auto psp_u = hamilt::make_pseudopot(mf_unfold);
+      auto sHKS = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts, nbnd, nbnd});
+      hamilt::set_H0(mf_unfold, psp_u.get(), sHKS);
+      auto dV = hamilt::V_Hxc_aug<HOST_MEMORY>(mf_unfold, comm, psp_u.get());
+      auto sV = make_shared_array<array_view_4d_t>(*mpi, shape_t<4>{nspin, nkpts, nbnd, nbnd});
+      math::nda::gather_to_shm(dV, sV);
+      comm.barrier();
+      double err_rebuild = 0.0;
+      if (mpi->node_comm.root()) {
+        auto H = sHKS.local();
+        auto V = sV.local();
+        for (long is = 0; is < nspin; ++is)
+          for (long ik = 0; ik < nkpts; ++ik)
+            for (long i = 0; i < nbnd; ++i)
+              for (long j = 0; j < nbnd; ++j) {
+                ComplexType h = H(is,ik,i,j) + V(is,ik,i,j);
+                ComplexType hh = H(is,ik,j,i) + V(is,ik,j,i);
+                err_rebuild = std::max(err_rebuild, std::abs(0.5*(h + std::conj(hh)) - Hks_unfold(is,ik,i,j)));
+              }
+      }
+      comm.all_reduce_in_place_n(&err_rebuild, 1, boost::mpi3::max<>{});
+      app_log(2, "unfold_mf_projectors {}: max|(H0+V_Hxc)_unfold - H_KS_unfold(stored)| = {}", prefix, err_rebuild);
+      REQUIRE(err_rebuild < tol_H0);
+    }
 
     auto psp_sym = hamilt::make_pseudopot(mf_sym);
     auto psp_unfold = hamilt::make_pseudopot(mf_unfold);
@@ -714,6 +785,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
             "per-atom weight vs no-symmetry: err = {}, max N = {}",
             prefix, err, err_noconj, nrm, err_N, nrm_N);
+    // augmented case measured 4.78e-8: the IBZ H0 uses the IBZ projectors, the view the parent's fullbz ones (the
+    // older-pw2coqui projector floor, as for the plain H0 checks)
     REQUIRE(err < tol_H0);
     if (has_trev) REQUIRE(err_noconj > 1e-3);
     if (not nosym_name.empty()) {
@@ -736,6 +809,19 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   SECTION("qe_h5") {
     auto mf_sym = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
     check(mf_sym, "unfold_mf_H0_h5", true, "qe_lih223", tol_H0_lih);
+  }
+  SECTION("qe_h5_aug") {
+    auto mf_parent = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
+    auto augmenter = std::make_shared<orbitals::momentum_augmenter>(mf_parent);
+    // 3 bands = complete multiplets at every IBZ k of this fixture (the R that closed_band_count gives in
+    // aug_ibz_symmetry in test_orbitals.cpp; its log line prints R)
+    auto mf_sym = orbitals::add_augmentation<HOST_MEMORY>(mf_parent, "unfold_mf_aug_ibz.h5", augmenter, 3, 1e-3, 1e-1);
+    REQUIRE(mf_sym.is_augmented());
+    auto [outdir, pf] = utils::utest_filename("qe_lih223_sym");
+    check(mf_sym, "unfold_mf_H0_aug", true, "", tol_H0_lih, outdir + pf + ".coqui.h5");
+    comm.barrier();
+    if (comm.root()) remove("unfold_mf_aug_ibz.h5");
+    comm.barrier();
   }
   SECTION("qe_h5_si333") {
     auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);

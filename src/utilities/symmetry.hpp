@@ -978,6 +978,21 @@ auto generate_dmatrix(MF_t &mf,
   int kold = -1;
   auto [isk0, isk1] = itertools::chunk_range(0, sk.size(), comm.size() ,comm.rank());
   long bad_norm_count = 0;
+  // Unitarity defect of D: eps_D = max_{s,k} ||D D^dagger - 1||_max, taken before the row normalization
+  // (a D that does not close on the kept bands has eps_D = O(1); the row-norm warning below hides it).
+  double eps_D = 0.0;
+  long isk_eps_D = -1;   // (s,k) index of the largest defect; -1 while eps_D = 0
+  auto update_eps_D = [&](auto const& Dblk, long isk) {
+    long n = Dblk.extent(0);
+    nda::array<ComplexType,2> Dh = nda::conj(nda::transpose(Dblk));
+    nda::array<ComplexType,2> DDh(n,n);
+    nda::blas::gemm(ComplexType(1.0), Dblk, Dh, ComplexType(0.0), DDh);
+    double e = 0.0;
+    for(long a=0; a<n; ++a)
+      for(long b=0; b<n; ++b)
+        e = std::max(e, std::abs(DDh(a,b) - (a==b ? ComplexType(1.0) : ComplexType(0.0))));
+    if(e > eps_D) { eps_D = e; isk_eps_D = isk; }
+  };
   for( long isk=isk0; isk<isk1; ++isk ) { 
 
     if(isk == 0) { // first term is always the identity
@@ -1039,6 +1054,7 @@ auto generate_dmatrix(MF_t &mf,
           nda::blas::gemm(ComplexType(1.0),psi(1,b_rng,all),
                                            nda::transpose(psi(0,b_rng,all)),
                           ComplexType(0.0),Temp(nda::range(nb),nda::range(nb)));
+          update_eps_D(Temp(nda::range(nb),nda::range(nb)), isk);
           // dump into sp_d
           for( int a=0; a<nb; ++a )
             for( int b=0; b<nb; ++b )
@@ -1048,6 +1064,7 @@ auto generate_dmatrix(MF_t &mf,
           nda::blas::gemm(ComplexType(1.0),psi(1,b_rng,all),
                                            nda::transpose(psi(0,b_rng,all)),
                           ComplexType(0.0),shm_dmat.local()(isk,b_rng,b_rng));
+          update_eps_D(shm_dmat.local()(isk,b_rng,b_rng), isk);
         }
         ib+=nb;
       };
@@ -1057,10 +1074,12 @@ auto generate_dmatrix(MF_t &mf,
       if constexpr (Sparse) {
         nda::blas::gemm(ComplexType(1.0),psi(1,all,all),nda::transpose(psi(0,all,all)),
                         ComplexType(0.0),Temp);
+        update_eps_D(Temp, isk);
         dmat_s.emplace_back(math::sparse::to_csr<MEM,int,int>(Temp,1e-8));
       } else {
         nda::blas::gemm(ComplexType(1.0),psi(1,all,all),nda::transpose(psi(0,all,all)),
                         ComplexType(0.0),shm_dmat.local()(isk,all,all));
+        update_eps_D(shm_dmat.local()(isk,all,all), isk);
       }
     }
     
@@ -1079,6 +1098,18 @@ auto generate_dmatrix(MF_t &mf,
         if(std::abs(e-1.0) > 1e-3) bad_norm_count += 1;
       }
     }
+  }
+
+  // Report eps_D and where it occurs (lowest isk among the ranks holding the maximum)
+  {
+    double eps_D_max = comm.all_reduce_value(eps_D, boost::mpi3::max<>{});
+    long isk_max = comm.all_reduce_value(eps_D == eps_D_max ? isk_eps_D : long(sk.size()), boost::mpi3::min<>{});
+    if(eps_D_max > 0.0 and isk_max >= 0 and isk_max < long(sk.size()))
+      app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} at isym = {}, ik = {} "
+                 "(before row normalization; O(1) if nbnd splits a degenerate set, see the warning below)",
+              eps_D_max, sk[isk_max].first, sk[isk_max].second);
+    else
+      app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} (before row normalization)", eps_D_max);
   }
 
   // check # of Bloch orbitals with a incomplete degenerate set
