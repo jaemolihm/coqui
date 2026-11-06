@@ -354,9 +354,10 @@ namespace methods {
 namespace mf {
 namespace {
   // Returns the pp_type of the pseudopotential of projector_file (mf's own file if it is empty), whose group
-  // Hamiltonian/<pp_type>/fullbz holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
-  // writes anything, so that a missing group (or a file that is not a pw2coqui h5) aborts without a partial file.
-  // The projectors are checked to belong to mf: same number of atoms and of projectors as its own pseudopotential.
+  // Hamiltonian/<pp_type>/fullbz holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf
+  // on every rank before it writes anything, so that a missing group (or a file that is not a pw2coqui h5) aborts
+  // without a partial file. The projectors are checked to belong to mf: same pp_type, number of atoms and number of
+  // projectors as its own pseudopotential.
   std::string read_full_bz_projector_type(MF const& mf, std::string const& projector_file) {
     bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
     std::string fn = not projector_file.empty() ? projector_file : (from_h5 ? mf.filename() : mf.outdir());
@@ -380,7 +381,7 @@ namespace {
 
     // Compare with the pseudopotential of mf itself (Hamiltonian/<pp_type> of mf.filename())
     if (fn != mf.filename() and mf.input_file_type() == mf::h5_input_type) {
-      auto read_pp_sizes = [&](std::string const& file) {
+      auto read_pp_type_and_sizes = [&](std::string const& file) {
         h5::file f(file, 'r');
         h5::group pp = h5::group(f).open_group("Hamiltonian");
         std::string type;
@@ -389,13 +390,14 @@ namespace {
         int nat = 0, nproj = 0;
         h5::h5_read_attribute(g, "number_of_atoms", nat);
         h5::h5_read_attribute(g, "total_num_of_proj", nproj);
-        return std::make_pair(nat, nproj);
+        return std::make_tuple(type, nat, nproj);
       };
-      auto own = read_pp_sizes(mf.filename());
-      auto other = read_pp_sizes(fn);
+      auto own = read_pp_type_and_sizes(mf.filename());
+      auto other = read_pp_type_and_sizes(fn);
       utils::check(own == other,
-                   "unfold_mf: projector_file {} has {} atoms and {} projectors; the mean field {} has {} and {}.",
-                   fn, other.first, other.second, mf.filename(), own.first, own.second);
+                   "unfold_mf: projector_file {} has pp_type {}, {} atoms and {} projectors; the mean field {} has pp_type "
+                   "{}, {} atoms and {} projectors.", fn, std::get<0>(other), std::get<1>(other), std::get<2>(other),
+                   mf.filename(), std::get<0>(own), std::get<1>(own), std::get<2>(own));
     }
     return pp_type;
   }
@@ -406,8 +408,8 @@ namespace {
   // mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
   //   mf        - the symmetry-reduced (IBZ) mean field; only its full k list (mf.kpts_crystal(), nkpts entries, the k
   //               of the unfolded mean field) is used
-  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (projectors at every
-  //               full-BZ k_qe, in pw2coqui's own k order)
+  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the projector file (projector_file, or the pw2coqui h5
+  //               of mf): projectors at every full-BZ k_qe, in pw2coqui's own k order
   //   out_grp   - output: group Hamiltonian/<pp_type> of the unfolded mean-field file
   // Called by unfold_mf on the root rank; there is no other source of the projectors at the unfolded k, because the
   // projectors of a rotated k are not obtained from the IBZ ones by the symmetry operations of the orbitals alone.
