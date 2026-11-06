@@ -167,6 +167,9 @@ struct lr_params {
   /// (V + Vxc)(q) in ΔJ. Requires kernel.hartree and a THC carrying Vxc;
   /// rejected together with kernel.exchange.
   bool include_xc = false;
+  /// Hartree kernel V̄(q) without the G = 0 term of v(q+G), in the operator and the
+  /// preconditioner alike (so the LR self-consistency gives χ̄). Requires kernel.hartree.
+  bool exclude_hartree_head = false;
   /// HSEX: evaluate the exchange channel with the statically screened kernel
   /// V + W_c(iν=0) instead of the bare V, i.e.
   ///   ΔF_x + ΔΣ_SEX = -ΔDm ⊙ W(iν=0).

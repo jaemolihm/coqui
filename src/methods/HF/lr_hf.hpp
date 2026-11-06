@@ -139,6 +139,14 @@ public:
    *                           the exchange kernel V(q) by V(q) + W_c(q, iν=0),
    *                           i.e. ΔK = -ΔDm ⊙ W(iν=0). The direct (ΔJ) channel
    *                           is untouched.
+   * @param exclude_hartree_head - [INPUT] Use V̄(q) = V(q) - v(q)/Ω conj(h_P) h_Q
+   *                           in ΔJ, i.e. drop the G = 0 term of v(q+G) from the
+   *                           Hartree kernel (h = thc.basis_head() at q). The
+   *                           removed plane wave is that of the THC's q image
+   *                           MF->Qpts(q_ibz_idx), and h is used as stored (zero
+   *                           h removes nothing). Exchange and the HSEX kernel keep
+   *                           the full V. No-op at q = Γ, where the THC carries no
+   *                           G = 0 term. Assumes a bare-Coulomb THC, v(q) = 4π/|q|².
    */
   template<nda::MemoryArray AF_t>
   void evaluate(sArray_t<AF_t>& sDeltaF_skij,
@@ -152,7 +160,8 @@ public:
                 const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
                 nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
                 bool compute_xc = false,
-                const hsex_kernel_t* hsex = nullptr);
+                const hsex_kernel_t* hsex = nullptr,
+                bool exclude_hartree_head = false);
 
   /// Print the LR HF timer block (header + total + subclocks) at log level `level`.
   inline void print_timers(int level = 2) {
@@ -249,14 +258,18 @@ private:
   bool _U_RPQ_cached = false;
   nda::array<ComplexType, 3> _U_RPQ;      // U(R)_PQ, exchange channel
 
-  /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc)
-  /// on the (P_rng, Q_rng) tile, fetching and caching the blocks on first use.
+  /// Fill `Uq_PQ` with the direct-channel kernel V(q) (+ Vxc(q) when compute_xc,
+  /// with the G = 0 term of V removed when exclude_hartree_head) on the
+  /// (P_rng, Q_rng) tile, fetching and caching the blocks on first use.
   void build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
                    nda::range P_rng, nda::range Q_rng, bool compute_xc,
+                   bool exclude_hartree_head,
                    nda::array<ComplexType, 2>& Uq_PQ);
 
   /**
    * @brief Internal THC-based LR-HF implementation
+   *
+   * @param exclude_hartree_head - [INPUT] see evaluate().
    */
   template<nda::MemoryArray AF_t>
   void thc_lr_hf(const sArray_t<AF_t>& sDeltaDm_skij,
@@ -269,7 +282,8 @@ private:
                  const nda::array<ComplexType, 4>* Dm_skij_unpert = nullptr,
                  nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
                  bool compute_xc = false,
-                 const hsex_kernel_t* hsex = nullptr);
+                 const hsex_kernel_t* hsex = nullptr,
+                 bool exclude_hartree_head = false);
 
   /**
    * @brief Hartree-only LR Fock, exploiting that ΔF is diagonal in the THC
@@ -298,13 +312,16 @@ private:
    * configuration takes the dense branch, which stays the reference implementation. Extending it to IBC (three more row dots, one per DeltaX term) or
    * to δV (one more cached diagonal) is mechanical, and worth doing only if such a
    * configuration ever shows up in a profile.
+   *
+   * @param exclude_hartree_head - [INPUT] see evaluate().
    */
   template<nda::MemoryArray AF_t>
   void thc_lr_hartree_only(const sArray_t<AF_t>& sDeltaDm_skij,
                            sArray_t<AF_t>& sDeltaF_skij,
                            THC_ERI auto& thc,
                            nda::array<ComplexType, 4>* DeltaF_PQ_out,
-                           bool compute_xc);
+                           bool compute_xc,
+                           bool exclude_hartree_head);
 
   /**
    * @brief LR finite-size correction for K based on "PRB 80, 085114(2009)"

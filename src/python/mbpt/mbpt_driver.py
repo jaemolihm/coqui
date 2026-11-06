@@ -412,7 +412,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            precond_tol=None, precond_max_iter=None,
            hessian="none",
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None,
-           reuse_W=False):
+           reuse_W=False, exclude_hartree_head=False):
     """
     Run unified linear response calculation.
 
@@ -647,6 +647,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Madelung term (the aux-basis arrays carry no G=0 component, so the q→0
         head of the contracted kernel enters there).
 
+    exclude_hartree_head : bool, optional
+        Default False. Drop the G = 0 term of v(q+G) from the Hartree rung (ΔJ), so the
+        solve yields the macroscopically unscreened χ̄; exchange, W and GW keep the full v.
+        The removed term is that of the THC's q image, from its stored basis head; a
+        no-op at q = Γ. Requires the Hartree rung. Assumes a bare-Coulomb THC.
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
@@ -693,6 +698,15 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     from coqui._lib.mbpt_module import run_lr as run_lr_cpp
 
     q_vec = np.asarray(q_vec, dtype=np.float64)
+    if exclude_hartree_head:
+        # Same check as run_lr_calc, before any collective
+        from .lr_driver import resolve_kernel
+        hartree, _, _ = resolve_kernel(method, include_hartree, include_exchange, gw_mode,
+                                       caller="run_lr")
+        if not hartree:
+            raise ValueError("run_lr: exclude_hartree_head=True requires the Hartree rung "
+                             "(include_hartree=True, or a method alias with Hartree); the "
+                             "kernel here has none.")
     # Force non-root ranks to pass None: tolerates legacy callers that
     # still hand a replicated array on every rank.
     from mpi4py import MPI
@@ -759,6 +773,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     # Recompute W from the checkpoint Green's function instead of reading it.
     lr_params["recompute_W"] = bool(recompute_W)
     lr_params["reuse_W"] = bool(reuse_W)
+    lr_params["exclude_hartree_head"] = bool(exclude_hartree_head)
     # Unperturbed reference and split-term output (one-shot G0W0@DFT).
     lr_params["unperturbed"] = str(unperturbed)
     lr_params["split_sigma_terms"] = bool(split_sigma_terms)

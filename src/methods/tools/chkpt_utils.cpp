@@ -647,7 +647,8 @@ void dump_lr(communicator_t& comm,
              std::optional<long> nbnd_save,
              std::string const& gw_mode,
              std::string const& precond_method,
-             std::optional<double> exchange_static_W_head) {
+             std::optional<double> exchange_static_W_head,
+             bool exclude_hartree_head) {
   if (comm.root()) {
     utils::check(std::filesystem::exists(filename),
                  "dump_lr: File {} does not exist. Cannot append.", filename);
@@ -683,6 +684,7 @@ void dump_lr(communicator_t& comm,
 
     h5::h5_write(lr_grp, "include_hartree", static_cast<int>(include_hartree));
     h5::h5_write(lr_grp, "include_exchange", static_cast<int>(include_exchange));
+    h5::h5_write(lr_grp, "exclude_hartree_head", static_cast<int>(exclude_hartree_head));
     h5::h5_write(lr_grp, "include_gw_sigma", static_cast<int>(sDeltaSigma_tskij != nullptr));
     // Refines include_gw_sigma, which cannot distinguish fixed_W from full.
     h5::h5_write(lr_grp, "gw_mode", gw_mode);
@@ -863,7 +865,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,
                       std::string const&, std::string const&,
-                      std::optional<double>);
+                      std::optional<double>, bool);
 
   } // chkpt
 } // methods

@@ -1530,6 +1530,8 @@ void release_lr_W_cache() { W_cache.reset(); }
  *                          (ΔΣ = -ΔG⊙W) or "full" (ΔΣ = -ΔG⊙W - G⊙ΔW)
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
  *                          that overrides the three keys above, or "HSEX".
+ *   exclude_hartree_head   ΔJ uses V̄(q) = V(q) minus the G = 0 term of the THC's
+ *                          q image (default false); requires the Hartree rung
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the preconditioner of GCR or
  *                          damping, and its solution of ΔH0 is the start of the
@@ -1659,6 +1661,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // the presence of a Vxc dataset in the THC: otherwise an --mbpt Hartree run
   // against a Vxc-carrying THC file would silently become LR-DFT.
   auto include_xc = io::get_value_with_default<bool>(pt, "include_xc", false);
+
+  // Hartree rung with v̄ (no G = 0 term of v(q+G)): the self-consistency then yields
+  // the macroscopically unscreened response χ̄. Exchange, W and the ladder keep the full v.
+  auto exclude_hartree_head = io::get_value_with_default<bool>(pt, "exclude_hartree_head", false);
+  utils::check(!exclude_hartree_head || total_kernel.hartree,
+               "run_lr_calc: exclude_hartree_head = true requires the Hartree rung "
+               "(include_hartree = true, or a method alias with Hartree).");
 
   // Aux-basis (THC) Fock matrices F_PQ / ΔF_PQ, consumed only by the DeltaX/IBC
   // ΔΔF curvature post-processors in Python. Opt-in, because they are
@@ -2291,6 +2300,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   lr_params p;
   p.kernel           = total_kernel;
   p.include_xc       = include_xc;
+  p.exclude_hartree_head = exclude_hartree_head;
   p.exchange_static_W  = exchange_static_W;
   p.max_iter         = max_iter;
   p.tol              = tol;
@@ -2380,7 +2390,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                    total_kernel.sigma_G_dW ? "full"
                        : total_kernel.sigma_dG_W ? "fixed_W" : "none",
                    precond_method != "none" ? precond_method : std::string(),
-                   hsex_head);
+                   hsex_head, exclude_hartree_head);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_DUMP");
 

@@ -240,6 +240,7 @@ void lr_driver::lr_setup(
   app_log(1, "  fix_density = {}", p.fix_density ? "true" : "false");
   app_log(1, "  kernel = {}", K.to_string());
   app_log(1, "  include_xc = {}", p.include_xc ? "true" : "false");
+  app_log(1, "  exclude_hartree_head = {}", p.exclude_hartree_head ? "true" : "false");
   if (p.exchange_static_W)
     app_log(1, "  exchange kernel = V + W_c(iν=0)  [static screened exchange]");
   if (!p.precond_kernel.empty())
@@ -651,7 +652,8 @@ void lr_driver::apply_kernel(
         precond ? nullptr : p.Dm_ab,
         DeltaF_PQ_out,
         !precond && p.include_xc,
-        hsex ? &(*hsex) : nullptr);
+        hsex ? &(*hsex) : nullptr,
+        p.exclude_hartree_head);
     _Timer.stop("LR_HF");
     _mpi->comm.barrier();
   }

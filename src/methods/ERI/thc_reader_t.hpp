@@ -489,6 +489,8 @@ namespace methods {
         auto Z_loc = _dZ.local();
         Z_loc(q, nda::ellipsis{}) = Zq_loc;
       }
+      // The LS-THC fit never forms the interpolating vectors in G-space, so it neglects the
+      // head: basis_head() is zero, and its users (e.g. LR exclude_hartree_head) remove nothing.
       _Chi_head() = 0.0;
       _Chi_bar_head() = 0.0;
       _Timer.stop("BUILD_THC");
