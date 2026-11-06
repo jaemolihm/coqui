@@ -90,6 +90,8 @@ namespace methods {
    * system/H0_skij, system/S_skij (unfolded from the input) and scf/div_treatment, scf/hf_div_treatment if present.
    * Matrices are copied from the IBZ k and conjugated at time-reversal k (see unfold_1e_hamiltonian).
    * It requires mf_unfold to be the unfolded mean field of mf_ibz written by mf::unfold_mf.
+   * Called by the post-processing step unfold_checkpoint (Python post_proc.unfold_checkpoint), right after it writes
+   * and loads mf_unfold.
    * The checkpoint carries no screened interaction, so a run_lr on it needs recompute_W=True.
    *
    * @param ctx        - [INPUT] MPI context

@@ -167,35 +167,6 @@ def augment_mf(mf, prefix, outdir="./", augment_type="momentum",
                             float(epstol), dirs_list, float(dtau_step))
 
 
-def unfold_mf(mf, prefix, outdir="./"):
-    """Write the unfolded mean field of a symmetry-reduced mean-field system.
-
-    The unfolded mean field is a bdft mean-field written to ``{outdir}/{prefix}.h5`` with the
-    k list of ``mf`` (same order, unfolded k vectors), the identity as its only
-    symmetry and ``nkpts_ibz = nkpts``. Its orbitals at k are the IBZ orbitals
-    rotated to k (conjugated at time-reversal k), i.e. the orbital gauge in
-    which an IBZ calculation on ``mf`` is solved. The nonlocal projectors at each
-    k are copied from the full-BZ projectors that ``pw2coqui.x`` writes with
-    ``add_pp_fullbz = .true.`` (group ``Hamiltonian/<pp_type>/fullbz`` of the
-    mean-field h5 file), so the unfolded mean field gives H0 and the nonlocal
-    e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
-    Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``.
-
-    ``mf`` must be a symmorphic (``force_symmorphic``) ``pw2coqui`` h5 mean field with the
-    full-BZ projectors, with ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
-
-    Parameters
-    ----------
-    mf : Mf
-        Mean-field system with symmetry reduction.
-    prefix : str
-        Prefix of the new mean-field file.
-    outdir : str
-        Directory for the new mean-field file.
-    """
-    mf.unfold_mf(outdir + "/" + prefix + ".h5")
-
-
 def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
                     iq_list=(1,), nmodes=None, modes=None, nbnd_aug=-1,
                     nbnd_mf=None, smearing_deltapsi=0.02, epstol=1e-4,

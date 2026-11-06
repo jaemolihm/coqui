@@ -154,11 +154,13 @@ namespace bdft_tests
     auto trev = mf_ibz->kp_trev();
     REQUIRE(std::any_of(trev.begin(), trev.end(), [](bool b) { return b; }));
 
+    // Unfolded mean field of qe_lih223_sym
     std::string unfold_prefix = "thc_unfold_mf", pivots = "thc_unfold_pivots.h5";
     mf::unfold_mf(*mf_ibz, unfold_prefix + ".h5");
     comm.barrier();
     auto mf_unfold = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type));
 
+    // Interpolating points of the parent, saved for both THC readers
     int nIpts = mf_ibz->nbnd()*15;
     double ecut = mf_ibz->ecutrho();
     auto pt_piv = make_thc_ptree(ecut, 8, 1024, 1e-10);
@@ -167,6 +169,7 @@ namespace bdft_tests
     make_thc_pivots(mf_ibz, pt_piv);
     comm.barrier();
 
+    // THC of the parent and of the unfolded mean field on those points
     auto make_pt = [&]() {
       auto pt = make_thc_reader_ptree(nIpts, "", "incore", "", "bdft", 1e-10, ecut, 8, 1024);
       pt.put("pivot_file", pivots);
@@ -176,6 +179,7 @@ namespace bdft_tests
     thc_reader_t thc_unfold(mf_unfold, make_pt());
     REQUIRE(thc_ibz.Np() == thc_unfold.Np());
 
+    // X(is,k) of the two, and of the conjugated unfolded X at time-reversal k
     double err_max = 0.0, err_noconj_max = 0.0;
     for (long is = 0; is < ns; ++is)
       for (long ik = 0; ik < nk; ++ik) {

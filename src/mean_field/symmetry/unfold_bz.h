@@ -112,17 +112,13 @@ namespace mf {
    * projector at k_j with Miller index n is beta(k_j + n), so the projector at k has the Miller index m = n - G0.
    * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
    * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
+   * Called by the post-processing step unfold_checkpoint (Python post_proc.unfold_checkpoint), which loads the file
+   * and writes the full-BZ checkpoint on it.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
    * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")
    */
   void unfold_mf(MF &mf, std::string filename);
-
-  namespace detail {
-    /** Index j of the row of kfull (nk,3; k_j in crystal coordinates) with k - k_j = G0 integer (tolerance 1e-6),
-     *  and G0 in the output argument; -1 if no row matches. Used by unfold_mf to find the full-BZ k of an unfolded k. */
-    long match_fullbz_k(nda::array<double,2> const& kfull, nda::array<double,1> const& k, std::array<int,3> &G0);
-  }
 } // mf
 
 

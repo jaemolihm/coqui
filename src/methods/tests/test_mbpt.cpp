@@ -160,6 +160,7 @@ namespace bdft_tests {
     auto mf_ibz = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
     long ns = mf_ibz.nspin(), nk = mf_ibz.nkpts(), nki = mf_ibz.nkpts_ibz(), nb = mf_ibz.nbnd();
 
+    // IAFT grid of the synthetic checkpoint
     ptree pt;
     pt.put("beta", 10.0);
 #ifdef ENABLE_DLR
@@ -171,6 +172,7 @@ namespace bdft_tests {
     imag_axes_ft::IAFT ft(pt, true, mf::wmax_from_mf(mf_ibz));
     long nt = ft.nt_f();
 
+    // Random IBZ matrices (seeded)
     using methods::chkpt::Array_view_4D_t;
     using methods::chkpt::Array_view_5D_t;
     std::mt19937 gen(7);
@@ -190,6 +192,7 @@ namespace bdft_tests {
     auto sSigma = math::shm::make_shared_array<Array_view_5D_t>(*mpi, std::array<long,5>{nt, ns, nki, nb, nb});
     fill(sH0); fill(sS); fill(sDm); fill(sF); fill(sG); fill(sSigma);
 
+    // Synthetic IBZ checkpoint, iteration 3, with both divergence treatments
     std::string in = "unfold_scf_in", out = "unfold_scf_out", unfold_prefix = "unfold_scf_unfolded";
     double mu = 0.37;
     methods::chkpt::write_metadata(comm, mf_ibz, ft, sH0, sS, in);
@@ -202,10 +205,12 @@ namespace bdft_tests {
     }
     comm.barrier();
 
+    // Unfolded mean field and full-BZ checkpoint
     mf::unfold_mf(mf_ibz, unfold_prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type);
     methods::chkpt::unfold_scf(*mpi, mf_ibz, mf_unfold, in, out);
+
     // k_weight of the output: 1/nkpts at every k, summing to 1
     int kw_ok = 0;
     if (comm.root()) {
@@ -218,6 +223,7 @@ namespace bdft_tests {
     comm.broadcast_n(&kw_ok, 1, 0);
     REQUIRE(kw_ok == 1);
 
+    // Output read on root: scalars, k list, IAFT beta, and the error of each matrix against the hand-made copy/conj
     double err_H0 = 0, err_S = 0, err_Dm = 0, err_F = 0, err_G = 0, err_Sigma = 0, err_noconj = 0, err_k = 0;
     // Scalars read on root; compared on all ranks after a broadcast so that a failure cannot hang the other ranks.
     long iter_out = 0, nk_out = 0, nki_out = 0;
@@ -286,6 +292,8 @@ namespace bdft_tests {
       check(sG.local(), "G_tskij", iter_grp, err_G);
       check(sSigma.local(), "Sigma_tskij", iter_grp, err_Sigma);
     }
+
+    // Broadcast and compare on all ranks
     comm.broadcast_n(&err_H0, 1, 0); comm.broadcast_n(&err_S, 1, 0); comm.broadcast_n(&err_Dm, 1, 0);
     comm.broadcast_n(&err_F, 1, 0); comm.broadcast_n(&err_G, 1, 0); comm.broadcast_n(&err_Sigma, 1, 0);
     comm.broadcast_n(&err_noconj, 1, 0); comm.broadcast_n(&err_k, 1, 0);

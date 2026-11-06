@@ -84,13 +84,12 @@ static auto const _c2py_fun_6 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "mf", "params")};
 
-// unfold_to_new_h5
+// unfold_checkpoint
 static auto const _c2py_fun_7 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const coqui_py::Mf &mf, const coqui_py::Mf &mf_unfold,
-       const std::string &params) {
-      return coqui_py::post_proc::unfold_to_new_h5(mf, mf_unfold, params);
+    [](const coqui_py::Mf &mf, const std::string &params) {
+      return coqui_py::post_proc::unfold_checkpoint(mf, params);
     },
-    "mf", "mf_unfold", "params")};
+    "mf", "params")};
 
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");
@@ -117,7 +116,7 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_5.c_str()},
     {"unfold_bz", (PyCFunction)c2py::pyfkw<_c2py_fun_6>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_6.c_str()},
-    {"unfold_to_new_h5", (PyCFunction)c2py::pyfkw<_c2py_fun_7>,
+    {"unfold_checkpoint", (PyCFunction)c2py::pyfkw<_c2py_fun_7>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_7.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };

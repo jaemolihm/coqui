@@ -23,6 +23,7 @@
 #include "utilities/check.hpp"
 #include "mean_field/symmetry/unfold_bz.h"
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
+#include "utilities/h5_utils.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -621,6 +622,9 @@ template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t
 void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
                 std::string in_prefix, std::string out_prefix) {
   std::string in_file = in_prefix + ".mbpt.h5";
+  std::string out_file = out_prefix + ".mbpt.h5";
+
+  // mf_unfold is the unfolded mean field of mf_ibz: same k list (row by row), nspin and nbnd
   utils::check(in_prefix != out_prefix, "unfold_scf: the output prefix must differ from the input prefix.");
   utils::check(mf_unfold.nkpts_ibz() == mf_unfold.nkpts() and mf_unfold.nkpts() == mf_ibz.nkpts() and
                mf_ibz.nkpts_ibz() < mf_ibz.nkpts(),
@@ -637,10 +641,9 @@ void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, m
                      "unfold_scf: k-point {} of mf_unfold differs from mf_ibz.", ik);
   }
 
+  // Input checkpoint (root): written on mf_ibz, dyson type, Sigma stored at the final iteration
   long iter = 0;
   double mu = 0.0;
-  std::string div_treatment, hf_div_treatment;
-  bool has_div = false, has_hf_div = false;
   if (ctx.comm.root()) {
     h5::file file(in_file, 'r');
     {
@@ -673,14 +676,11 @@ void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, m
       h5::h5_read(iter_grp, "Sigma_not_stored", sigma_not_stored);
     utils::check(not sigma_not_stored, "unfold_scf: Sigma_tskij was omitted from {} scf/iter{}.", in_file, iter);
     h5::h5_read(iter_grp, "mu", mu);
-    has_div = scf_grp.has_dataset("div_treatment");
-    if (has_div) h5::h5_read(scf_grp, "div_treatment", div_treatment);
-    has_hf_div = scf_grp.has_dataset("hf_div_treatment");
-    if (has_hf_div) h5::h5_read(scf_grp, "hf_div_treatment", hf_div_treatment);
   }
   ctx.comm.broadcast_n(&iter, 1, 0);
   ctx.comm.broadcast_n(&mu, 1, 0);
 
+  // Matrices unfolded from the IBZ k by copy, conjugated at time-reversal k
   std::string iter_path = "scf/iter" + std::to_string(iter);
   auto sH0 = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, "system/H0_skij");
   auto sS = unfold_1e_hamiltonian(ctx, mf_ibz, in_file, "system/S_skij");
@@ -689,15 +689,19 @@ void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, m
   auto sG = unfold_dynamic_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/G_tskij");
   auto sSigma = unfold_dynamic_hamiltonian(ctx, mf_ibz, in_file, iter_path + "/Sigma_tskij");
 
+  // Output checkpoint: system/ of mf_unfold, IAFT of the input, one iteration scf/iter{N}
   auto ft = imag_axes_ft::read_iaft(in_file, false);
   write_metadata(ctx.comm, mf_unfold, ft, sH0, sS, out_prefix);
   dump_scf(ctx.comm, iter, sDm, sG, sF, sSigma, mu, out_prefix, "scf", iter);
 
+  // Coulomb divergence settings, copied when present
   if (ctx.comm.root()) {
-    h5::file file(out_prefix + ".mbpt.h5", 'a');
-    auto scf_grp = h5::group(file).open_group("scf");
-    if (has_div) h5::h5_write(scf_grp, "div_treatment", div_treatment);
-    if (has_hf_div) h5::h5_write(scf_grp, "hf_div_treatment", hf_div_treatment);
+    h5::file fin(in_file, 'r');
+    h5::file fout(out_file, 'a');
+    auto in_scf = h5::group(fin).open_group("scf");
+    auto out_scf = h5::group(fout).open_group("scf");
+    for (std::string name : {"div_treatment", "hf_div_treatment"})
+      if (in_scf.has_dataset(name)) utils::h5_copy(in_scf, name, out_scf);
   }
   ctx.comm.barrier();
 }

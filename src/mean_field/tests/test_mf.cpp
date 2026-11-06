@@ -455,10 +455,12 @@ TEST_CASE("unfold_mf", "[mean_field]")
     auto trev = mf_sym.kp_trev();
     REQUIRE( std::any_of(trev.begin(), trev.end(), [](bool b) { return b; }) == has_trev );
 
+    // Unfolded mean field, reloaded as bdft
     mf::unfold_mf(mf_sym, prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
 
+    // Sizes, symmetry, k weights, k list and eigenvalues against the parent
     REQUIRE( mf_unfold.nkpts() == nkpts );
     REQUIRE( mf_unfold.nkpts_ibz() == nkpts );
     REQUIRE( mf_unfold.nspin() == nspin );
@@ -481,6 +483,7 @@ TEST_CASE("unfold_mf", "[mean_field]")
         for(long n=0; n<nbnd; ++n)
           REQUIRE( mf_unfold.eigval()(is,ik,n) == mf_sym.eigval()(is,ik,n) );
 
+    // Orbitals at every k against get_orbital_set of the parent
     nda::array<ComplexType,2> psi_sym(nbnd, ngm), psi_unfold(nbnd, ngm);
     double max_diff = 0.0, max_conj_gap = 0.0;
     for(long is=0; is<nspin; ++is)
@@ -510,26 +513,6 @@ TEST_CASE("unfold_mf", "[mean_field]")
   SECTION("qe_h5_si333") {
     auto mf_sym = mf::default_MF(mpi, "qe_si333_sym", mf::h5_input_type);
     check_unfold(mf_sym, "unfold_mf_qe_si333", true);
-  }
-}
-
-// mf::detail::match_fullbz_k (the k matching of unfold_mf: k = k_j + G0) against full-BZ lists whose rows are the k
-// shifted by known reciprocal lattice vectors G_j: every k is matched to its own row with G0 = -G_j, and a k that is
-// not in the list (offset 1e-3 in one coordinate, above the 1e-6 tolerance) is not matched. The qe_lih222_sym and
-// qe_lih223_sym fixtures have unfolded k with G0 != 0 (4 of 8 and 1 of 12), tested through unfold_mf in test_eph.cpp.
-TEST_CASE("unfold_mf_match_fullbz_k", "[mean_field]")
-{
-  nda::array<double,2> kref = {{0.0, 0.0, 0.0}, {0.5, 0.0, 0.0}, {0.25, -0.25, 0.5}, {1.0/3.0, 1.0/3.0, -1.0/3.0}};
-  int G[4][3] = {{0, 0, 0}, {1, -2, 0}, {0, 3, -1}, {-1, 0, 2}};
-  nda::array<double,2> kfull(4, 3);
-  for (long j=0; j<4; ++j) for (int d=0; d<3; ++d) kfull(j,d) = kref(j,d) + G[j][d];
-  for (long j=0; j<4; ++j) {
-    nda::array<double,1> k = {kref(j,0), kref(j,1), kref(j,2)};
-    std::array<int,3> G0;
-    REQUIRE( mf::detail::match_fullbz_k(kfull, k, G0) == j );
-    for (int d=0; d<3; ++d) REQUIRE( G0[d] == -G[j][d] );
-    k(1) += 1e-3;
-    REQUIRE( mf::detail::match_fullbz_k(kfull, k, G0) == -1 );
   }
 }
 

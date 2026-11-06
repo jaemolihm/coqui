@@ -53,6 +53,7 @@
 #include "methods/SCF/scf_common.hpp"
 #include "orbitals/orbital_augmenter.h"
 #include "mean_field/symmetry/unfold_bz.h"
+#include "utilities/kpoint_utils.hpp"
 
 namespace bdft_tests
 {
@@ -633,6 +634,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0) {
     long nspin = mf_sym.nspin(), nkpts = mf_sym.nkpts(), nkpts_ibz = mf_sym.nkpts_ibz(), nbnd = mf_sym.nbnd();
     long nat = mf_sym.number_of_atoms();
+
+    // Unfolded mean field; H0 of the IBZ system and of the unfolded mean field, each with its own pseudopotential
     mf::unfold_mf(mf_sym, prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
@@ -649,6 +652,7 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     for (long ik = 0; ik < nkpts; ++ik) REQUIRE(std::abs(mf_unfold.k_weight(ik) - 1.0/double(nkpts)) < 1e-14);
     REQUIRE(mf_unfold.occ().shape(1) == nkpts);
 
+    // (1) H0 against the IBZ H0 copied from kp_to_ibz(k), conjugated at time-reversal k
     double err = 0.0, err_noconj = 0.0, nrm = 0.0;
     if (mpi->node_comm.root()) {
       auto H_sym = sH0_sym.local();
@@ -671,7 +675,7 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     comm.all_reduce_in_place_n(&err_noconj, 1, boost::mpi3::max<>{});
     comm.all_reduce_in_place_n(&nrm, 1, boost::mpi3::max<>{});
 
-    // per-atom projector weights against the no-symmetry system (eph_projector_overlaps needs h5 input)
+    // (2) per-atom projector weights against the no-symmetry system (eph_projector_overlaps needs h5 input)
     double err_N = 0.0, nrm_N = 0.0;
     if (not nosym_name.empty()) {
       auto mf_nosym = mf::default_MF(mpi, nosym_name, mf::h5_input_type);
@@ -695,15 +699,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
       };
       for (long ik = 0; ik < nkpts; ++ik) {
         // k point of the no-symmetry system equal to the unfolded mean field's k modulo a reciprocal lattice vector
-        long ikn = -1;
-        for (long jk = 0; jk < nkpts and ikn < 0; ++jk) {
-          double d = 0.0;
-          for (int i = 0; i < 3; ++i) {
-            double x = mf_unfold.kpts_crystal(ik)(i) - mf_nosym.kpts_crystal(jk)(i);
-            d = std::max(d, std::abs(x - std::round(x)));
-          }
-          if (d < 1e-6) ikn = jk;
-        }
+        long ikn = utils::find_kpoint(mf_nosym.kpts_crystal(), mf_unfold.kpts_crystal(ik, 0),
+                                      mf_unfold.kpts_crystal(ik, 1), mf_unfold.kpts_crystal(ik, 2));
         REQUIRE(ikn >= 0);
         for (long b = 0; b < nat; ++b) {
           double N_unfold = weight(P_unfold, ik, b), Nn = weight(P_nosym, ikn, b);
@@ -712,6 +709,8 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
         }
       }
     }
+
+    // Report and compare
     app_log(2, "unfold_mf_projectors {}: max|H0_unfold - H0_ibz(copy/conj)| = {}, without conj at TR k = {}, max|H0| = {}; "
             "per-atom weight vs no-symmetry: err = {}, max N = {}",
             prefix, err, err_noconj, nrm, err_N, nrm_N);

@@ -885,6 +885,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     enddo
   enddo
 
+  ! Cartesian k of the full-BZ list
   allocate(kf_cart(3,nkf), npw_f(nkf))
   kf_cart(:,1:nkf) = matmul(bg, kf(:,1:nkf))   ! crystal -> cartesian (2pi/alat)
 
@@ -901,6 +902,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
   CALL mp_sum(npw_f, intra_bgrp_comm)
   maxnpw = maxval(npw_f)
 
+  ! Group fullbz: k list and sizes (ionode)
   if (ionode) then
     call qeh5_open_group(h5_n, "fullbz", h5_fb)
     call qeh5_add_attribute(h5_fb%id,"number_of_kpoints",nkf)
@@ -918,6 +920,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     allocate(vkb(npwx,nkb))
   endif
 
+  ! Miller indices and projectors at each full-BZ k
   allocate(itmp(ngm_g), ipos(ngm_g))
   do ik = 1, nkf
     ! local G of this k and their global indices
@@ -956,6 +959,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
       allocate(vkb_g_root(ngg,nkb))
     endif
 
+    ! projectors of this k, gathered to ionode in the global G order
     CALL init_us_2(npw, igk, kf_cart(1,ik), vkb)
     allocate(vkb_g(ngg))
     do ikb = 1, nkb
@@ -970,6 +974,7 @@ subroutine write_pp_fullbz(h5_n, mill_g)
     deallocate(vkb_g, igk_l2g)
   enddo
 
+  ! Close the group, free the buffers and restore npwx and vkb
   if (ionode) then
     deallocate(mill_k)
     call qeh5_close(h5_fb)

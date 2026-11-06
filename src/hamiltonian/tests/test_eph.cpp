@@ -205,30 +205,36 @@ TEST_CASE("unfold_mf_eph_vertex", "[eph]")
 
   auto run = [&](std::string src_sym, std::string src_nosym, mf::mf_input_file_type_e ft, std::string prefix,
                  std::vector<std::array<double,3>> qs) {
+    // Symmetric and no-symmetry systems; occupied bands of the latter
     auto mf_sym = mf::default_MF(mpi, src_sym, ft);
     auto mf_nosym = mf::default_MF(mpi, src_nosym, ft);
     long nocc = 0;
     for(long n=0; n<mf_nosym.nbnd(); ++n) if(mf_nosym.occ()(0,0,n) > 0.5) ++nocc;
     REQUIRE(nocc > 0);
 
+    // Unfolded mean field and its pseudopotential
     mf::unfold_mf(mf_sym, prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
     REQUIRE(mf_unfold.nkpts() == mf_nosym.nkpts());
     hamilt::pseudopot pp(mf_unfold);
     for(auto const& qa : qs) {
+      // Reference C of the no-symmetry system
       nda::array<double,1> q = {qa[0], qa[1], qa[2]};
       hamilt::pseudopot pp_n(mf_nosym);
       auto C_n = correlation(pp_n.eph_vertex_nonlocal(mf_nosym, q()), nocc);
       double nC = frobenius(C_n);
       REQUIRE(nC > 1e-6);
       bool q0 = (std::abs(qa[0]) + std::abs(qa[1]) + std::abs(qa[2]) < 1e-12);
+
       // number of k whose k and k+q are unfolded by different operations
       nda::array<int,1> kpq(mf_sym.nkpts());
       auto kc = mf_sym.kpts_crystal();
       utils::calculate_kpq_map(kc, q, kpq);
       long n_diff_ops = 0;
       for(long ik=0; ik<mf_sym.nkpts(); ++ik) if(mf_sym.kp_symm(ik) != mf_sym.kp_symm(kpq(ik))) ++n_diff_ops;
+
+      // C of the unfolded mean field and its error, in total and in the cross-atom block
       auto C_unfold = correlation(pp.eph_vertex_nonlocal(mf_unfold, q()), nocc);
       double eC = frobenius(nda::array<ComplexType,2>(C_unfold - C_n)) / nC;
       // cross-atom block: the largest |C(a,b)| with a, b on different atoms

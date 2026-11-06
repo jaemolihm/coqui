@@ -81,12 +81,12 @@ namespace methods {
    *   - Nw: number of real frequency points
    *   - eta: shift above the real-frequency axis
    * Optional arguments for pp_type = unfold_bz (unfold BZ from irreducible to the 1st BZ)
-   * Required arguments for pp_type = unfold_to_new_h5 (write a new full-BZ checkpoint, chkpt::unfold_scf)
-   *   - output: prefix (in outdir) of the new checkpoint outdir/output.mbpt.h5
-   * @param [INPUT] mf_unfold - unfolded mean field of mf (mf::unfold_mf); used only by pp_type = unfold_to_new_h5
+   * Required arguments for pp_type = unfold_checkpoint (unfolded mean field and full-BZ checkpoint of an IBZ
+   * checkpoint, mf::unfold_mf and chkpt::unfold_scf)
+   *   - output: prefix (in outdir) of the unfolded mean field outdir/output.h5 and of the new checkpoint
+   *     outdir/output.mbpt.h5
    */
-  void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt,
-                       std::shared_ptr<mf::MF> mf_unfold = nullptr) {
+  void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt) {
     auto mpi = mf->mpi();
     if (mpi->comm.size()%mpi->node_comm.size()!=0) {
       APP_ABORT("pproc: number of processors on each node should be the same.");
@@ -116,11 +116,18 @@ namespace methods {
       std::string scf_output = outdir+"/"+prefix;
       unfold_bz(*mpi, *mf, scf_output);
 
-    } else if (pp_type == "unfold_to_new_h5") {
+    } else if (pp_type == "unfold_checkpoint") {
 
-      utils::check(mf_unfold != nullptr, "unfold_to_new_h5: requires the unfolded mean field mf_unfold.");
       auto output = io::get_value<std::string>(pt,"output",err+"output");
-      chkpt::unfold_scf(*mpi, *mf, *mf_unfold, outdir+"/"+prefix, outdir+"/"+output);
+      // Cheap input checks, before the orbitals are rotated and written
+      utils::check(output != prefix, "unfold_checkpoint: output must differ from prefix ({}).", prefix);
+      utils::check(std::filesystem::exists(outdir+"/"+prefix+".mbpt.h5"),
+                   "unfold_checkpoint: input checkpoint {} not found.", outdir+"/"+prefix+".mbpt.h5");
+      // Unfolded mean field outdir/output.h5, loaded back as the system of the new checkpoint
+      mf::unfold_mf(*mf, outdir+"/"+output+".h5");
+      auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, outdir, output, mf::h5_input_type);
+      // Full-BZ checkpoint outdir/output.mbpt.h5 from the IBZ checkpoint outdir/prefix.mbpt.h5
+      chkpt::unfold_scf(*mpi, *mf, mf_unfold, outdir+"/"+prefix, outdir+"/"+output);
 
     } else if (pp_type == "band_interpolation") {
 
