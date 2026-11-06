@@ -971,6 +971,10 @@ namespace methods {
     // exchange channel, which contracts V(R) with the off-diagonal density.
     bool has_Vxc() const { return _Vxc.has_value(); }
 
+    // True for an LS-THC fitted to Cholesky ERIs (cd_dir set). That fit never forms the
+    // interpolating vectors in G-space, so basis_head() is zero, not the G = 0 component.
+    bool built_from_cholesky() const { return _cd_dir != ""; }
+
     // Path of the kernel dump the stored Vxc was built from; empty when the THC file
     // predates Vxc_source. Used to reject reuse of a Vxc built from a different dump.
     std::string const& vxc_source() const { return _vxc_source; }

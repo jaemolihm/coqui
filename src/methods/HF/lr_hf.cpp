@@ -140,46 +140,26 @@ void lr_hf::build_Uq_PQ(THC_ERI auto& thc, int np_P, int np_Q,
   // The same pairing conj(h_P) M_PQ h_Q gives the head of M in head_from_prod_basis
   // (GW/g0_div_utils.hpp), and eval_eps_inv_q there uses the inverse factor Ω|q|²/(4π).
   // It is removed from this private copy only; the cached V(q) and the exchange
-  // path keep the full kernel.
+  // path keep the full kernel. The removed plane wave is the THC's own q image
+  // Q_thc, which may differ from the perturbation q by a reciprocal vector
+  // (find_q_ibz_index matches modulo G); run_chi checks that they agree.
   if (exclude_hartree_head) {
     auto Q_thc = _MF->Qpts(_q_ibz_idx);
     double q2 = Q_thc(0)*Q_thc(0) + Q_thc(1)*Q_thc(1) + Q_thc(2)*Q_thc(2);
     const bool is_gamma = (q2 <= 1e-8);  // the THC has no G = 0 term, so V is already V̄
-    nda::array<ComplexType, 1> h_q;
-    if (not is_gamma) h_q = thc.basis_head()(_q_ibz_idx, nda::range::all);
-    if (not _hartree_head_checked) { // Validate the q image and the basis head once per instance
-      // The removed plane wave is the THC's own q image, so it must be the caller's q
-      auto recv = _MF->recv();
-      double dq = 0.0;
-      for (int a = 0; a < 3; ++a) {
-        double q_cart = 0.0;
-        for (int d = 0; d < 3; ++d) q_cart += _q_vec(d) * recv(d, a);
-        dq = std::max(dq, std::abs(q_cart - Q_thc(a)));
-      }
-      utils::check(dq < 1e-8,
-                   "lr_hf: exclude_hartree_head needs the q of the THC's q image "
-                   "Q_thc = ({:.8f}, {:.8f}, {:.8f}) a.u. (Cartesian); the perturbation q = "
-                   "({:.8f}, {:.8f}, {:.8f}) (crystal) differs from it by {:.2e}. Pass the "
-                   "q_vec that maps to Q_thc.",
-                   Q_thc(0), Q_thc(1), Q_thc(2), _q_vec(0), _q_vec(1), _q_vec(2), dq);
-      if (is_gamma) {
+    if (not _hartree_head_logged) { // Log the removed plane wave once per instance
+      if (is_gamma) { // Gamma: nothing to remove
         app_log(2, "  exclude_hartree_head: q = Gamma, the THC Coulomb has no G = 0 term; no-op.");
-      } else {
-        double h_norm2 = 0.0;
-        for (long iP = 0; iP < h_q.size(); ++iP) h_norm2 += std::norm(h_q(iP));
-        utils::check(h_norm2 > 0.0,
-                     "lr_hf: exclude_hartree_head needs the THC basis head "
-                     "(interpolating_vectors_G0), which is identically zero at q index {}. "
-                     "This THC was built by the path that leaves it zero; rebuild the THC "
-                     "with the path that stores it.", _q_ibz_idx);
+      } else { // Finite q: name the THC image whose G = 0 term is removed
         app_log(2, "  exclude_hartree_head: q_thc = ({:.6f}, {:.6f}, {:.6f}) a.u., "
                 "v(q) = {:.6f}, q_vec = ({:.6f}, {:.6f}, {:.6f}) (crystal).",
                 Q_thc(0), Q_thc(1), Q_thc(2), 4.0 * std::numbers::pi / q2,
                 _q_vec(0), _q_vec(1), _q_vec(2));
       }
-      _hartree_head_checked = true;
+      _hartree_head_logged = true;
     }
     if (not is_gamma) { // Subtract the rank-1 G = 0 term
+      auto h_q = thc.basis_head()(_q_ibz_idx, nda::range::all);
       const double coeff = 4.0 * std::numbers::pi / q2 / _MF->volume();
       for (long iP = 0; iP < P_rng.size(); ++iP) {
         const ComplexType hP_conj = std::conj(h_q(P_rng.first() + iP));

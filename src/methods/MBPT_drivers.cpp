@@ -1530,8 +1530,9 @@ void release_lr_W_cache() { W_cache.reset(); }
  *                          (ΔΣ = -ΔG⊙W) or "full" (ΔΣ = -ΔG⊙W - G⊙ΔW)
  *   method                 method-ladder alias ("none"/"Hartree"/"HF"/"GW0"/"GW")
  *                          that overrides the three keys above, or "HSEX".
- *   exclude_hartree_head   ΔJ uses V̄(q) = V(q) minus its G = 0 term (default
- *                          false); requires the Hartree rung
+ *   exclude_hartree_head   ΔJ uses V̄(q) = V(q) minus the G = 0 term of the THC's
+ *                          q image (default false); requires the Hartree rung and
+ *                          a THC not built from Cholesky ERIs
  *   precond_method         static kernel ("none"/"Hartree"/"HF"/"HSEX", default
  *                          "none") used only as the preconditioner of GCR or
  *                          damping, and its solution of ΔH0 is the start of the
@@ -1668,6 +1669,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   utils::check(!exclude_hartree_head || total_kernel.hartree,
                "run_lr_calc: exclude_hartree_head = true requires the Hartree rung "
                "(include_hartree = true, or a method alias with Hartree).");
+  utils::check(!exclude_hartree_head || !eri.corr_eri->get().built_from_cholesky(),
+               "run_lr_calc: exclude_hartree_head = true needs the THC basis head "
+               "(interpolating_vectors_G0), which an LS-THC built from Cholesky ERIs "
+               "(cd_dir) does not compute. Use an ISDF THC.");
 
   // Aux-basis (THC) Fock matrices F_PQ / ΔF_PQ, consumed only by the DeltaX/IBC
   // ΔΔF curvature post-processors in Python. Opt-in, because they are

@@ -141,10 +141,12 @@ public:
    *                           is untouched.
    * @param exclude_hartree_head - [INPUT] Use V̄(q) = V(q) - v(q)/Ω conj(h_P) h_Q
    *                           in ΔJ, i.e. drop the G = 0 term of v(q+G) from the
-   *                           Hartree kernel (h = thc.basis_head() at q). Exchange
-   *                           and the HSEX kernel keep the full V. No-op at q = Γ,
-   *                           where the THC carries no G = 0 term. Assumes a
-   *                           bare-Coulomb THC, v(q) = 4π/|q|².
+   *                           Hartree kernel (h = thc.basis_head() at q). The
+   *                           removed plane wave is that of the THC's q image
+   *                           MF->Qpts(q_ibz_idx), and h is used as stored (zero
+   *                           h removes nothing). Exchange and the HSEX kernel keep
+   *                           the full V. No-op at q = Γ, where the THC carries no
+   *                           G = 0 term. Assumes a bare-Coulomb THC, v(q) = 4π/|q|².
    */
   template<nda::MemoryArray AF_t>
   void evaluate(sArray_t<AF_t>& sDeltaF_skij,
@@ -249,7 +251,7 @@ private:
   // depends on the per-call channel flags — V(q) only in the direct channel, U(R)
   // only in the exchange channel, Vxc only when compute_xc.
 
-  bool _hartree_head_checked = false;     // q image / basis head validated for exclude_hartree_head
+  bool _hartree_head_logged = false;      // exclude_hartree_head's q image logged (once per instance)
   bool _Vq_cached = false;
   nda::array<ComplexType, 2> _Vq_PQ;      // V(q)_PQ tile at _q_ibz_idx
   bool _Vxc_q_cached = false;

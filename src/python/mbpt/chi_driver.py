@@ -193,7 +193,6 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
           MPI_Abort a q/G sweep driver cannot catch, so they are re-checked here.
         - ``exclude_hartree_head=True`` without the Hartree rung, without G = 0 in
           ``G_mill``, or with a ``q_vec`` that is not a point of ``mf.qpts_ibz()``.
-          The last is also a C++ check against the THC's own q image.
         - A nonzero reciprocal-lattice ``q_vec`` (equivalent to Gamma) with the
           Hartree rung and G = 0 in ``G_mill``: the THC solve is chi_bar there, but
           chi, chi_bar and eps_M would be built from a finite v(q). Pass q_vec = 0.
@@ -323,8 +322,8 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
     M, qpG_cart = compute_pw_matrix_elements(mf, q_vec, G_mill)
 
     if exclude_hartree_head:
-        # The THC removes the G = 0 term at its own q image; that must be q_vec itself
-        # (C++ lr_hf checks the same against the image it fetches).
+        # The THC removes the G = 0 term at its own q image; that must be q_vec itself,
+        # since chi, chi_bar and eps_M below use the G = 0 row of q_vec.
         q_cart = qpG_cart[i0]
         dq = np.abs(np.asarray(mf.qpts_ibz()) - q_cart[None, :]).max(axis=1)
         if dq.min() > 1e-8:

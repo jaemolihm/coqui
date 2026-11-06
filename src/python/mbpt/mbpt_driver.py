@@ -653,10 +653,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         G = 0 term (h = THC ``interpolating_vectors_G0`` at q), so the self-consistency
         yields the macroscopically unscreened response χ̄. Only the explicit Hartree rung
         changes: exchange, HSEX, W and the GW terms keep the full v. A no-op at q = Γ,
-        where the THC has no G = 0 term. ``q_vec`` must be the q of the THC's own q image
-        (the removed plane wave is that image's G = 0), and the THC must carry its basis
-        head; both are hard errors otherwise. Requires the Hartree rung
-        (``include_hartree=True`` or a ``method`` with Hartree). Assumes a bare-Coulomb
+        where the THC has no G = 0 term. The removed plane wave is the G = 0 term of the
+        THC's own q image, which may differ from ``q_vec`` by a reciprocal vector
+        (``run_chi`` checks that they agree), and h is used as stored: a THC file with a
+        zero head removes nothing. Requires the Hartree rung (``include_hartree=True``
+        or a ``method`` with Hartree) and a THC not built from Cholesky ERIs (LS-THC,
+        ``cd_dir``), which has no basis head; both are hard errors. Assumes a bare-Coulomb
         THC, v(q) = 4π/|q|² (not checked: a THC read from file does not record its
         potential). Written as ``linear_response/exclude_hartree_head``.
     precond_method : str, optional
