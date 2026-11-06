@@ -86,34 +86,43 @@ namespace methods {
         nda::array<ComplexType, 1> eps_inv_q0_w(niw);
         eps_inv_q0_w() = 0.0;
 
-        nda::array<ComplexType, 1> Q_abs2(nqpts_ibz);
-        nda::array<ComplexType, 1> Q_abs(nqpts_ibz);
-        for (int iq = 0; iq < nqpts_ibz; ++iq) {
-          auto qpt = mf.Qpts_ibz(iq);
-          Q_abs2(iq) = ComplexType( qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2) );
-          Q_abs(iq) = ComplexType( std::sqrt( qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2) ) );
-        }
+        // The gygi fit, gygi_average and gygi_extrplt search their q points on the full BZ, also when eps_inv_wq
+        // holds only the IBZ. The head is symmetry invariant,
+        //   eps_inv_00(S q) = eps_inv_00(q) for every point-group operation S, and
+        //   eps_inv_00(-q)  = eps_inv_00(q) (time reversal),
+        // so the value at full-BZ point iq is the column qp_to_ibz(iq) of eps_inv_wq
+        // (qp_to_ibz is the identity in full-BZ mode).
+        // Qpts(iq) is exactly S q_ibz or -S q_ibz, not folded by a reciprocal-lattice vector G: the head is not
+        // G-periodic (eps_inv_00(q+G) = eps_inv_GG(q) differs), so folding Qpts would make these values wrong.
+        auto Qpts = mf.Qpts();
+        auto qp_to_ibz = mf.qp_to_ibz();
+        utils::check(nqpts_ibz == mf.nqpts_ibz(), "extrapolate_eps_inv_q0: eps_inv_wq must have nqpts_ibz columns");
 
         if (div_treatment.find("gygi_extrplt") != std::string::npos) {
+          nda::array<ComplexType, 1> Q_abs(mf.nqpts());
+          for (int iq = 0; iq < mf.nqpts(); ++iq) {
+            auto qpt = Qpts(iq, nda::range::all);
+            Q_abs(iq) = ComplexType( std::sqrt( qpt(0)*qpt(0) + qpt(1)*qpt(1) + qpt(2)*qpt(2) ) );
+          }
           // TODO Deprecated method. Should be removed in the future. 
           utils::check(mf.nkpts_ibz() > 1, "extrapolate_eps_inv_q0: nkpts_ibz <= 1 while div_treatment==gygi_extrplt");
           
-          auto q_indices = filter_qpts(mf.Qpts_ibz(), 0.8, 1, two_dimension);
+          auto q_indices = filter_qpts(Qpts, 0.8, 1, two_dimension);
           nda::array<ComplexType, 1> Q_filtered(q_indices.size());
           nda::array<ComplexType, 2> eps_inv_filtered(niw, q_indices.size());
           
           for (size_t i = 0; i < q_indices.size(); ++i) {
             Q_filtered(i) = Q_abs( q_indices[i] );
-            eps_inv_filtered(nda::range::all, i) = eps_inv_wq(nda::range::all, q_indices[i] );
+            eps_inv_filtered(nda::range::all, i) = eps_inv_wq(nda::range::all, qp_to_ibz(q_indices[i]) );
           }
 
           if ( q_indices.empty() ) {
             // If no q-points passed the filter, fall back to the smallest-|q| point
-            int smallest_idx = find_smallest_qabs(mf.Qpts_ibz(), false);
-            eps_inv_q0_w = eps_inv_wq(nda::range::all, smallest_idx);
+            int smallest_idx = find_smallest_qabs(Qpts, false);
+            eps_inv_q0_w = eps_inv_wq(nda::range::all, qp_to_ibz(smallest_idx));
           } else if ( q_indices.size() < 3) {
             // Choose the closest point to the gamma instead
-            eps_inv_q0_w = eps_inv_wq(nda::range::all, q_indices[0]);
+            eps_inv_q0_w = eps_inv_wq(nda::range::all, qp_to_ibz(q_indices[0]));
           } else {
             if (two_dimension)
               app_log(3, "  Extrapolate head of the inverse of the dielectric function from {} q-points on the xy-plane", q_indices.size());
@@ -128,11 +137,12 @@ namespace methods {
 
         } else if (div_treatment.find("gygi_average") != std::string::npos) {
 
-          // Average over all q-points with smallest |q|
-          auto smallest_indices = find_smallest_qabs_indices(mf.Qpts_ibz(), false, false);
+          // Average over all full-BZ q-points with smallest |q|
+          // (a set of n symmetry-equivalent points contributes its value n times)
+          auto smallest_indices = find_smallest_qabs_indices(Qpts, false, false);
           eps_inv_q0_w = 0.0;
           for (int idx : smallest_indices) {
-            eps_inv_q0_w += eps_inv_wq(nda::range::all, idx);
+            eps_inv_q0_w += eps_inv_wq(nda::range::all, qp_to_ibz(idx));
           }
           eps_inv_q0_w /= smallest_indices.size();
 
@@ -140,6 +150,7 @@ namespace methods {
 
           // Approximate q=0 value using the q-point closest to the Gamma point
           // This is the old "gygi" method. 
+          // |S q| = |q| and the IBZ representatives lead Qpts(), so Qpts_ibz() gives the same point as the full BZ.
           int smallest_idx = find_smallest_qabs(mf.Qpts_ibz(), false);
           eps_inv_q0_w = eps_inv_wq(nda::range::all, smallest_idx);
 
@@ -170,47 +181,14 @@ namespace methods {
             }
           }
 
-          auto closest_indices = find_n_closest_per_direction(mf.Qpts_ibz(), mf.lattv(), fit_order+1);
-
           if (two_dimension)
             app_log(3, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, and +/-b2 directions."); 
           else
             app_log(3, "\n Polynomial extrapolate head of the inverse of the dielectric function as O(q^2) along +/-b1, +/-b2, and +/-b3 directions."); 
           app_log(4, "   - Maximum polynomial fit order: {}", fit_order);
           app_log(4, "   - Maximum number of q-points used for fit per direction: {}", fit_order+1);
-          
-          int dim = 0;
-          constexpr std::array<const char *, 6> direction_labels = {"+b1", "-b1", "+b2", "-b2", "+b3", "-b3"};
-          for (int dir = 0; dir < 6; ++dir) {
 
-            if (two_dimension and dir >= 4) continue; // skip b3 directions for 2D materials
-
-            nda::array<ComplexType, 1> Q_filtered(closest_indices[dir].size());
-            nda::array<ComplexType, 2> eps_inv_filtered(niw, closest_indices[dir].size());
-            
-            for (size_t i = 0; i < closest_indices[dir].size(); ++i) {
-              Q_filtered(i) = Q_abs2( closest_indices[dir][i] );
-              eps_inv_filtered(nda::range::all, i) = eps_inv_wq(nda::range::all, closest_indices[dir][i] );
-            }
-
-            if (closest_indices[dir].size() == 0) {
-              continue; // no point found along this direction, skip extrapolation
-            }
-            
-            app_log(3, "\n  Found {} points along {} direction for extrapolation.", closest_indices[dir].size(), direction_labels[dir]);
-
-            for (int n = 0; n < niw; ++n) {
-              eps_inv_q0_w(n) += extrapolate_to_q0(
-                Q_filtered, eps_inv_filtered(n, nda::range::all), 
-                closest_indices[dir].size()-1, (n==0)? true : false
-              );
-            }
-
-            dim += 1;
-          }
-
-          utils::check(dim > 0, "extrapolate_eps_inv_q0: no valid q-point found for extrapolation in any direction");
-          eps_inv_q0_w /= static_cast<double>(dim); // average over the number of dimensions extrapolated
+          eps_inv_q0_w = extrapolate_gygi_q0(eps_inv_wq, Qpts, mf.lattv(), qp_to_ibz, fit_order, two_dimension);
 
           if (div_treatment.find("metal") != std::string::npos) {
             app_log(3, "\n Enforcing the static limit of the inverse dielectric function to 0 for metallic systems{}.\n",
@@ -225,6 +203,70 @@ namespace methods {
 
         }
 
+        return eps_inv_q0_w;
+      }
+
+      /**
+       * Extrapolate the head of the inverse dielectric function to q=0 as a polynomial in |q|^2 along each
+       * of the directions +b1, -b1, +b2, -b2, (+b3, -b3), and average the extrapolated values over the directions
+       * that have at least one q-point. Called by extrapolate_eps_inv_q0 for the "gygi" treatment.
+       * @param eps_inv_wq - [INPUT] inverse dielectric function, shape [niw, ncols]
+       * @param Qpts       - [INPUT] q-points in which the directions are searched, cartesian, shape [nq, 3].
+       *                     This is the full-BZ list also when eps_inv_wq holds only the IBZ.
+       * @param lattv      - [INPUT] lattice vectors (shape: [3, 3])
+       * @param q_to_col   - [INPUT] column of eps_inv_wq that holds the value at Qpts(iq), shape [nq]
+       *                     (qp_to_ibz of the mean-field object)
+       * @param fit_order  - [INPUT] maximum polynomial order, reduced to (number of points - 1) in each direction
+       * @param two_dim    - [INPUT] skip the b3 directions
+       * @return head at q=0, shape [niw]
+       */
+      template<nda::ArrayOfRank<2> Array_eps_t, nda::ArrayOfRank<2> Array_q_t, nda::ArrayOfRank<2> Array_latt_t,
+               nda::ArrayOfRank<1> Array_map_t>
+      static auto extrapolate_gygi_q0(const Array_eps_t &eps_inv_wq, const Array_q_t &Qpts,
+                                      const Array_latt_t &lattv, const Array_map_t &q_to_col,
+                                      int fit_order, bool two_dim)
+      -> nda::array<ComplexType, 1> {
+
+        long niw = eps_inv_wq.shape(0);
+        nda::array<ComplexType, 1> eps_inv_q0_w(niw);
+        eps_inv_q0_w() = 0.0;
+
+        // Search the points along each direction on the given q list
+        auto closest_indices = find_n_closest_per_direction(Qpts, lattv, fit_order+1);
+
+        int dim = 0;
+        constexpr std::array<const char *, 6> direction_labels = {"+b1", "-b1", "+b2", "-b2", "+b3", "-b3"};
+        for (int dir = 0; dir < 6; ++dir) {
+
+          if (two_dim and dir >= 4) continue; // skip b3 directions for 2D materials
+
+          nda::array<ComplexType, 1> Q_filtered(closest_indices[dir].size());
+          nda::array<ComplexType, 2> eps_inv_filtered(niw, closest_indices[dir].size());
+
+          for (size_t i = 0; i < closest_indices[dir].size(); ++i) {
+            int iq = closest_indices[dir][i];
+            Q_filtered(i) = ComplexType( Qpts(iq,0)*Qpts(iq,0) + Qpts(iq,1)*Qpts(iq,1) + Qpts(iq,2)*Qpts(iq,2) );
+            eps_inv_filtered(nda::range::all, i) = eps_inv_wq(nda::range::all, q_to_col(iq) );
+          }
+
+          if (closest_indices[dir].size() == 0) {
+            continue; // no point found along this direction, skip extrapolation
+          }
+
+          app_log(3, "\n  Found {} points along {} direction for extrapolation.", closest_indices[dir].size(), direction_labels[dir]);
+
+          for (int n = 0; n < niw; ++n) {
+            eps_inv_q0_w(n) += extrapolate_to_q0(
+              Q_filtered, eps_inv_filtered(n, nda::range::all),
+              closest_indices[dir].size()-1, (n==0)? true : false
+            );
+          }
+
+          dim += 1;
+        }
+
+        utils::check(dim > 0, "extrapolate_eps_inv_q0: no valid q-point found for extrapolation in any direction");
+        eps_inv_q0_w /= static_cast<double>(dim); // average over the number of dimensions extrapolated
         return eps_inv_q0_w;
       }
 
@@ -400,10 +442,9 @@ namespace methods {
       }
 
       /**
-       * Find up to n closest points to origin along each signed Cartesian direction
-       * For a uniform 3D grid centered at origin spanning (-0.5, 0.5] in each direction,
-       * this function finds points with smallest coordinate magnitudes along
-       * +b1, -b1, +b2, -b2, +b3, and -b3 directions.
+       * Find up to n closest points to origin along each signed crystal axis (+-b1, +-b2, +-b3).
+       * Qpts are the stored full-BZ images; their crystal coordinates can lie outside (-0.5, 0.5].
+       * A zone-boundary point (coordinate +-0.5) is put in both the + and - list of its axis.
        * @param Qpts      - [INPUT] array of q-points (shape: [nqpts, 3])
        * @param lattv     - [INPUT] lattice vectors (shape: [3, 3])
        * @param n         - [INPUT] number of closest points (at maximum) to return per direction
@@ -446,10 +487,12 @@ namespace methods {
             
             if (!other_dims_zero) continue;
 
-            // treat -0.5 as 0.5 due to periodicity
-            if (std::abs(coord + 0.5) < 1e-6) coord = std::abs(coord);
-
-            if (coord > tolerance) {
+            // A zone-boundary point (coordinate +-0.5) also stands for -q:
+            //   eps_inv_00(-q) = eps_inv_00(q) (time reversal), |-q|^2 = |q|^2
+            if (std::abs(std::abs(coord) - 0.5) < 1e-6) {
+              positive_coord_idx_pairs.push_back({0.5, i});
+              negative_coord_idx_pairs.push_back({0.5, i});
+            } else if (coord > tolerance) {
               positive_coord_idx_pairs.push_back({coord, i});
             } else if (coord < -tolerance) {
               negative_coord_idx_pairs.push_back({std::abs(coord), i});
