@@ -113,8 +113,7 @@ namespace mf {
    * mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
    * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
    * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
-   * Called by the post-processing step unfold_checkpoint (Python post_proc.unfold_checkpoint), which loads the file
-   * and writes the full-BZ checkpoint on it.
+   * Called by Python mean_field.unfold_mf (Mf.unfold_mf); the file is the mean field of post_proc.unfold_checkpoint.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts
    * @param filename - [INPUT] name of the output h5 file; load it with make_mf(..., "bdft")

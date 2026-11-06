@@ -86,10 +86,11 @@ static auto const _c2py_fun_6 = c2py::dispatcher_f_kw_t{c2py::cfun(
 
 // unfold_checkpoint
 static auto const _c2py_fun_7 = c2py::dispatcher_f_kw_t{c2py::cfun(
-    [](const coqui_py::Mf &mf, const std::string &params) {
-      return coqui_py::post_proc::unfold_checkpoint(mf, params);
+    [](const coqui_py::Mf &mf, const coqui_py::Mf &mf_unfold,
+       const std::string &params) {
+      return coqui_py::post_proc::unfold_checkpoint(mf, mf_unfold, params);
     },
-    "mf", "params")};
+    "mf", "mf_unfold", "params")};
 
 static const auto _c2py_doc_0 = _c2py_fun_0.doc(R"DOC()DOC");
 static const auto _c2py_doc_1 = _c2py_fun_1.doc(R"DOC()DOC");

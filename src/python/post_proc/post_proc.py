@@ -260,49 +260,40 @@ def unfold_bz(mf, params):
     pproc_mod.unfold_bz(mf, json.dumps(params))
 
 
-def unfold_checkpoint(mf, params):
+def unfold_checkpoint(mf, mf_unfold, params):
     """
-    Write the unfolded (full-BZ) mean field of an IBZ mean field and the last iteration
-    of an IBZ MBPT checkpoint as a new full-BZ checkpoint on it.
+    Write the last iteration of an IBZ MBPT checkpoint as a new full-BZ checkpoint on the
+    unfolded mean field.
 
     Unlike :func:`unfold_bz`, which adds `_unfold` datasets to the input checkpoint,
-    this writes two new files, so that full-BZ methods (e.g. ``run_lr``) can start
-    from an IBZ calculation:
-
-    - ``outdir/output.h5``: the unfolded mean field, a bdft mean field with the k list
-      of ``mf`` (same order, unfolded k vectors), the identity as its only symmetry and
-      ``nkpts_ibz = nkpts``. Its orbitals at k are the IBZ orbitals rotated to k
-      (conjugated at time-reversal k), the orbital gauge in which an IBZ calculation on
-      ``mf`` is solved. The nonlocal projectors at each k are copied from the full-BZ
-      projectors that ``pw2coqui.x`` writes with ``add_pp_fullbz = .true.``, so it gives
-      H0 and the nonlocal e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
-      Load it with ``make_mf(mpi, {"prefix": output, "outdir": outdir}, "bdft")``.
-    - ``outdir/output.mbpt.h5``: the last iteration of the input (Dm, G, F, Sigma, mu)
-      unfolded by copy/conj to that k list, the IAFT grid, H0, S and the div_treatment
-      settings. It carries no screened interaction, so ``run_lr`` on it needs
-      ``recompute_W=True``.
-
-    ``mf`` must be a symmorphic (``force_symmorphic``) ``pw2coqui`` h5 mean field with the
-    full-BZ projectors, with ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
+    this writes a new file, so that full-BZ methods (e.g. ``run_lr``) can start from an
+    IBZ calculation: ``outdir/prefix_unfold.mbpt.h5`` holds the last iteration of the
+    input (Dm, G, F, Sigma, mu) unfolded by copy/conj to the k list of ``mf_unfold``,
+    the IAFT grid, H0, S and the div_treatment settings, and the ``system`` group of
+    ``mf_unfold``. It carries no screened interaction, so ``run_lr`` on it needs
+    ``recompute_W=True``.
 
     Parameters
     ----------
     mf : Mf
         Symmetry-reduced (IBZ) mean field of the input checkpoint.
+    mf_unfold : Mf
+        Unfolded mean field of ``mf``, written by :func:`coqui.mean_field.unfold_mf` and
+        loaded with ``make_mf(..., "bdft")``.
     params : dict
         Supported keys:
 
         - ``prefix`` *(str, required)* — prefix of the input (IBZ) MBPT checkpoint
           (``outdir/prefix.mbpt.h5``, dyson type).
-        - ``output`` *(str, required)* — prefix of the unfolded mean field
-          (``outdir/output.h5``) and of the new checkpoint (``outdir/output.mbpt.h5``).
-        - ``outdir`` *(str, optional, default ``"./"``)* — directory of all files.
+        - ``prefix_unfold`` *(str, required)* — prefix of the new checkpoint
+          (``outdir/prefix_unfold.mbpt.h5``).
+        - ``outdir`` *(str, optional, default ``"./"``)* — directory of both checkpoints.
 
     Returns
     -------
     None
     """
-    pproc_mod.unfold_checkpoint(mf, json.dumps(params))
+    pproc_mod.unfold_checkpoint(mf, mf_unfold, json.dumps(params))
 
 def dump_vxc(mf, params):
     """

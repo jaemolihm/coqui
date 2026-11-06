@@ -90,8 +90,7 @@ namespace methods {
    * system/H0_skij, system/S_skij (unfolded from the input) and scf/div_treatment, scf/hf_div_treatment if present.
    * Matrices are copied from the IBZ k and conjugated at time-reversal k (see unfold_1e_hamiltonian).
    * It requires mf_unfold to be the unfolded mean field of mf_ibz written by mf::unfold_mf.
-   * Called by the post-processing step unfold_checkpoint (Python post_proc.unfold_checkpoint), right after it writes
-   * and loads mf_unfold.
+   * Called by methods::unfold_checkpoint (Python post_proc.unfold_checkpoint).
    * The checkpoint carries no screened interaction, so a run_lr on it needs recompute_W=True.
    *
    * @param ctx        - [INPUT] MPI context
@@ -100,8 +99,8 @@ namespace methods {
    * @param in_prefix  - [INPUT] prefix of the IBZ checkpoint: in_prefix.mbpt.h5
    * @param out_prefix - [INPUT] prefix of the full-BZ checkpoint: out_prefix.mbpt.h5
    */
-  void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
-                  std::string in_prefix, std::string out_prefix);
+  void unfold_scf_checkpoint(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
+                             std::string in_prefix, std::string out_prefix);
 
   template<typename X_4D_t>
   long read_qpscf(mpi3::shared_communicator node_comm,

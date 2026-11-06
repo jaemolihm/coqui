@@ -619,26 +619,26 @@ template void read_qp_hamilt_components(
 
 template bool read_pi_local(sArray_t<Array_view_5D_t>&, sArray_t<Array_view_5D_t>&, std::string, long);
 
-void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
+void unfold_scf_checkpoint(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, mf::MF &mf_unfold,
                 std::string in_prefix, std::string out_prefix) {
   std::string in_file = in_prefix + ".mbpt.h5";
   std::string out_file = out_prefix + ".mbpt.h5";
 
   // mf_unfold is the unfolded mean field of mf_ibz: same k list (row by row), nspin and nbnd
-  utils::check(in_prefix != out_prefix, "unfold_scf: the output prefix must differ from the input prefix.");
+  utils::check(in_prefix != out_prefix, "unfold_scf_checkpoint: the output prefix must differ from the input prefix.");
   utils::check(mf_unfold.nkpts_ibz() == mf_unfold.nkpts() and mf_unfold.nkpts() == mf_ibz.nkpts() and
                mf_ibz.nkpts_ibz() < mf_ibz.nkpts(),
-               "unfold_scf: mf_unfold must be the unfolded mean field of mf_ibz (nkpts: {}/{}, nkpts_ibz: {}/{}).",
+               "unfold_scf_checkpoint: mf_unfold must be the unfolded mean field of mf_ibz (nkpts: {}/{}, nkpts_ibz: {}/{}).",
                mf_unfold.nkpts(), mf_ibz.nkpts(), mf_unfold.nkpts_ibz(), mf_ibz.nkpts_ibz());
   utils::check(mf_unfold.nspin() == mf_ibz.nspin() and mf_unfold.nbnd() == mf_ibz.nbnd(),
-               "unfold_scf: mf_unfold and mf_ibz differ in nspin or nbnd.");
+               "unfold_scf_checkpoint: mf_unfold and mf_ibz differ in nspin or nbnd.");
   {
     auto k_ibz = mf_ibz.kpts_crystal();
     auto k_unfold = mf_unfold.kpts_crystal();
     for (long ik = 0; ik < mf_unfold.nkpts(); ++ik)
       for (int i = 0; i < 3; ++i)
         utils::check(std::abs(k_ibz(ik, i) - k_unfold(ik, i)) < 1e-10,
-                     "unfold_scf: k-point {} of mf_unfold differs from mf_ibz.", ik);
+                     "unfold_scf_checkpoint: k-point {} of mf_unfold differs from mf_ibz.", ik);
   }
 
   // Input checkpoint (root): written on mf_ibz, dyson type, Sigma stored at the final iteration
@@ -652,29 +652,29 @@ void unfold_scf(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF &mf_ibz, m
       h5::h5_read(sys_grp, "number_of_kpoints_ibz", nki_in);
       h5::h5_read(sys_grp, "number_of_orbitals", nb_in);
       utils::check(nki_in == mf_ibz.nkpts_ibz() and nb_in == mf_ibz.nbnd(),
-                   "unfold_scf: {} has {} IBZ k-points and {} orbitals, mf_ibz has {} and {}.",
+                   "unfold_scf_checkpoint: {} has {} IBZ k-points and {} orbitals, mf_ibz has {} and {}.",
                    in_file, nki_in, nb_in, mf_ibz.nkpts_ibz(), mf_ibz.nbnd());
       nda::array<double, 2> kc;
       nda::h5_read(sys_grp, "kpoints_crys", kc);
       utils::check(kc.extent(0) == mf_ibz.nkpts() and kc.extent(1) == 3,
-                   "unfold_scf: kpoints_crys of {} has shape ({}, {}), expected ({}, 3).",
+                   "unfold_scf_checkpoint: kpoints_crys of {} has shape ({}, {}), expected ({}, 3).",
                    in_file, kc.extent(0), kc.extent(1), mf_ibz.nkpts());
       for (long ik = 0; ik < mf_ibz.nkpts(); ++ik)
         for (int i = 0; i < 3; ++i)
           utils::check(std::abs(kc(ik, i) - mf_ibz.kpts_crystal(ik, i)) < 1e-10,
-                       "unfold_scf: k-point {} of {} differs from mf_ibz (different k list or order).", ik, in_file);
+                       "unfold_scf_checkpoint: k-point {} of {} differs from mf_ibz (different k list or order).", ik, in_file);
     }
     auto scf_grp = h5::group(file).open_group("scf");
     h5::h5_read(scf_grp, "final_iter", iter);
     auto iter_grp = scf_grp.open_group("iter" + std::to_string(iter));
     utils::check(iter_grp.has_dataset("F_skij"),
-                 "unfold_scf: {} scf/iter{} is not a dyson-type solution (no F_skij).", in_file, iter);
+                 "unfold_scf_checkpoint: {} scf/iter{} is not a dyson-type solution (no F_skij).", in_file, iter);
     utils::check(iter_grp.has_dataset("G_tskij") and iter_grp.has_dataset("Dm_skij"),
-                 "unfold_scf: {} scf/iter{} has no G_tskij or Dm_skij.", in_file, iter);
+                 "unfold_scf_checkpoint: {} scf/iter{} has no G_tskij or Dm_skij.", in_file, iter);
     bool sigma_not_stored = false;
     if (iter_grp.has_dataset("Sigma_not_stored"))
       h5::h5_read(iter_grp, "Sigma_not_stored", sigma_not_stored);
-    utils::check(not sigma_not_stored, "unfold_scf: Sigma_tskij was omitted from {} scf/iter{}.", in_file, iter);
+    utils::check(not sigma_not_stored, "unfold_scf_checkpoint: Sigma_tskij was omitted from {} scf/iter{}.", in_file, iter);
     h5::h5_read(iter_grp, "mu", mu);
   }
   ctx.comm.broadcast_n(&iter, 1, 0);

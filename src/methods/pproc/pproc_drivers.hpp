@@ -81,10 +81,6 @@ namespace methods {
    *   - Nw: number of real frequency points
    *   - eta: shift above the real-frequency axis
    * Optional arguments for pp_type = unfold_bz (unfold BZ from irreducible to the 1st BZ)
-   * Required arguments for pp_type = unfold_checkpoint (unfolded mean field and full-BZ checkpoint of an IBZ
-   * checkpoint, mf::unfold_mf and chkpt::unfold_scf)
-   *   - output: prefix (in outdir) of the unfolded mean field outdir/output.h5 and of the new checkpoint
-   *     outdir/output.mbpt.h5
    */
   void post_processing(std::string pp_type, std::shared_ptr<mf::MF> mf, ptree const& pt) {
     auto mpi = mf->mpi();
@@ -115,19 +111,6 @@ namespace methods {
 
       std::string scf_output = outdir+"/"+prefix;
       unfold_bz(*mpi, *mf, scf_output);
-
-    } else if (pp_type == "unfold_checkpoint") {
-
-      auto output = io::get_value<std::string>(pt,"output",err+"output");
-      // Cheap input checks, before the orbitals are rotated and written
-      utils::check(output != prefix, "unfold_checkpoint: output must differ from prefix ({}).", prefix);
-      utils::check(std::filesystem::exists(outdir+"/"+prefix+".mbpt.h5"),
-                   "unfold_checkpoint: input checkpoint {} not found.", outdir+"/"+prefix+".mbpt.h5");
-      // Unfolded mean field outdir/output.h5, loaded back as the system of the new checkpoint
-      mf::unfold_mf(*mf, outdir+"/"+output+".h5");
-      auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, outdir, output, mf::h5_input_type);
-      // Full-BZ checkpoint outdir/output.mbpt.h5 from the IBZ checkpoint outdir/prefix.mbpt.h5
-      chkpt::unfold_scf(*mpi, *mf, mf_unfold, outdir+"/"+prefix, outdir+"/"+output);
 
     } else if (pp_type == "band_interpolation") {
 
@@ -266,6 +249,31 @@ namespace methods {
     } else {
       APP_ABORT("pproc: Unkonw post-processing type: {}", pp_type);
     }
+  }
+
+  /**
+   * Write the full-BZ checkpoint outdir/prefix_unfold.mbpt.h5 of the IBZ checkpoint outdir/prefix.mbpt.h5
+   * (chkpt::unfold_scf_checkpoint).
+   * Called by Python post_proc.unfold_checkpoint. It is separate from post_processing, which takes one mean field:
+   * the system/ group of the new checkpoint (nkpts_ibz = nkpts, k_weight, q-point maps) is that of mf_unfold.
+   * @param [INPUT] mf_ibz - mean field of the IBZ checkpoint
+   * @param [INPUT] mf_unfold - unfolded mean field of mf_ibz (mf::unfold_mf)
+   * Requires:
+   *   - prefix: prefix of the IBZ checkpoint outdir/prefix.mbpt.h5
+   *   - prefix_unfold: prefix of the new checkpoint outdir/prefix_unfold.mbpt.h5
+   * Optional arguments:
+   *   - outdir: location of directory with files
+   */
+  void unfold_checkpoint(std::shared_ptr<mf::MF> mf_ibz, std::shared_ptr<mf::MF> mf_unfold, ptree const& pt) {
+    auto mpi = mf_ibz->mpi();
+    std::string err = std::string("unfold_checkpoint - Incorrect input - ");
+    auto prefix = io::get_value<std::string>(pt,"prefix",err+"prefix");
+    auto prefix_unfold = io::get_value<std::string>(pt,"prefix_unfold",err+"prefix_unfold");
+    auto outdir = io::get_value_with_default<std::string>(pt,"outdir","./");
+    utils::check(prefix_unfold != prefix, "unfold_checkpoint: prefix_unfold must differ from prefix ({}).", prefix);
+    utils::check(std::filesystem::exists(outdir+"/"+prefix+".mbpt.h5"),
+                 "unfold_checkpoint: input checkpoint {} not found.", outdir+"/"+prefix+".mbpt.h5");
+    chkpt::unfold_scf_checkpoint(*mpi, *mf_ibz, *mf_unfold, outdir+"/"+prefix, outdir+"/"+prefix_unfold);
   }
 
 } // methods

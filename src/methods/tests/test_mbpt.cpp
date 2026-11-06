@@ -148,13 +148,13 @@ namespace bdft_tests {
   }
 
 
-  // chkpt::unfold_scf on a synthetic dyson checkpoint (random Dm, G, F, Sigma, H0, S on the IBZ of qe_lih223_sym,
+  // chkpt::unfold_scf_checkpoint on a synthetic dyson checkpoint (random Dm, G, F, Sigma, H0, S on the IBZ of qe_lih223_sym,
   // which has time-reversal k) against the copy (conjugate at time-reversal k) from kp_to_ibz(k) done by hand.
   // Also checks final_iter, mu, the IAFT grid, the divergence treatments and the k list of the output.
   // The reference applies the same kp_to_ibz / kp_trev copy-conj rule as unfold_1e/dynamic_hamiltonian, so this tests
   // the plumbing (datasets, mu, final_iter, div strings), not the gauge rule; the gauge is tested by the H0 and HF
   // restart comparisons on the unfolded mean field. err_noconj only shows that the data can tell conj from copy.
-  TEST_CASE("unfold_scf", "[methods][mbpt][chkpt]") {
+  TEST_CASE("unfold_scf_checkpoint", "[methods][mbpt][chkpt]") {
     auto& mpi = utils::make_unit_test_mpi_context();
     auto& comm = mpi->comm;
     auto mf_ibz = mf::default_MF(mpi, "qe_lih223_sym", mf::h5_input_type);
@@ -209,7 +209,7 @@ namespace bdft_tests {
     mf::unfold_mf(mf_ibz, unfold_prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type);
-    methods::chkpt::unfold_scf(*mpi, mf_ibz, mf_unfold, in, out);
+    methods::chkpt::unfold_scf_checkpoint(*mpi, mf_ibz, mf_unfold, in, out);
 
     // k_weight of the output: 1/nkpts at every k, summing to 1
     int kw_ok = 0;
@@ -300,7 +300,7 @@ namespace bdft_tests {
     comm.broadcast_n(&iter_out, 1, 0); comm.broadcast_n(&nk_out, 1, 0); comm.broadcast_n(&nki_out, 1, 0);
     comm.broadcast_n(&mu_out, 1, 0); comm.broadcast_n(&beta_out, 1, 0);
     comm.broadcast_n(&div_ok, 1, 0); comm.broadcast_n(&hf_div_ok, 1, 0);
-    app_log(2, "unfold_scf: relative errors H0 {} S {} Dm {} F {} G {} Sigma {}; without conj at TR k {}; k list {}",
+    app_log(2, "unfold_scf_checkpoint: relative errors H0 {} S {} Dm {} F {} G {} Sigma {}; without conj at TR k {}; k list {}",
             err_H0, err_S, err_Dm, err_F, err_G, err_Sigma, err_noconj, err_k);
     REQUIRE(iter_out == 3);
     REQUIRE(mu_out == mu);
