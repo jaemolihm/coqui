@@ -70,6 +70,13 @@ namespace {
     auto sGnew = make_shared_array<Array_view_5D_t>(*_context, {nt, long(_ns), long(_nkpts_ibz), nb, nb});
     sGnew.set_zero();
     double dmax = 0.0, smax = 0.0;
+    static const bool use_ref = [] { const char* e = std::getenv("COQUI_DYSON_TAU_REF"); return !(e and std::string(e) == "0"); }();
+    long n_lowest = -1;
+    {
+      auto wnm = _FT->wn_mesh();
+      for (long i = 0; i < wnm.size(); ++i) if (wnm(i) == 1) n_lowest = i;
+      utils::check(n_lowest >= 0, "solve_dyson_tau: lowest positive fermionic Matsubara node (n = 1) not found");
+    }
     for (long task = _context->comm.rank(); task < nsk * nblk; task += _context->comm.size()) {
       long sk = task / nblk, blk = task % nblk;
       long is = sk / _nkpts_ibz, ik = sk % _nkpts_ibz;
@@ -79,8 +86,19 @@ namespace {
       nda::matrix<ComplexType> Sk = S(is, ik, all, all);
       for (long i = 0; i < nb; ++i) Sk(i, i) -= 1.0;
       smax = std::max(smax, nda::max_element(nda::abs(Sk)));
-      // G0(tau) = U g(tau, e - mu) U^H with H0 + F = U e U^H (orthonormal basis)
-      nda::matrix<ComplexType> Hk = H0(is, ik, all, all) + F(is, ik, all, all);
+      // Static reference Sigma_ref = Hermitian part of Sigma at the lowest positive Matsubara node: the update is
+      // G = G0' + G0' * (Sigma - Sigma_ref delta) * G with G0' = [(iw+mu) - H0 - F - Sigma_ref]^-1, which has the
+      // same fixed point and a much smaller contraction factor (CdO: rho 0.93 -> 0.16 at the lowest frequency).
+      nda::array<ComplexType, 3> SigK = Sig(all, is, ik, all, all);
+      nda::matrix<ComplexType> Sref(nb, nb);
+      Sref() = 0.0;
+      if (use_ref) {
+        nda::matrix<ComplexType> Sw(nb, nb);
+        _FT->tau_to_w(SigK, Sw, imag_axes_ft::fermion, n_lowest);
+        Sref = 0.5 * (Sw + nda::dagger(Sw));
+      }
+      // G0'(tau) = U g(tau, e - mu) U^H with H0 + F + Sigma_ref = U e U^H (orthonormal basis)
+      nda::matrix<ComplexType> Hk = H0(is, ik, all, all) + F(is, ik, all, all) + Sref;
       auto [ev, U] = nda::linalg::eigenelements(Hk);
       nda::array<ComplexType, 3> G0(nt, nb, nb);
       nda::matrix<ComplexType> Ug(nb, nb);
@@ -93,9 +111,10 @@ namespace {
         }
         G0(t, all, all) = Ug * nda::dagger(U);
       }
-      nda::array<ComplexType, 3> SigK = Sig(all, is, ik, all, all);
       auto cS = _FT->dlr_it_vals2coefs(SigK);
       auto cG0 = _FT->dlr_it_vals2coefs(G0);
+      nda::array<ComplexType, 3> cG0R(nt, nb, nb);                    // coefficients of G0'(tau) Sigma_ref
+      for (long l = 0; l < nt; ++l) cG0R(l, all, all) = nda::matrix<ComplexType>(cG0(l, all, all)) * Sref;
       nda::array<ComplexType, 3> Gp = Gold(all, is, ik, all, J);
       nda::array<ComplexType, 3> Gn(nt, nb, j1 - j0);
       for (int sw = 0; sw < nsweep; ++sw) {
@@ -103,6 +122,7 @@ namespace {
         auto X = _FT->dlr_it_convolve(cS, cGp);          // (Sigma * G)(tau)
         auto cX = _FT->dlr_it_vals2coefs(X);
         Gn = G0(all, all, J) + _FT->dlr_it_convolve(cG0, cX);
+        if (use_ref) Gn -= _FT->dlr_it_convolve(cG0R, cGp);
         if (sw == nsweep - 1) dmax = std::max(dmax, nda::max_element(nda::abs(Gn - Gp)));
         Gp = Gn;
       }
@@ -114,7 +134,7 @@ namespace {
     utils::check(smax < 1e-8, "solve_dyson_tau: needs an orthonormal basis (max |S - 1| = {})", smax);
     if (_context->node_comm.root()) _G_shm.local() = sGnew.local();
     _context->comm.barrier();
-    app_log(1, "DYSONTAU sweeps= {} last_sweep_change= {:.3e}", nsweep, dmax);
+    app_log(1, "DYSONTAU sweeps= {} ref= {} last_sweep_change= {:.3e}", nsweep, use_ref ? 1 : 0, dmax);
     _Timer.stop("DYSON");
   }
 
