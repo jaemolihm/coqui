@@ -341,6 +341,19 @@ namespace imag_axes_ft {
     decltype(auto) wn_mesh_b() const {
       return std::visit( [&](auto&& v) { return v.wn_mesh_b(); }, grid_var);
     }
+    // DLR-only helpers for the imaginary-time Dyson update (simple_dyson, COQUI_DYSON_TAU_SWEEPS).
+    template<typename A> nda::array<ComplexType, 3> dlr_it_vals2coefs(A const& a) const {
+      return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
+        if constexpr (requires { v.it_vals2coefs(a); }) { return nda::array<ComplexType, 3>(v.it_vals2coefs(a)); }
+        else { utils::check(false, "IAFT::dlr_it_vals2coefs: DLR basis only"); return nda::array<ComplexType, 3>{}; }
+      }, grid_var);
+    }
+    template<typename A> nda::array<ComplexType, 3> dlr_it_convolve(A const& fc, A const& gc) const {
+      return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
+        if constexpr (requires { v.it_convolve(fc, gc); }) { return nda::array<ComplexType, 3>(v.it_convolve(fc, gc)); }
+        else { utils::check(false, "IAFT::dlr_it_convolve: DLR basis only"); return nda::array<ComplexType, 3>{}; }
+      }, grid_var);
+    }
     decltype(auto) tau_mesh() const {
       return std::visit( [&](auto&& v) { return v.tau_mesh_f(); }, grid_var);
     }

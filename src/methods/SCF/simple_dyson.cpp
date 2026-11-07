@@ -21,10 +21,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "methods/SCF/simple_dyson.h"
 #include "nda/h5.hpp"
 #include "nda/linalg.hpp"
+#include "numerics/shared_array/nda.hpp"
 #include "nda/nda.hpp"
 #include "numerics/gemm_guard.hpp"
 
@@ -46,8 +48,87 @@ namespace {
 }
 
   template<typename G_t, typename F_t, typename Sigma_t>
+  void simple_dyson::solve_dyson_tau(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm,
+                                     double mu, int nsweep) {
+    _Timer.start("DYSON");
+    using math::shm::make_shared_array;
+    decltype(nda::range::all) all;
+    const long nt = _nts, nb = _nbnd;
+    const double beta = _FT->beta();
+    nda::array<double, 1> tau(nt);
+    {
+      auto tr = _FT->tau_mesh();
+      for (long t = 0; t < nt; ++t) tau(t) = (tr(t) + 1.0) * beta / 2.0;
+    }
+    auto S = _sS_skij.local(); auto H0 = _sH0_skij.local(); auto F = _sF_skij.local();
+    auto Sig = _Sigma_shm.local(); auto Gold = _G_shm.local();
+    // tasks = (s, k, column block of G); the columns stay in their block through every sweep,
+    // so the n sweeps need no communication
+    long nsk = long(_ns) * _nkpts_ibz;
+    long nblk = std::max(1L, std::min(long(nb), (long(_context->comm.size()) + nsk - 1) / nsk));
+    long bj = (nb + nblk - 1) / nblk;
+    auto sGnew = make_shared_array<Array_view_5D_t>(*_context, {nt, long(_ns), long(_nkpts_ibz), nb, nb});
+    sGnew.set_zero();
+    double dmax = 0.0, smax = 0.0;
+    for (long task = _context->comm.rank(); task < nsk * nblk; task += _context->comm.size()) {
+      long sk = task / nblk, blk = task % nblk;
+      long is = sk / _nkpts_ibz, ik = sk % _nkpts_ibz;
+      long j0 = blk * bj, j1 = std::min(nb, j0 + bj);
+      if (j0 >= j1) continue;
+      auto J = nda::range(j0, j1);
+      nda::matrix<ComplexType> Sk = S(is, ik, all, all);
+      for (long i = 0; i < nb; ++i) Sk(i, i) -= 1.0;
+      smax = std::max(smax, nda::max_element(nda::abs(Sk)));
+      // G0(tau) = U g(tau, e - mu) U^H with H0 + F = U e U^H (orthonormal basis)
+      nda::matrix<ComplexType> Hk = H0(is, ik, all, all) + F(is, ik, all, all);
+      auto [ev, U] = nda::linalg::eigenelements(Hk);
+      nda::array<ComplexType, 3> G0(nt, nb, nb);
+      nda::matrix<ComplexType> Ug(nb, nb);
+      for (long t = 0; t < nt; ++t) {
+        for (long a = 0; a < nb; ++a) {
+          double e = ev(a) - mu, g;
+          if (e >= 0) g = -std::exp(-tau(t) * e) / (1.0 + std::exp(-beta * e));
+          else        g = -std::exp((beta - tau(t)) * e) / (1.0 + std::exp(beta * e));
+          for (long b = 0; b < nb; ++b) Ug(b, a) = U(b, a) * g;
+        }
+        G0(t, all, all) = Ug * nda::dagger(U);
+      }
+      nda::array<ComplexType, 3> SigK = Sig(all, is, ik, all, all);
+      auto cS = _FT->dlr_it_vals2coefs(SigK);
+      auto cG0 = _FT->dlr_it_vals2coefs(G0);
+      nda::array<ComplexType, 3> Gp = Gold(all, is, ik, all, J);
+      nda::array<ComplexType, 3> Gn(nt, nb, j1 - j0);
+      for (int sw = 0; sw < nsweep; ++sw) {
+        auto cGp = _FT->dlr_it_vals2coefs(Gp);
+        auto X = _FT->dlr_it_convolve(cS, cGp);          // (Sigma * G)(tau)
+        auto cX = _FT->dlr_it_vals2coefs(X);
+        Gn = G0(all, all, J) + _FT->dlr_it_convolve(cG0, cX);
+        if (sw == nsweep - 1) dmax = std::max(dmax, nda::max_element(nda::abs(Gn - Gp)));
+        Gp = Gn;
+      }
+      sGnew.local()(all, is, ik, all, J) = Gn;
+    }
+    sGnew.all_reduce();
+    _context->comm.all_reduce_in_place_n(&dmax, 1, mpi3::max<>{});
+    _context->comm.all_reduce_in_place_n(&smax, 1, mpi3::max<>{});
+    utils::check(smax < 1e-8, "solve_dyson_tau: needs an orthonormal basis (max |S - 1| = {})", smax);
+    if (_context->node_comm.root()) _G_shm.local() = sGnew.local();
+    _context->comm.barrier();
+    app_log(1, "DYSONTAU sweeps= {} last_sweep_change= {:.3e}", nsweep, dmax);
+    _Timer.stop("DYSON");
+  }
+
+  template<typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(G_t &_G_shm,
                                  const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
+    {
+      static const int nsw = [] { const char* e = std::getenv("COQUI_DYSON_TAU_SWEEPS"); return e ? std::atoi(e) : 0; }();
+      if (nsw > 0 and _tau_ready and not sigma_is_zero(*_context, _Sigma_shm.local())) {
+        solve_dyson_tau(_G_shm, _sF_skij, _Sigma_shm, mu, nsw);
+        return;
+      }
+      _tau_ready = true;
+    }
     _Timer.start("DYSON");
     using math::nda::make_distributed_array;
     using Array_5D_t = nda::array<ComplexType, 5>;

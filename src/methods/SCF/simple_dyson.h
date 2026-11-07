@@ -131,6 +131,11 @@ public:
    * Compute the eigenvalues of _F + _Sigma(iwn)
    * @param spectra - [OUTPUT] eigenvalues, (nw, ns, nkpts_ibz, nbnd)
    */
+  // COQUI_DYSON_TAU_SWEEPS=<n>: after the first (Matsubara-node) solve, G is updated by n Picard sweeps of the
+  // imaginary-time Dyson equation G = G0 + G0 * Sigma * G (exact DLR convolutions, values on the tau nodes),
+  // started from the G in _G_shm (the previous SCF iteration). G0 from the eigenpairs of H0 + F (S = 1).
+  template<typename G_t, typename F_t, typename Sigma_t>
+  void solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu, int nsweep);
   template<typename X_t, typename Xt_t>
   void compute_eigenspectra(const X_t&_sF_skij, const Xt_t &_Sigma_shm, nda::array<ComplexType, 4> &spectra);
 
@@ -168,6 +173,7 @@ private:
   sArray_t<Array_view_4D_t> _sS_skij;
 
   utils::TimerManager _Timer;
+  bool _tau_ready = false;   // G in _G_shm comes from a previous solve (for COQUI_DYSON_TAU_SWEEPS)
 
 public:
   const mf::MF* MF() const { return _MF; }

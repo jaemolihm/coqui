@@ -91,6 +91,13 @@ namespace imag_axes_ft {
 
       ~DLR() = default;
 
+      // DLR coefficients of fermionic values on the tau nodes (first axis = tau node, cppdlr order).
+      template <typename A> auto it_vals2coefs(A const &a) const { return _it_ops.vals2coefs(a); }
+      // Values on the tau nodes of h(tau) = int_0^beta f(tau - tau') g(tau') dtau' (antiperiodic extension),
+      // from the DLR coefficients of f and g (rank 3: tau x m x n and tau x n x p). Exact for DLR functions,
+      // O(r^2 m n + r m n p) (Kaye, Strand, Golez, arXiv:2307.08566, App. A; cppdlr::imtime_ops::convolve).
+      template <typename A> auto it_convolve(A const &fc, A const &gc) const { return _it_ops.convolve(beta, fc, gc); }
+
       void metadata_log(int level = 1) const {
         app_log(level, "  Mesh details on the imaginary axis");
         app_log(level, "  ----------------------------------");
