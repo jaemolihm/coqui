@@ -439,27 +439,34 @@ namespace bdft_tests {
   }
 
   // DLR::free_fermion_tau vs the analytic kernel cppdlr::k_it(tau/beta in relative format, beta e) at every tau node
-  // (including the nodes near beta, stored as negative relative times), for e of both signs up to wmax.
+  // (including the nodes near beta, stored as negative relative times), for e of both signs up to |beta e| = 2000
+  // (the exponentials of the naive form overflow there). Every value must be finite; the error is relative to
+  // max(|kernel|, 1e-300) (underflow). The exponent reaches 2000, so its rounding alone is 2000 * 1.1e-16 ~ 2e-13
+  // relative: the tolerance is 1e-12.
   TEST_CASE("dlr_free_fermion_tau", "[iaft][dlr]") {
     double beta = 50.0, wmax = 2.0;
     imag_axes_ft::dlr::DLR dlr(beta, wmax, "high");
     long r = dlr._it_ops.rank();
-    nda::array<double, 1> e = {-2.0, -0.7, -1e-3, 0.0, 1e-3, 0.3, 2.0};
+    nda::array<double, 1> e = {-40.0, -2.0, -0.7, -1e-3, 0.0, 1e-3, 0.3, 2.0, 40.0};
     auto g = dlr.free_fermion_tau(e);
     REQUIRE(g.shape() == (std::array<long, 2>{r, e.size()}));
-    double max_rel_err = 0.0;
-    bool has_node_near_beta = false;
+    double max_err = 0.0;
+    bool has_node_near_beta = false, all_finite = true;
     for (long t = 0; t < r; ++t) {
       double t_rel = dlr._it_ops.get_itnodes(t);
       if (t_rel < 0) has_node_near_beta = true;
       for (long a = 0; a < e.size(); ++a) {
         double g_ref = cppdlr::k_it(t_rel, beta * e(a));
-        max_rel_err = std::max(max_rel_err, std::abs(g(t, a) - g_ref) / std::abs(g_ref));
+        if (not std::isfinite(g(t, a))) all_finite = false;
+        double err = std::abs(g(t, a) - g_ref) / std::max(std::abs(g_ref), 1e-300);
+        max_err = std::max(max_err, err);
+        if (not (err <= max_err)) max_err = std::numeric_limits<double>::infinity();  // NaN
       }
     }
-    app_log(1, "dlr_free_fermion_tau: max relative error vs k_it = {:.3e}", max_rel_err);
+    app_log(1, "dlr_free_fermion_tau: max relative error vs k_it = {:.3e}", max_err);
     CHECK(has_node_near_beta);
-    CHECK(max_rel_err < 1e-13);
+    CHECK(all_finite);
+    CHECK(max_err < 1e-12);
   }
 
 } // bdft_tests

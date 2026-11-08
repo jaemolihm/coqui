@@ -352,7 +352,7 @@ namespace imag_axes_ft {
       }, grid_var);
     }
     // g(tau_t, e_a) = -exp(-tau e) / (1 + exp(-beta e)) on the fermionic tau nodes, shape (nt_f, e.size())
-    nda::array<double, 2> free_fermion_tau(nda::array<double, 1> const &e) const {
+    nda::array<double, 2> free_fermion_tau(nda::array_const_view<double, 1> e) const {
       return std::visit([&](auto&& v) -> nda::array<double, 2> {
         if constexpr (requires { v.free_fermion_tau(e); }) { return v.free_fermion_tau(e); }
         else { utils::check(false, "IAFT::free_fermion_tau: DLR basis only"); return nda::array<double, 2>{}; }

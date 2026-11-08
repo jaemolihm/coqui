@@ -83,9 +83,10 @@ namespace {
       utils::check(n_lowest >= 0, "solve_dyson_tau: no positive fermionic Matsubara node in the mesh");
     }
 
-    // Tasks are (spin, k, column block of G); a column block stays in its task, so the sweep needs no communication
+    // Tasks are (spin, k, column block of G); a column block stays in its task, so the sweep needs no communication.
+    // The number of column blocks per (s,k) is floor(np / nsk), so that no rank gets two tasks when np >= nsk
     long nsk = long(_ns) * _nkpts_ibz;
-    long nblk_cols = std::max(1L, std::min(nb, (long(_context->comm.size()) + nsk - 1) / nsk));
+    long nblk_cols = std::max(1L, std::min(nb, long(_context->comm.size()) / nsk));  // floor: at most one task per rank when np >= nsk
     long ncols_per_block = (nb + nblk_cols - 1) / nblk_cols;
     auto sG_new = make_shared_array<Array_view_5D_t>(*_context, {nt, long(_ns), long(_nkpts_ibz), nb, nb});
     sG_new.set_zero();

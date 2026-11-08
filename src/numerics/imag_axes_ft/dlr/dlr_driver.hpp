@@ -116,14 +116,14 @@ namespace imag_axes_ft {
         nda::array<ComplexType, 3> cF = _it_ops.vals2coefs(F_tij), cX = _it_ops.vals2coefs(X_tij);
         nda::array<ComplexType, 3> HcF = cppdlr::arraymult(conv_hilb, cF), HcX = cppdlr::arraymult(conv_hilb, cX);
         // Diagonal contribution: tcf2it * (cF .* cX)
-        auto cF_cX = nda::array<ComplexType, 3>(r, F_tij.extent(1), X_tij.extent(2));
-        for (long i = 0; i < r; ++i) cF_cX(i, all, all) = cppdlr::matmul(cF(i, all, all), cX(i, all, all));
-        auto h_diag = cppdlr::arraymult(conv_tcf2it, cF_cX);
+        auto prod_tmn = nda::array<ComplexType, 3>(r, F_tij.extent(1), X_tij.extent(2));
+        for (long i = 0; i < r; ++i) prod_tmn(i, all, all) = cppdlr::matmul(cF(i, all, all), cX(i, all, all));
+        auto h_diag = cppdlr::arraymult(conv_tcf2it, prod_tmn);
         // Off-diagonal contribution: cf2it * (HcF .* cX + cF .* HcX)
         for (long i = 0; i < r; ++i)
-          cF_cX(i, all, all) = cppdlr::matmul(HcF(i, all, all), cX(i, all, all))
+          prod_tmn(i, all, all) = cppdlr::matmul(HcF(i, all, all), cX(i, all, all))
                                + cppdlr::matmul(cF(i, all, all), HcX(i, all, all));
-        nda::array<ComplexType, 3> h = beta * (h_diag + cppdlr::arraymult(_it_ops.get_cf2it(), cF_cX));
+        nda::array<ComplexType, 3> h = beta * (h_diag + cppdlr::arraymult(_it_ops.get_cf2it(), prod_tmn));
         return h;
       }
 
@@ -135,7 +135,7 @@ namespace imag_axes_ft {
        * -exp((beta - tau) e) / (1 + exp(beta e)) is used, with beta - tau taken from the relative-format nodes
        * (negative relative nodes lie near beta), so that it keeps full relative precision near tau = beta.
        */
-      nda::array<double, 2> free_fermion_tau(nda::array<double, 1> const &e) const {
+      nda::array<double, 2> free_fermion_tau(nda::array_const_view<double, 1> e) const {
         long r = _it_ops.rank();
         nda::array<double, 2> g(r, e.size());
         for (long t = 0; t < r; ++t) {

@@ -129,10 +129,10 @@ namespace bdft_tests {
   // Sigma(tau) = 5e-4 G_HF(tau) at fixed (F, Sigma, mu); the sweeps start from the Sigma = 0 Green's function
   // (QE LiH, S = 1) and must converge to the node-Dyson G (relative L2 over all of G). Sigma is weak because
   // on this small-gap fixture the sweeps converge geometrically only for a weak Sigma.
-  // The sweep tasks are (s, k, column block of G). This fixture has 8 (s,k) pairs, so the column-block split only
-  // runs with more than 8 ranks. The main ctest entry runs this case at CTEST_NPROC ranks (tasks split over (s,k)
-  // only); the test_methods_scf_dyson_picard_np9 entry (registered when CTEST_NPROC >= 9) runs it at 9 ranks, with
-  // 2 column blocks per (s,k).
+  // The sweep tasks are (s, k, column block of G), with floor(ranks / 8) column blocks per (s,k) for the 8 (s,k) pairs
+  // of this fixture, so the column-block split only runs with at least 16 ranks. The main ctest entry runs this case at
+  // CTEST_NPROC ranks (tasks split over (s,k) only); the test_methods_scf_dyson_picard_np16 entry (registered when
+  // CTEST_NPROC >= 16) runs it at 16 ranks, with 2 column blocks per (s,k).
   TEST_CASE("dyson_no_inversion_picard", "[methods_scf]") {
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;
