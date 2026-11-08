@@ -204,6 +204,9 @@ class MF
     { return kpts()(nda::range(nkpts_ibz()), nda::range::all); }
     decltype(auto) kpts_ibz(int i) const { return kpts_ibz()(i, nda::range::all); }
     auto kpts_ibz(int i, int j) const {  return kpts_ibz()(i, j); }
+    // kpts_ibz() in crystal coordinates
+    decltype(auto) kpts_crystal_ibz() const
+    { return kpts_crystal()(nda::range(nkpts_ibz()), nda::range::all); }
     decltype(auto) k_weight() const 
     { return std::visit( [&](auto&& v) { return v.get_sys().k_weight(); }, var ); }
     decltype(auto) k_weight(int i) const { return k_weight()(i); }

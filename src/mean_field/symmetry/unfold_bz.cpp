@@ -372,8 +372,11 @@ namespace {
     utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
                  "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
                  "rerun pw2coqui.x with add_pp_fullbz = .true.{}", fn,
+                 mf.mf_type() != mf::bdft_source ? "" :
                  mf.is_augmented() ? " An augmented basis carries them from its parent: rebuild it from that "
-                                     "pw2coqui h5." : "");
+                                     "pw2coqui h5." :
+                                     " A bdft basis other than an augmented one does not carry them: unfold its "
+                                     "parent.");
     return pp_type;
   }
 

@@ -50,6 +50,7 @@
 #include "methods/HF/hf_t.h"
 #include "mean_field/symmetry/unfold_bz.h"
 #include "utilities/symmetry.hpp"
+#include "utilities/h5_utils.hpp"
 #include <filesystem>
 #include "utilities/mpi_context.h"
 
@@ -436,7 +437,7 @@ nda::array<ComplexType,2> dense_of(Sparse_t const& D, long nb)
 
 // ||D D^dagger - 1||_max of a sparse nb x nb rotation matrix D
 template<class Sparse_t>
-double unitarity_defect(Sparse_t const& D, long nb)
+double unitary_error(Sparse_t const& D, long nb)
 {
   auto Dd = dense_of(D, nb);
   double err = 0.0;
@@ -450,19 +451,20 @@ double unitarity_defect(Sparse_t const& D, long nb)
 }
 
 // max_(s,k) ||D D^dagger - 1||_max of the stored symmetry rotations D(s,k) of mf, over all s > 0 and all k of the full BZ
-double stored_D_unitarity_defect(mf::MF& mf)
+double stored_D_unitary_error(mf::MF& mf)
 {
   double err = 0.0;
   for (long s = 1; s < mf.qsymms().extent(0); ++s)
     for (long k = 0; k < mf.nkpts(); ++k) {
       auto [cjg, Dp] = mf.symmetry_rotation(s, k);
-      err = std::max(err, unitarity_defect(*Dp, mf.nbnd()));
+      err = std::max(err, unitary_error(*Dp, mf.nbnd()));
     }
   return err;
 }
 
 // IBZ augmented basis: symmetry rotations and the IBZ -> full-BZ chain.
-//  (a) The IBZ augmented mean field builds (add_augmentation on a symmetry-reduced MF).
+//  (a) The IBZ augmented mean field builds (add_augmentation on a symmetry-reduced MF) and carries the parent's full-BZ
+//      projectors; eigenstate_selection on the same parent does not (negative control of the copy's scope).
 //  (b) Its stored rotations D(s,k), built by the dense branch of generate_dmatrix (assume_irreducible = not augmented),
 //      are unitary: ||D D^dagger - 1||_max against the floor measured on this fixture, and to < 1e-10 when built dense
 //      (no 1e-8 sparsifier) and without the row normalization (control: dirs {0}). Negative control: the
@@ -497,16 +499,32 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
   REQUIRE(aug_mf.is_augmented());
   REQUIRE(aug_mf.nkpts_ibz() < aug_mf.nkpts());
   REQUIRE(aug_mf.nbnd() > nbnd);
+  // (a) full-BZ projectors of the parent (pw2coqui add_pp_fullbz, read by unfold_mf): copied by the augmented-basis
+  // writer only; another bdft writer on the same parent (eigenstate selection) leaves them out
+  {
+    std::string pp_type;
+    {
+      h5::file f(parent_dir + "/pwscf.coqui.h5", 'r');
+      h5::h5_read_attribute(h5::group(f).open_group("Hamiltonian"), "pp_type", pp_type);
+    }
+    std::string fullbz = "Hamiltonian/" + pp_type + "/fullbz";
+    REQUIRE(utils::h5_group_exists(parent_dir + "/pwscf.coqui.h5", fullbz));
+    REQUIRE(utils::h5_group_exists("aug_ibz.h5", fullbz));
+    orbitals::eigenstate_selection(qe_mf, "aug_ibz_eigsel.h5", "linear", 1, 0);
+    comm.barrier();
+    REQUIRE(not utils::h5_group_exists("aug_ibz_eigsel.h5", fullbz));
+    cleanup("aug_ibz_eigsel.h5");
+  }
 
   // (b) unitarity of the stored D
-  double eps_D = stored_D_unitarity_defect(aug_mf);
+  double D_unitary_error = stored_D_unitary_error(aug_mf);
   app_log(2, "aug_ibz_symmetry: R = {}, nbnd {} -> {}; max ||D D^dagger - 1||_max (stored D) = {:.3e}",
-          R, nbnd, aug_mf.nbnd(), eps_D);
-  REQUIRE(eps_D < 3e-8);   // measured 2.99e-9 (floor of the 1e-8 sparsifier of to_csr), bound 10x the floor
+          R, nbnd, aug_mf.nbnd(), D_unitary_error);
+  REQUIRE(D_unitary_error < 3e-8);   // measured 2.99e-9 (floor of the 1e-8 sparsifier of to_csr), bound 10x the floor
   // max_(s,k) ||D D^dagger - 1||_max of the rotations of the bdft file ./prefix.h5, built as for an augmented basis
-  // (assume_irreducible = false), stored dense (no 1e-8 sparsifier) and without the row normalization: the unitarity
-  // defect that generate_dmatrix logs
-  auto unnormalized_D_defect = [&](std::string const& prefix) {
+  // (assume_irreducible = false), stored dense (no 1e-8 sparsifier) and without the row normalization: the unitary
+  // error that generate_dmatrix logs
+  auto unnormalized_D_unitary_error = [&](std::string const& prefix) {
     mf::bdft::bdft_readonly m(mpi, "./", prefix);
     auto slist = utils::find_inverse_symmetry(m.bz().qsymms, m.bz().symm_list);
     auto [sk_to_n, dmat] = utils::generate_dmatrix<false>(m, m.bz().symm_list, slist, false, false);
@@ -522,23 +540,23 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
         }
     return err;
   };
-  double eps_D_raw = unnormalized_D_defect("aug_ibz");
-  app_log(2, "aug_ibz_symmetry: max ||D D^dagger - 1||_max, dense and before the row normalization = {:.3e}", eps_D_raw);
-  REQUIRE(eps_D_raw < 1e-10);   // measured 2.9e-13 (np 1), 3.8e-13 (np 8); dirs {0} 1.0
+  double D_unitary_error_raw = unnormalized_D_unitary_error("aug_ibz");
+  app_log(2, "aug_ibz_symmetry: max ||D D^dagger - 1||_max, dense and before the row normalization = {:.3e}", D_unitary_error_raw);
+  REQUIRE(D_unitary_error_raw < 1e-10);   // measured 2.9e-13 (np 1), 3.8e-13 (np 8); dirs {0} 1.0
 
   // (b) control 0: momentum states along x only are not a vector set, so the aug span is not invariant under the
   // symmetry operations
   {
     auto augmenter_x = std::make_shared<orbitals::momentum_augmenter>(qe_mf, std::vector<int>{0});
     auto aug_x = orbitals::add_augmentation<HOST_MEMORY>(qe_mf, "aug_ibz_x.h5", augmenter_x, R, 1e-3, 1e-1);
-    double eps_x = stored_D_unitarity_defect(aug_x);
+    double D_unitary_error_x = stored_D_unitary_error(aug_x);
     app_log(2, "aug_ibz_symmetry: dirs {{0}} (not invariant): max ||D D^dagger - 1||_max = {:.3e} (dirs {{0,1,2}}: {:.3e})",
-            eps_x, eps_D);
-    REQUIRE(eps_x > 1e-3);
-    double eps_x_raw = unnormalized_D_defect("aug_ibz_x");
+            D_unitary_error_x, D_unitary_error);
+    REQUIRE(D_unitary_error_x > 1e-3);
+    double D_unitary_error_x_raw = unnormalized_D_unitary_error("aug_ibz_x");
     app_log(2, "aug_ibz_symmetry: dirs {{0}}: max ||D D^dagger - 1||_max, dense and before the row normalization = {:.3e}",
-            eps_x_raw);
-    REQUIRE(eps_x_raw > 1e-3);
+            D_unitary_error_x_raw);
+    REQUIRE(D_unitary_error_x_raw > 1e-3);
     cleanup("aug_ibz_x.h5");
   }
   // (b) control 1: assume_irreducible = true needs sorted eigval at every k, which diag(H_KS) is not
@@ -586,7 +604,7 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
       }
     app_log(2, "aug_ibz_symmetry: assume_irreducible = true (sorted eigval) vs dense D: max|D_irred - D_dense| = {:.3e}",
             dD_irred);
-    REQUIRE(dD_irred > 100.0 * eps_D);
+    REQUIRE(dD_irred > 100.0 * D_unitary_error);
     cleanup("aug_ibz_sorted.h5");
   }
 

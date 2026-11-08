@@ -788,9 +788,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   fft2row.reserve(size_t(ngm)*2);
   for(long r=0; r<ngm; ++r) fft2row[wfc_g.gv_to_fft()(r)] = r;
 
-  // k-point list of the deposit/source indices: the IBZ list (leading nkpts_ibz rows; all of them
-  // when nkpts == nkpts_ibz)
-  nda::array<double,2> kpts_cr = mf.kpts_crystal()(nda::range(0,nkpts_ibz), nda::range::all);
+  // k-point list of the deposit/source indices: the IBZ list (all k when nkpts == nkpts_ibz)
+  nda::array<double,2> kpts_cr = mf.kpts_crystal_ibz();
 
   // raw (non-orthonormal) augmentation states on the 'w' grid, zeroed
   auto raw_aug = math::nda::make_distributed_array<larray>(mpi.comm,pgrid,
