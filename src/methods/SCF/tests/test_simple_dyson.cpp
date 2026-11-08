@@ -125,10 +125,13 @@ namespace bdft_tests {
   }
 
 
-  // dyson_no_inversion = true (imaginary-time Picard sweeps, DLR basis) vs the Matsubara-node Dyson solve, for a nonzero
-  // Sigma(tau) = 5e-4 G_HF(tau) (small: the sweeps converge geometrically only for a weak Sigma on this small-gap fixture), at fixed (F, Sigma, mu). The sweeps start from the Sigma = 0 Green's function (plane-wave QE LiH, S = 1),
-  // so the test checks that repeated solve_dyson calls converge to the node-Dyson G (relative L2 over all of G).
-  // The sweep tasks are split over (s, k, column block) and reduced across ranks, so it is run on several ranks.
+  // dyson_no_inversion = true (imaginary-time Picard sweeps, DLR basis) vs the Matsubara-node Dyson solve, for
+  // Sigma(tau) = 5e-4 G_HF(tau) at fixed (F, Sigma, mu); the sweeps start from the Sigma = 0 Green's function
+  // (QE LiH, S = 1) and must converge to the node-Dyson G (relative L2 over all of G). Sigma is weak because
+  // on this small-gap fixture the sweeps converge geometrically only for a weak Sigma.
+  // The sweep tasks are (s, k, column block of G). This fixture has 8 (s,k) pairs, so the column-block split and the
+  // cross-rank reduce of the blocks only run with more than 8 ranks: ctest runs this case at 8 ranks (task split over
+  // (s,k) only) and, as test_methods_scf_dyson_picard_np16, at 16 ranks (2 column blocks per (s,k)).
   TEST_CASE("dyson_no_inversion_picard", "[methods_scf]") {
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;
@@ -152,6 +155,7 @@ namespace bdft_tests {
     // Sigma(tau) = 0.0005 G_HF(tau) with G_HF the Hartree-Fock Green's function at the mu of the Sigma = 0 problem
     double mu = update_mu(0.0, dyson_node, mf, ft, F, Sigma);
     dyson_node.solve_dyson(G_hf, F, Sigma, mu);
+    Sigma.node_sync();  // all ranks are done reading Sigma before the node root overwrites it
     if (context->node_comm.root()) Sigma.local() = 0.0005 * G_hf.local();
     Sigma.node_sync();
     mu = update_mu(mu, dyson_node, mf, ft, F, Sigma);
@@ -169,12 +173,14 @@ namespace bdft_tests {
     CHECK(l2_norm(G_tau.local() - G_node.local()) / G_norm < 1e-10);
 
     // Start the sweeps from the Sigma = 0 Green's function
+    G_tau.node_sync();  // all ranks are done reading G_tau before the node root overwrites it
     if (context->node_comm.root()) G_tau.local() = G_hf.local();
     G_tau.node_sync();
     double err_start = l2_norm(G_tau.local() - G_node.local()) / G_norm;
     for (int it = 0; it < 12; ++it) dyson_tau.solve_dyson(G_tau, F, Sigma, mu);
     double err_converged = l2_norm(G_tau.local() - G_node.local()) / G_norm;
-    app_log(1, "dyson_no_inversion: |G_tau - G_node|/|G_node| = {:.3e} (start from G_HF: {:.3e})", err_converged, err_start);
+    app_log(1, "dyson_no_inversion: |G_tau - G_node|/|G_node| = {:.3e} (start from G_HF: {:.3e})",
+            err_converged, err_start);
     CHECK(err_start > 1e-3);
     CHECK(err_converged < 1e-10);
   }
@@ -200,6 +206,7 @@ namespace bdft_tests {
     simple_dyson dyson(std::addressof(mf), std::addressof(ft), 1e-9, "bisection");
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
     dyson.solve_dyson(G_first, F, Sigma, mu);
+    Sigma.node_sync();  // all ranks are done reading Sigma before the node root overwrites it
     if (context->node_comm.root()) Sigma.local() = 0.0005 * G_first.local();
     Sigma.node_sync();
     dyson.solve_dyson(G_first, F, Sigma, mu);

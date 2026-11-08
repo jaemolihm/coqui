@@ -343,6 +343,8 @@ namespace imag_axes_ft {
     }
     // DLR-only imaginary-time operations (exact DLR convolutions on the tau nodes); abort for the IR basis.
     // Documented at the DLR members of the same name in dlr/dlr_driver.hpp.
+    // Kept next to Tct_ff (= vals2coefs(eye)): applies the LU solve with cf2it (cond ~1e14), while an explicit-inverse
+    // product loses accuracy (an exact convolution: 1.4e-3 error with inv(cf2it), 3.6e-14 with the LU solve).
     template<typename A> nda::array<ComplexType, 3> dlr_it_vals2coefs(A const& a) const {
       return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
         if constexpr (requires { v.it_vals2coefs(a); }) { return nda::array<ComplexType, 3>(v.it_vals2coefs(a)); }

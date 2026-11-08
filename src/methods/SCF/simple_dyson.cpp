@@ -168,7 +168,7 @@ namespace {
     _G_shm.node_sync();
     _context->comm.barrier();
     app_log(2, "Dyson equation for Green's function (imaginary-time Picard sweep, no Matsubara inversion):");
-    app_log(2, "  - max|G_new - G_prev| = {:.3e}", sweep_change_max);
+    app_log(1, "  - max|G_new - G_prev| = {:.3e}", sweep_change_max);
     app_log(2, "  - max|e - mu| of H0 + F + Sigma_ref = {:.6f} a.u. (wmax = {:.6f} a.u.)", eps_mu_max, _FT->wmax());
     if (eps_mu_max > _FT->wmax())
       app_log(1, "  [WARNING] the spectrum of H0 + F + Sigma_ref reaches beyond wmax ({:.6f} > {:.6f} a.u.); "
