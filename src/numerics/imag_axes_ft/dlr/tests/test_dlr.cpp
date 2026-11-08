@@ -408,9 +408,8 @@ namespace bdft_tests {
     REQUIRE(lk > 1e-5);
   }
 
-  // DLR::it_convolve (convolution built from the Hilbert products of fixed operands) vs cppdlr::imtime_ops::convolve on
-  // random matrix-valued DLR coefficients: relative L2 error at round-off. Also checks tau + (beta - tau) = beta
-  // and tau against the tau mesh of the DLR.
+  // DLR::it_convolve (values in, values out) vs cppdlr::imtime_ops::convolve of the DLR coefficients (vals2coefs of the
+  // same values) on random non-square matrix-valued F (3x4) and X (4x2): relative L2 error at round-off.
   TEST_CASE("dlr_it_convolve", "[iaft][dlr]") {
     double beta = 50.0, wmax = 2.0;
     imag_axes_ft::dlr::DLR dlr(beta, wmax, "high");
@@ -424,24 +423,43 @@ namespace bdft_tests {
 
     std::mt19937 gen(7);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    auto random_coefs = [&](long d1, long d2) {
+    auto random_values = [&](long d1, long d2) {
       nda::array<ComplexType, 3> c(r, d1, d2);
       for (long i = 0; i < c.size(); ++i) c.data()[i] = ComplexType(dist(gen), dist(gen));
       return c;
     };
-    auto fc = random_coefs(m, n);
-    auto gc = random_coefs(n, p);
-    auto h_ref = dlr._it_ops.convolve(beta, fc, gc);
-    auto h = dlr.it_convolve(fc, gc, dlr.it_hilbert(fc), dlr.it_hilbert(gc));
+    auto F = random_values(m, n);
+    auto X = random_values(n, p);
+    nda::array<ComplexType, 3> cF = dlr._it_ops.vals2coefs(F), cX = dlr._it_ops.vals2coefs(X);
+    nda::array<ComplexType, 3> h_ref = dlr._it_ops.convolve(beta, cF, cX);
+    auto h = dlr.it_convolve(F, X);
     double rel_err = l2_norm(nda::array<ComplexType, 3>(h - h_ref)) / l2_norm(h_ref);
     app_log(1, "dlr_it_convolve: |h - h_cppdlr|/|h_cppdlr| = {:.3e}", rel_err);
     CHECK(rel_err < 1e-12);
+  }
 
-    auto [tau, beta_minus_tau] = dlr.it_tau_and_beta_minus_tau();
-    for (long i = 0; i < r; ++i) {
-      CHECK(tau(i) + beta_minus_tau(i) == Approx(beta).epsilon(1e-14));
-      CHECK(tau(i) == Approx(beta * (dlr.tau_mesh_f(i) + 1.0) / 2.0).epsilon(1e-12));
+  // DLR::free_fermion_tau vs the analytic kernel cppdlr::k_it(tau/beta in relative format, beta e) at every tau node
+  // (including the nodes near beta, stored as negative relative times), for e of both signs up to wmax.
+  TEST_CASE("dlr_free_fermion_tau", "[iaft][dlr]") {
+    double beta = 50.0, wmax = 2.0;
+    imag_axes_ft::dlr::DLR dlr(beta, wmax, "high");
+    long r = dlr._it_ops.rank();
+    nda::array<double, 1> e = {-2.0, -0.7, -1e-3, 0.0, 1e-3, 0.3, 2.0};
+    auto g = dlr.free_fermion_tau(e);
+    REQUIRE(g.shape() == (std::array<long, 2>{r, e.size()}));
+    double max_rel_err = 0.0;
+    bool has_node_near_beta = false;
+    for (long t = 0; t < r; ++t) {
+      double t_rel = dlr._it_ops.get_itnodes(t);
+      if (t_rel < 0) has_node_near_beta = true;
+      for (long a = 0; a < e.size(); ++a) {
+        double g_ref = cppdlr::k_it(t_rel, beta * e(a));
+        max_rel_err = std::max(max_rel_err, std::abs(g(t, a) - g_ref) / std::abs(g_ref));
+      }
     }
+    app_log(1, "dlr_free_fermion_tau: max relative error vs k_it = {:.3e}", max_rel_err);
+    CHECK(has_node_near_beta);
+    CHECK(max_rel_err < 1e-13);
   }
 
 } // bdft_tests

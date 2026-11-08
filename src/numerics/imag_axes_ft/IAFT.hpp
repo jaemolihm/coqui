@@ -341,34 +341,21 @@ namespace imag_axes_ft {
     decltype(auto) wn_mesh_b() const {
       return std::visit( [&](auto&& v) { return v.wn_mesh_b(); }, grid_var);
     }
-    // DLR-only imaginary-time operations (exact DLR convolutions on the tau nodes); abort for the IR basis.
-    // Documented at the DLR members of the same name in dlr/dlr_driver.hpp.
-    // A separate entry point from Tct_ff (= vals2coefs(eye), applied as an explicit matrix): it solves with the LU
-    // factors of cf2it (cond ~1e14-1e15), while an explicit-inverse product loses accuracy (beta = 100, wmax = 4,
-    // high: exact convolution of two free G, 1.4e-3 error with inv(cf2it), 3.6e-14 with the LU solve).
-    template<typename A> nda::array<ComplexType, 3> dlr_it_vals2coefs(A const& a) const {
+    // DLR-only imaginary-time operations on the fermionic tau nodes (abort for the IR basis), used by
+    // simple_dyson::solve_dyson_tau. Documented at the DLR members it_convolve and free_fermion_tau.
+    // h = F * X, h(tau) = int_0^beta F(tau - tau') X(tau') dtau' (antiperiodic F), exact for DLR functions
+    nda::array<ComplexType, 3> dlr_convolve(nda::array_const_view<ComplexType, 3> F_tij,
+                                            nda::array_const_view<ComplexType, 3> X_tij) const {
       return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
-        if constexpr (requires { v.it_vals2coefs(a); }) { return nda::array<ComplexType, 3>(v.it_vals2coefs(a)); }
-        else { utils::check(false, "IAFT::dlr_it_vals2coefs: DLR basis only"); return nda::array<ComplexType, 3>{}; }
+        if constexpr (requires { v.it_convolve(F_tij, X_tij); }) { return v.it_convolve(F_tij, X_tij); }
+        else { utils::check(false, "IAFT::dlr_convolve: DLR basis only"); return nda::array<ComplexType, 3>{}; }
       }, grid_var);
     }
-    nda::array<ComplexType, 3> dlr_it_hilbert(nda::array_const_view<ComplexType, 3> c) const {
-      return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
-        if constexpr (requires { v.it_hilbert(c); }) { return v.it_hilbert(c); }
-        else { utils::check(false, "IAFT::dlr_it_hilbert: DLR basis only"); return nda::array<ComplexType, 3>{}; }
-      }, grid_var);
-    }
-    nda::array<ComplexType, 3> dlr_it_convolve(nda::array_const_view<ComplexType, 3> fc, nda::array_const_view<ComplexType, 3> gc,
-                                               nda::array_const_view<ComplexType, 3> Hfc, nda::array_const_view<ComplexType, 3> Hgc) const {
-      return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
-        if constexpr (requires { v.it_convolve(fc, gc, Hfc, Hgc); }) { return v.it_convolve(fc, gc, Hfc, Hgc); }
-        else { utils::check(false, "IAFT::dlr_it_convolve: DLR basis only"); return nda::array<ComplexType, 3>{}; }
-      }, grid_var);
-    }
-    std::pair<nda::array<double, 1>, nda::array<double, 1>> dlr_it_tau_and_beta_minus_tau() const {
-      return std::visit([&](auto&& v) -> std::pair<nda::array<double, 1>, nda::array<double, 1>> {
-        if constexpr (requires { v.it_tau_and_beta_minus_tau(); }) { return v.it_tau_and_beta_minus_tau(); }
-        else { utils::check(false, "IAFT::dlr_it_tau_and_beta_minus_tau: DLR basis only"); return {}; }
+    // g(tau_t, e_a) = -exp(-tau e) / (1 + exp(-beta e)) on the fermionic tau nodes, shape (nt_f, e.size())
+    nda::array<double, 2> free_fermion_tau(nda::array<double, 1> const &e) const {
+      return std::visit([&](auto&& v) -> nda::array<double, 2> {
+        if constexpr (requires { v.free_fermion_tau(e); }) { return v.free_fermion_tau(e); }
+        else { utils::check(false, "IAFT::free_fermion_tau: DLR basis only"); return nda::array<double, 2>{}; }
       }, grid_var);
     }
     decltype(auto) tau_mesh() const {

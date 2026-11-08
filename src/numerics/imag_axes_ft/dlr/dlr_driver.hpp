@@ -91,53 +91,66 @@ namespace imag_axes_ft {
 
       ~DLR() = default;
 
-      // DLR coefficients of fermionic values on the tau nodes (first axis = tau node, cppdlr order).
-      template <typename A> auto it_vals2coefs(A const &a) const { return _it_ops.vals2coefs(a); }
-
-      // Tau nodes of the DLR grid in physical units: tau_i and beta - tau_i, both from the relative-format nodes
-      // (negative relative nodes lie near beta), so that beta - tau keeps full relative precision near tau = beta.
-      std::pair<nda::array<double, 1>, nda::array<double, 1>> it_tau_and_beta_minus_tau() const {
+      /**
+       * Ordinary fermionic convolution on the tau nodes, h(tau) = int_0^beta F(tau - tau') X(tau') dtau' with the
+       * antiperiodic extension of F, from values on the tau nodes: F_tij (r x m x n), X_tij (r x n x p) -> h (r x m x p).
+       * Exact for DLR functions, O(r^2 m n + r m n p) (Kaye, Strand, Golez, arXiv:2307.08566, App. A).
+       * Called through IAFT::dlr_convolve by simple_dyson::solve_dyson_tau, which needs a Dyson update without
+       * Matsubara nodes.
+       *
+       * Design decisions: (1) cppdlr::imtime_ops::convolve is not used. Its rank-3 overload (pinned cppdlr 7a0f60c)
+       * evaluates arraymult(hilb, fc) and arraymult(hilb, gc) inside the loop over the r tau nodes, which costs
+       * O(r^3 m n), and the matrices hilb and tcf2it it needs are private; they are rebuilt in
+       * build_convolution_matrices(). (2) Values -> coefficients goes through the LU solve with cf2it
+       * (_it_ops.vals2coefs, cond ~1e14-1e15), not the explicit matrix Tct_ff (= vals2coefs(eye)): for the exact
+       * convolution of two free G at beta = 100, wmax = 4, high, the explicit inverse gives a 1.4e-3 error and the
+       * LU solve 3.6e-14.
+       */
+      nda::array<ComplexType, 3> it_convolve(nda::array_const_view<ComplexType, 3> F_tij,
+                                             nda::array_const_view<ComplexType, 3> X_tij) const {
         long r = _it_ops.rank();
-        nda::array<double, 1> tau(r), beta_minus_tau(r);
-        for (long i = 0; i < r; ++i) {
-          double t_rel = _it_ops.get_itnodes(i);
-          tau(i) = beta * cppdlr::rel2abs(t_rel);
-          beta_minus_tau(i) = beta * ((t_rel < 0) ? -t_rel : 1.0 - t_rel);
-        }
-        return {tau, beta_minus_tau};
-      }
-
-      // Discrete Hilbert transform along the tau-node axis of DLR coefficients c (r x m x n): (H c)(j) = sum_k hilb(j,k) c(k).
-      // The product of a fixed operand with H is reused across it_convolve calls.
-      nda::array<ComplexType, 3> it_hilbert(nda::array_const_view<ComplexType, 3> c) const {
-        return cppdlr::arraymult(conv_hilb, c);
-      }
-
-      // Ordinary fermionic convolution h(tau) = int_0^beta f(tau - tau') g(tau') dtau' (antiperiodic extension) on the
-      // tau nodes, from the DLR coefficients fc (r x m x n), gc (r x n x p) and their Hilbert transforms
-      // Hfc = it_hilbert(fc), Hgc = it_hilbert(gc). Exact for DLR functions, O(r^2 m n + r m n p) given Hfc, Hgc
-      // (Kaye, Strand, Golez, arXiv:2307.08566, App. A).
-      // Design decision: cppdlr::imtime_ops::convolve is not used. Its rank-3 overload (pinned cppdlr 7a0f60c) evaluates
-      // arraymult(hilb, fc) and arraymult(hilb, gc) inside the loop over the r tau nodes, which costs O(r^3 m n); the
-      // matrices hilb and tcf2it it needs are private, so they cannot be reused from outside. They are rebuilt in
-      // build_convolution_matrices(), and the Hilbert products are taken out of the call so that those of a fixed operand
-      // are computed once.
-      nda::array<ComplexType, 3> it_convolve(nda::array_const_view<ComplexType, 3> fc, nda::array_const_view<ComplexType, 3> gc,
-                                             nda::array_const_view<ComplexType, 3> Hfc, nda::array_const_view<ComplexType, 3> Hgc) const {
-        long r = _it_ops.rank();
-        utils::check(fc.extent(0) == r and gc.extent(0) == r and Hfc.shape() == fc.shape() and Hgc.shape() == gc.shape()
-                     and fc.extent(2) == gc.extent(1),
+        utils::check(F_tij.extent(0) == r and X_tij.extent(0) == r and F_tij.extent(2) == X_tij.extent(1),
                      "imag_axes_ft::dlr::DLR::it_convolve: incompatible shapes.");
         auto all = nda::range::all;
-        // Diagonal contribution: tcf2it * (fc .* gc)
-        auto fg_prod = nda::array<ComplexType, 3>(r, fc.extent(1), gc.extent(2));
-        for (long i = 0; i < r; ++i) fg_prod(i, all, all) = cppdlr::matmul(fc(i, all, all), gc(i, all, all));
-        auto h_diag = cppdlr::arraymult(conv_tcf2it, fg_prod);
-        // Off-diagonal contribution: cf2it * (Hfc .* gc + fc .* Hgc)
+        // Coefficients of F and X, and their discrete Hilbert transforms along the tau-node axis
+        nda::array<ComplexType, 3> cF = _it_ops.vals2coefs(F_tij), cX = _it_ops.vals2coefs(X_tij);
+        nda::array<ComplexType, 3> HcF = cppdlr::arraymult(conv_hilb, cF), HcX = cppdlr::arraymult(conv_hilb, cX);
+        // Diagonal contribution: tcf2it * (cF .* cX)
+        auto cF_cX = nda::array<ComplexType, 3>(r, F_tij.extent(1), X_tij.extent(2));
+        for (long i = 0; i < r; ++i) cF_cX(i, all, all) = cppdlr::matmul(cF(i, all, all), cX(i, all, all));
+        auto h_diag = cppdlr::arraymult(conv_tcf2it, cF_cX);
+        // Off-diagonal contribution: cf2it * (HcF .* cX + cF .* HcX)
         for (long i = 0; i < r; ++i)
-          fg_prod(i, all, all) = cppdlr::matmul(Hfc(i, all, all), gc(i, all, all)) + cppdlr::matmul(fc(i, all, all), Hgc(i, all, all));
-        nda::array<ComplexType, 3> h = beta * (h_diag + cppdlr::arraymult(_it_ops.get_cf2it(), fg_prod));
+          cF_cX(i, all, all) = cppdlr::matmul(HcF(i, all, all), cX(i, all, all))
+                               + cppdlr::matmul(cF(i, all, all), HcX(i, all, all));
+        nda::array<ComplexType, 3> h = beta * (h_diag + cppdlr::arraymult(_it_ops.get_cf2it(), cF_cX));
         return h;
+      }
+
+      /**
+       * Free fermion propagator on the tau nodes, g(tau_t, e_a) = -exp(-tau_t e_a) / (1 + exp(-beta e_a)), shape (nt, ne).
+       * Called through IAFT::free_fermion_tau by simple_dyson::solve_dyson_tau to build G0'(tau) from the eigenvalues
+       * of H0 + F + Sigma_ref (e = eigenvalue - mu).
+       * The exponent is always <= 0 (no overflow): for e >= 0 it is -tau e; for e < 0 the form
+       * -exp((beta - tau) e) / (1 + exp(beta e)) is used, with beta - tau taken from the relative-format nodes
+       * (negative relative nodes lie near beta), so that it keeps full relative precision near tau = beta.
+       */
+      nda::array<double, 2> free_fermion_tau(nda::array<double, 1> const &e) const {
+        long r = _it_ops.rank();
+        nda::array<double, 2> g(r, e.size());
+        for (long t = 0; t < r; ++t) {
+          double t_rel = _it_ops.get_itnodes(t);
+          double tau = beta * cppdlr::rel2abs(t_rel);
+          double beta_minus_tau = beta * ((t_rel < 0) ? -t_rel : 1.0 - t_rel);
+          for (long a = 0; a < e.size(); ++a) {
+            if (e(a) >= 0) { // g = -exp(-tau e) / (1 + exp(-beta e))
+              g(t, a) = -std::exp(-tau * e(a)) / (1.0 + std::exp(-beta * e(a)));
+            } else {         // g = -exp((beta - tau) e) / (1 + exp(beta e))
+              g(t, a) = -std::exp(beta_minus_tau * e(a)) / (1.0 + std::exp(beta * e(a)));
+            }
+          }
+        }
+        return g;
       }
 
       void metadata_log(int level = 1) const {
@@ -274,6 +287,10 @@ namespace imag_axes_ft {
     }
 
     private:
+      // matrices of it_convolve (see build_convolution_matrices)
+      nda::matrix<double> conv_hilb;
+      nda::matrix<double> conv_tcf2it;
+
       // Ttw = pinv(Twt), with the exact pairing Ttw(:, -wn) = conj(Ttw(:, wn)).
       // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
       // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
@@ -509,9 +526,6 @@ namespace imag_axes_ft {
       double lambda = 0.0;
 
       cppdlr::imtime_ops _it_ops;
-      // matrices of it_convolve (see build_convolution_matrices)
-      nda::matrix<double> conv_hilb;
-      nda::matrix<double> conv_tcf2it;
       cppdlr::imfreq_ops _if_ops_f;
       cppdlr::imfreq_ops _if_ops_b;
 

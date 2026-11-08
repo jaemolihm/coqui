@@ -70,9 +70,6 @@ namespace {
     using math::shm::make_shared_array;
     decltype(nda::range::all) all;
     const long nt = _nts, nb = _nbnd;
-    const double beta = _FT->beta();
-    // tau and beta - tau of the DLR nodes, each at full relative precision
-    auto [tau, beta_minus_tau] = _FT->dlr_it_tau_and_beta_minus_tau();
     auto H0 = _sH0_skij.local(); auto F = _sF_skij.local();
     auto Sigma_tskij = _Sigma_shm.local(); auto G_prev_tskij = _G_shm.local();
 
@@ -109,44 +106,24 @@ namespace {
       // G0'(tau) = U g(tau, e - mu) U^H with H0 + F + Sigma_ref = U e U^H (orthonormal basis)
       nda::matrix<ComplexType> H_ref_ij = H0(is, ik, all, all) + F(is, ik, all, all) + Sigma_ref_ij;
       auto [eps_a, U_ia] = nda::linalg::eigenelements(H_ref_ij);
-      nda::array<ComplexType, 3> G0_tij(nt, nb, nb);
+      nda::array<double, 1> e_a(nb);
+      for (long a = 0; a < nb; ++a) e_a(a) = eps_a(a) - mu;
+      eps_mu_max = std::max(eps_mu_max, nda::max_element(nda::abs(e_a)));
+      auto g_ta = _FT->free_fermion_tau(e_a);
+      nda::array<ComplexType, 3> G0_tij(nt, nb, nb), G0_Sigma_ref_tij(nt, nb, nb);
       nda::matrix<ComplexType> U_g_ia(nb, nb);
       for (long t = 0; t < nt; ++t) {
-        for (long a = 0; a < nb; ++a) {
-          double e = eps_a(a) - mu, g;
-          eps_mu_max = std::max(eps_mu_max, std::abs(e));
-          if (e >= 0) { // Occupation factor from exp(-beta e): g = -exp(-tau e) / (1 + exp(-beta e))
-            g = -std::exp(-tau(t) * e) / (1.0 + std::exp(-beta * e));
-          } else {      // Occupation factor from exp(beta e): g = -exp((beta - tau) e) / (1 + exp(beta e))
-            g = -std::exp(beta_minus_tau(t) * e) / (1.0 + std::exp(beta * e));
-          }
-          for (long b = 0; b < nb; ++b) U_g_ia(b, a) = U_ia(b, a) * g;
-        }
+        for (long a = 0; a < nb; ++a)
+          for (long b = 0; b < nb; ++b) U_g_ia(b, a) = U_ia(b, a) * g_ta(t, a);
         G0_tij(t, all, all) = U_g_ia * nda::dagger(U_ia);
-      }
-
-      // DLR coefficients and Hilbert transforms of the fixed operands. H (G0' Sigma_ref) = (H G0') Sigma_ref:
-      // Sigma_ref acts on the orbital indices, H on the tau-node index.
-      auto cSigma = _FT->dlr_it_vals2coefs(Sigma_tij);
-      auto HcSigma = _FT->dlr_it_hilbert(cSigma);
-      auto cG0 = _FT->dlr_it_vals2coefs(G0_tij);
-      auto HcG0 = _FT->dlr_it_hilbert(cG0);
-      nda::array<ComplexType, 3> cG0_Sigma_ref(nt, nb, nb), HcG0_Sigma_ref(nt, nb, nb);
-      for (long l = 0; l < nt; ++l) {
-        cG0_Sigma_ref(l, all, all) = nda::matrix<ComplexType>(cG0(l, all, all)) * Sigma_ref_ij;
-        HcG0_Sigma_ref(l, all, all) = nda::matrix<ComplexType>(HcG0(l, all, all)) * Sigma_ref_ij;
+        G0_Sigma_ref_tij(t, all, all) = nda::matrix<ComplexType>(G0_tij(t, all, all)) * Sigma_ref_ij;
       }
 
       // One sweep: G_new = G0' + G0' * (Sigma * G_prev) - (G0' Sigma_ref) * G_prev
       nda::array<ComplexType, 3> G_prev_cols = G_prev_tskij(all, is, ik, all, col_range);
-      auto cG_prev = _FT->dlr_it_vals2coefs(G_prev_cols);
-      auto HcG_prev = _FT->dlr_it_hilbert(cG_prev);
-      auto Sigma_G_cols = _FT->dlr_it_convolve(cSigma, cG_prev, HcSigma, HcG_prev);
-      auto cSigma_G = _FT->dlr_it_vals2coefs(Sigma_G_cols);
-      auto HcSigma_G = _FT->dlr_it_hilbert(cSigma_G);
       nda::array<ComplexType, 3> G_new_cols = G0_tij(all, all, col_range)
-          + _FT->dlr_it_convolve(cG0, cSigma_G, HcG0, HcSigma_G)
-          - _FT->dlr_it_convolve(cG0_Sigma_ref, cG_prev, HcG0_Sigma_ref, HcG_prev);
+          + _FT->dlr_convolve(G0_tij, _FT->dlr_convolve(Sigma_tij, G_prev_cols))
+          - _FT->dlr_convolve(G0_Sigma_ref_tij, G_prev_cols);
       sweep_change_max = std::max(sweep_change_max, nda::max_element(nda::abs(G_new_cols - G_prev_cols)));
       sG_new.local()(all, is, ik, all, col_range) = G_new_cols;
     }
