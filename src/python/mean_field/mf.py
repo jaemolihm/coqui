@@ -177,16 +177,15 @@ def unfold_mf(mf, params):
     which an IBZ calculation on ``mf`` is solved. The nonlocal projectors at each
     k are copied from the full-BZ projectors that ``pw2coqui.x`` writes with
     ``add_pp_fullbz = .true.`` (group ``Hamiltonian/<pp_type>/fullbz`` of the
-    mean-field h5 file, or of ``projector_file``), so the unfolded mean field gives H0 and the nonlocal
-    e-ph vertex at any q. For an augmented ``mf`` (:func:`augment_mf`, :func:`augment_mf_dpsi`) the
+    mean-field h5 file; an augmented h5 carries the group of its parent), so the unfolded mean field gives
+    H0 and the nonlocal e-ph vertex at any q. For an augmented ``mf`` (:func:`augment_mf`, :func:`augment_mf_dpsi`) the
     augmented flag, the per-band fit weights and the Kohn-Sham matrix ``Orbitals/H_KS_skij`` are
     unfolded too (copy at ``kp_to_ibz``, conjugated at time-reversal k). ``k_weight`` is 1/nkpts at every k.
     Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``; an IBZ
     checkpoint on ``mf`` is unfolded onto it with :func:`coqui.post_proc.unfold_checkpoint`.
 
     ``mf`` must be a symmorphic (``force_symmorphic``) ``pw2coqui`` h5 mean field with the
-    full-BZ projectors (or, for an augmented ``mf``, which has none, a ``projector_file`` with them),
-    with ``nkpts_ibz < nkpts`` and ``npol = 1``.
+    full-BZ projectors (or a basis augmented from one), with ``nkpts_ibz < nkpts`` and ``npol = 1``.
 
     Parameters
     ----------
@@ -197,12 +196,8 @@ def unfold_mf(mf, params):
 
         - ``prefix`` *(str, required)* — prefix of the new mean-field file ``outdir/prefix.h5``.
         - ``outdir`` *(str, optional, default ``"./"``)* — directory of the new mean-field file.
-        - ``projector_file`` *(str, optional, default ``""`` = the h5 file of ``mf``)* — pw2coqui h5 file with
-          the full-BZ projectors of the parent mean field. Required for an augmented ``mf``; its number of
-          atoms and projectors must equal those of ``mf``.
     """
-    mf.unfold_mf(params.get("outdir", "./") + "/" + params["prefix"] + ".h5",
-                 params.get("projector_file", ""))
+    mf.unfold_mf(params.get("outdir", "./") + "/" + params["prefix"] + ".h5")
 
 
 def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,

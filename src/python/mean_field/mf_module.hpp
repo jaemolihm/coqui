@@ -157,8 +157,8 @@ namespace coqui_py {
      * @brief Write the unfolded mean field of this symmetry-reduced mean-field system to the bdft h5 file filename.
      * See mf::unfold_mf.
      */
-    void unfold_mf(const std::string& filename, const std::string& projector_file) const {
-      mf::unfold_mf(*_mf, filename, projector_file);
+    void unfold_mf(const std::string& filename) const {
+      mf::unfold_mf(*_mf, filename);
     }
 
     /**

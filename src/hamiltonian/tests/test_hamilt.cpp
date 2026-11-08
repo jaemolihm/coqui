@@ -627,21 +627,20 @@ TEST_CASE("pyscf_ovlp", "[hamilt]") {
 // (2) The per-atom projector weight N_b(k) = sum_{n in occ} sum_j |<beta_{b,j}|phi_{n,k}>|^2 of the unfolded mean field against that
 //     of a no-symmetry calculation of the same system (separate QE run), k points matched by crystal coordinates. N_b
 //     is invariant under unitary rotations of the occupied manifold.
-// (3) An augmented IBZ mean field (momentum augmentation of qe_lih223_sym), whose h5 has no full-BZ projectors, is
-//     unfolded with projector_file = the pw2coqui h5 of its parent: the view is augmented, carries the IBZ band
+// (3) An augmented IBZ mean field (momentum augmentation of qe_lih223_sym), whose h5 carries the full-BZ projectors
+//     copied from its parent (without them unfold_mf aborts), is unfolded: the view is augmented, carries the IBZ band
 //     weights (expanded by kp_to_ibz), its stored Orbitals/H_KS_skij is the IBZ one copied at kp_to_ibz(k) and
 //     conjugated at time-reversal k, and H0 + V_Hxc rebuilt on the view reproduces that stored matrix.
 TEST_CASE("unfold_mf_projectors", "[hamilt]") {
   auto& mpi = utils::make_unit_test_mpi_context();
   auto& comm = mpi->comm;
 
-  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0,
-                   std::string projector_file = "") {
+  auto check = [&](mf::MF& mf_sym, std::string prefix, bool has_trev, std::string nosym_name, double tol_H0) {
     long nspin = mf_sym.nspin(), nkpts = mf_sym.nkpts(), nkpts_ibz = mf_sym.nkpts_ibz(), nbnd = mf_sym.nbnd();
     long nat = mf_sym.number_of_atoms();
 
     // Unfolded mean field; H0 of the IBZ system and of the unfolded mean field, each with its own pseudopotential
-    mf::unfold_mf(mf_sym, prefix + ".h5", projector_file);
+    mf::unfold_mf(mf_sym, prefix + ".h5");
     comm.barrier();
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", prefix, mf::h5_input_type);
 
@@ -817,8 +816,7 @@ TEST_CASE("unfold_mf_projectors", "[hamilt]") {
     // aug_ibz_symmetry in test_orbitals.cpp; its log line prints R)
     auto mf_sym = orbitals::add_augmentation<HOST_MEMORY>(mf_parent, "unfold_mf_aug_ibz.h5", augmenter, 3, 1e-3, 1e-1);
     REQUIRE(mf_sym.is_augmented());
-    auto [outdir, pf] = utils::utest_filename("qe_lih223_sym");
-    check(mf_sym, "unfold_mf_H0_aug", true, "", tol_H0_lih, outdir + pf + ".coqui.h5");
+    check(mf_sym, "unfold_mf_H0_aug", true, "", tol_H0_lih);
     comm.barrier();
     if (comm.root()) remove("unfold_mf_aug_ibz.h5");
     comm.barrier();

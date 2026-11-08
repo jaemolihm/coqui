@@ -385,9 +385,9 @@ TEST_CASE("aug_ks_seed_partial", "[orbit]")
 
 // Directory ./prefix_dir/ holding the QE fixture `fixture` with a midgap Fermi energy added to its pw2coqui h5
 // (System/fermi_energy; thc nbnd_protected needs one and the LiH fixtures lack it). The other fixture files are
-// symlinks. Returns the h5 path; the directory is written on the root. The copy keeps the Hamiltonian/<pp_type>/fullbz
-// group (projector source of unfold_mf).
-std::string make_fixture_dir_with_efermi(utils::mpi_context_t<boost::mpi3::communicator,boost::mpi3::shared_communicator>& mpi,
+// symlinks. The directory is written on the root. The copy keeps the Hamiltonian/<pp_type>/fullbz group (projector
+// source of unfold_mf, copied into the augmented h5).
+void make_fixture_dir_with_efermi(utils::mpi_context_t<boost::mpi3::communicator,boost::mpi3::shared_communicator>& mpi,
                                          std::string const& fixture, std::string const& dir, double efermi)
 {
   auto [outdir, pf] = utils::utest_filename(fixture);
@@ -404,7 +404,6 @@ std::string make_fixture_dir_with_efermi(utils::mpi_context_t<boost::mpi3::commu
     h5::h5_write_attribute(sgrp, "fermi_energy", efermi);
   }
   mpi.comm.barrier();
-  return fn;
 }
 
 // Smallest R >= R_min such that the gap eigval(R) - eigval(R-1) of the parent exceeds gap_min at every IBZ k, i.e. the
@@ -482,7 +481,7 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
   auto& comm = mpi->comm;
   const double efermi = 0.07;  // midgap of qe_lih223_sym: max VB 0.0163, min CB 0.1268 (Ha)
   const std::string parent_dir = "./aug_ibz_parent";
-  std::string parent_fn = make_fixture_dir_with_efermi(*mpi, "qe_lih223_sym", parent_dir, efermi);
+  make_fixture_dir_with_efermi(*mpi, "qe_lih223_sym", parent_dir, efermi);
   auto qe_mf = mf::make_MF(mpi, mf::qe_source, parent_dir + "/", "pwscf", mf::h5_input_type);
   REQUIRE(qe_mf.nkpts_ibz() < qe_mf.nkpts());
   long nbnd = qe_mf.nbnd();
@@ -703,8 +702,8 @@ TEST_CASE("aug_ibz_symmetry", "[orbit]")
     make_pivots(aug_ptr, "aug_ibz_pivots.h5");
     auto F_ibz = fock(aug_ptr, make_pt(aug_ptr, "aug_ibz_pivots.h5", true));
 
-    // unfolded view of the IBZ augmented MF, projectors from the pw2coqui h5 of the parent
-    mf::unfold_mf(*aug_ptr, "aug_ibz_view.h5", parent_fn);
+    // unfolded view of the IBZ augmented MF (full-BZ projectors carried from the parent's pw2coqui h5)
+    mf::unfold_mf(*aug_ptr, "aug_ibz_view.h5");
     comm.barrier();
     auto view = std::make_shared<mf::MF>(mf::make_MF(mpi, mf::bdft_source, "./", "aug_ibz_view", mf::h5_input_type));
     REQUIRE(view->is_augmented());
