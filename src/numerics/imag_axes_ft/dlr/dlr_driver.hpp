@@ -94,7 +94,7 @@ namespace imag_axes_ft {
       /**
        * Ordinary fermionic convolution on the tau nodes, h(tau) = int_0^beta F(tau - tau') X(tau') dtau' with the
        * antiperiodic extension of F, from values on the tau nodes: F_tij (r x m x n), X_tij (r x n x p) -> h (r x m x p).
-       * Exact for DLR functions, O(r^2 m n + r m n p) (Kaye, Strand, Golez, arXiv:2307.08566, App. A).
+       * Exact for DLR functions, O(r^2 (m n + n p + m p) + r m n p) (Kaye, Strand, Golez, arXiv:2307.08566, App. A).
        * Called through IAFT::dlr_convolve by simple_dyson::solve_dyson_tau, which needs a Dyson update without
        * Matsubara nodes.
        *

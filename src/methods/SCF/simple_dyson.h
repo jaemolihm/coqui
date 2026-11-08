@@ -126,8 +126,10 @@ public:
 
   /**
    * Solve Dyson's equation and update _G_tskij_view for current _mu, _F, and _Sigma.
-   * With dyson_no_inversion, every call after the first one with a nonzero Sigma updates G by an
-   * imaginary-time Picard sweep instead (solve_dyson_tau), starting from the G in _G_shm.
+   * With dyson_no_inversion, every call with a nonzero Sigma except the very first call of this object updates
+   * G by an imaginary-time Picard sweep instead (solve_dyson_tau), starting from the G in _G_shm. In a fresh run
+   * only the Sigma = 0 initialization is a node solve and every GW iteration, the first included, is a sweep from
+   * the initial G; the first call of a restarted run is a node solve.
    */
   template<typename G_t, typename F_t, typename Sigma_t>
   void solve_dyson(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
@@ -185,7 +187,8 @@ private:
   std::shared_ptr<hamilt::pseudopot> _PSP;
   double _mu_tol = 1e-9;
   std::string _mu_update_alg = "bisection";
-  // true: solve_dyson updates G by imaginary-time Picard sweeps (solve_dyson_tau) after its first call
+  // true: every solve_dyson call with a nonzero Sigma except the first call of this object is a Picard sweep
+  // (solve_dyson_tau)
   bool _dyson_no_inversion = false;
   // if set, update_mu returns this value instead of searching for the target number of electrons
   std::optional<double> _fixed_mu;

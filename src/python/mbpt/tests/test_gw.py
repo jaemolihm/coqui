@@ -187,6 +187,57 @@ def test_gw_chkpt_slim_mixing(mpi, iter_alg):
     _remove_outputs(mpi, ["gw_full", "gw_slim"])
 
 
+def _scgw_dyson_no_inversion(mpi, thc, output, dyson_no_inversion):
+    gw_params = {
+        "restart": False,
+        "output": output,
+        "niter": 20,
+        "beta": 100,
+        "iaft": {"prec": "medium", "basis": "dlr"},
+        "conv_thr": 1e-6,
+        "iter_alg": {"alg": "diis", "mixing": 0.7, "diis_warmup": 3},
+        "dyson_no_inversion": dyson_no_inversion,
+    }
+    coqui.run_gw(gw_params, h_int=thc)
+    mpi.barrier()
+
+
+def test_gw_dyson_no_inversion(mpi, capfd):
+    # scGW (LiH, THC, DLR basis, DIIS) through run_gw with dyson_no_inversion = false vs true: both converge to the same
+    # fixed point, so the final density matrix and Fock matrix agree within the convergence of the two different
+    # iteration paths (conv_thr 1e-6; measured 5.9e-7 and 6.8e-7 relative, bound 1e-5). G and Sigma are not compared: in
+    # this insulator the two runs settle on different chemical potentials in the gap (0.0712 vs 0.0729 a.u.), which
+    # changes G(tau) and Sigma(tau) at the 1e-3 level without changing the density. Only the true run prints the
+    # imaginary-time Picard sweep line of simple_dyson::solve_dyson_tau (the false run is the node-solve path).
+    mf = construct_qe_mf(mpi, "qe_lih222_sym")
+    eri_params = {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
+                  "chol_block_size": 1, "init": True}
+    thc = coqui.make_thc_coulomb(mf, eri_params)
+
+    capfd.readouterr()
+    _scgw_dyson_no_inversion(mpi, thc, "gw_node", False)
+    out_node = capfd.readouterr().out
+    _scgw_dyson_no_inversion(mpi, thc, "gw_picard", True)
+    out_picard = capfd.readouterr().out
+
+    if mpi.root():
+        import h5py
+        assert "Dyson Picard sweep" not in out_node
+        assert "Dyson Picard sweep" in out_picard
+        states = {}
+        for name in ("gw_node", "gw_picard"):
+            with h5py.File(f"{name}.mbpt.h5", "r") as f:
+                it = f["scf/final_iter"][()]
+                states[name] = (it, f[f"scf/iter{it}/Dm_skij"][()], f[f"scf/iter{it}/F_skij"][()])
+        (it_n, Dm_n, F_n), (it_p, Dm_p, F_p) = states["gw_node"], states["gw_picard"]
+        errs = [np.linalg.norm(X_p - X_n) / np.linalg.norm(X_n) for X_p, X_n in ((Dm_p, Dm_n), (F_p, F_n))]
+        print("iterations node / picard:", it_n, it_p, "; rel. difference Dm / F:", errs)
+        assert it_n < 20 and it_p < 20
+        assert max(errs) < 1e-5
+    mpi.barrier()
+    _remove_outputs(mpi, ["gw_node", "gw_picard"])
+
+
 # Restart floor measured on this system: 2.3e-14 (F), 1.8e-13 (Sigma), 2.1e-12 (G).
 RESTART_TOL = 1e-10
 

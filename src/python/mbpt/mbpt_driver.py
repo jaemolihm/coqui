@@ -87,13 +87,6 @@ def run_hf(params, h_int, h_int_exchange=None):
           with ``fix_density=True`` on such a ground state.
         - ``mu_tolerance`` *(float, optional, default ``1e-9``)* — tolerance for the
           chemical potential search.
-        - ``dyson_no_inversion`` *(bool, optional, default ``False``; DLR basis and an
-          orthonormal basis (S = 1) only; tested for ``gw``)* — if ``True``,
-          the Dyson equation is solved without inverting on the Matsubara nodes after the first
-          iteration: G is updated by one imaginary-time Picard sweep per SCF iteration, with exact
-          DLR convolutions and a static reference self-energy (Hermitian part of Σ at the lowest
-          positive Matsubara node). Meant for gapped systems whose scGW stalls or diverges
-          with the node inversion. A restart begins with a node solve.
         - ``div_treatment`` *(str, optional, default ``"gygi"``)* — treatment of the
           Coulomb kernel divergence at q→0. Common choices:
 
@@ -233,6 +226,15 @@ def run_gw(params, h_int,
             correlated subspace.
         - ``dump_w_to_h5`` *(bool, optional, default ``False``)* — if ``True``,
           saves the screened interaction W to the checkpoint file.
+        - ``dyson_no_inversion`` *(bool, optional, default ``False``)* — if ``True``, every Dyson
+          solve with a nonzero Σ(τ) except the first call of the run (a restart's first call
+          included) updates G by one imaginary-time Picard sweep from the previous G, with
+          exact DLR convolutions and a static reference self-energy (Hermitian part of Σ at the
+          lowest positive Matsubara node), instead of inverting on the Matsubara nodes. Meant
+          for gapped systems whose scGW stalls or diverges with the node inversion. Requires
+          the DLR basis and an orthonormal basis (S = 1), checked when the run starts. Also read
+          by the GF2 solver and the GW+EDMFT path; no effect when Σ = 0 (HF, the single update of
+          RPA); not read by ``run_evgw``, ``run_qpgw`` and the qp-HF driver.
 
     h_int : ThcCoulomb or CholCoulomb
         Primary Coulomb interaction object, used for both the polarizability and

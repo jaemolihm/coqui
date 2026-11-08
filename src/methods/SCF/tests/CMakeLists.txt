@@ -12,7 +12,7 @@ set_tests_properties(test_${TEST_ID} PROPERTIES WORKING_DIRECTORY ${PROJECT_UNIT
 
 # Column-block split of the Picard sweep (dyson_no_inversion): the fixture has 8 (s,k) pairs and the sweep uses
 # floor(ranks / 8) column blocks per (s,k), so 16 ranks is the minimum that splits columns (2 blocks per (s,k))
-if(CTEST_NPROC GREATER_EQUAL 16)
+if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 16)
   add_mpi_unit_test(test_${TEST_ID}_dyson_picard_np16 "${PROJECT_UNIT_TEST_DIR}/test_${TEST_ID}" 16 "dyson_no_inversion_picard")
   set_tests_properties(test_${TEST_ID}_dyson_picard_np16 PROPERTIES WORKING_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
 endif()

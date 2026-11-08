@@ -132,7 +132,7 @@ namespace bdft_tests {
   // The sweep tasks are (s, k, column block of G), with floor(ranks / 8) column blocks per (s,k) for the 8 (s,k) pairs
   // of this fixture, so the column-block split only runs with at least 16 ranks. The main ctest entry runs this case at
   // CTEST_NPROC ranks (tasks split over (s,k) only); the test_methods_scf_dyson_picard_np16 entry (registered when
-  // CTEST_NPROC >= 16) runs it at 16 ranks, with 2 column blocks per (s,k).
+  // MPIEXEC_MAX_NUMPROCS >= 16) runs it at 16 ranks, with 2 column blocks per (s,k).
   TEST_CASE("dyson_no_inversion_picard", "[methods_scf]") {
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;

@@ -11,7 +11,7 @@
 
 - Imaginary-time and Matsubara meshes to h5 checkpoint, written by both the C++ and the Python IAFT. (#51)
 - `CPPDLR` CMake variable to configure against a local cppdlr source tree instead of the one fetched by `FetchContent`. (#51)
-- `dyson_no_inversion` input of `run_hf` / `run_gw`: imaginary-time Picard sweeps with exact DLR convolutions instead of the Matsubara-node Dyson solve after the first SCF iteration (DLR basis, S = 1). (#124)
+- `dyson_no_inversion` input of `run_gw` (also the GF2 solver and the GW+EDMFT path): imaginary-time Picard sweeps with exact DLR convolutions instead of the Matsubara-node Dyson solve, for every Dyson solve with a nonzero Σ except the first call of the run (DLR basis, S = 1). (#124)
 
 ### Improved
 
