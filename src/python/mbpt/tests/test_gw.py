@@ -227,6 +227,8 @@ def test_gw_dyson_no_inversion(mpi, capfd):
         states = {}
         for name in ("gw_node", "gw_picard"):
             with h5py.File(f"{name}.mbpt.h5", "r") as f:
+                # run_lr takes its Dyson kernel from this mark: written iff the last Dyson solve was a sweep
+                assert ("dyson_no_inversion" in f["scf"]) == (name == "gw_picard"), name
                 it = f["scf/final_iter"][()]
                 states[name] = (it, f[f"scf/iter{it}/Dm_skij"][()], f[f"scf/iter{it}/F_skij"][()])
         (it_n, Dm_n, F_n), (it_p, Dm_p, F_p) = states["gw_node"], states["gw_picard"]

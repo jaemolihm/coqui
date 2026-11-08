@@ -234,7 +234,11 @@ def run_gw(params, h_int,
           for gapped systems whose scGW stalls or diverges with the node inversion. Requires
           the DLR basis and an orthonormal basis (S = 1), checked when the run starts. Also read
           by the GF2 solver and the GW+EDMFT path; no effect when Σ = 0 (HF, the single update of
-          RPA); not read by ``run_evgw``, ``run_qpgw`` and the qp-HF driver.
+          RPA); not read by ``run_evgw``, ``run_qpgw`` and the qp-HF driver. When the last Dyson
+          solve of the run was such a sweep, the run writes ``scf/dyson_no_inversion`` to the
+          checkpoint, and ``run_lr`` / ``run_chi`` on it differentiate the sweep's fixed point (the
+          imaginary-time Dyson equation) instead of the Matsubara-node solution; nothing is written
+          otherwise.
 
     h_int : ThcCoulomb or CholCoulomb
         Primary Coulomb interaction object, used for both the polarizability and
@@ -535,7 +539,12 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         ground state. Default False.
     unperturbed : str, optional
         Unperturbed reference (default "checkpoint"):
-        - "checkpoint": interacting G rebuilt from the checkpoint F+Σ (scGW LR)
+        - "checkpoint": interacting G rebuilt from the checkpoint F+Σ (scGW LR). A checkpoint
+          with ``scf/dyson_no_inversion`` (written by ``run_gw`` with ``dyson_no_inversion``, see
+          there) is the exception: its stored G(τ) is used as is, the Dyson equation is
+          differentiated in imaginary time, and ``input_iter`` must be the final iteration.
+          The Dyson kernel is taken from the checkpoint; passing ``dyson_no_inversion`` to
+          ``run_lr`` is an error.
         - "mf_dft": DFT/KS mean-field G0 built directly from the mean-field
           eigenvalues/orbitals (one-shot G0W0@DFT). W0 is then the RPA screened
           interaction from G0 (recompute_W is forced on) and the checkpoint is
