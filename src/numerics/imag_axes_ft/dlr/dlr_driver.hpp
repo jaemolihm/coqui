@@ -341,7 +341,7 @@ namespace imag_axes_ft {
       // Q^T Kt = U S Vt gives Tlt = U^T R (u_l = Q U_l).
       // The DLR Tct (= it2cf) gives pole weights, which are not ordered by singular value, so their tail does not
       // measure truncation; the IR Tct is used as is.
-      // E_f goes through an LU solve with cf2it (cond ~1e13); as a value -> value map it is accurate (error ~ eps
+      // E_f goes through an LU solve with cf2it (cond ~1e14-1e15); as a value -> value map it is accurate (error ~ eps
       // against an analytic model G; dlr_leakage_modes checks the orthonormality of the modes built from it).
       // Do not replace it with B_f * Tct (explicit inverse) without re-measuring.
       void build_Tlt() {
