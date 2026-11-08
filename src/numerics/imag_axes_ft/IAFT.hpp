@@ -341,17 +341,31 @@ namespace imag_axes_ft {
     decltype(auto) wn_mesh_b() const {
       return std::visit( [&](auto&& v) { return v.wn_mesh_b(); }, grid_var);
     }
-    // DLR-only helpers for the imaginary-time Dyson update (simple_dyson, COQUI_DYSON_TAU_SWEEPS).
+    // DLR-only imaginary-time operations (exact DLR convolutions on the tau nodes); abort for the IR basis.
+    // Documented at the DLR members of the same name in dlr/dlr_driver.hpp.
     template<typename A> nda::array<ComplexType, 3> dlr_it_vals2coefs(A const& a) const {
       return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
         if constexpr (requires { v.it_vals2coefs(a); }) { return nda::array<ComplexType, 3>(v.it_vals2coefs(a)); }
         else { utils::check(false, "IAFT::dlr_it_vals2coefs: DLR basis only"); return nda::array<ComplexType, 3>{}; }
       }, grid_var);
     }
-    template<typename A> nda::array<ComplexType, 3> dlr_it_convolve(A const& fc, A const& gc) const {
+    nda::array<ComplexType, 3> dlr_it_hilbert(nda::array_const_view<ComplexType, 3> c) const {
       return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
-        if constexpr (requires { v.it_convolve(fc, gc); }) { return nda::array<ComplexType, 3>(v.it_convolve(fc, gc)); }
+        if constexpr (requires { v.it_hilbert(c); }) { return v.it_hilbert(c); }
+        else { utils::check(false, "IAFT::dlr_it_hilbert: DLR basis only"); return nda::array<ComplexType, 3>{}; }
+      }, grid_var);
+    }
+    nda::array<ComplexType, 3> dlr_it_convolve(nda::array_const_view<ComplexType, 3> fc, nda::array_const_view<ComplexType, 3> gc,
+                                               nda::array_const_view<ComplexType, 3> Hfc, nda::array_const_view<ComplexType, 3> Hgc) const {
+      return std::visit([&](auto&& v) -> nda::array<ComplexType, 3> {
+        if constexpr (requires { v.it_convolve(fc, gc, Hfc, Hgc); }) { return v.it_convolve(fc, gc, Hfc, Hgc); }
         else { utils::check(false, "IAFT::dlr_it_convolve: DLR basis only"); return nda::array<ComplexType, 3>{}; }
+      }, grid_var);
+    }
+    std::pair<nda::array<double, 1>, nda::array<double, 1>> dlr_it_tau_and_beta_minus_tau() const {
+      return std::visit([&](auto&& v) -> std::pair<nda::array<double, 1>, nda::array<double, 1>> {
+        if constexpr (requires { v.it_tau_and_beta_minus_tau(); }) { return v.it_tau_and_beta_minus_tau(); }
+        else { utils::check(false, "IAFT::dlr_it_tau_and_beta_minus_tau: DLR basis only"); return {}; }
       }, grid_var);
     }
     decltype(auto) tau_mesh() const {

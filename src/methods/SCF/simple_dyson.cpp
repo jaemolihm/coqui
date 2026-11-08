@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 
 #include "methods/SCF/simple_dyson.h"
 #include "nda/h5.hpp"
@@ -47,107 +46,148 @@ namespace {
   }
 }
 
+  void simple_dyson::check_dyson_no_inversion_requirements() {
+    // Called by the constructors when dyson_no_inversion is set, before any GW evaluation
+    utils::check(_FT->basis() == imag_axes_ft::dlr_basis,
+                 "simple_dyson: dyson_no_inversion = true needs the DLR imaginary-axis basis (iaft_basis = \"dlr\").");
+    // S is node-shared: every rank scans all of it
+    _sS_skij.node_sync();
+    auto S = _sS_skij.local();
+    double S_dev_max = 0.0;
+    for (long is = 0; is < _ns; ++is)
+      for (long ik = 0; ik < _nkpts_ibz; ++ik)
+        for (long i = 0; i < _nbnd; ++i)
+          for (long j = 0; j < _nbnd; ++j)
+            S_dev_max = std::max(S_dev_max, std::abs(S(is, ik, i, j) - (i == j ? 1.0 : 0.0)));
+    utils::check(S_dev_max < 1e-8,
+                 "simple_dyson: dyson_no_inversion = true needs an orthonormal basis (S = 1), but max|S - 1| = {}.",
+                 S_dev_max);
+  }
+
   template<typename G_t, typename F_t, typename Sigma_t>
-  void simple_dyson::solve_dyson_tau(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm,
-                                     double mu, int nsweep) {
+  void simple_dyson::solve_dyson_tau(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
     _Timer.start("DYSON");
     using math::shm::make_shared_array;
     decltype(nda::range::all) all;
     const long nt = _nts, nb = _nbnd;
     const double beta = _FT->beta();
-    nda::array<double, 1> tau(nt);
-    {
-      auto tr = _FT->tau_mesh();
-      for (long t = 0; t < nt; ++t) tau(t) = (tr(t) + 1.0) * beta / 2.0;
-    }
-    auto S = _sS_skij.local(); auto H0 = _sH0_skij.local(); auto F = _sF_skij.local();
-    auto Sig = _Sigma_shm.local(); auto Gold = _G_shm.local();
-    // tasks = (s, k, column block of G); the columns stay in their block through every sweep,
-    // so the n sweeps need no communication
-    long nsk = long(_ns) * _nkpts_ibz;
-    long nblk = std::max(1L, std::min(long(nb), (long(_context->comm.size()) + nsk - 1) / nsk));
-    long bj = (nb + nblk - 1) / nblk;
-    auto sGnew = make_shared_array<Array_view_5D_t>(*_context, {nt, long(_ns), long(_nkpts_ibz), nb, nb});
-    sGnew.set_zero();
-    double dmax = 0.0, smax = 0.0;
-    static const bool use_ref = [] { const char* e = std::getenv("COQUI_DYSON_TAU_REF"); return !(e and std::string(e) == "0"); }();
+    // tau and beta - tau of the DLR nodes, each at full relative precision
+    auto [tau, beta_minus_tau] = _FT->dlr_it_tau_and_beta_minus_tau();
+    auto H0 = _sH0_skij.local(); auto F = _sF_skij.local();
+    auto Sigma_tskij = _Sigma_shm.local(); auto G_prev_tskij = _G_shm.local();
+
+    // Static reference node: the smallest positive fermionic Matsubara frequency of the mesh,
+    // omega = n_ir * pi / beta with n_ir the (odd) sparse_ir index of the node
     long n_lowest = -1;
     {
-      auto wnm = _FT->wn_mesh();
-      for (long i = 0; i < wnm.size(); ++i) if (wnm(i) == 1) n_lowest = i;
-      utils::check(n_lowest >= 0, "solve_dyson_tau: lowest positive fermionic Matsubara node (n = 1) not found");
+      auto wn_mesh = _FT->wn_mesh();
+      for (long i = 0; i < wn_mesh.size(); ++i)
+        if (wn_mesh(i) > 0 and (n_lowest < 0 or wn_mesh(i) < wn_mesh(n_lowest))) n_lowest = i;
+      utils::check(n_lowest >= 0, "solve_dyson_tau: no positive fermionic Matsubara node in the mesh");
     }
-    for (long task = _context->comm.rank(); task < nsk * nblk; task += _context->comm.size()) {
-      long sk = task / nblk, blk = task % nblk;
-      long is = sk / _nkpts_ibz, ik = sk % _nkpts_ibz;
-      long j0 = blk * bj, j1 = std::min(nb, j0 + bj);
-      if (j0 >= j1) continue;
-      auto J = nda::range(j0, j1);
-      nda::matrix<ComplexType> Sk = S(is, ik, all, all);
-      for (long i = 0; i < nb; ++i) Sk(i, i) -= 1.0;
-      smax = std::max(smax, nda::max_element(nda::abs(Sk)));
-      // Static reference Sigma_ref = Hermitian part of Sigma at the lowest positive Matsubara node: the update is
-      // G = G0' + G0' * (Sigma - Sigma_ref delta) * G with G0' = [(iw+mu) - H0 - F - Sigma_ref]^-1, which has the
-      // same fixed point and a much smaller contraction factor (CdO: rho 0.93 -> 0.16 at the lowest frequency).
-      nda::array<ComplexType, 3> SigK = Sig(all, is, ik, all, all);
-      nda::matrix<ComplexType> Sref(nb, nb);
-      Sref() = 0.0;
-      if (use_ref) {
-        nda::matrix<ComplexType> Sw(nb, nb);
-        _FT->tau_to_w(SigK, Sw, imag_axes_ft::fermion, n_lowest);
-        Sref = 0.5 * (Sw + nda::dagger(Sw));
-      }
+
+    // Tasks are (spin, k, column block of G); a column block stays in its task, so the sweep needs no communication
+    long nsk = long(_ns) * _nkpts_ibz;
+    long nblk_cols = std::max(1L, std::min(nb, (long(_context->comm.size()) + nsk - 1) / nsk));
+    long ncols_per_block = (nb + nblk_cols - 1) / nblk_cols;
+    auto sG_new = make_shared_array<Array_view_5D_t>(*_context, {nt, long(_ns), long(_nkpts_ibz), nb, nb});
+    sG_new.set_zero();
+    double sweep_change_max = 0.0, eps_mu_max = 0.0;
+    for (long task = _context->comm.rank(); task < nsk * nblk_cols; task += _context->comm.size()) {
+      long sk_idx = task / nblk_cols, col_blk = task % nblk_cols;
+      long is = sk_idx / _nkpts_ibz, ik = sk_idx % _nkpts_ibz;
+      long col_start = col_blk * ncols_per_block, col_end = std::min(nb, col_start + ncols_per_block);
+      if (col_start >= col_end) continue;
+      auto col_range = nda::range(col_start, col_end);
+
+      // Static reference Sigma_ref = Hermitian part of Sigma at the lowest positive Matsubara node
+      nda::array<ComplexType, 3> Sigma_tij = Sigma_tskij(all, is, ik, all, all);
+      nda::matrix<ComplexType> Sigma_w_ij(nb, nb);
+      _FT->tau_to_w(Sigma_tij, Sigma_w_ij, imag_axes_ft::fermion, n_lowest);
+      nda::matrix<ComplexType> Sigma_ref_ij = 0.5 * (Sigma_w_ij + nda::dagger(Sigma_w_ij));
+
       // G0'(tau) = U g(tau, e - mu) U^H with H0 + F + Sigma_ref = U e U^H (orthonormal basis)
-      nda::matrix<ComplexType> Hk = H0(is, ik, all, all) + F(is, ik, all, all) + Sref;
-      auto [ev, U] = nda::linalg::eigenelements(Hk);
-      nda::array<ComplexType, 3> G0(nt, nb, nb);
-      nda::matrix<ComplexType> Ug(nb, nb);
+      nda::matrix<ComplexType> H_ref_ij = H0(is, ik, all, all) + F(is, ik, all, all) + Sigma_ref_ij;
+      auto [eps_a, U_ia] = nda::linalg::eigenelements(H_ref_ij);
+      nda::array<ComplexType, 3> G0_tij(nt, nb, nb);
+      nda::matrix<ComplexType> U_g_ia(nb, nb);
       for (long t = 0; t < nt; ++t) {
         for (long a = 0; a < nb; ++a) {
-          double e = ev(a) - mu, g;
-          if (e >= 0) g = -std::exp(-tau(t) * e) / (1.0 + std::exp(-beta * e));
-          else        g = -std::exp((beta - tau(t)) * e) / (1.0 + std::exp(beta * e));
-          for (long b = 0; b < nb; ++b) Ug(b, a) = U(b, a) * g;
+          double e = eps_a(a) - mu, g;
+          eps_mu_max = std::max(eps_mu_max, std::abs(e));
+          if (e >= 0) { // Occupation factor from exp(-beta e): g = -exp(-tau e) / (1 + exp(-beta e))
+            g = -std::exp(-tau(t) * e) / (1.0 + std::exp(-beta * e));
+          } else {      // Occupation factor from exp(beta e): g = -exp((beta - tau) e) / (1 + exp(beta e))
+            g = -std::exp(beta_minus_tau(t) * e) / (1.0 + std::exp(beta * e));
+          }
+          for (long b = 0; b < nb; ++b) U_g_ia(b, a) = U_ia(b, a) * g;
         }
-        G0(t, all, all) = Ug * nda::dagger(U);
+        G0_tij(t, all, all) = U_g_ia * nda::dagger(U_ia);
       }
-      auto cS = _FT->dlr_it_vals2coefs(SigK);
-      auto cG0 = _FT->dlr_it_vals2coefs(G0);
-      nda::array<ComplexType, 3> cG0R(nt, nb, nb);                    // coefficients of G0'(tau) Sigma_ref
-      for (long l = 0; l < nt; ++l) cG0R(l, all, all) = nda::matrix<ComplexType>(cG0(l, all, all)) * Sref;
-      nda::array<ComplexType, 3> Gp = Gold(all, is, ik, all, J);
-      nda::array<ComplexType, 3> Gn(nt, nb, j1 - j0);
-      for (int sw = 0; sw < nsweep; ++sw) {
-        auto cGp = _FT->dlr_it_vals2coefs(Gp);
-        auto X = _FT->dlr_it_convolve(cS, cGp);          // (Sigma * G)(tau)
-        auto cX = _FT->dlr_it_vals2coefs(X);
-        Gn = G0(all, all, J) + _FT->dlr_it_convolve(cG0, cX);
-        if (use_ref) Gn -= _FT->dlr_it_convolve(cG0R, cGp);
-        if (sw == nsweep - 1) dmax = std::max(dmax, nda::max_element(nda::abs(Gn - Gp)));
-        Gp = Gn;
+
+      // DLR coefficients and Hilbert transforms of the fixed operands. H (G0' Sigma_ref) = (H G0') Sigma_ref:
+      // Sigma_ref acts on the orbital indices, H on the tau-node index.
+      auto cSigma = _FT->dlr_it_vals2coefs(Sigma_tij);
+      auto HcSigma = _FT->dlr_it_hilbert(cSigma);
+      auto cG0 = _FT->dlr_it_vals2coefs(G0_tij);
+      auto HcG0 = _FT->dlr_it_hilbert(cG0);
+      nda::array<ComplexType, 3> cG0_Sigma_ref(nt, nb, nb), HcG0_Sigma_ref(nt, nb, nb);
+      for (long l = 0; l < nt; ++l) {
+        cG0_Sigma_ref(l, all, all) = nda::matrix<ComplexType>(cG0(l, all, all)) * Sigma_ref_ij;
+        HcG0_Sigma_ref(l, all, all) = nda::matrix<ComplexType>(HcG0(l, all, all)) * Sigma_ref_ij;
       }
-      sGnew.local()(all, is, ik, all, J) = Gn;
+
+      // One sweep: G_new = G0' + G0' * (Sigma * G_prev) - (G0' Sigma_ref) * G_prev
+      nda::array<ComplexType, 3> G_prev_cols = G_prev_tskij(all, is, ik, all, col_range);
+      auto cG_prev = _FT->dlr_it_vals2coefs(G_prev_cols);
+      auto HcG_prev = _FT->dlr_it_hilbert(cG_prev);
+      auto Sigma_G_cols = _FT->dlr_it_convolve(cSigma, cG_prev, HcSigma, HcG_prev);
+      auto cSigma_G = _FT->dlr_it_vals2coefs(Sigma_G_cols);
+      auto HcSigma_G = _FT->dlr_it_hilbert(cSigma_G);
+      nda::array<ComplexType, 3> G_new_cols = G0_tij(all, all, col_range)
+          + _FT->dlr_it_convolve(cG0, cSigma_G, HcG0, HcSigma_G)
+          - _FT->dlr_it_convolve(cG0_Sigma_ref, cG_prev, HcG0_Sigma_ref, HcG_prev);
+      sweep_change_max = std::max(sweep_change_max, nda::max_element(nda::abs(G_new_cols - G_prev_cols)));
+      sG_new.local()(all, is, ik, all, col_range) = G_new_cols;
     }
-    sGnew.all_reduce();
-    _context->comm.all_reduce_in_place_n(&dmax, 1, mpi3::max<>{});
-    _context->comm.all_reduce_in_place_n(&smax, 1, mpi3::max<>{});
-    utils::check(smax < 1e-8, "solve_dyson_tau: needs an orthonormal basis (max |S - 1| = {})", smax);
-    if (_context->node_comm.root()) _G_shm.local() = sGnew.local();
+    sG_new.all_reduce_parallel();
+    _context->comm.all_reduce_in_place_n(&sweep_change_max, 1, mpi3::max<>{});
+    _context->comm.all_reduce_in_place_n(&eps_mu_max, 1, mpi3::max<>{});
+
+    // G(tau) is checked on the DLR kernel-SVD modes as on the node path; each rank takes a share of the (s,k) pairs
+    {
+      auto [sk_start, sk_end] = itertools::chunk_range(0, nsk, _context->comm.size(), _context->comm.rank());
+      auto G_new_tskij = sG_new.local();
+      nda::array<ComplexType, 4> G_check(nt, sk_end - sk_start, nb, nb);
+      for (long sk_idx = sk_start; sk_idx < sk_end; ++sk_idx)
+        G_check(all, sk_idx - sk_start, all, all) = G_new_tskij(all, sk_idx / _nkpts_ibz, sk_idx % _nkpts_ibz, all, all);
+      _FT->check_leakage(G_check, imag_axes_ft::fermion, std::addressof(_context->comm), "Green's function");
+    }
+
+    if (_context->node_comm.root()) _G_shm.local() = sG_new.local();
+    _G_shm.node_sync();
     _context->comm.barrier();
-    app_log(1, "DYSONTAU sweeps= {} ref= {} last_sweep_change= {:.3e}", nsweep, use_ref ? 1 : 0, dmax);
+    app_log(2, "Dyson equation for Green's function (imaginary-time Picard sweep, no Matsubara inversion):");
+    app_log(2, "  - max|G_new - G_prev| = {:.3e}", sweep_change_max);
+    app_log(2, "  - max|e - mu| of H0 + F + Sigma_ref = {:.6f} a.u. (wmax = {:.6f} a.u.)", eps_mu_max, _FT->wmax());
+    if (eps_mu_max > _FT->wmax())
+      app_log(1, "  [WARNING] the spectrum of H0 + F + Sigma_ref reaches beyond wmax ({:.6f} > {:.6f} a.u.); "
+                 "G0' is not representable on the DLR grid.", eps_mu_max, _FT->wmax());
     _Timer.stop("DYSON");
+    print_timers();
   }
 
   template<typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(G_t &_G_shm,
                                  const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
-    {
-      static const int nsw = [] { const char* e = std::getenv("COQUI_DYSON_TAU_SWEEPS"); return e ? std::atoi(e) : 0; }();
-      if (nsw > 0 and _tau_ready and not sigma_is_zero(*_context, _Sigma_shm.local())) {
-        solve_dyson_tau(_G_shm, _sF_skij, _Sigma_shm, mu, nsw);
+    if (_dyson_no_inversion) {
+      if (_G_has_previous_solution and not sigma_is_zero(*_context, _Sigma_shm.local())) {
+        // Imaginary-time Picard sweep from the previous G
+        solve_dyson_tau(_G_shm, _sF_skij, _Sigma_shm, mu);
         return;
       }
-      _tau_ready = true;
+      // Matsubara-node solve below: first call, or a static Sigma
+      _G_has_previous_solution = true;  // true from the first call on: the node solve below stores a G in _G_shm
     }
     _Timer.start("DYSON");
     using math::nda::make_distributed_array;

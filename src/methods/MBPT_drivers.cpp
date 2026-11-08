@@ -88,6 +88,7 @@ inline std::string resolve_mbpt_output_stem(ptree const& pt) {
  * @param chkpt_prefix  - [INPUT] Checkpoint file prefix (used if h0_source="checkpoint")
  * @param mu_tol        - [INPUT] Chemical potential tolerance (default 1e-9)
  * @param mu_update_alg - [INPUT] Chemical potential update algorithm
+ * @param dyson_no_inversion - [INPUT] Solve the Dyson equation by imaginary-time Picard sweeps (see simple_dyson)
  * @return simple_dyson object
  */
 inline simple_dyson make_dyson_with_h0_source(
@@ -96,16 +97,17 @@ inline simple_dyson make_dyson_with_h0_source(
     imag_axes_ft::IAFT* ft_ptr,
     const std::string& chkpt_prefix,
     double mu_tol = 1e-9,
-    std::string mu_update_alg = "bisection") {
+    std::string mu_update_alg = "bisection",
+    bool dyson_no_inversion = false) {
   // Both sources are valid for an augmented basis: "compute" rebuilds H0 from the
   // orbitals, while "checkpoint" reads the stored H0_skij (a genuine computed H0,
   // not the placeholder eigenvalues), so the two agree.
   if (h0_source == "checkpoint") {
     app_log(1, "  H0 source                = checkpoint ({}.mbpt.h5)", chkpt_prefix);
-    return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix, mu_tol, mu_update_alg);
+    return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix, mu_tol, mu_update_alg, dyson_no_inversion);
   } else {
     app_log(1, "  H0 source                = computed from orbitals");
-    return simple_dyson(mf_ptr, ft_ptr, mu_tol, mu_update_alg);
+    return simple_dyson(mf_ptr, ft_ptr, mu_tol, mu_update_alg, dyson_no_inversion);
   }
 }
 
@@ -306,6 +308,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
+  auto dyson_no_inversion = io::get_value_with_default<bool>(pt, "dyson_no_inversion", false);
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
   // Opt-in: additionally write the exchange-only Fock K_skij (F = J + K) to the
   // checkpoint for every iteration F is written. Default (false) leaves output unchanged.
@@ -360,7 +363,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   hf_t hf(hf_div_treatment);
   if(solver_type == "rpa") {
 
-    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg,
+                                                    dyson_no_inversion);
     set_fixed_mu(dyson, pt);
     gw_t gw(&ft, div_treatment, output);
     MBState mb_state(mpi, ft, output);
@@ -368,7 +372,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
 
   } else if(solver_type == "hf") {
 
-    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg,
+                                                    dyson_no_inversion);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
@@ -386,7 +391,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
 
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg,
+                                                    dyson_no_inversion);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
@@ -439,7 +445,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
       utils::check(false, "thermodynamic-property (grand potential) evaluation is not yet supported for the GF2 solver.");
     }
 
-    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg,
+                                                    dyson_no_inversion);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));
@@ -573,6 +580,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto mu_tol = io::get_value_with_default<double>(pt,"mu_tolerance", 1e-9);
   auto output = resolve_mbpt_output_stem(pt);
   auto mu_update_alg = io::get_value_with_default<std::string>(pt, "mu_update_alg", "midpoint");
+  auto dyson_no_inversion = io::get_value_with_default<bool>(pt, "dyson_no_inversion", false);
   auto compute_exchange = io::get_value_with_default<bool>(pt,"compute_exchange",true);
   // Opt-in: additionally write the exchange-only Fock K_skij (F = J + K) to the
   // checkpoint for every iteration F is written. Default (false) leaves output unchanged.
@@ -630,7 +638,8 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
 
     auto screen_type = io::get_value_with_default<std::string>(pt,"screen_type", "rpa");
 
-    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg);
+    simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, output, mu_tol, mu_update_alg,
+                                                    dyson_no_inversion);
     set_fixed_mu(dyson, pt);
     if (io::get_value_with_default<bool>(pt,"iter_alg.enable", true)) {
       iter_solver = std::make_unique<iter_scf::iter_scf_t>(iter_scf::make_iter_scf(pt));

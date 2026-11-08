@@ -408,4 +408,40 @@ namespace bdft_tests {
     REQUIRE(lk > 1e-5);
   }
 
+  // DLR::it_convolve (convolution built from the Hilbert products of fixed operands) vs cppdlr::imtime_ops::convolve on
+  // random matrix-valued DLR coefficients: relative L2 error at round-off. Also checks tau + (beta - tau) = beta
+  // and tau against the tau mesh of the DLR.
+  TEST_CASE("dlr_it_convolve", "[iaft][dlr]") {
+    double beta = 50.0, wmax = 2.0;
+    imag_axes_ft::dlr::DLR dlr(beta, wmax, "high");
+    long r = dlr._it_ops.rank();
+    long m = 3, n = 4, p = 2;
+    auto l2_norm = [](auto const &a) {
+      double sum = 0.0;
+      for (long i = 0; i < a.size(); ++i) sum += std::norm(a.data()[i]);
+      return std::sqrt(sum);
+    };
+
+    std::mt19937 gen(7);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    auto random_coefs = [&](long d1, long d2) {
+      nda::array<ComplexType, 3> c(r, d1, d2);
+      for (long i = 0; i < c.size(); ++i) c.data()[i] = ComplexType(dist(gen), dist(gen));
+      return c;
+    };
+    auto fc = random_coefs(m, n);
+    auto gc = random_coefs(n, p);
+    auto h_ref = dlr._it_ops.convolve(beta, fc, gc);
+    auto h = dlr.it_convolve(fc, gc, dlr.it_hilbert(fc), dlr.it_hilbert(gc));
+    double rel_err = l2_norm(nda::array<ComplexType, 3>(h - h_ref)) / l2_norm(h_ref);
+    app_log(1, "dlr_it_convolve: |h - h_cppdlr|/|h_cppdlr| = {:.3e}", rel_err);
+    CHECK(rel_err < 1e-12);
+
+    auto [tau, beta_minus_tau] = dlr.it_tau_and_beta_minus_tau();
+    for (long i = 0; i < r; ++i) {
+      CHECK(tau(i) + beta_minus_tau(i) == Approx(beta).epsilon(1e-14));
+      CHECK(tau(i) == Approx(beta * (dlr.tau_mesh_f(i) + 1.0) / 2.0).epsilon(1e-12));
+    }
+  }
+
 } // bdft_tests

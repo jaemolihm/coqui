@@ -48,6 +48,14 @@ namespace bdft_tests {
   namespace mpi3 = boost::mpi3;
   using namespace methods;
 
+  // L2 norm of all elements of a node-shared array's local view
+  auto l2_norm = [](auto const &a) {
+    auto a_reg = nda::make_regular(a);
+    double sum = 0.0;
+    for (long i = 0; i < a_reg.size(); ++i) sum += std::norm(a_reg.data()[i]);
+    return std::sqrt(sum);
+  };
+
   TEST_CASE("dyson_init", "[methods_scf]") {
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;
@@ -114,6 +122,89 @@ namespace bdft_tests {
     double e_corr = eval_corr_energy(context->comm, ft, G, Sigma, k_weight);
     VALUE_EQUAL(e_corr, 0.0, 1e-12);
     context->comm.barrier();
+  }
+
+
+  // dyson_no_inversion = true (imaginary-time Picard sweeps, DLR basis) vs the Matsubara-node Dyson solve, for a nonzero
+  // Sigma(tau) = 5e-4 G_HF(tau) (small: the sweeps converge geometrically only for a weak Sigma on this small-gap fixture), at fixed (F, Sigma, mu). The sweeps start from the Sigma = 0 Green's function (plane-wave QE LiH, S = 1),
+  // so the test checks that repeated solve_dyson calls converge to the node-Dyson G (relative L2 over all of G).
+  // The sweep tasks are split over (s, k, column block) and reduced across ranks, so it is run on several ranks.
+  TEST_CASE("dyson_no_inversion_picard", "[methods_scf]") {
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/qe/lih_kp222_nbnd16/";
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::qe_source, filepath, "pwscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+    hamilt::pseudopot psp(mf);
+    long nt = ft.nt_f(), ns = mf.nspin(), nk = mf.nkpts_ibz(), nb = mf.nbnd();
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_hf(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_node(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_tau(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+
+    simple_dyson dyson_node(std::addressof(mf), std::addressof(ft), 1e-9, "bisection", false);
+    simple_dyson dyson_tau(std::addressof(mf), std::addressof(ft), 1e-9, "bisection", true);
+
+    // Sigma(tau) = 0.0005 G_HF(tau) with G_HF the Hartree-Fock Green's function at the mu of the Sigma = 0 problem
+    double mu = update_mu(0.0, dyson_node, mf, ft, F, Sigma);
+    dyson_node.solve_dyson(G_hf, F, Sigma, mu);
+    if (context->node_comm.root()) Sigma.local() = 0.0005 * G_hf.local();
+    Sigma.node_sync();
+    mu = update_mu(mu, dyson_node, mf, ft, F, Sigma);
+
+    // Reference: Matsubara-node Dyson solve
+    dyson_node.solve_dyson(G_node, F, Sigma, mu);
+    double G_norm = l2_norm(G_node.local());
+
+    // First call of the flagged solver is the node solve itself
+    dyson_tau.solve_dyson(G_tau, F, Sigma, mu);
+    CHECK(l2_norm(G_tau.local() - G_node.local()) == 0.0);
+
+    // The node-Dyson G is a fixed point of the sweep
+    dyson_tau.solve_dyson(G_tau, F, Sigma, mu);
+    CHECK(l2_norm(G_tau.local() - G_node.local()) / G_norm < 1e-10);
+
+    // Start the sweeps from the Sigma = 0 Green's function
+    if (context->node_comm.root()) G_tau.local() = G_hf.local();
+    G_tau.node_sync();
+    double err_start = l2_norm(G_tau.local() - G_node.local()) / G_norm;
+    for (int it = 0; it < 12; ++it) dyson_tau.solve_dyson(G_tau, F, Sigma, mu);
+    double err_converged = l2_norm(G_tau.local() - G_node.local()) / G_norm;
+    app_log(1, "dyson_no_inversion: |G_tau - G_node|/|G_node| = {:.3e} (start from G_HF: {:.3e})", err_converged, err_start);
+    CHECK(err_start > 1e-3);
+    CHECK(err_converged < 1e-10);
+  }
+
+  // dyson_no_inversion = false (default): repeated solve_dyson calls at a nonzero Sigma return the same G bit for bit,
+  // independent of the G in the array (the Matsubara-node solve is the only path).
+  TEST_CASE("dyson_no_inversion_off", "[methods_scf]") {
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/qe/lih_kp222_nbnd16/";
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::qe_source, filepath, "pwscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+    hamilt::pseudopot psp(mf);
+    long nt = ft.nt_f(), ns = mf.nspin(), nk = mf.nkpts_ibz(), nb = mf.nbnd();
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_first(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_second(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft), 1e-9, "bisection");
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    dyson.solve_dyson(G_first, F, Sigma, mu);
+    if (context->node_comm.root()) Sigma.local() = 0.0005 * G_first.local();
+    Sigma.node_sync();
+    dyson.solve_dyson(G_first, F, Sigma, mu);
+    dyson.solve_dyson(G_second, F, Sigma, mu);
+    CHECK(l2_norm(G_first.local() - G_second.local()) == 0.0);
   }
 
 

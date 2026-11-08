@@ -87,6 +87,13 @@ def run_hf(params, h_int, h_int_exchange=None):
           with ``fix_density=True`` on such a ground state.
         - ``mu_tolerance`` *(float, optional, default ``1e-9``)* — tolerance for the
           chemical potential search.
+        - ``dyson_no_inversion`` *(bool, optional, default ``False``; DLR basis and an
+          orthonormal basis (S = 1) only; tested for ``gw``)* — if ``True``,
+          the Dyson equation is solved without inverting on the Matsubara nodes after the first
+          iteration: G is updated by one imaginary-time Picard sweep per SCF iteration, with exact
+          DLR convolutions and a static reference self-energy (Hermitian part of Σ at the lowest
+          positive Matsubara node). Meant for gapped systems whose scGW stalls or diverges
+          with the node inversion. A restart begins with a node solve.
         - ``div_treatment`` *(str, optional, default ``"gygi"``)* — treatment of the
           Coulomb kernel divergence at q→0. Common choices:
 

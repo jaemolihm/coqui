@@ -65,9 +65,11 @@ class simple_dyson {
 public:
   simple_dyson(mf::MF* MF, imag_axes_ft::IAFT* FT,
                double mu_tol = 1e-9,
-               std::string mu_update_alg = "bisection"):
+               std::string mu_update_alg = "bisection",
+               bool dyson_no_inversion = false):
       _MF(MF), _context(MF->mpi()), _FT(FT), _PSP(hamilt::make_pseudopot(*_MF)),
-      _mu_tol(mu_tol), _mu_update_alg(mu_update_alg), _nts(_FT->nt_f()), _nw(_FT->nw_f()),
+      _mu_tol(mu_tol), _mu_update_alg(mu_update_alg), _dyson_no_inversion(dyson_no_inversion),
+      _nts(_FT->nt_f()), _nw(_FT->nw_f()),
       _ns(_MF->nspin()), _nkpts(_MF->nkpts()), _nkpts_ibz(_MF->nkpts_ibz()), 
       _nbnd(_MF->nbnd()),
       _sH0_skij(math::shm::make_shared_array<Array_view_4D_t>(*_context, {_ns, _nkpts_ibz, _nbnd, _nbnd})),
@@ -86,14 +88,16 @@ public:
       _Timer.add(v);
     }
     _context->comm.barrier();
+    if (_dyson_no_inversion) check_dyson_no_inversion_requirements();
   }
 
   simple_dyson(mf::MF* MF, imag_axes_ft::IAFT* FT,
                std::string H0_S_chkpt,
                double mu_tol = 1e-9,
-               std::string mu_update_alg = "bisection"):
+               std::string mu_update_alg = "bisection",
+               bool dyson_no_inversion = false):
       _MF(MF), _context(_MF->mpi()),
-      _FT(FT), _mu_tol(mu_tol), _mu_update_alg(mu_update_alg),
+      _FT(FT), _mu_tol(mu_tol), _mu_update_alg(mu_update_alg), _dyson_no_inversion(dyson_no_inversion),
       _nts(_FT->nt_f()), _nw(_FT->nw_f()),
       _ns(_MF->nspin()), _nkpts(_MF->nkpts()), _nkpts_ibz(_MF->nkpts_ibz()),
       _nbnd(_MF->nbnd()),
@@ -110,6 +114,7 @@ public:
       _Timer.add(v);
     }
     _context->comm.barrier();
+    if (_dyson_no_inversion) check_dyson_no_inversion_requirements();
   }
 
   simple_dyson(simple_dyson const&) = default;
@@ -120,7 +125,9 @@ public:
   ~simple_dyson(){}
 
   /**
-   * Solve Dyson's equation and update _G_tskij_view for current _mu, _F, and _Sigma
+   * Solve Dyson's equation and update _G_tskij_view for current _mu, _F, and _Sigma.
+   * With dyson_no_inversion, every call after the first one with a nonzero Sigma updates G by an
+   * imaginary-time Picard sweep instead (solve_dyson_tau), starting from the G in _G_shm.
    */
   template<typename G_t, typename F_t, typename Sigma_t>
   void solve_dyson(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
@@ -131,11 +138,6 @@ public:
    * Compute the eigenvalues of _F + _Sigma(iwn)
    * @param spectra - [OUTPUT] eigenvalues, (nw, ns, nkpts_ibz, nbnd)
    */
-  // COQUI_DYSON_TAU_SWEEPS=<n>: after the first (Matsubara-node) solve, G is updated by n Picard sweeps of the
-  // imaginary-time Dyson equation G = G0 + G0 * Sigma * G (exact DLR convolutions, values on the tau nodes),
-  // started from the G in _G_shm (the previous SCF iteration). G0 from the eigenpairs of H0 + F (S = 1).
-  template<typename G_t, typename F_t, typename Sigma_t>
-  void solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu, int nsweep);
   template<typename X_t, typename Xt_t>
   void compute_eigenspectra(const X_t&_sF_skij, const Xt_t &_Sigma_shm, nda::array<ComplexType, 4> &spectra);
 
@@ -153,12 +155,38 @@ public:
   }
 
 private:
+  /**
+   * Update G in _G_shm by one Picard sweep of the imaginary-time Dyson equation, without Matsubara nodes.
+   *
+   * Called by solve_dyson after its first (Matsubara-node) solve when dyson_no_inversion is set and Sigma is nonzero.
+   * The node solve inverts (iw + mu) S - H0 - F - Sigma(iw) on the DLR Matsubara nodes and refits G(tau); that
+   * solve-and-refit amplifies the worst-conditioned DLR tau directions of the SCF response, which makes some gapped
+   * systems stall or diverge in scGW. This path never touches the Matsubara nodes: it uses exact DLR convolutions on
+   * the tau nodes,
+   *     G <- G0' + G0' * Sigma * G - (G0' Sigma_ref) * G,    (f * g)(tau) = int_0^beta f(tau - tau') g(tau') dtau',
+   * where G0' = [(iw + mu) - H0 - F - Sigma_ref]^-1 and Sigma_ref is the Hermitian part of Sigma at the lowest
+   * positive Matsubara node. The fixed point is the Dyson equation G = G0 + G0 * Sigma * G for G0 from H0 + F;
+   * Sigma_ref only shrinks the contraction factor.
+   *
+   * G in _G_shm is the previous call's result and is carried between SCF iterations: a restart begins with a node
+   * solve, and a run that stops before convergence leaves a G that is one sweep from the previous one, not the
+   * Dyson solution of the stored (F, Sigma). Limits: DLR basis only, S = 1 (checked at construction), tested on
+   * gapped systems.
+   */
+  template<typename G_t, typename F_t, typename Sigma_t>
+  void solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
+
+  /// Abort unless the IAFT basis is DLR and the overlap matrix is the identity (requirements of solve_dyson_tau).
+  void check_dyson_no_inversion_requirements();
+
   mf::MF* _MF = nullptr;
   std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> _context;
   imag_axes_ft::IAFT* _FT = nullptr;
   std::shared_ptr<hamilt::pseudopot> _PSP;
   double _mu_tol = 1e-9;
   std::string _mu_update_alg = "bisection";
+  // true: solve_dyson updates G by imaginary-time Picard sweeps (solve_dyson_tau) after its first call
+  bool _dyson_no_inversion = false;
   // if set, update_mu returns this value instead of searching for the target number of electrons
   std::optional<double> _fixed_mu;
 
@@ -173,7 +201,7 @@ private:
   sArray_t<Array_view_4D_t> _sS_skij;
 
   utils::TimerManager _Timer;
-  bool _tau_ready = false;   // G in _G_shm comes from a previous solve (for COQUI_DYSON_TAU_SWEEPS)
+  bool _G_has_previous_solution = false;  // true once solve_dyson has stored a G in _G_shm (the start of the next Picard sweep)
 
 public:
   const mf::MF* MF() const { return _MF; }
@@ -183,6 +211,7 @@ public:
   const hamilt::pseudopot* PSP() const { return _PSP.get(); }
   double mu_tol() const { return _mu_tol; }
   std::string mu_update_alg() const { return _mu_update_alg; }
+  bool dyson_no_inversion() const { return _dyson_no_inversion; }
   std::optional<double>& fixed_mu() { return _fixed_mu; }
   const std::optional<double>& fixed_mu() const { return _fixed_mu; }
   auto H0() const& { return _sH0_skij.local(); }

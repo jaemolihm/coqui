@@ -93,10 +93,52 @@ namespace imag_axes_ft {
 
       // DLR coefficients of fermionic values on the tau nodes (first axis = tau node, cppdlr order).
       template <typename A> auto it_vals2coefs(A const &a) const { return _it_ops.vals2coefs(a); }
-      // Values on the tau nodes of h(tau) = int_0^beta f(tau - tau') g(tau') dtau' (antiperiodic extension),
-      // from the DLR coefficients of f and g (rank 3: tau x m x n and tau x n x p). Exact for DLR functions,
-      // O(r^2 m n + r m n p) (Kaye, Strand, Golez, arXiv:2307.08566, App. A; cppdlr::imtime_ops::convolve).
-      template <typename A> auto it_convolve(A const &fc, A const &gc) const { return _it_ops.convolve(beta, fc, gc); }
+
+      // Tau nodes of the DLR grid in physical units: tau_i and beta - tau_i, both from the relative-format nodes
+      // (negative relative nodes lie near beta), so that beta - tau keeps full relative precision near tau = beta.
+      std::pair<nda::array<double, 1>, nda::array<double, 1>> it_tau_and_beta_minus_tau() const {
+        long r = _it_ops.rank();
+        nda::array<double, 1> tau(r), beta_minus_tau(r);
+        for (long i = 0; i < r; ++i) {
+          double t_rel = _it_ops.get_itnodes(i);
+          tau(i) = beta * cppdlr::rel2abs(t_rel);
+          beta_minus_tau(i) = beta * ((t_rel < 0) ? -t_rel : 1.0 - t_rel);
+        }
+        return {tau, beta_minus_tau};
+      }
+
+      // Discrete Hilbert transform along the tau-node axis of DLR coefficients c (r x m x n): (H c)(j) = sum_k hilb(j,k) c(k).
+      // The product of a fixed operand with H is reused across it_convolve calls.
+      nda::array<ComplexType, 3> it_hilbert(nda::array_const_view<ComplexType, 3> c) const {
+        return cppdlr::arraymult(conv_hilb, c);
+      }
+
+      // Ordinary fermionic convolution h(tau) = int_0^beta f(tau - tau') g(tau') dtau' (antiperiodic extension) on the
+      // tau nodes, from the DLR coefficients fc (r x m x n), gc (r x n x p) and their Hilbert transforms
+      // Hfc = it_hilbert(fc), Hgc = it_hilbert(gc). Exact for DLR functions, O(r^2 m n + r m n p) given Hfc, Hgc
+      // (Kaye, Strand, Golez, arXiv:2307.08566, App. A).
+      // Design decision: cppdlr::imtime_ops::convolve is not used. Its rank-3 overload (pinned cppdlr 7a0f60c) evaluates
+      // arraymult(hilb, fc) and arraymult(hilb, gc) inside the loop over the r tau nodes, which costs O(r^3 m n); the
+      // matrices hilb and tcf2it it needs are private, so they cannot be reused from outside. They are rebuilt in
+      // build_convolution_matrices(), and the Hilbert products are taken out of the call so that those of a fixed operand
+      // are computed once.
+      nda::array<ComplexType, 3> it_convolve(nda::array_const_view<ComplexType, 3> fc, nda::array_const_view<ComplexType, 3> gc,
+                                             nda::array_const_view<ComplexType, 3> Hfc, nda::array_const_view<ComplexType, 3> Hgc) const {
+        long r = _it_ops.rank();
+        utils::check(fc.extent(0) == r and gc.extent(0) == r and Hfc.shape() == fc.shape() and Hgc.shape() == gc.shape()
+                     and fc.extent(2) == gc.extent(1),
+                     "imag_axes_ft::dlr::DLR::it_convolve: incompatible shapes.");
+        auto all = nda::range::all;
+        // Diagonal contribution: tcf2it * (fc .* gc)
+        auto fg_prod = nda::array<ComplexType, 3>(r, fc.extent(1), gc.extent(2));
+        for (long i = 0; i < r; ++i) fg_prod(i, all, all) = cppdlr::matmul(fc(i, all, all), gc(i, all, all));
+        auto h_diag = cppdlr::arraymult(conv_tcf2it, fg_prod);
+        // Off-diagonal contribution: cf2it * (Hfc .* gc + fc .* Hgc)
+        for (long i = 0; i < r; ++i)
+          fg_prod(i, all, all) = cppdlr::matmul(Hfc(i, all, all), gc(i, all, all)) + cppdlr::matmul(fc(i, all, all), Hgc(i, all, all));
+        nda::array<ComplexType, 3> h = beta * (h_diag + cppdlr::arraymult(_it_ops.get_cf2it(), fg_prod));
+        return h;
+      }
 
       void metadata_log(int level = 1) const {
         app_log(level, "  Mesh details on the imaginary axis");
@@ -370,6 +412,27 @@ namespace imag_axes_ft {
         Tlt = nda::matrix<ComplexType>(T_real);
       }
 
+      // conv_hilb and conv_tcf2it of it_convolve, built from the public data of _it_ops exactly as the private
+      // cppdlr::imtime_ops::convolve_init does (relative-format nodes: the branch on the sign of dlr_it selects the
+      // kernel at t = 1 or t = 0).
+      void build_convolution_matrices() {
+        long r = _it_ops.rank();
+        auto dlr_rf = _it_ops.get_rfnodes();
+        auto dlr_it = _it_ops.get_itnodes();
+        auto cf2it = _it_ops.get_cf2it();
+        conv_hilb = nda::matrix<double>(r, r);
+        conv_tcf2it = nda::matrix<double>(r, r);
+        for (long j = 0; j < r; ++j) {
+          for (long k = 0; k < r; ++k) {
+            // "Discrete Hilbert transform" matrix 1/(dlr_rf(j) - dlr_rf(k)), zero on the diagonal
+            conv_hilb(j, k) = (j == k) ? 0.0 : 1.0 / (dlr_rf(j) - dlr_rf(k));
+            // cf2it times the imaginary time variable tau
+            if (dlr_it(j) > 0) conv_tcf2it(j, k) = -(dlr_it(j) + cppdlr::k_it(1.0, dlr_rf(k))) * cf2it(j, k);
+            else               conv_tcf2it(j, k) = -(dlr_it(j) - cppdlr::k_it(0.0, dlr_rf(k))) * cf2it(j, k);
+          }
+        }
+      }
+
       void init(bool print_meta_log) {
         lambda = beta * wmax;
         utils::check(lambda > 0.0, "Invalid value of lambda, {}, in imag_axes_ft::dlr::DLR.", lambda);
@@ -426,6 +489,8 @@ namespace imag_axes_ft {
         Ttt_bf = nda::eye<ComplexType>(nt_b);
         Ttt_fb = nda::eye<ComplexType>(nt_f); 
 
+        build_convolution_matrices();
+
         // tau -> coefficients
         auto it2cf  = _it_ops.vals2coefs(nda::eye<ComplexType>(nt_f));
         Tct_ff = it2cf;
@@ -444,6 +509,9 @@ namespace imag_axes_ft {
       double lambda = 0.0;
 
       cppdlr::imtime_ops _it_ops;
+      // matrices of it_convolve (see build_convolution_matrices)
+      nda::matrix<double> conv_hilb;
+      nda::matrix<double> conv_tcf2it;
       cppdlr::imfreq_ops _if_ops_f;
       cppdlr::imfreq_ops _if_ops_b;
 
