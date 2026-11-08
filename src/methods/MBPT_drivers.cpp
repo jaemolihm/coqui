@@ -1205,6 +1205,27 @@ std::optional<double> read_fixed_mu(mpi_context_t& mpi,
 }
 
 /**
+ * Whether the ground state in the checkpoint group `input_grp` ("scf" or "embed") ended on an imaginary-time Picard
+ * sweep of the Dyson equation (chkpt::dump_dyson_no_inversion, written by scf_loop). run_lr then differentiates the
+ * sweep's fixed point (imaginary-time lr_dyson kernel); false for checkpoints without the mark, which are all
+ * checkpoints of a Matsubara-node ground state.
+ */
+template<typename mpi_context_t>
+bool read_dyson_no_inversion(mpi_context_t& mpi,
+                             const std::string& input_file,
+                             const std::string& input_grp)
+{
+  int marked = 0;
+  if (mpi.comm.root()) {
+    h5::file file(input_file, 'r');
+    auto root_grp = h5::group(file);
+    marked = (root_grp.has_subgroup(input_grp) and root_grp.open_group(input_grp).has_dataset("dyson_no_inversion"));
+  }
+  mpi.comm.broadcast_n(&marked, 1, 0);
+  return marked != 0;
+}
+
+/**
  * Read the div_treatment the scGW run used (stashed in the checkpoint scf
  * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
  * dataset must be regenerated. LR/GW evaluators must reuse this value so
@@ -1844,6 +1865,34 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     }
   }
 
+  // Dyson kernel of the ground state: the imaginary-time convolution iff the ground state ended on a Picard sweep.
+  // Only a checkpoint G(τ) is the sweep's fixed point; the "mf_dft" G0 is built from the mean field.
+  const bool dyson_tau = (unperturbed == "checkpoint") and read_dyson_no_inversion(*mpi, input_file, input_grp);
+  utils::check(!io::check_child_exists(pt, "dyson_no_inversion"),
+               "run_lr_calc: 'dyson_no_inversion' is a ground-state input. run_lr takes the Dyson kernel from the "
+               "checkpoint ({}/{}/dyson_no_inversion present: imaginary-time convolution, absent: Matsubara nodes); "
+               "remove the argument.", input_file, input_grp);
+  // Iteration whose G(τ) and Dm the imaginary-time kernel expands about (-1: final_iter)
+  long gs_iter = input_iter;
+  if (dyson_tau) {
+    h5::file file(input_file, 'r');
+    auto grp = h5::group(file).open_group(input_grp);
+    utils::check(grp.has_dataset("final_iter"),
+                 "run_lr_calc: Checkpoint {}/{}/ missing 'final_iter'. SCF calculation may not have completed.",
+                 input_file, input_grp);
+    long final_iter = 0;
+    h5::h5_read(grp, "final_iter", final_iter);
+    // An earlier iteration of the run, or of a run before a restart, may be a Matsubara-node solve
+    utils::check(input_iter == -1 or input_iter == final_iter,
+                 "run_lr_calc: {}/{}/dyson_no_inversion marks a ground state whose last Dyson solve was an "
+                 "imaginary-time Picard sweep, so input_iter must be the final iteration {} (got {}).",
+                 input_file, input_grp, final_iter, input_iter);
+    gs_iter = final_iter;
+  }
+  app_log(1, "LR Dyson kernel: {}", dyson_tau
+              ? fmt::format("imaginary-time convolution ({}/dyson_no_inversion)", input_grp)
+              : std::string("Matsubara nodes"));
+
   utils::TimerManager lr_init_timer;
   for (auto& v : {"LR_INIT", "LR_INIT_DYSON", "LR_INIT_READ_SCF",
                   "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W", "LR_INIT_GS_LOCAL", "LR_DUMP"}) {
@@ -1858,7 +1907,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   utils::check(h0_source == "compute" || h0_source == "checkpoint",
                "run_lr_calc: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
   lr_init_timer.start("LR_INIT_DYSON");
-  simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, prefix);
+  simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, prefix, 1e-9, "bisection", dyson_tau);
   lr_init_timer.stop("LR_INIT_DYSON");
 
   utils::memlog("run_lr_calc: after simple_dyson ctor");
@@ -1898,12 +1947,21 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_READ_SCF");
 
-    // Compute G from F and Sigma via Dyson equation
-    app_log(2, "Computing unperturbed Green's function from checkpoint...");
-    app_log(2, "  h0_source = {}", h0_source);
-    app_log(2, "  mu = {:.8f}", mu);
     lr_init_timer.start("LR_INIT_UPDATE_G");
-    update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+    if (dyson_tau) {
+      // The stored G(τ) and Dm are the ground state's own: a Matsubara-node rebuild from the stored (F, Σ, μ) is the
+      // node solution, not the Picard fixed point the imaginary-time kernel differentiates
+      app_log(2, "Reading the unperturbed Green's function and density matrix from the checkpoint "
+                 "({}/iter{})...", input_grp, gs_iter);
+      sG_tskij = read_greens_function(*mpi, mf.get(), input_file, gs_iter, input_grp);
+      chkpt::read_dm(mpi->node_comm, prefix, gs_iter, sDm_skij, input_grp);
+    } else {
+      // Compute G from F and Sigma via Dyson equation
+      app_log(2, "Computing unperturbed Green's function from checkpoint...");
+      app_log(2, "  h0_source = {}", h0_source);
+      app_log(2, "  mu = {:.8f}", mu);
+      update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+    }
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   }
@@ -2335,6 +2393,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_tol      = precond_tol;
   p.precond_max_iter = precond_max_iter;
   p.hessian_stationary = hessian_stationary;
+  // GS state of the node density functional of the imaginary-time kernel (fix_density at q=Γ)
+  p.F_skij           = &sF_skij;
+  p.Sigma_tskij      = &sSigma_tskij;
+  p.mu               = mu;
 
   driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 

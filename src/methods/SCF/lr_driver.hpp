@@ -159,6 +159,7 @@ struct embedding_info {
  */
 struct lr_params {
   using sArray_4D_t = math::shm::shared_array<nda::array_view<ComplexType, 4>>;
+  using sArray_5D_t = math::shm::shared_array<nda::array_view<ComplexType, 5>>;
 
   // --- Active terms ---
   /// The operator's kernel K_total, applied every iteration.
@@ -227,6 +228,14 @@ struct lr_params {
   /// Divergence treatments the unperturbed run used, read from the checkpoint.
   std::string div_treatment = "gygi";       ///< correlation / GW head
   std::string hf_div_treatment = "gygi";    ///< HF exchange Madelung term
+
+  // --- Ground state of the imaginary-time Dyson kernel ---
+  /// GS Fock matrix, self-energy and chemical potential, read only when the lr_driver's simple_dyson has
+  /// dyson_no_inversion: fix_density at q=Γ builds the node density functional of the GS μ search from them
+  /// (lr_dyson::build_dmu_response). Ignored by the Matsubara kernel.
+  const sArray_4D_t* F_skij = nullptr;
+  const sArray_5D_t* Sigma_tskij = nullptr;
+  double mu = 0.0;
 
   // --- Optional inputs ---
   const sArray_4D_t* sDeltaX_left = nullptr;   ///< δ^q X, with sDeltaX_right: IBC
@@ -594,6 +603,7 @@ private:
   // --- Cached operands (constant across perturbations and SCF iterations) ---
   // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
   // *address* of this array, so a per-call local would silently invalidate it.
+  // Empty in the imaginary-time Dyson kernel, which reads G(τ) directly.
   std::optional<sArray_t<Array_view_5D_t>> _sG_wskij;
   std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), q-dist
   std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist

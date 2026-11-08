@@ -295,6 +295,12 @@ auto scf_loop(MBState &mb_state, dyson_type &dyson, eri_t &mb_eri, const imag_ax
   mb_eri.release_dZ_cache();
   Timer.stop("SCF_TOTAL");
 
+  // Mark a ground state whose last Dyson solve was an imaginary-time Picard sweep (see chkpt::dump_dyson_no_inversion).
+  // A restart without the sweep clears the mark of the earlier run.
+  if (dyson.dyson_no_inversion() or restart)
+    chkpt::dump_dyson_no_inversion(mpi->comm, mb_state.coqui_prefix+".mbpt.h5",
+                                   dyson.dyson_no_inversion() and dyson.last_solve_was_tau());
+
   // Run-status marker, written only once the loop has exited: a run killed
   // mid-flight leaves no "scf_status" dataset, which readers take as unknown.
   chkpt::write_scf_status(mpi->comm, mb_state.coqui_prefix,
@@ -469,6 +475,9 @@ double qp_scf_loop(
   // mu is searched here: drop the fixed-mu mark of an earlier scf_loop run on this checkpoint
   if (restart)
     chkpt::dump_fixed_mu(mpi->comm, mb_state.coqui_prefix+".mbpt.h5", std::nullopt);
+  // qpGW solves no Dyson equation: drop the Picard-sweep mark of an earlier scf_loop run on this checkpoint
+  if (restart)
+    chkpt::dump_dyson_no_inversion(mpi->comm, mb_state.coqui_prefix+".mbpt.h5", false);
   Timer.stop("WRITE");
 
   double Heff_conv;

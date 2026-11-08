@@ -16,3 +16,10 @@ if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 16)
   add_mpi_unit_test(test_${TEST_ID}_dyson_picard_np16 "${PROJECT_UNIT_TEST_DIR}/test_${TEST_ID}" 16 "dyson_no_inversion_picard")
   set_tests_properties(test_${TEST_ID}_dyson_picard_np16 PROPERTIES WORKING_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
 endif()
+
+# Band split of the imaginary-time LR Dyson kernel (lr_dyson_tau_vs_node): the fixture has 8 k-points, so 16 ranks leave
+# 2 ranks per k and split the band axes of lr_dyson_tau_pgrid
+if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 16)
+  add_mpi_unit_test(test_${TEST_ID}_lr_dyson_tau_np16 "${PROJECT_UNIT_TEST_DIR}/test_${TEST_ID}" 16 "lr_dyson_tau_vs_node")
+  set_tests_properties(test_${TEST_ID}_lr_dyson_tau_np16 PROPERTIES WORKING_DIRECTORY ${PROJECT_UNIT_TEST_DIR})
+endif()

@@ -147,6 +147,51 @@ namespace bdft_tests {
     comm.barrier();
   }
 
+  // The "dyson_no_inversion" mark of a checkpoint group (read by run_lr to select the imaginary-time Dyson kernel) is
+  // written only for a Picard-sweep ground state, rewritten idempotently, and removed again by a later run without
+  // one; a group without the mark keeps the old layout.
+  TEST_CASE("dump_dyson_no_inversion", "[methods][mbpt][chkpt]") {
+    auto& mpi_context = utils::make_unit_test_mpi_context();
+    auto& comm = mpi_context->comm;
+    std::string fn = "dump_dyson_no_inversion_test.mbpt.h5";
+    if (comm.root()) {
+      h5::file file(fn, 'w');
+      h5::group grp(file);
+      grp.create_group("scf");
+    }
+    comm.barrier();
+
+    auto has = [&](std::string g) {
+      int r = 0;
+      if (comm.root()) {
+        h5::file file(fn, 'r');
+        h5::group grp(file);
+        r = grp.has_subgroup(g) and grp.open_group(g).has_dataset("dyson_no_inversion");
+      }
+      comm.broadcast_n(&r, 1, 0);
+      return r == 1;
+    };
+
+    // No sweep: nothing is written, not even a missing group
+    methods::chkpt::dump_dyson_no_inversion(comm, fn, false);
+    methods::chkpt::dump_dyson_no_inversion(comm, fn, false, "embed");
+    REQUIRE(not has("scf"));
+    REQUIRE(not has("embed"));
+
+    methods::chkpt::dump_dyson_no_inversion(comm, fn, true);
+    methods::chkpt::dump_dyson_no_inversion(comm, fn, true);  // a second write replaces the first
+    REQUIRE(has("scf"));
+    REQUIRE(not has("embed"));
+
+    // A later run on the same checkpoint without the sweep clears the mark
+    methods::chkpt::dump_dyson_no_inversion(comm, fn, false);
+    REQUIRE(not has("scf"));
+
+    comm.barrier();
+    if (comm.root()) std::remove(fn.c_str());
+    comm.barrier();
+  }
+
 
   // chkpt::unfold_scf_checkpoint on a synthetic dyson checkpoint (random Dm, G, F, Sigma, H0, S on the IBZ of qe_lih223_sym,
   // which has time-reversal k) against the copy (conjugate at time-reversal k) from kp_to_ibz(k) done by hand.

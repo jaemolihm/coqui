@@ -248,16 +248,17 @@ void read_ovlp(mpi3::shared_communicator node_comm, std::string output, shared_a
 }
 
 template<typename shared_array_t>
-void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm) {
+void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm,
+             std::string const& h5_grp) {
   if (node_comm.root()) {
     std::string filename = output + ".mbpt.h5";
     h5::file file(filename, 'r');
-    auto scf_grp = h5::group(file).open_group("scf");
+    auto scf_grp = h5::group(file).open_group(h5_grp);
 
     if (iter == -1) h5::h5_read(scf_grp, "final_iter", iter);
 
     utils::check(scf_grp.has_subgroup("iter"+std::to_string(iter)),
-                 "read_dm: \"scf/iter{}\" h5 group does not exist.", iter);
+                 "read_dm: \"{}/iter{}\" h5 group does not exist.", h5_grp, iter);
 
     auto Dm_loc = Dm.local();
     auto iter_grp = scf_grp.open_group("iter"+std::to_string(iter));
@@ -603,7 +604,8 @@ template long read_scf(
 
 template void read_H0(mpi3::shared_communicator, std::string, sArray_t<Array_view_4D_t>&);
 template void read_ovlp(mpi3::shared_communicator, std::string, sArray_t<Array_view_4D_t>&);
-template void read_dm(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_4D_t>&);
+template void read_dm(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_4D_t>&,
+                      std::string const&);
 
 template long read_qpscf(
     mpi3::shared_communicator, sArray_t<Array_view_4D_t>&,
@@ -893,6 +895,33 @@ void dump_fixed_mu(communicator_t& comm, std::string filename, std::optional<dou
 }
 
 template<typename communicator_t>
+void dump_dyson_no_inversion(communicator_t& comm, std::string filename, bool tau_solve,
+                             std::string const& grp_name) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_dyson_no_inversion: File {} does not exist. Cannot append.", filename);
+    auto stale = [&]() {
+      h5::file file(filename, 'r');
+      h5::group grp(file);
+      return grp.has_subgroup(grp_name) and grp.open_group(grp_name).has_dataset("dyson_no_inversion");
+    };
+    if (tau_solve) {
+      h5::file file(filename, 'a');
+      h5::group grp(file);
+      auto mark_grp = grp.has_subgroup(grp_name) ? grp.open_group(grp_name) : grp.create_group(grp_name);
+      if (mark_grp.has_dataset("dyson_no_inversion"))
+        H5Ldelete(h5::hid_t(mark_grp), "dyson_no_inversion", H5P_DEFAULT);
+      h5::h5_write(mark_grp, "dyson_no_inversion", 1l);
+    } else if (stale()) {
+      h5::file file(filename, 'a');
+      h5::group grp(file);
+      H5Ldelete(h5::hid_t(grp.open_group(grp_name)), "dyson_no_inversion", H5P_DEFAULT);
+    }
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
 bool read_qp_params(communicator_t& comm, std::string filename,
                     std::string& off_diag_mode, double& eta,
                     std::string& ac_alg, int& Nfit) {
@@ -939,6 +968,7 @@ template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
 template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
 template void dump_fixed_mu(mpi3::communicator&, std::string, std::optional<double>, std::string const&);
+template void dump_dyson_no_inversion(mpi3::communicator&, std::string, bool, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,
                           sArray_t<Array_view_4D_t>&, sArray_t<Array_view_3D_t>&,

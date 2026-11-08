@@ -80,7 +80,8 @@ namespace methods {
   void read_ovlp(mpi3::shared_communicator node_comm, std::string output, shared_array_t &S);
 
   template<typename shared_array_t>
-  void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm);
+  void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm,
+               std::string const& h5_grp = "scf");
 
   /**
    * Write a full-BZ checkpoint from a dyson-type checkpoint of a calculation on the IBZ.
@@ -274,6 +275,17 @@ namespace methods {
   template<typename communicator_t>
   void dump_fixed_mu(communicator_t& comm, std::string filename, std::optional<double> mu,
                      std::string const& grp_name = "scf");
+
+  /**
+   * Record on the group `grp_name` that the ground state's Green's function was last updated by an
+   * imaginary-time Picard sweep (simple_dyson::last_solve_was_tau), as the dataset "dyson_no_inversion" (value 1; its presence is the mark).
+   * run_lr reads it to differentiate the sweep's fixed point instead of the Matsubara-node solution. Written only
+   * when `tau_solve` is true; otherwise a stale mark of an earlier run on the same checkpoint is removed and
+   * nothing is written, so a ground state without the sweep leaves the checkpoint format unchanged.
+   */
+  template<typename communicator_t>
+  void dump_dyson_no_inversion(communicator_t& comm, std::string filename, bool tau_solve,
+                               std::string const& grp_name = "scf");
 
   /**
    * Read the qpGW AC parameters written by dump_qp_params. Returns true and

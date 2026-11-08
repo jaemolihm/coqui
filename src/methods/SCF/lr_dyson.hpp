@@ -23,6 +23,7 @@
 #define COQUI_LR_DYSON_HPP
 
 #include <optional>
+#include <vector>
 
 #include "utilities/Timer.hpp"
 #include "IO/app_loggers.h"
@@ -149,6 +150,17 @@ inline std::array<long, 5> lr_dyson_tau_pgrid(long nproc, long nkpts_ibz) {
  *   - Δμ is the chemical potential shift (for particle conservation at q=0)
  *
  * Note: The ordering follows bra-ket convention: ΔG(k) = ⟨ψ_{k+q}|ΔG|ψ_k⟩
+ *
+ * Two kernels, selected by simple_dyson::dyson_no_inversion() of the dyson passed to the constructor, each the exact
+ * derivative of the ground-state (GS) Dyson map it names:
+ *   - Matsubara nodes (false): the product above at the nodes iω_n from the cached G(iω) (set_cached_G_omega),
+ *     the derivative of the GS Green's function obtained by inverting on the nodes.
+ *   - Imaginary time (true): the convolution in τ on the DLR nodes with the GS G(τ) (set_G_tau),
+ *       ΔG = G_{k+q} * [X δ(τ) + ΔΣ_k] * G_k,   X = ΔH0 + ΔF + ΔV_QPGW − Δμ S,
+ *     the derivative of the fixed point G = G0 + G0 * Σ * G of the GS imaginary-time Picard sweeps
+ *     (simple_dyson::solve_dyson_tau). The two Jacobians differ at the DLR-grid floor, ~5e-9 on a large-λ grid.
+ * With fix_density at q=Γ, the GS chemical potential is searched on the Matsubara nodes in both modes (update_mu), so
+ * in the imaginary-time kernel Δμ is taken from the node functional of the GS density (build_dmu_response).
  */
 class lr_dyson {
 public:
@@ -193,6 +205,32 @@ public:
     }
     _cached_G_wskij = G_wskij;
   }
+
+  /**
+   * @brief Set the GS Green's function G(τ) of the imaginary-time kernel
+   *
+   * Required before solve_lr_dyson when the dyson passed to the constructor has dyson_no_inversion(); the Matsubara
+   * kernel takes set_cached_G_omega() instead. The caller retains ownership; the pointed-to array must outlive all
+   * solve_lr_dyson calls.
+   *
+   * @param sG_tskij - [INPUT] Pointer to the shared GS G(τ) (nt, ns, nk, nb, nb), the stored output of the GS
+   */
+  void set_G_tau(const sArray_t<Array_view_5D_t>* sG_tskij) {
+    // Same invalidation as set_cached_G_omega: the Δμ response is a function of G and S alone.
+    if (_sG_tskij != sG_tskij) {
+      _dN_dmu_cached = false;
+      _cached_dN_dmu = 0.0;
+      _dG_dmu_tskij.reset();
+      _sdDm_dmu_skij.reset();
+      _sdNnode_dX_skij.reset();
+      _sdNnode_dSigma_tskij.reset();
+    }
+    _sG_tskij = sG_tskij;
+  }
+
+  /// True iff the LR Dyson kernel is the imaginary-time convolution (set_G_tau), false for the Matsubara-node
+  /// product (set_cached_G_omega).
+  bool tau_kernel() const { return _dyson.dyson_no_inversion(); }
 
   /**
    * @brief Solve full LR Dyson equation
@@ -275,13 +313,18 @@ public:
    * Each rank computes whole (s, k) blocks over all ω from the node-replicated
    * G(iω); the nodes' blocks are combined by one internode sum. Collective on comm.
    *
+   * In the imaginary-time kernel the pass is ΔDm(k) = −T_β · [G_{k+q} X G_k](τ) per (s, k) with the τ convolution
+   * (no c_ω weights), and `sDeltaSigma_src` is the ΔΣ(τ) behind `sDeltaDm_src`: only the Δμ of fix_density reads it
+   * (ΔN of the GS density functional, see build_dmu_response). Ignored by the Matsubara kernel.
+   *
    * @return the Δμ used, as solve_lr_dyson
    */
   double solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                                 const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
                                 const sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                 const sArray_t<Array_view_4D_t>* sDeltaDm_src,
-                                bool fix_density);
+                                bool fix_density,
+                                const sArray_t<Array_view_5D_t>* sDeltaSigma_src = nullptr);
 
   /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
@@ -312,11 +355,25 @@ public:
    * allocates the ~ΔG-sized dG/dμ(τ); lr_driver calls it exactly when
    * `fix_density && is_q_gamma()`, so no other path pays for it.
    *
-   * Requires: set_cached_G_omega() must have been called first.
+   * Requires: set_cached_G_omega() (set_G_tau() in the imaginary-time kernel) must have been called first.
+   *
+   * Imaginary-time kernel: dG/dμ(τ) = −G*G and dDm/dμ come from the τ pass at X = −S, but the GS chemical potential is
+   * searched on the Matsubara nodes, N(μ) = spin Σ_k w_k Σ_ω c_ω Tr[G_k(iω)] with G_k(iω) = [(iω+μ)S − H0 − F − Σ_k(iω)]⁻¹
+   * of the GS (F, Σ, μ). With P_k = spin w_k Σ_ω c_ω G_k(iω)² and Q_k(τ) = spin w_k Σ_ω c_ω Twt(ω,τ) G_k(iω)²,
+   *   ΔN_node = Σ_k Tr[P_k X] + Σ_{τ,k} Tr[Q_k(τ) ΔΣ_k(τ)],
+   * which fix_density sets to zero: Δμ = −ΔN_node(Δμ=0) / dN_node/dμ, dN_node/dμ = −Σ_k Tr[P_k S] (= dN_dmu()).
+   * P_k and Q_k(τ) are kept (one ΔG(τ)-sized shared array). The GS state (F, Σ, μ) is required there and ignored by
+   * the Matsubara kernel.
+   *
+   * @param sF_skij       - [INPUT] GS Fock matrix (ns, nk, nb, nb), imaginary-time kernel only
+   * @param sSigma_tskij  - [INPUT] GS self-energy (nt, ns, nk, nb, nb), imaginary-time kernel only
+   * @param mu            - [INPUT] GS chemical potential, imaginary-time kernel only
    *
    * @throws std::runtime_error if q≠0
    */
-  void build_dmu_response();
+  void build_dmu_response(const sArray_t<Array_view_4D_t>* sF_skij = nullptr,
+                          const sArray_t<Array_view_5D_t>* sSigma_tskij = nullptr,
+                          double mu = 0.0);
 
   /// dN/dμ, the density of states at the Fermi level. Valid once
   /// build_dmu_response() has run; zero before that.
@@ -342,6 +399,7 @@ public:
     app_log(level, "{0}  - Alloc (dist arrays):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_ALLOC"), _Timer.number_of_calls("LR_DYSON_ALLOC"));
     app_log(level, "{0}  - ΔΣ(τ)->ΔΣ(iω):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_TAU_TO_W"), _Timer.number_of_calls("LR_DYSON_TAU_TO_W"));
     app_log(level, "{0}  - LR Dyson loop:              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_LOOP"), _Timer.number_of_calls("LR_DYSON_LOOP"));
+    app_log(level, "{0}  - τ convolution kernel:       {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_TAU_KERNEL"), _Timer.number_of_calls("LR_DYSON_TAU_KERNEL"));
     app_log(level, "{0}  - Redistribute ΔG(iω):        {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_REDIST"), _Timer.number_of_calls("LR_DYSON_REDIST"));
     app_log(level, "{0}  - ΔG(iω)->ΔG(τ):              {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_G_W_TO_T"), _Timer.number_of_calls("LR_DYSON_G_W_TO_T"));
     app_log(level, "{0}  - Gather ΔG(τ):               {1:8.3f} sec  {2:4d} calls", indent, _Timer.elapsed("LR_DYSON_GATHER"), _Timer.number_of_calls("LR_DYSON_GATHER"));
@@ -417,6 +475,35 @@ private:
       double Delta_mu,
       const DeltaF_t* sDeltaVcorr_skij);
 
+  // Imaginary-time kernel (dyson_no_inversion): the same contract as solve_lr_dyson_impl with ΔΣ(τ) given directly.
+  // Each rank forms its (k, i, j) block of ΔG(τ) on lr_dyson_tau_pgrid by two DLR convolutions of the GS G(τ),
+  //   F_blk = G_{k+q}[:, i, :] · X + G_{k+q}[:, i, :] * ΔΣ_k,   ΔG_blk = F_blk * G_k[:, :, j],
+  // from node-shared inputs only (no communication), then hands the block array to finalize_DeltaG_tau.
+  template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
+  void solve_lr_dyson_tau_impl(
+      DeltaDm_t& sDeltaDm_skij,
+      const DeltaH0_t& sDeltaH0_skij,
+      const DeltaF_t& sDeltaF_skij,
+      const sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
+      double Delta_mu,
+      const DeltaF_t* sDeltaVcorr_skij);
+
+  // Tail shared by both kernels, on a ΔG(τ) distributed on lr_dyson_tau_pgrid: ΔDm = −ΔG(τ=β⁻) on the same blocks,
+  // gathered into sDeltaDm_skij, then ΔG(τ) itself retained in _dDeltaG_tau_buffer for materialize_DeltaG_tau.
+  template<typename DeltaDm_t>
+  void finalize_DeltaG_tau(dArray_5D_t&& dDeltaG_tskij, DeltaDm_t& sDeltaDm_skij);
+
+  // Imaginary-time kernel: build P_k and Q_k(τ) of the GS density functional (see build_dmu_response) from the GS
+  // (F, Σ, μ). The Matsubara-node G_k(iω) is formed here and not taken from solve_dyson, which discards it after
+  // w_to_tau.
+  void build_dN_node_functional(const sArray_t<Array_view_4D_t>& sF_skij,
+                                const sArray_t<Array_view_5D_t>& sSigma_tskij, double mu);
+
+  // Imaginary-time kernel: ΔN of the GS density functional at Δμ = 0 for the static terms X = Σ static_terms
+  // (null entries skipped) and ΔΣ(τ) (nullptr: none): Σ_k Tr[P_k X_k] + Σ_{τ,k} Tr[Q_k(τ) ΔΣ_k(τ)]. Collective.
+  double compute_dN_node(const std::vector<const sArray_t<Array_view_4D_t>*>& static_terms,
+                         const sArray_t<Array_view_5D_t>* sDeltaSigma_tskij);
+
   // Turn the Δμ=0 solution retained by the last pass into the solution at Δμ:
   // ΔG(τ) += Δμ·dG/dμ(τ) on the retained distributed array, ΔDm += Δμ·dDm/dμ on the
   // node-replicated one. Both are local adds; nothing is recomputed.
@@ -427,8 +514,12 @@ private:
   // Steps 2-3 of the fix_density solve for ΔDm, on the Δμ=0 ΔDm the pass left:
   // Δμ from the closed form, then the shift of ΔDm. Returns 0 and touches nothing
   // unless fix_density at q=Γ.
+  // In the imaginary-time kernel ΔN(0) and dN/dμ are those of the GS node functional (compute_dN_node) at the
+  // static terms and ΔΣ(τ) of the pass; the Matsubara kernel reads both from ΔDm and ignores them.
   template<typename DeltaDm_t>
-  double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density);
+  double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density,
+                           const std::vector<const sArray_t<Array_view_4D_t>*>& static_terms = {},
+                           const sArray_t<Array_view_5D_t>* sDeltaSigma_tskij = nullptr);
 
 
   simple_dyson& _dyson;
@@ -448,6 +539,14 @@ private:
   // Cached G(iω) in shared memory — set via set_cached_G_omega().
   // Non-owning pointer; caller (lr_driver) owns the array.
   const sArray_t<Array_view_5D_t>* _cached_G_wskij = nullptr;
+
+  // GS G(τ) of the imaginary-time kernel — set via set_G_tau(). Non-owning, as _cached_G_wskij.
+  const sArray_t<Array_view_5D_t>* _sG_tskij = nullptr;
+
+  // Imaginary-time kernel, with fix_density at q=Γ: P_k (ns, nk, nb, nb) and Q_k(τ) (nt, ns, nk, nb, nb) of the GS
+  // node functional, ∂N_node/∂X = P and ∂N_node/∂ΔΣ(τ) = Q (see build_dmu_response). Dropped when G changes.
+  std::optional<sArray_t<Array_view_4D_t>> _sdNnode_dX_skij;
+  std::optional<sArray_t<Array_view_5D_t>> _sdNnode_dSigma_tskij;
 
   // ΔG(τ) of the last solve, still distributed, awaiting a consumer.
   // Empty once materialize_DeltaG_tau() has replicated it, and reset at the top

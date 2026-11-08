@@ -378,15 +378,21 @@ void lr_driver::lr_setup(
   // array's address, so a per-call local would invalidate it every solve.
   utils::memlog("lr_driver::lr_setup: before sG_wskij precompute");
   _Timer.start("LR_DRIVER_SETUP_G_OMEGA");
-  _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
-  _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
+  if (_lr_dyson.tau_kernel()) {
+    // Imaginary-time Dyson kernel: lr_dyson convolves the GS G(τ) itself, so no G(iω) is formed
+    _lr_dyson.set_G_tau(&sG_tskij);
+  } else {
+    // Matsubara-node Dyson kernel: G(iω) cached for the node products
+    _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
+    _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
+  }
   _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
   utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
 
   // Precompute the Δμ response if needed for fix_density mode at q=0
   if (p.fix_density && _lr_dyson.is_q_gamma()) {
     _Timer.start("LR_DRIVER_SETUP_DELTAMU");
-    _lr_dyson.build_dmu_response();
+    _lr_dyson.build_dmu_response(p.F_skij, p.Sigma_tskij, p.mu);
     _Timer.stop("LR_DRIVER_SETUP_DELTAMU");
   }
 
@@ -719,7 +725,7 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     y_prev_vec.F = _hist_layout_pc.F_view_slice(y_F.local());
     _Timer.start("LR_DYSON");
     _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F,
-                                     r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density);
+                                     r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density, r_S);
     _Timer.stop("LR_DYSON");
     // K_pc is Σ-free and reads no ΔG; sG_tskij only fills the slot.
     apply_kernel(/*precond=*/true, y_F, nullptr, *_sDeltaDm_pc_y, sG_tskij, sG_tskij,
@@ -1180,6 +1186,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   const long nq   = _nkpts;                        // full-BZ q/R points (distributed aux arrays)
   const long nb   = _nbnd;
   const int  n_nodes = std::max(1, _mpi->internode_comm.size());
+  const bool tau_dyson = _dyson.dyson_no_inversion();   // imaginary-time Dyson kernel (see lr_dyson)
 
   const double bytes_per = static_cast<double>(sizeof(ComplexType));
   const double to_GB = 1.0 / (1024.0 * 1024.0 * 1024.0);
@@ -1218,7 +1225,8 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   // sG_tskij is caller-owned but resident throughout the solve, so count it here.
   arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
-  arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
+  if (!tau_dyson)  // the imaginary-time kernel convolves G(τ) and caches no G(iω)
+    arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
   if (any_Sigma) {
     arrays.push_back({"sDeltaSigma_tskij", shp5b(nt), band5(nt), false, PERSIST});
   }
@@ -1277,6 +1285,12 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
     arrays.push_back({"∂Dm/∂μ (lr_dyson)",
                       fmt::format("({},{},{},{})", ns, nki, nb, nb),
                       band5(1), false, PERSIST});
+    // The GS node density functional of the imaginary-time kernel: P_k (ns, nk, nb, nb) and Q_k(τ), shared.
+    if (tau_dyson) {
+      arrays.push_back({"P_k = ∂N/∂X (lr_dyson)", fmt::format("({},{},{},{})", ns, nki, nb, nb),
+                        band5(1), false, PERSIST});
+      arrays.push_back({"Q_k(τ) = ∂N/∂ΔΣ(τ) (lr_dyson)", shp5b(nt), band5(nt), false, PERSIST});
+    }
   }
 
   // --- Persistent, distributed (over global comm), aux basis ~ nk·nt·NP² ---
@@ -1302,9 +1316,17 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   //       ΔW/Σ  : ΔΠ/ΔW(τ) + the FT staging buffers (needs_dW only)
   //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
   //     two never coexist — the peak adds only the larger of the two phases.
-  arrays.push_back({"ΔG(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
-  if (any_Sigma)
-    arrays.push_back({"ΔΣ(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
+  if (tau_dyson) {
+    // Per-rank convolution workspace of the τ kernel: G_{k+q}[i], G_k[:, j], G*X (+ ΔΣ_k and its convolution), the
+    // (nt, i, j) result block, all on one (k, i, j) block of the lr_dyson_tau_pgrid
+    arrays.push_back({"τ convolution workspace (lr_dyson)",
+                      fmt::format("~(3 nb + {} nb)·nt per rank, x{} ranks", any_Sigma ? 3 : 1, _mpi->comm.size()),
+                      double(nt) * nb * (3 * nb + (any_Sigma ? 3 : 1) * nb) * _mpi->comm.size(), true, T_DYSON});
+  } else {
+    arrays.push_back({"ΔG(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
+    if (any_Sigma)
+      arrays.push_back({"ΔΣ(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
+  }
   if (needs_dW) {
     arrays.push_back({"ΔΠ/ΔW(τ)",       shp4a(nth), aux4(nth), true, T_GWSIG});
     // FT staging buffers, allocated and released inside each tau_to_w/w_to_tau.

@@ -162,11 +162,13 @@ namespace {
       if (_G_has_previous_solution and not sigma_is_zero(*_context, _Sigma_shm.local())) {
         // Imaginary-time Picard sweep from the previous G
         solve_dyson_tau(_G_shm, _sF_skij, _Sigma_shm, mu);
+        _last_solve_tau = true;
         return;
       }
       // Matsubara-node solve below: first call, or a static Sigma
       _G_has_previous_solution = true;  // true from the first call on: the node solve below stores a G in _G_shm
     }
+    _last_solve_tau = false;
     _Timer.start("DYSON");
     using math::nda::make_distributed_array;
     using Array_5D_t = nda::array<ComplexType, 5>;

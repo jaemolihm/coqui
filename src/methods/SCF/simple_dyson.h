@@ -204,6 +204,7 @@ private:
   sArray_t<Array_view_4D_t> _sS_skij;
 
   utils::TimerManager _Timer;
+  bool _last_solve_tau = false;  // set by every solve_dyson call: true iff it ran solve_dyson_tau
   bool _G_has_previous_solution = false;  // true once solve_dyson has stored a G in _G_shm (the start of the next Picard sweep)
 
 public:
@@ -215,6 +216,9 @@ public:
   double mu_tol() const { return _mu_tol; }
   std::string mu_update_alg() const { return _mu_update_alg; }
   bool dyson_no_inversion() const { return _dyson_no_inversion; }
+  /// True iff the last solve_dyson call was an imaginary-time Picard sweep (a ground state whose stored G is the
+  /// fixed point of the sweep, not the Matsubara-node solution); false before any call.
+  bool last_solve_was_tau() const { return _last_solve_tau; }
   std::optional<double>& fixed_mu() { return _fixed_mu; }
   const std::optional<double>& fixed_mu() const { return _fixed_mu; }
   auto H0() const& { return _sH0_skij.local(); }
