@@ -39,7 +39,6 @@
 #include "methods/SCF/scf_common.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
-#include "methods/SCF/lr_precompute.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 
 namespace lr_dyson_tests {
@@ -127,9 +126,8 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    dyson.keep_G_omega(true);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
-    dyson.keep_G_omega(false);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     // Create a random Hermitian perturbation
@@ -159,8 +157,7 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    // Precompute G(iω) in shared memory and pass to lr_dyson before solving
-    auto& sG_wskij = dyson.G_omega();
+    // Pass the exact Dyson G(iω) kept by update_G to lr_dyson before solving
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
@@ -352,9 +349,8 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    dyson.keep_G_omega(true);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
-    dyson.keep_G_omega(false);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     // Hermitian ΔH0, zero ΔF
@@ -377,7 +373,6 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    auto& sG_wskij = dyson.G_omega();
     lr_dys.set_cached_G_omega(&sG_wskij);
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
@@ -474,9 +469,8 @@ namespace lr_dyson_tests {
     if (context->node_comm.root()) Sigma.local()() = 0.0;
     context->comm.barrier();
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    dyson.keep_G_omega(true);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
-    dyson.keep_G_omega(false);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     if (context->node_comm.root()) {
@@ -499,7 +493,6 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    auto& sG_wskij = dyson.G_omega();
     auto fro = [](auto const& a, auto const& b, double sb) {
       double d = 0.0;
       for (long n = 0; n < a.size(); ++n) d += std::norm(a.data()[n] - sb * b.data()[n]);
@@ -650,12 +643,10 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    dyson.keep_G_omega(true);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
-    dyson.keep_G_omega(false);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
-    auto& sG_wskij = dyson.G_omega();
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // --- under test: dN/dmu from the Delta_mu response ---

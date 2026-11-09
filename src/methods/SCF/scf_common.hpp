@@ -290,7 +290,7 @@ void update_G(sArray_t<Array_view_5D_t> &sG_tskij,
 /**
  * Exact G(iw) = sum_a C_a C_a^dagger / (iw + mu - e_a) = [(iw + mu) S - H_MF]^-1 of a mean field with MOs C and
  * energies e (S-orthonormal), at the Matsubara nodes of FT. Called by run_lr_calc for unperturbed = "mf_dft", so that LR
- * linearizes about the exact G(iw) as in the Dyson path (simple_dyson::keep_G_omega) and not about tau_to_w(G(tau)).
+ * linearizes about the exact G(iw) as in the Dyson path (simple_dyson::solve_dyson, G_w_out) and not about tau_to_w(G(tau)).
  */
 void update_G_omega(sArray_t<Array_view_5D_t> &sG_wskij,
                     const sArray_t<Array_view_4D_t> &sMO_skia, const sArray_t<Array_view_3D_t> &sE_ska,
@@ -446,12 +446,13 @@ std::tuple<double,bool> qp_eqn_spectral(double Vhf, function_t &Sigma, long I, d
 /** Dyson-SCF utilities **/
 
 /**
- * Update Green's function
+ * Update Green's function. If G_w_out is not nullptr, it receives the exact Dyson G(iw) of the same solve
+ * (see simple_dyson::solve_dyson).
  */
 template<typename dyson_type, typename X_t, typename Xt_t>
 void update_G(dyson_type &dyson, const mf::MF &mf, const imag_axes_ft::IAFT &FT,
               X_t & Dm, Xt_t &G, const X_t & F, const Xt_t &Sigma, double &mu,
-              bool const_mu = false);
+              bool const_mu = false, sArray_t<Array_view_5D_t>* G_w_out = nullptr);
 
 /**
  * Update chemical potential (_mu) for current _F and _Sigma

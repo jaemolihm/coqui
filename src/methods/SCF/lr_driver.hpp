@@ -303,7 +303,7 @@ public:
   /**
    * @brief Build everything an LR SCF solve needs that does not depend on ΔH0.
    *
-   * The solvers, the cached W_full(iω) / dW_tRPQ / G^R / G(iω) operands, the
+   * The solvers, the cached W_full(iω) / dW_tRPQ / G^R operands (and the caller's G(iω)), the
    * DIIS history and the previous-iterate buffers are all functions of the
    * unperturbed state and the q-vector alone, so several perturbations at the
    * same q share one setup. Nothing here is seeded from ΔH0 — the perturbation
@@ -316,7 +316,7 @@ public:
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
-   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::G_omega; mean field: update_G_omega) that lr_dyson
+   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field: update_G_omega) that lr_dyson
    * linearizes about; the caller keeps it alive and in place until the last solve.
    *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
