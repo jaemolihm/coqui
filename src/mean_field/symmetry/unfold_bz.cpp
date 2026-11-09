@@ -353,9 +353,10 @@ namespace methods {
 
 namespace mf {
 namespace {
-  // Returns the pp_type of the pseudopotential of the pw2coqui h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz
-  // holds the projectors at every full-BZ k (pw2coqui add_pp_fullbz). Called by unfold_mf on every rank before it
-  // writes anything, so that a missing group (or a mean field that is not a pw2coqui h5) aborts without a partial file.
+  // Returns the pp_type of the pseudopotential of the h5 file of mf, whose group Hamiltonian/<pp_type>/fullbz holds the
+  // projectors at every full-BZ k (written by pw2coqui add_pp_fullbz, or carried from the parent into an augmented h5).
+  // Called by unfold_mf on every rank before it writes anything, so that a missing group (or a mean field that is not
+  // an h5 file) aborts without a partial file.
   std::string read_full_bz_projector_type(MF const& mf) {
     bool from_h5 = mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source;
     std::string fn = from_h5 ? mf.filename() : mf.outdir();
@@ -370,7 +371,12 @@ namespace {
 
     utils::check(not pp_type.empty() and utils::h5_group_exists(fn, "Hamiltonian/" + pp_type + "/fullbz"),
                  "unfold_mf: {} has no full-BZ projectors (Hamiltonian/<pp_type>/fullbz); "
-                 "rerun pw2coqui.x with add_pp_fullbz = .true.", fn);
+                 "rerun pw2coqui.x with add_pp_fullbz = .true.{}", fn,
+                 mf.mf_type() != mf::bdft_source ? "" :
+                 mf.is_augmented() ? " An augmented basis carries them from its parent: rebuild it from that "
+                                     "pw2coqui h5." :
+                                     " A bdft basis other than an augmented one does not carry them: unfold its "
+                                     "parent.");
     return pp_type;
   }
 
@@ -380,7 +386,7 @@ namespace {
   // mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
   //   mf        - the symmetry-reduced (IBZ) mean field; only its full k list (mf.kpts_crystal(), nkpts entries, the k
   //               of the unfolded mean field) is used
-  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (projectors at every
+  //   qe_pp_grp - input: group Hamiltonian/<pp_type>/fullbz of the h5 file of mf (projectors at every
   //               full-BZ k_qe, in pw2coqui's own k order)
   //   out_grp   - output: group Hamiltonian/<pp_type> of the unfolded mean-field file
   // Called by unfold_mf on the root rank; there is no other source of the projectors at the unfolded k, because the
@@ -429,9 +435,10 @@ namespace {
     // Supported inputs; the full-BZ projectors are checked before anything is written
     utils::check(mf.nkpts() != mf.nkpts_ibz(),
                  "unfold_mf: the mean-field system has no symmetry reduction (nkpts = nkpts_ibz = {}).", mf.nkpts());
-    utils::check(not mf.is_augmented(), "unfold_mf: augmented orbital bases are not supported.");
     utils::check(mf.nbnd_aux() == 0, "unfold_mf: nbnd_aux > 0 is not supported.");
     utils::check(mf.npol() == 1, "unfold_mf: npol > 1 is not supported.");
+    utils::check(not mf.is_augmented() or mf.has_hks_matrix(),
+                 "unfold_mf: the augmented mean field {} has no Orbitals/H_KS_skij.", mf.filename());
     std::string pp_type = read_full_bz_projector_type(mf);
 
     // System of the unfolded mean field: full-BZ k list in the order of mf, identity as the only symmetry
@@ -459,6 +466,14 @@ namespace {
     utils::check(sys._symm.nkpts == nkpts and sys._symm.nkpts_ibz == nkpts,
                  "unfold_mf: failed to build the full-BZ k list.");
 
+    // Augmented mf: carry the flag and the per-band THC fit weights (full BZ), so that THC on the view
+    // is weighted like the IBZ one and the view is read as an augmented basis
+    if (mf.is_augmented()) {
+      sys.augmented = true;
+      sys.augment_type = mf.augment_type();
+      sys.aug_band_weight = mf.augmented_band_weights();
+    }
+
     // Write the file on the root (get_orbital_set and the source h5 reads are not collective)
     if (comm.root()) {
       h5::file file(filename, 'w');
@@ -469,6 +484,25 @@ namespace {
       h5::group ogrp = grp.open_group("Orbitals");
       bdft::detail::write_wfc_metadata(ogrp, *mf.wfc_truncated_grid());
       bdft::detail::write_orbitals(mf, ogrp, nkpts, mf.nbnd());
+
+      // Augmented mf: Kohn-Sham matrix of the basis at every k, H_KS(k) = H_KS(kp_to_ibz(k)) (conjugated at
+      // time-reversal k), the rule of the orbitals above
+      if (mf.is_augmented()) {
+        long ns = mf.nspin(), nb = mf.nbnd();
+        nda::array<ComplexType,4> H_ibz(ns, mf.nkpts_ibz(), nb, nb);
+        mf.read_hks_matrix(H_ibz());
+        nda::array<ComplexType,4> H_full(ns, nkpts, nb, nb);
+        auto kp_to_ibz = mf.kp_to_ibz();
+        auto kp_trev = mf.kp_trev();
+        for (long is=0; is<ns; ++is)
+          for (long ik=0; ik<nkpts; ++ik) {
+            if (kp_trev(ik))
+              H_full(is, ik, nda::ellipsis{}) = nda::conj(H_ibz(is, kp_to_ibz(ik), nda::ellipsis{}));
+            else
+              H_full(is, ik, nda::ellipsis{}) = H_ibz(is, kp_to_ibz(ik), nda::ellipsis{});
+          }
+        nda::h5_write(ogrp, "H_KS_skij", H_full, false);
+      }
 
       // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group
       grp.create_group("Hamiltonian");

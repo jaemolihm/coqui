@@ -107,12 +107,16 @@ namespace mf {
    * reversal and nkpts_ibz = nkpts. Its orbitals at k are those returned by mf.get_orbital_set('w', is, k, ...),
    * i.e. the IBZ orbitals rotated to k (conjugated at time-reversal k), the orbital gauge in which an IBZ
    * calculation on mf is solved. The local pseudopotential is copied from mf. The nonlocal projectors at k are copied
-   * from the group Hamiltonian/<pp_type>/fullbz of the pw2coqui h5 file of mf (pw2coqui add_pp_fullbz), which holds
+   * from the group Hamiltonian/<pp_type>/fullbz of the h5 file of mf (written by pw2coqui add_pp_fullbz, or carried
+   * from the parent into an augmented h5), which holds
    * the projectors at every full-BZ k_qe: k = k_qe + G0 (G0 a reciprocal lattice vector), and the stored
    * projector at k_qe with Miller index mill_qe is beta(k_qe + mill_qe), so the projector at k has the Miller index
    * mill = mill_qe - G0 = mill_qe - (k - k_qe), so that mill + k = mill_qe + k_qe.
-   * k_weight is 1/nkpts at every k. Aborts if mf is not a pw2coqui h5 mean field with that group, or if a k of mf
-   * is not in its k list. Only symmorphic systems (force_symmorphic), npol = 1 and non-augmented orbitals are supported.
+   * k_weight is 1/nkpts at every k. Aborts if the h5 file of mf has no such group, or if a k of mf
+   * is not in its k list. Only symmorphic systems (force_symmorphic) and npol = 1 are supported.
+   * An augmented mf (basis augmentation, bdft h5) is unfolded with its flags, per-band fit weights and Kohn-Sham
+   * matrix Orbitals/H_KS_skij (IBZ k copied to every k of its star, conjugated at time-reversal k). Its full-BZ
+   * projectors are the group copied from the pw2coqui h5 of its parent when the basis was written.
    * Called by Python mean_field.unfold_mf (Mf.unfold_mf); the file is the mean field of post_proc.unfold_checkpoint.
    *
    * @param mf       - [INPUT] mean-field instance with nkpts_ibz < nkpts

@@ -67,13 +67,14 @@ inline void write_wfc_metadata(h5::group& ogrp, grids::truncated_g_grid const& w
   h5::h5_write(ogrp,"wfc_ngm",int(wfc_g.size()));
 }
 
-// Copies the Hamiltonian/ group (local + nonlocal pseudopotential, per k of mf) into grp
+// Copies the Hamiltonian/ group (local + nonlocal pseudopotential, per k of mf) into grp; with copy_fullbz also the
+// full-BZ projectors of an h5 mf (Hamiltonian/<pp_type>/fullbz, if present), which mf::unfold_mf reads
 template<class MF>
-void write_pseudopot(MF const& mf, h5::group& grp) {
+void write_pseudopot(MF const& mf, h5::group& grp, bool copy_fullbz = false) {
   if(mf.input_file_type() == mf::xml_input_type and mf.mf_type() == mf::qe_source) {
     hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.outdir(),mf::xml_input_type);
   } else if(mf.input_file_type() == mf::h5_input_type and mf.mf_type() != mf::pyscf_source) {
-    hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.filename(),mf::h5_input_type);
+    hamilt::pseudopot_to_h5(mf.fft_grid_dim(),grp,mf.filename(),mf::h5_input_type,true,copy_fullbz);
   }
 }
 
@@ -218,7 +219,7 @@ public:
     // build symmetry rotations: only correct with orthogonal bases, fix!
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0) 
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
 
     print_metadata("CoQuí mean-field reader");
   }
@@ -234,7 +235,7 @@ public:
     // build symmetry rotations
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0) 
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
 
     print_metadata("CoQuí mean-field reader");
   }
@@ -293,7 +294,7 @@ public:
     // build symmetry rotations
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0) 
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
 
     print_metadata("CoQuí mean-field reader");
   }
@@ -400,7 +401,7 @@ public:
     // build symmetry rotations
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0) 
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
     sys.mpi->comm.barrier();
 
     print_metadata("CoQuí mean-field reader (from mf object)");
@@ -523,7 +524,7 @@ public:
       if(H_KS_ibz != nullptr)
         nda::h5_write(ogrp,"H_KS_skij",*H_KS_ibz,false);
       h5::group hgrp = grp.create_group("Hamiltonian");
-      detail::write_pseudopot(mf,grp);
+      detail::write_pseudopot(mf,grp,/*copy_fullbz=*/true);   // the augmented basis is unfolded by mf::unfold_mf
     } else {
       nda::array<ComplexType,2> psik(norb,ngm);
       for( int ik=0; ik<nkpts_ibz; ++ik ) {
@@ -547,7 +548,7 @@ public:
     // build symmetry rotations
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0)
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
 
     print_metadata("CoQuí mean-field reader (augmented basis)");
     sys.mpi->comm.barrier();
@@ -628,7 +629,7 @@ public:
     // build symmetry rotations
     auto slist = utils::find_inverse_symmetry(sys.bz().qsymms,sys.bz().symm_list);
     if(slist.size() > 0) 
-      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this,sys.bz().symm_list,slist);
+      std::tie(sk_to_n,dmat) = utils::generate_dmatrix<true>(*this, sys.bz().symm_list, slist, /*assume_irreducible=*/not sys.augmented);
 
     print_metadata("CoQuí mean-field reader (from mf object with orbital selection)");
     sys.mpi->comm.barrier();

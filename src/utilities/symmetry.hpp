@@ -978,6 +978,21 @@ auto generate_dmatrix(MF_t &mf,
   int kold = -1;
   auto [isk0, isk1] = itertools::chunk_range(0, sk.size(), comm.size() ,comm.rank());
   long bad_norm_count = 0;
+  // Unitary error of D: D_unitary_error = max_{s,k} ||D D^dagger - 1||_max, taken before the row normalization
+  // (a D that does not close on the kept bands has D_unitary_error = O(1); the row-norm warning below hides it).
+  double D_unitary_error = 0.0;
+  long isk_D_unitary_error = -1;   // (s,k) index of the largest error; -1 while D_unitary_error = 0
+  auto update_D_unitary_error = [&](auto const& Dblk, long isk) {
+    long n = Dblk.extent(0);
+    nda::array<ComplexType,2> Dh = nda::conj(nda::transpose(Dblk));
+    nda::array<ComplexType,2> DDh(n,n);
+    nda::blas::gemm(ComplexType(1.0), Dblk, Dh, ComplexType(0.0), DDh);
+    double e = 0.0;
+    for(long a=0; a<n; ++a)
+      for(long b=0; b<n; ++b)
+        e = std::max(e, std::abs(DDh(a,b) - (a==b ? ComplexType(1.0) : ComplexType(0.0))));
+    if(e > D_unitary_error) { D_unitary_error = e; isk_D_unitary_error = isk; }
+  };
   for( long isk=isk0; isk<isk1; ++isk ) { 
 
     if(isk == 0) { // first term is always the identity
@@ -1039,6 +1054,7 @@ auto generate_dmatrix(MF_t &mf,
           nda::blas::gemm(ComplexType(1.0),psi(1,b_rng,all),
                                            nda::transpose(psi(0,b_rng,all)),
                           ComplexType(0.0),Temp(nda::range(nb),nda::range(nb)));
+          update_D_unitary_error(Temp(nda::range(nb),nda::range(nb)), isk);
           // dump into sp_d
           for( int a=0; a<nb; ++a )
             for( int b=0; b<nb; ++b )
@@ -1048,6 +1064,7 @@ auto generate_dmatrix(MF_t &mf,
           nda::blas::gemm(ComplexType(1.0),psi(1,b_rng,all),
                                            nda::transpose(psi(0,b_rng,all)),
                           ComplexType(0.0),shm_dmat.local()(isk,b_rng,b_rng));
+          update_D_unitary_error(shm_dmat.local()(isk,b_rng,b_rng), isk);
         }
         ib+=nb;
       };
@@ -1057,10 +1074,12 @@ auto generate_dmatrix(MF_t &mf,
       if constexpr (Sparse) {
         nda::blas::gemm(ComplexType(1.0),psi(1,all,all),nda::transpose(psi(0,all,all)),
                         ComplexType(0.0),Temp);
+        update_D_unitary_error(Temp, isk);
         dmat_s.emplace_back(math::sparse::to_csr<MEM,int,int>(Temp,1e-8));
       } else {
         nda::blas::gemm(ComplexType(1.0),psi(1,all,all),nda::transpose(psi(0,all,all)),
                         ComplexType(0.0),shm_dmat.local()(isk,all,all));
+        update_D_unitary_error(shm_dmat.local()(isk,all,all), isk);
       }
     }
     
@@ -1079,6 +1098,20 @@ auto generate_dmatrix(MF_t &mf,
         if(std::abs(e-1.0) > 1e-3) bad_norm_count += 1;
       }
     }
+  }
+
+  // Report D_unitary_error and where it occurs (lowest isk among the ranks holding the maximum)
+  {
+    double D_unitary_error_max = comm.all_reduce_value(D_unitary_error, boost::mpi3::max<>{});
+    long isk_max = comm.all_reduce_value(D_unitary_error == D_unitary_error_max ? isk_D_unitary_error : long(sk.size()),
+                                         boost::mpi3::min<>{});
+    if(D_unitary_error_max > 0.0 and isk_max >= 0 and isk_max < long(sk.size()))
+      app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} at isym = {}, ik = {} "
+                 "(before row normalization; O(1) if nbnd splits a degenerate set, see the warning below)",
+              D_unitary_error_max, sk[isk_max].first, sk[isk_max].second);
+    else
+      app_log(2, "  generate_dmatrix: max_(s,k) ||D D^dagger - 1||_max = {:.3e} (before row normalization)",
+              D_unitary_error_max);
   }
 
   // check # of Bloch orbitals with a incomplete degenerate set

@@ -204,6 +204,9 @@ class MF
     { return kpts()(nda::range(nkpts_ibz()), nda::range::all); }
     decltype(auto) kpts_ibz(int i) const { return kpts_ibz()(i, nda::range::all); }
     auto kpts_ibz(int i, int j) const {  return kpts_ibz()(i, j); }
+    // kpts_ibz() in crystal coordinates
+    decltype(auto) kpts_crystal_ibz() const
+    { return kpts_crystal()(nda::range(nkpts_ibz()), nda::range::all); }
     decltype(auto) k_weight() const 
     { return std::visit( [&](auto&& v) { return v.get_sys().k_weight(); }, var ); }
     decltype(auto) k_weight(int i) const { return k_weight()(i); }
@@ -338,6 +341,10 @@ class MF
     bool is_augmented() const
     { return std::holds_alternative<bdft::bdft_readonly>(var)
           && std::get<bdft::bdft_readonly>(var).get_sys().augmented; }
+
+    // Provenance tag of the augmentation ("momentum", "dpsi", ...); empty if not augmented.
+    std::string augment_type() const
+    { return is_augmented() ? std::get<bdft::bdft_readonly>(var).get_sys().augment_type : std::string(); }
 
     // True if the h5 carries the full Kohn-Sham matrix Orbitals/H_KS_skij (IBZ only).
     // Every augmented basis is required to; hamilt::set_fock aborts on one that is

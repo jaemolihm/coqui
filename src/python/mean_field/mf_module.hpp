@@ -171,7 +171,7 @@ namespace coqui_py {
      * bands m ∈ [R, nbnd) are added back using the screened vertex g_scr and
      * eigenvalues read (and converted Ry→Ha) from
      * {elph_dir}/elph_bare.iq{iq}.h5 (also the source of q). Requires npol==1
-     * and a full-BZ k-grid. See orbitals::add_augmentation_dpsi.
+     * (an IBZ mean field only with Gamma-only iq_list and all modes). See orbitals::add_augmentation_dpsi.
      *
      * @param prefix            prefix of the new mean-field file
      * @param outdir            directory for the new mean-field file

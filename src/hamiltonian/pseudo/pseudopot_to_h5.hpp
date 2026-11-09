@@ -28,6 +28,7 @@
 #include "hamiltonian/pseudo/pseudopot_type.hpp"
 #include "IO/app_loggers.h"
 #include "utilities/check.hpp"
+#include "utilities/h5_utils.hpp"
 #include "utilities/mpi_context.h"
 #include "mpi3/environment.hpp"
 #include "mpi3/communicator.hpp"
@@ -62,14 +63,19 @@ void h5_read_write_attribute(h5::group& r_grp, h5::group& w_grp, std::string nam
 }
 
 // copy_projectors = false (h5 input only) leaves out everything that is per k point (the attributes
-// number_of_kpoints and max_npw, and the datasets npw, miller_k*, projector_k*); the caller writes them.
+// number_of_kpoints and max_npw, the datasets npw, miller_k*, projector_k*); the caller writes them.
 // copy_projectors = false is used to write unfolded mf h5 file (different projectors than irreducible BZ mf h5)
+// copy_fullbz = true (h5 input with copy_projectors) also copies the group fullbz, the projectors at every full-BZ k
+// (pw2coqui add_pp_fullbz), when the input has it; the augmented-basis writer passes it, so that mf::unfold_mf can
+// unfold the augmented basis.
 void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0, 
                      std::string input_file_name, mf::mf_input_file_type_e input_file_type,
-                     bool copy_projectors = true) 
+                     bool copy_projectors = true, bool copy_fullbz = false) 
 {
   utils::check(copy_projectors or input_file_type == mf::h5_input_type,
                "pseudopot_to_h5: copy_projectors = false requires an h5 input.");
+  utils::check(not copy_fullbz or (copy_projectors and input_file_type == mf::h5_input_type),
+               "pseudopot_to_h5: copy_fullbz requires copy_projectors and an h5 input.");
   using detail::h5_read_write_attribute;
   if(not grp0.has_subgroup("Hamiltonian") )
     grp0.create_group("Hamiltonian");
@@ -345,6 +351,10 @@ void pseudopot_to_h5(nda::ArrayOfRank<1> auto const&fft_mesh, h5::group& grp0,
         nda::h5_read(grp_,"projector_k"+std::to_string(ik),buff);
         nda::h5_write(grp,"projector_k"+std::to_string(ik),buff);
       }
+      // projectors at every full-BZ k (pw2coqui add_pp_fullbz), read by mf::unfold_mf; they depend only on
+      // (k+G, atoms), so an augmented basis built on this mean field carries them unchanged
+      if(copy_fullbz and grp_.has_subgroup("fullbz"))
+        utils::h5_copy(grp_, "fullbz", grp);
     }
 
   } else {

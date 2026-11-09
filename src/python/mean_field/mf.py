@@ -177,13 +177,15 @@ def unfold_mf(mf, params):
     which an IBZ calculation on ``mf`` is solved. The nonlocal projectors at each
     k are copied from the full-BZ projectors that ``pw2coqui.x`` writes with
     ``add_pp_fullbz = .true.`` (group ``Hamiltonian/<pp_type>/fullbz`` of the
-    mean-field h5 file), so the unfolded mean field gives H0 and the nonlocal
-    e-ph vertex at any q. ``k_weight`` is 1/nkpts at every k.
+    mean-field h5 file; an augmented h5 carries the group of its parent), so the unfolded mean field gives
+    H0 and the nonlocal e-ph vertex at any q. For an augmented ``mf`` (:func:`augment_mf`, :func:`augment_mf_dpsi`) the
+    augmented flag, the per-band fit weights and the Kohn-Sham matrix ``Orbitals/H_KS_skij`` are
+    unfolded too (copy at ``kp_to_ibz``, conjugated at time-reversal k). ``k_weight`` is 1/nkpts at every k.
     Load it with ``make_mf(mpi, {"prefix": prefix, "outdir": outdir}, "bdft")``; an IBZ
     checkpoint on ``mf`` is unfolded onto it with :func:`coqui.post_proc.unfold_checkpoint`.
 
     ``mf`` must be a symmorphic (``force_symmorphic``) ``pw2coqui`` h5 mean field with the
-    full-BZ projectors, with ``nkpts_ibz < nkpts``, ``npol = 1`` and non-augmented orbitals.
+    full-BZ projectors (or a basis augmented from one), with ``nkpts_ibz < nkpts`` and ``npol = 1``.
 
     Parameters
     ----------
@@ -243,7 +245,10 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
     ``V_Hxc``, so the parent must export a multiplicative ``V_xc``: a QE-xml
     parent (re-export it through the h5 route) and a meta-GGA functional are
     refused outright rather than augmented without it. Requires
-    ``npol == 1`` and a full-BZ k-grid (``nkpts == nkpts_ibz``).
+    ``npol == 1``. An IBZ ``mf`` (``nkpts_ibz < nkpts``) is accepted only if ``iq_list``
+    is Gamma only and all modes are used; the δψ and ``elph_bare`` files are then
+    indexed by the IBZ k list of ``mf`` (checked against the ``xk_cryst`` of
+    ``elph_bare``).
 
     Parameters
     ----------
