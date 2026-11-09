@@ -132,7 +132,7 @@ namespace {
                                                          {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
       auto Gt_loc = dG_tskij.local();
       auto Gw_loc = dG_wskij_tmp.local();
-      _FT->w_to_tau(Gw_loc, Gt_loc, imag_axes_ft::fermion);
+      _FT->w_to_tau_w_weighted(Gw_loc, Gt_loc);
       dG_wskij_tmp.reset();
 
       _FT->check_leakage(dG_tskij, imag_axes_ft::fermion, "Green's function");

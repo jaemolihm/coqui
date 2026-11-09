@@ -58,7 +58,7 @@ double compute_Nelec(double mu, const nda::array<ComplexType, 4> &spectra,
     }
   }
 
-  FT.w_to_tau(Xw, Xt, imag_axes_ft::fermion);
+  FT.w_to_tau_w_weighted(Xw, Xt);
   FT.tau_to_beta(Xt, nelecs);
 
   ComplexType nelec = scl*std::accumulate(nelecs.begin(),nelecs.end(),ComplexType(0.0));

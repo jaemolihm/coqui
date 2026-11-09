@@ -102,6 +102,27 @@ void IAFT::w_to_tau(ndaArray_A &&X_wi, ndaArray_B &&X_ti, stats_e stats) const {
 }
 
 /**
+ * Fermionic Matsubara frequencies to imaginary times with Ttw_ff_w_weighted(); see the declaration.
+ * @param X_wi  - [INPUT] Matsubara frequency tensor
+ * @param X_ti  - [OUTPUT] imaginary-time tensor
+ */
+template<nda::MemoryArray ndaArray_A, nda::MemoryArray ndaArray_B>
+void IAFT::w_to_tau_w_weighted(ndaArray_A &&X_wi, ndaArray_B &&X_ti) const {
+  static_assert(nda::get_rank<ndaArray_A> == nda::get_rank<ndaArray_B>,
+                "iaft::w_to_tau_w_weighted: incorrect rank of array X_wi and X_ti. ");
+  size_t nt = nt_f();
+  size_t nw = nw_f();
+  utils::check(X_ti.shape(0) == nt, "iaft::w_to_tau_w_weighted: incorrect dimension of nt for X_t");
+  utils::check(X_wi.shape(0) == nw, "iaft::w_to_tau_w_weighted: incorrect dimension of nw for X_w");
+
+  long dim1 = std::accumulate(X_wi.shape().begin()+1, X_wi.shape().end(), 1, std::multiplies<>{});
+  if (dim1 == 0) return;  // empty local block
+  auto X_ti_2D = nda::reshape(X_ti, shape_t<2>{nt, dim1});
+  auto X_wi_2D = nda::reshape(X_wi, shape_t<2>{nw, dim1});
+  nda::blas::gemm(Ttw_ff_w_weighted(), X_wi_2D, X_ti_2D);
+}
+
+/**
  * version for FT with particle-hole symmetry
  */
 template<nda::MemoryArray Array_w_t, nda::MemoryArray Array_tau_t>
