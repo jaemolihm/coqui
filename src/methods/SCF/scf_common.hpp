@@ -290,7 +290,8 @@ void update_G(sArray_t<Array_view_5D_t> &sG_tskij,
 /**
  * Exact G(iw) = sum_a C_a C_a^dagger / (iw + mu - e_a) = [(iw + mu) S - H_MF]^-1 of a mean field with MOs C and
  * energies e (S-orthonormal), at the Matsubara nodes of FT. Called by run_lr_calc for unperturbed = "mf_dft", so that LR
- * linearizes about the exact G(iw) as in the Dyson path (simple_dyson::solve_dyson, G_w_out) and not about tau_to_w(G(tau)).
+ * linearizes about the exact G(iw) as in the Dyson path (simple_dyson::solve_dyson, G_w_out) and not about
+ * tau_to_w(G(tau)), which differs from it by the omega -> tau -> omega projection of the IAFT basis (DLR and IR).
  */
 void update_G_omega(sArray_t<Array_view_5D_t> &sG_wskij,
                     const sArray_t<Array_view_4D_t> &sMO_skia, const sArray_t<Array_view_3D_t> &sE_ska,

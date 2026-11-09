@@ -11,9 +11,11 @@
 
 - Imaginary-time and Matsubara meshes to h5 checkpoint, written by both the C++ and the Python IAFT. (#51)
 - `CPPDLR` CMake variable to configure against a local cppdlr source tree instead of the one fetched by `FetchContent`. (#51)
+- `IAFT.w_to_tau_w_weighted` in Python: the `|omega|`-weighted fermionic Matsubara -> tau fit of the C++ `IAFT::w_to_tau_w_weighted` (IR: same as `w_to_tau`).
 
 ### Improved
 
+- `run_lr`, `run_chi` and `run_lr_gw_edmft` linearize about the exact Dyson `G(iw)` (`unperturbed="mf_dft"`: the analytic MO `G(iw)`) instead of `tau_to_w(G(tau))`, so that they are the derivative of the ground-state map; applies to DLR and IR. LR results change by ~1e-9 - 1e-8 in `Delta G` and `Delta Dm`, and more in `Delta mu` of insulators.
 - More stable DLR mesh construction: `cppdlr` pin bumped from `f6bd6ab` to `7a0f60c`. (#51)
 - IAFT mesh compatibility checking when reading a checkpoint. (#51)
 
@@ -22,7 +24,7 @@
 - Wrong Wannier projectors from `wannier90` library mode when the outer disentanglement window excludes the lowest of the KS bands at some k-point.
 - Hang in `mlwf_h5_from_wannier90_output` with more than one MPI rank when no `.eig` file is present.
 - Wannier90 output files from `wannier90` library mode silently written to a truncated path outside `outdir` when `outdir/prefix` exceeds 50 characters; library mode now aborts instead.
-- Dyson `G(iw) -> G(tau)` on the DLR grid uses the new `IAFT::w_to_tau_w_weighted` (`|omega|`-weighted least-squares fit; `tau -> omega -> tau` stays exact) in `simple_dyson`, `dca_dyson`, `compute_Nelec`, `lr_dyson` (`Delta G(iw) -> tau` and its `Delta Dm` coefficients) and the Wannier-basis Dyson G of `pproc_t`: the orthogonal fit amplified the non-representable part of node-Dyson output into the tau-edge directions and stalled IBZ scGW at large beta. General `w_to_tau` and `w_interpolate` are unchanged; IR is unchanged.
+- Dyson `G(iw) -> G(tau)` on the DLR grid uses the new `IAFT::w_to_tau_w_weighted` (`|omega|`-weighted least-squares fit; `tau -> omega -> tau` stays exact) in `simple_dyson`, `dca_dyson`, `compute_Nelec`, `lr_dyson` (`Delta G(iw) -> tau` and its `Delta Dm` coefficients) and the Wannier-basis Dyson G of `pproc_t`: the orthogonal fit amplified the non-representable part of node-Dyson output into the tau-edge directions and stalled IBZ scGW at large beta. General `w_to_tau` and `w_interpolate` are unchanged; this weighted fit is the identity on IR (see the LR entry under Improved for the IR change).
 
 ### Default Value Updates
 

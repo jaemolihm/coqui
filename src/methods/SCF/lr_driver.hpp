@@ -316,8 +316,8 @@ public:
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
-   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field: update_G_omega) that lr_dyson
-   * linearizes about; the caller keeps it alive and in place until the last solve.
+   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field:
+   * update_G_omega) that lr_dyson linearizes about; the caller keeps it alive and in place until the last solve.
    *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
    * lr_rpa_pi / lr_scr_coulomb_t solvers and their kpq maps are all latched to

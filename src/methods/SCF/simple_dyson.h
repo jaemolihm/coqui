@@ -124,7 +124,8 @@ public:
    * nullptr, it also receives the exact Dyson G(iw) = [(iw + mu) S - H0 - F - Sigma(iw)]^-1 in shared memory
    * (nw, ns, nk, nb, nb), copied before the w -> tau step by the same gather as G(tau); nullptr allocates and copies
    * nothing. Called by run_lr_calc (through update_G), so that lr_driver::lr_setup linearizes about the exact G(iw) and
-   * not about tau_to_w(G(tau)), which differs from it by the DLR round trip. The caller allocates G_w_out.
+   * not about tau_to_w(G(tau)), which differs from it by the omega -> tau -> omega projection of the IAFT basis (DLR and
+   * IR). The caller allocates G_w_out.
    */
   template<typename G_t, typename F_t, typename Sigma_t>
   void solve_dyson(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu,

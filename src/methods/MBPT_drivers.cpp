@@ -1870,6 +1870,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // (mf_dft path).
   auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  utils::memlog("run_lr_calc: after sG_wskij alloc");
   double mu = 0.0;
   if (unperturbed == "mf_dft") {
     // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
