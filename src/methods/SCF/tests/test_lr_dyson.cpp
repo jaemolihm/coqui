@@ -912,6 +912,56 @@ namespace lr_dyson_tests {
     context->comm.barrier();
   }
 
+  TEST_CASE("simple_dyson_picard_sweep_change", "[methods_scf]") {
+    // simple_dyson::picard_sweep_change (the ground-state sweep residual logged by run_lr) vs the change of an actual
+    // solve_dyson sweep from the same G (QE LiH, DLR beta = 100, wmax = 4, high): bitwise equal for a perturbed G,
+    // G left unchanged, and below 1e-13 at the converged fixed point.
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/qe/lih_kp222_nbnd16/";
+    auto mf = mf::make_MF(context, mf::qe_source, filepath, "pwscf");
+    imag_axes_ft::IAFT ft(100.0, 4.0, imag_axes_ft::dlr_basis, "high");
+    long nt = ft.nt_f(), ns = mf.nspin(), nk = mf.nkpts_ibz(), nb = mf.nbnd();
+    auto make4 = [&]() { return math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}); };
+    auto make5 = [&]() { return math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}); };
+    sArray_t<Array_view_4D_t> F(make4());
+    sArray_t<Array_view_5D_t> G_hf(make5()), G_tau(make5()), G_check(make5()), Sigma(make5());
+
+    simple_dyson dyson_node(std::addressof(mf), std::addressof(ft), 1e-9, "bisection", false);
+    simple_dyson dyson_tau(std::addressof(mf), std::addressof(ft), 1e-9, "bisection", true);
+    double mu = make_weak_sigma_gs(context, mf, ft, dyson_node, F, G_hf, Sigma);
+
+    // G: node solve (first call of the flagged solver), scaled by 1.01 so that it is off the fixed point
+    dyson_tau.solve_dyson(G_tau, F, Sigma, mu);
+    if (context->node_comm.root()) G_tau.local() *= 1.01;
+    G_tau.node_sync();
+    context->comm.barrier();
+    nda::array<ComplexType, 5> G_before = G_tau.local();
+
+    // Reference: the change of a real sweep from the same G (on a copy)
+    if (context->node_comm.root()) G_check.local() = G_tau.local();
+    G_check.node_sync();
+    context->comm.barrier();
+    dyson_tau.solve_dyson(G_check, F, Sigma, mu);
+    double change_ref = 0.0;
+    for (long n = 0; n < G_before.size(); ++n)
+      change_ref = std::max(change_ref, std::abs(G_check.local().data()[n] - G_before.data()[n]));
+
+    double change = dyson_tau.picard_sweep_change(G_tau, F, Sigma, mu);
+    app_log(1, "[TEST] picard_sweep_change: {:.6e} (real sweep {:.6e})", change, change_ref);
+    CHECK(change > 1e-6);
+    CHECK(change == change_ref);
+    double G_moved = 0.0;
+    for (long n = 0; n < G_before.size(); ++n)
+      G_moved = std::max(G_moved, std::abs(G_tau.local().data()[n] - G_before.data()[n]));
+    CHECK(G_moved == 0.0);
+
+    // At the fixed point the change is below the sweep tolerance
+    sweep_to_fixed_point(context, dyson_tau, G_tau, F, Sigma, mu);
+    CHECK(dyson_tau.picard_sweep_change(G_tau, F, Sigma, mu) < 1e-13);
+    context->comm.barrier();
+  }
+
   // The main ctest entry runs this case at CTEST_NPROC ranks; test_methods_scf_lr_dyson_tau_np16 (registered when
   // MPIEXEC_MAX_NUMPROCS >= 16) runs it at 16 ranks, where the 8 k-points leave 2 ranks per k and the band axes of the
   // lr_dyson_tau_pgrid are split (np_i * np_j > 1).

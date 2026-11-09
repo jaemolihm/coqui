@@ -1949,12 +1949,17 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     lr_init_timer.start("LR_INIT_UPDATE_G");
     if (dyson_tau) {
-      // The stored G(τ) and Dm are the ground state's own: a Matsubara-node rebuild from the stored (F, Σ, μ) is the
-      // node solution, not the Picard fixed point the imaginary-time kernel differentiates
+      // The expansion point is the stored G(τ) and Dm, the ground state's own: the last Picard sweep's output, which
+      // is within the ground state's sweep residual of the fixed point of the stored (F, Σ, μ) (logged below). A
+      // Matsubara-node rebuild from (F, Σ, μ) would be the node solution, not a sweep's G.
       app_log(2, "Reading the unperturbed Green's function and density matrix from the checkpoint "
                  "({}/iter{})...", input_grp, gs_iter);
-      sG_tskij = read_greens_function(*mpi, mf.get(), input_file, gs_iter, input_grp);
+      chkpt::read_G(mpi->node_comm, prefix, gs_iter, sG_tskij, input_grp);
       chkpt::read_dm(mpi->node_comm, prefix, gs_iter, sDm_skij, input_grp);
+      // Distance of the stored G from the sweep's fixed point (to first order, G_stored - G* ~ this change)
+      double gs_sweep_change = dyson.picard_sweep_change(sG_tskij, sF_skij, sSigma_tskij, mu);
+      app_log(1, "LR Dyson kernel: max|Sweep(G_stored) - G_stored| = {:.3e} (ground-state sweep residual; the "
+                 "expansion point is the stored G)", gs_sweep_change);
     } else {
       // Compute G from F and Sigma via Dyson equation
       app_log(2, "Computing unperturbed Green's function from checkpoint...");

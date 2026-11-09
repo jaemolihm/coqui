@@ -431,10 +431,6 @@ void lr_dyson::solve_lr_dyson_tau_impl(
   }
   _Timer.stop("LR_DYSON_TAU_KERNEL");
 
-  _Timer.start("LR_DYSON_MISC");
-  _context->comm.barrier();
-  _Timer.stop("LR_DYSON_MISC");
-
   finalize_DeltaG_tau(std::move(dDeltaG_tskij), sDeltaDm_skij);
 
   _Timer.start("LR_DYSON_MISC");

@@ -238,7 +238,8 @@ def run_gw(params, h_int,
           solve of the run was such a sweep, the run writes ``scf/dyson_no_inversion`` to the
           checkpoint, and ``run_lr`` / ``run_chi`` on it differentiate the sweep's fixed point (the
           imaginary-time Dyson equation) instead of the Matsubara-node solution; nothing is written
-          otherwise.
+          otherwise. The mark is written when the run completes: a run killed mid-flight carries
+          none, and ``run_lr`` on it uses the Matsubara-node kernel.
 
     h_int : ThcCoulomb or CholCoulomb
         Primary Coulomb interaction object, used for both the polarizability and

@@ -120,8 +120,9 @@ def test_lr_dyson_tau_checkpoint(mpi, capfd):
         assert np.linalg.norm(dDm_ref) > 1e-6
         assert err < 1e-9
 
-        # ΔN = spin Σ_k w_k Tr[ΔDm] of the density-fixed response
-        dN = 2.0 * np.trace(dDm_fd, axis1=-2, axis2=-1).sum().real / nk
+        # ΔN = spin Σ_{s,k} w_k Tr[ΔDm] of the density-fixed response, with the k weights and spin factor of compute_Nelec
+        spin_factor = 2.0 if (ns == 1 and mf.npol() == 1) else 1.0
+        dN = spin_factor * (np.asarray(mf.k_weights())[None, :] * np.trace(dDm_fd, axis1=-2, axis2=-1)).sum().real
         print("fix_density: Delta_mu =", dmu, "; ΔN =", dN, "; ‖ΔDm‖ =", np.linalg.norm(dDm_fd))
         assert abs(dmu) > 1e-6
         assert abs(dN) < 1e-8 * np.linalg.norm(dDm_fd)

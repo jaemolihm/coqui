@@ -158,7 +158,9 @@ inline std::array<long, 5> lr_dyson_tau_pgrid(long nproc, long nkpts_ibz) {
  *   - Imaginary time (true): the convolution in τ on the DLR nodes with the GS G(τ) (set_G_tau),
  *       ΔG = G_{k+q} * [X δ(τ) + ΔΣ_k] * G_k,   X = ΔH0 + ΔF + ΔV_QPGW − Δμ S,
  *     the derivative of the fixed point G = G0 + G0 * Σ * G of the GS imaginary-time Picard sweeps
- *     (simple_dyson::solve_dyson_tau). The two Jacobians differ at the DLR-grid floor, ~5e-9 on a large-λ grid.
+ *     (simple_dyson::solve_dyson_tau), taken at the stored GS G, which is the last sweep's output and so within the GS
+ *     sweep residual of that fixed point (run_lr logs the residual). The two Jacobians differ at the DLR-grid floor,
+ *     ~5e-9 on a large-λ grid.
  * With fix_density at q=Γ, the GS chemical potential is searched on the Matsubara nodes in both modes (update_mu), so
  * in the imaginary-time kernel Δμ is taken from the node functional of the GS density (build_dmu_response).
  */
@@ -359,7 +361,8 @@ public:
    *
    * Imaginary-time kernel: dG/dμ(τ) = −G*G and dDm/dμ come from the τ pass at X = −S, but the GS chemical potential is
    * searched on the Matsubara nodes, N(μ) = spin Σ_k w_k Σ_ω c_ω Tr[G_k(iω)] with G_k(iω) = [(iω+μ)S − H0 − F − Σ_k(iω)]⁻¹
-   * of the GS (F, Σ, μ). With P_k = spin w_k Σ_ω c_ω G_k(iω)² and Q_k(τ) = spin w_k Σ_ω c_ω Twt(ω,τ) G_k(iω)²,
+   * of the GS (F, Σ, μ); S = 1 (dyson_no_inversion requires it), so ∂N/∂X = Σ_ω c_ω G_k(iω)² with no S insertions.
+   * With P_k = spin w_k Σ_ω c_ω G_k(iω)² and Q_k(τ) = spin w_k Σ_ω c_ω Twt(ω,τ) G_k(iω)²,
    *   ΔN_node = Σ_k Tr[P_k X] + Σ_{τ,k} Tr[Q_k(τ) ΔΣ_k(τ)],
    * which fix_density sets to zero: Δμ = −ΔN_node(Δμ=0) / dN_node/dμ, dN_node/dμ = −Σ_k Tr[P_k S] (= dN_dmu()).
    * P_k and Q_k(τ) are kept (one ΔG(τ)-sized shared array). The GS state (F, Σ, μ) is required there and ignored by
@@ -477,7 +480,7 @@ private:
 
   // Imaginary-time kernel (dyson_no_inversion): the same contract as solve_lr_dyson_impl with ΔΣ(τ) given directly.
   // Each rank forms its (k, i, j) block of ΔG(τ) on lr_dyson_tau_pgrid by two DLR convolutions of the GS G(τ),
-  //   F_blk = G_{k+q}[:, i, :] · X + G_{k+q}[:, i, :] * ΔΣ_k,   ΔG_blk = F_blk * G_k[:, :, j],
+  //   GX_blk = G_{k+q}[:, i, :] · X + G_{k+q}[:, i, :] * ΔΣ_k,   ΔG_blk = GX_blk * G_k[:, :, j],
   // from node-shared inputs only (no communication), then hands the block array to finalize_DeltaG_tau.
   template<typename DeltaDm_t, typename DeltaH0_t, typename DeltaF_t>
   void solve_lr_dyson_tau_impl(

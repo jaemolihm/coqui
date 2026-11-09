@@ -137,6 +137,14 @@ public:
   void solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
 
   /**
+   * max|Sweep(G) - G| for one imaginary-time Picard sweep (solve_dyson_tau) of the given (F, Sigma, mu) from G, which is
+   * left unchanged. Used by run_lr to log how far a stored ground-state G is from the sweep's fixed point
+   * (for a sweep of contraction factor ρ < 1, |G - G*| <= change / (1 - ρ)). Requires dyson_no_inversion; collective.
+   */
+  template<typename G_t, typename F_t, typename Sigma_t>
+  double picard_sweep_change(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
+
+  /**
    * Compute the eigenvalues of _F + _Sigma(iwn)
    * @param spectra - [OUTPUT] eigenvalues, (nw, ns, nkpts_ibz, nbnd)
    */
@@ -174,9 +182,12 @@ private:
    * solve, and a run that stops before convergence leaves a G that is one sweep from the previous one, not the
    * Dyson solution of the stored (F, Sigma). Limits: DLR basis only, S = 1 (checked at construction), tested on
    * gapped systems.
+   *
+   * @param store_G - [INPUT] false: _G_shm is left untouched (only the change is computed)
+   * @return max|G_new - G_prev| over all elements and ranks
    */
   template<typename G_t, typename F_t, typename Sigma_t>
-  void solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
+  double solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu, bool store_G = true);
 
   /// Abort unless the IAFT basis is DLR and the overlap matrix is the identity (requirements of solve_dyson_tau).
   void check_dyson_no_inversion_requirements();

@@ -65,7 +65,8 @@ namespace {
   }
 
   template<typename G_t, typename F_t, typename Sigma_t>
-  void simple_dyson::solve_dyson_tau(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
+  double simple_dyson::solve_dyson_tau(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu,
+                                       bool store_G) {
     _Timer.start("DYSON");
     using math::shm::make_shared_array;
     decltype(nda::range::all) all;
@@ -142,8 +143,10 @@ namespace {
       _FT->check_leakage(G_check, imag_axes_ft::fermion, std::addressof(_context->comm), "Green's function");
     }
 
-    if (_context->node_comm.root()) _G_shm.local() = sG_new.local();
-    _G_shm.node_sync();
+    if (store_G) {  // false: only the sweep change is wanted (picard_sweep_change), _G_shm stays as it was
+      if (_context->node_comm.root()) _G_shm.local() = sG_new.local();
+      _G_shm.node_sync();
+    }
     _context->comm.barrier();
     app_log(2, "Dyson equation for Green's function (imaginary-time Picard sweep, no Matsubara inversion):");
     app_log(1, "Dyson Picard sweep: max|G_new - G_prev| = {:.3e}", sweep_change_max);
@@ -153,6 +156,14 @@ namespace {
                  "G0' is not representable on the DLR grid.", eps_mu_max, _FT->wmax());
     _Timer.stop("DYSON");
     print_timers();
+    return sweep_change_max;
+  }
+
+  template<typename G_t, typename F_t, typename Sigma_t>
+  double simple_dyson::picard_sweep_change(G_t &_G_shm, const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
+    utils::check(_dyson_no_inversion, "simple_dyson::picard_sweep_change: needs dyson_no_inversion = true");
+    // One sweep from the given G, discarded: the change is the distance of G from the sweep's fixed point (to first order)
+    return solve_dyson_tau(_G_shm, _sF_skij, _Sigma_shm, mu, false);
   }
 
   template<typename G_t, typename F_t, typename Sigma_t>
@@ -376,6 +387,9 @@ namespace {
   template void simple_dyson::solve_dyson(sArray_t<Array_view_5D_t>&,
       const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double);
   template void simple_dyson::solve_dyson(sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>&,
+      const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double);
+
+  template double simple_dyson::picard_sweep_change(sArray_t<Array_view_5D_t>&,
       const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double);
 
   template void simple_dyson::compute_eigenspectra(const sArray_t<Array_view_4D_t>&,
