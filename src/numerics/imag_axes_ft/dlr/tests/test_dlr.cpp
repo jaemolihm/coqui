@@ -325,6 +325,44 @@ namespace bdft_tests {
     REQUIRE(err_pair == 0.0);
   }
 
+  // IAFT::w_to_tau_w_weighted vs its definition: on DLR it is the gemm with dlr.Ttw_ff_w_weighted (bitwise); on IR it
+  // is w_to_tau(X, fermion) (bitwise), since IR has no weighted variant. Random complex X(iw, 3).
+  TEST_CASE("iaft_w_to_tau_w_weighted_dispatch", "[iaft][dlr]") {
+    double beta = 1000.0, wmax = 30.0;
+    std::mt19937 gen(11);
+    std::normal_distribution<double> dist(0.0, 1.0);
+    auto random_X = [&](long nw) {
+      nda::array<ComplexType, 2> X(nw, 3);
+      for (long i = 0; i < nw; ++i)
+        for (long j = 0; j < 3; ++j) X(i, j) = ComplexType(dist(gen), dist(gen));
+      return X;
+    };
+
+    // DLR: w_to_tau_w_weighted vs gemm with Ttw_ff_w_weighted
+    {
+      imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+      imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
+      auto X = random_X(iaft.nw_f());
+      nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
+      iaft.w_to_tau_w_weighted(X, Y);
+      nda::blas::gemm(dlr.Ttw_ff_w_weighted, X, Y_ref);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
+      // and it differs from the orthogonal w_to_tau
+      nda::array<ComplexType, 2> Y_o(iaft.nt_f(), 3);
+      iaft.w_to_tau(X, Y_o, imag_axes_ft::fermion);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_o)) > 0.0);
+    }
+    // IR: w_to_tau_w_weighted vs w_to_tau
+    {
+      imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::ir_basis, "high");
+      auto X = random_X(iaft.nw_f());
+      nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
+      iaft.w_to_tau_w_weighted(X, Y);
+      iaft.w_to_tau(X, Y_ref, imag_axes_ft::fermion);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
+    }
+  }
+
   // Node Dyson G = w_to_tau_w_weighted[(iw - h - tau_to_w Sigma)^{-1}] on the DLR grid vs the exact G(tau) of a gapped
   // 2-orbital model whose Sigma(iw) = sum_p V_p V_p^H / (iw - xi_p) comes from bath poles inside wmax. The exact G
   // is the system block of the resolvent of the embedding Hamiltonian [[h, V], [V^H, diag(xi)]] and Sigma(tau) is

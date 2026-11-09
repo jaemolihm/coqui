@@ -364,8 +364,7 @@ namespace imag_axes_ft {
     decltype(auto) Ttw_ff() const {
       return std::visit( [&](auto&& v) { return v.Ttw_ff(); }, grid_var);
     }
-    // |omega|-weighted fermionic w -> tau matrix of the DLR grid. The weighted fit is a property of the DLR SYM
-    // grid (nw_f = nt_f + 1); IR has no weighted variant and keeps its orthogonal Ttw_ff.
+    // |omega|-weighted fermionic w -> tau matrix of the DLR grid; IR keeps its orthogonal Ttw_ff.
     decltype(auto) Ttw_ff_w_weighted() const {
       return std::visit( [&](auto&& v) -> decltype(auto) {
 #ifdef ENABLE_DLR

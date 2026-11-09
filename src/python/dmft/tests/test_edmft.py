@@ -233,7 +233,7 @@ def weiss_lr_inputs():
 
     return dict(iaft=iaft, G_w=G_w, dG_w=dG_w, Vhf=Vhf, dVhf=dVhf, Sigma_w=Sigma_w, dSigma_w=dSigma_w,
                 V=V, W_w=W_w, dW_w=dW_w, Pi_w=Pi_w, dPi_w=dPi_w,
-                G_t=iaft.w_to_tau(G_w, 'f'), dG_t=iaft.w_to_tau(dG_w, 'f'),
+                G_t=iaft.w_to_tau_w_weighted(G_w), dG_t=iaft.w_to_tau_w_weighted(dG_w),
                 W_t=iaft.w_to_tau_phsym(W_w, 'b'), dW_t=iaft.w_to_tau_phsym(dW_w, 'b'))
 
 

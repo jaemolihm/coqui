@@ -473,13 +473,15 @@ namespace imag_axes_ft {
       // Used only for G(iw) from the Dyson equation (IAFT::w_to_tau_w_weighted; its callers are listed there).
       // For such G ~ 1/(i omega), which is nearly representable on the nt_f DLR tau nodes, the part of G(iw)
       // outside the range of Twt (one direction of C^{nw_f}, as nw_f = nt_f + 1 on the SYM fermionic mesh) lies
-      // where |G| is large, so the relative error of G(tau) stays small. Measured on the nk4 grid:
-      // ||Ttw W^-1||_2 = 244 for Ttw_ff and 4.5 for Ttw_ff_w_weighted; the gain is grid dependent
-      // (none on beta 200, wmax 3, high and beta 100, wmax 4, high).
+      // where |G| is large, so the relative error of G(tau) stays small: for G ~ 1/(i omega) and a Matsubara
+      // residual r, the tau error is bounded by ||T W^-1||_2 ||W r||, hence ||T W^-1||_2 is the measure of the gain.
+      // Measured ||Ttw W^-1||_2 = 244 for Ttw_ff and 4.5 for Ttw_ff_w_weighted on beta 1000, wmax 30, high; the gain
+      // is grid dependent (unchanged on beta 200, wmax 3, high and on beta 100, wmax 4, high).
       // Not for general data (impurity Sigma from CT-SEG/ED through w_interpolate): the weighted projection
       // Twt Ttw_w is oblique; it moves the removed component, along W^-2 u, onto the lowest |omega| nodes and
-      // amplifies it (||Twt Ttw_w||_2 = 2.3 / 6.8 / 42 on the nk4 / Hubbard / medium grids), whereas the
-      // orthogonal fit Ttw_ff changes the data minimally. tau -> w -> tau stays exact (Ttw_w Twt = 1).
+      // amplifies it (||Twt Ttw_w||_2 = 2.3 / 6.8 / 42 on beta 1000, wmax 30, high / beta 200, wmax 3, high /
+      // beta 1000, wmax 30, medium), whereas the orthogonal fit Ttw_ff changes the data minimally.
+      // tau -> w -> tau stays exact (Ttw_w Twt = 1).
       nda::matrix<ComplexType> Ttw_ff_w_weighted;
       // transformation from t_f to w_f
       nda::matrix<ComplexType> Twt_ff;
