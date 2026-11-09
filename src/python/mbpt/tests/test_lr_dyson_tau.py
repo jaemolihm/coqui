@@ -66,11 +66,13 @@ def _lr_dyson_only(mpi, thc, prefix, output, dH0, **kwargs):
 
 def test_lr_dyson_tau_checkpoint(mpi, capfd):
     # run_gw with dyson_no_inversion = false vs true on LiH (THC, DLR, beta = 100): only the Picard-sweep run carries
-    # scf/dyson_no_inversion. run_lr names the Dyson kernel it takes from the mark (the imaginary-time convolution on the
-    # stored G(tau), Matsubara nodes without the mark), and its non-interacting response ΔDm of a random Hermitian ΔH0
-    # on the sweep checkpoint matches the reference -T_beta w_to_tau[G(iw) ΔH0 G(iw)] of the stored G(tau) to 1e-9
-    # (7.8e-11 measured; the two kernels differ at the DLR-grid floor, 6.3e-7 with prec = medium, hence prec = high). It
-    # checks the plumbing: the stored G is read, the kernel is applied, the result is written. With fix_density the shifted
+    # scf/dyson_no_inversion. run_lr names the Dyson kernel it takes from the mark (the imaginary-time convolution about
+    # the Picard fixed point of the stored (F, Sigma, mu), rebuilt by converged sweeps; Matsubara nodes without the
+    # mark). The non-interacting response ΔDm of a random Hermitian ΔH0 on the sweep checkpoint (converged only to
+    # conv_thr = 1e-6, so the stored G(tau) is off its fixed point) matches the reference -T_beta w_to_tau[G*(iw) ΔH0
+    # G*(iw)] with G*(iw) = [(iw + mu) - H0 - F - Sigma(iw)]^-1 formed pointwise, to 1e-9 (prec = high; the two kernels
+    # differ at the DLR-grid floor, 6.3e-7 with prec = medium), and is more than 10x farther from the same product at the
+    # stored G(tau). With fix_density the shifted
     # ΔDm has ΔN = 0 to the DLR floor (1.0e-8 against ‖ΔDm‖ = 13.8 measured: Δμ zeroes the node ΔN, not the τ trace). The
     # real backend (THC, C++ run_gw and lr_dyson) runs in every step; nothing is stubbed.
     mf = construct_qe_mf(mpi, "qe_lih222")
@@ -106,19 +108,37 @@ def test_lr_dyson_tau_checkpoint(mpi, capfd):
         assert "LR Dyson kernel: imaginary-time convolution (scf/dyson_no_inversion)" in out_tau
         assert "LR Dyson kernel: Matsubara nodes" in out_node
 
-        # Reference: the Matsubara-node product at the stored G(tau)
+        # Reference: the Matsubara-node product at the fixed point of the stored (F, Sigma, mu), G(iw) = [(iw + mu) - H0
+        # - F - Sigma(iw)]^-1 formed pointwise. The stored G(tau) is one sweep away from its own fixed point only to the
+        # SCF residual (conv_thr = 1e-6 here), so a reference built on it differs from the kernel's expansion point.
         from coqui.utils.imag_axes_ft import IAFT
         iaft = IAFT.from_coqui_chkpt("lrtau_picard.mbpt.h5", verbose=False)
         with h5py.File("lrtau_picard.mbpt.h5", "r") as f:
-            G_tskij = _read_complex(f, f"scf/iter{f['scf/final_iter'][()]}/G_tskij")
-        G_w = iaft.tau_to_w(G_tskij, "f")
-        dG_w = G_w @ dH0[None] @ G_w
-        dG_t = iaft.w_to_tau(dG_w, "f")
-        dDm_ref = -np.einsum("t,t...->...", np.asarray(iaft._impl.T_beta_t_ff).reshape(-1), dG_t)
+            it = f["scf/final_iter"][()]
+            G_tskij = _read_complex(f, f"scf/iter{it}/G_tskij")
+            F_skij = _read_complex(f, f"scf/iter{it}/F_skij")
+            Sigma_tskij = _read_complex(f, f"scf/iter{it}/Sigma_tskij")
+            mu = f[f"scf/iter{it}/mu"][()]
+            H0_skij = _read_complex(f, "system/H0_skij")
+        iw = 1j * np.asarray(iaft.wn_mesh("f")) * np.pi / iaft.beta
+        Sigma_w = iaft.tau_to_w(Sigma_tskij, "f")
+        M_w = (iw[:, None, None, None, None] + mu) * np.eye(nb) - (H0_skij + F_skij)[None] - Sigma_w
+        G_star_w = np.linalg.inv(M_w)
+
+        def dDm_node_product(G_w):
+            dG_t = iaft.w_to_tau(G_w @ dH0[None] @ G_w, "f")
+            return -np.einsum("t,t...->...", np.asarray(iaft._impl.T_beta_t_ff).reshape(-1), dG_t)
+
+        dDm_ref = dDm_node_product(G_star_w)
+        dDm_stored = dDm_node_product(iaft.tau_to_w(G_tskij, "f"))
         err = np.linalg.norm(dDm_tau - dDm_ref) / np.linalg.norm(dDm_ref)
-        print("rel. difference of ΔDm, tau kernel vs node product at the stored G:", err)
+        err_stored = np.linalg.norm(dDm_tau - dDm_stored) / np.linalg.norm(dDm_ref)
+        print("rel. difference of ΔDm, tau kernel vs node product at the fixed point of the stored (F, Sigma, mu):", err,
+              "; vs the product at the stored G(tau):", err_stored)
         assert np.linalg.norm(dDm_ref) > 1e-6
         assert err < 1e-9
+        # The expansion point is the rebuilt fixed point, not the stored G (which is off it by the SCF residual)
+        assert err_stored > 10 * err
 
         # ΔN = spin Σ_{s,k} w_k Tr[ΔDm] of the density-fixed response, with the k weights and spin factor of compute_Nelec
         spin_factor = 2.0 if (ns == 1 and mf.npol() == 1) else 1.0

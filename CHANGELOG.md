@@ -12,7 +12,7 @@
 - Imaginary-time and Matsubara meshes to h5 checkpoint, written by both the C++ and the Python IAFT. (#51)
 - `CPPDLR` CMake variable to configure against a local cppdlr source tree instead of the one fetched by `FetchContent`. (#51)
 - `dyson_no_inversion` input of `run_gw` (also the GF2 solver and the GW+EDMFT path): imaginary-time Picard sweeps with exact DLR convolutions instead of the Matsubara-node Dyson solve, for every Dyson solve with a nonzero Σ except the first call of the run (DLR basis, S = 1). (#124)
-- `run_lr` / `run_chi` on a ground state whose last Dyson solve was such a Picard sweep (`scf/dyson_no_inversion`, written by `run_gw`) differentiate the imaginary-time Dyson equation at the stored ground-state G (within the ground state's last-sweep residual of the Picard fixed point, logged by `run_lr`); the Matsubara-node kernel's Jacobian differs from the imaginary-time one at ~5e-9 on a large-λ DLR grid. Checkpoints without the mark are unchanged.
+- `run_lr` / `run_chi` on a ground state whose last Dyson solve was such a Picard sweep (`scf/dyson_no_inversion`, written by `run_gw`) differentiate the imaginary-time Dyson equation at the Picard fixed point of the stored (F, Σ, μ) (`run_lr` rebuilds G by converged sweeps, as the Matsubara-node kernel rebuilds it by the node solve); the Matsubara-node kernel's Jacobian differs from the imaginary-time one at ~5e-9 on a large-λ DLR grid. Checkpoints without the mark are unchanged.
 
 ### Improved
 

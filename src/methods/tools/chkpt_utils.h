@@ -84,16 +84,6 @@ namespace methods {
                std::string const& h5_grp = "scf");
 
   /**
-   * Read G_tskij of iteration `iter` (-1: final_iter) of the group `h5_grp` into the existing shared array `G`,
-   * so that no second full-G array is allocated. Aborts if the iteration holds no G (chkpt_slim intermediate
-   * iteration, qp checkpoint). Called by run_lr_calc for a dyson_no_inversion ground state, whose stored G is the
-   * expansion point of the imaginary-time kernel.
-   */
-  template<typename shared_array_t>
-  void read_G(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &G,
-              std::string const& h5_grp = "scf");
-
-  /**
    * Write a full-BZ checkpoint from a dyson-type checkpoint of a calculation on the IBZ.
    *
    * out_prefix.mbpt.h5 has the standard layout, with one iteration scf/iter{N} (N = final_iter of the input)

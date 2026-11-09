@@ -267,29 +267,6 @@ void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter,
   node_comm.barrier();
 }
 
-template<typename shared_array_t>
-void read_G(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &G,
-            std::string const& h5_grp) {
-  if (node_comm.root()) {
-    std::string filename = output + ".mbpt.h5";
-    h5::file file(filename, 'r');
-    auto grp = h5::group(file).open_group(h5_grp);
-
-    if (iter == -1) h5::h5_read(grp, "final_iter", iter);
-
-    utils::check(grp.has_subgroup("iter"+std::to_string(iter)),
-                 "read_G: \"{}/iter{}\" h5 group does not exist.", h5_grp, iter);
-    auto iter_grp = grp.open_group("iter"+std::to_string(iter));
-    utils::check(iter_grp.has_dataset("G_tskij"),
-                 "read_G: {}/iter{} holds no G_tskij (chkpt_slim intermediate iteration or qp checkpoint).",
-                 h5_grp, iter);
-
-    auto G_loc = G.local();
-    nda::h5_read(iter_grp, "G_tskij", G_loc);
-  }
-  node_comm.barrier();
-}
-
 template<typename X_4D_t>
 long read_qpscf(mpi3::shared_communicator node_comm,
                 X_4D_t &Heff_skij, double &mu, std::string output) {
@@ -629,9 +606,6 @@ template void read_H0(mpi3::shared_communicator, std::string, sArray_t<Array_vie
 template void read_ovlp(mpi3::shared_communicator, std::string, sArray_t<Array_view_4D_t>&);
 template void read_dm(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_4D_t>&,
                       std::string const&);
-
-template void read_G(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_5D_t>&,
-                     std::string const&);
 
 template long read_qpscf(
     mpi3::shared_communicator, sArray_t<Array_view_4D_t>&,

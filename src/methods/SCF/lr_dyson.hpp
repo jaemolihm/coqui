@@ -158,8 +158,8 @@ inline std::array<long, 5> lr_dyson_tau_pgrid(long nproc, long nkpts_ibz) {
  *   - Imaginary time (true): the convolution in τ on the DLR nodes with the GS G(τ) (set_G_tau),
  *       ΔG = G_{k+q} * [X δ(τ) + ΔΣ_k] * G_k,   X = ΔH0 + ΔF + ΔV_QPGW − Δμ S,
  *     the derivative of the fixed point G = G0 + G0 * Σ * G of the GS imaginary-time Picard sweeps
- *     (simple_dyson::solve_dyson_tau), taken at the stored GS G, which is the last sweep's output and so within the GS
- *     sweep residual of that fixed point (run_lr logs the residual). The two Jacobians differ at the DLR-grid floor,
+ *     (simple_dyson::solve_dyson_tau), taken at that fixed point of the stored (F, Σ, μ) (run_lr converges the sweeps
+ *     from the Matsubara-node solve before setting G(τ)). The two Jacobians differ at the DLR-grid floor,
  *     ~5e-9 on a large-λ grid.
  * With fix_density at q=Γ, the GS chemical potential is searched on the Matsubara nodes in both modes (update_mu), so
  * in the imaginary-time kernel Δμ is taken from the node functional of the GS density (build_dmu_response).

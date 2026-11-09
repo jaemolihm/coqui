@@ -297,10 +297,6 @@ void lr_dyson::solve_lr_dyson_impl(
 
     finalize_DeltaG_tau(std::move(dDeltaG_tskij), sDeltaDm_skij);
   }
-
-  _Timer.start("LR_DYSON_MISC");
-  _context->comm.barrier();
-  _Timer.stop("LR_DYSON_MISC");
 }
 
 
@@ -432,10 +428,6 @@ void lr_dyson::solve_lr_dyson_tau_impl(
   _Timer.stop("LR_DYSON_TAU_KERNEL");
 
   finalize_DeltaG_tau(std::move(dDeltaG_tskij), sDeltaDm_skij);
-
-  _Timer.start("LR_DYSON_MISC");
-  _context->comm.barrier();
-  _Timer.stop("LR_DYSON_MISC");
 }
 
 
@@ -528,36 +520,53 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
   // A ΔG(τ) left by an earlier full pass belongs to a different ΔDm.
   _dDeltaG_tau_buffer.reset();
 
-  // Each rank computes whole (s, k) blocks of ΔDm, summed over all ω, into its
-  // node's copy; the blocks computed on other nodes stay zero until the sum below.
-  sDeltaDm_skij.set_zero();
-  auto DeltaDm = sDeltaDm_skij.local();
+  decltype(nda::range::all) all;
   nda::matrix<ComplexType> X(_nbnd, _nbnd);
-  auto [b0, b1] = itertools::chunk_range(0, _ns * _nkpts_ibz, long(_context->comm.size()),
-                                         long(_context->comm.rank()));
   if (tau_kernel()) {
-    // Imaginary-time kernel: ΔDm(k) += −T_β · [G_{k+q} X G_k](τ), the τ convolution of the full pass without
-    // retaining ΔG(τ)
-    decltype(nda::range::all) all;
+    // Imaginary-time kernel: ΔDm = −T_β [G_{k+q} X G_k](τ), the τ convolution of the full pass without retaining
+    // ΔG(τ). Each rank forms its (k, i, j) block of ΔDm on the (k, i, j) split of the full pass
+    // (lr_dyson_tau_pgrid), so that all ranks work also when there are more ranks than (s, k) pairs
+    using Array_4D_t = nda::array<ComplexType, 4>;
+    auto t_pgrid = lr_dyson_tau_pgrid(_context->comm.size(), _nkpts_ibz);
+    auto dDeltaDm_skij = math::nda::make_distributed_array<Array_4D_t>(
+        _context->comm, {1, t_pgrid[2], t_pgrid[3], t_pgrid[4]}, {_ns, _nkpts_ibz, _nbnd, _nbnd});
+    auto [ns_loc, nk_loc, ni_loc, nj_loc] = dDeltaDm_skij.local_shape();
+    auto [s_org, k_org, i_org, j_org] = dDeltaDm_skij.origin();
+    auto i_rng = dDeltaDm_skij.local_range(2);
+    auto j_rng = dDeltaDm_skij.local_range(3);
+    auto DeltaDm_blk = dDeltaDm_skij.local();
     auto G_t = _sG_tskij->local();
-    nda::array<ComplexType, 3> G_kq_t(_nts, _nbnd, _nbnd), G_k_t(_nts, _nbnd, _nbnd), GX_t(_nts, _nbnd, _nbnd);
-    nda::matrix<ComplexType> DeltaG_beta(_nbnd, _nbnd);
-    for (long b = b0; b < b1; ++b) {
-      const long s = b / _nkpts_ibz;
-      const long ik = b % _nkpts_ibz;
-      const long ikq = _kpq_map(ik);
-      auto DeltaDm_k = DeltaDm(s, ik, all, all);
-      if (sDeltaDm_src) DeltaDm_k = sDeltaDm_src->local()(s, ik, all, all);
-      X = sDeltaH0_skij.local()(s, ik, all, all) + sDeltaF_skij.local()(s, ik, all, all);
-      G_kq_t = G_t(all, s, ikq, all, all);
-      G_k_t = G_t(all, s, ik, all, all);
-      for (long t = 0; t < _nts; ++t)
-        nda::blas::gemm(ComplexType(1.0), G_kq_t(t, all, all), X, ComplexType(0.0), GX_t(t, all, all));
-      _dyson.FT()->tau_to_beta(_dyson.FT()->dlr_convolve(GX_t, G_k_t), DeltaG_beta);
-      DeltaDm_k -= DeltaG_beta;
+
+    if (ni_loc > 0 and nj_loc > 0) {
+      nda::array<ComplexType, 3> G_kq_t(_nts, ni_loc, _nbnd), G_k_t(_nts, _nbnd, nj_loc), GX_t(_nts, ni_loc, _nbnd);
+      nda::matrix<ComplexType> DeltaG_beta(ni_loc, nj_loc);
+      for (long s = 0; s < ns_loc; ++s) {
+        for (long k = 0; k < nk_loc; ++k) {
+          const long is = s + s_org;
+          const long ik = k + k_org;
+          const long ikq = _kpq_map(ik);
+          X = sDeltaH0_skij.local()(is, ik, all, all) + sDeltaF_skij.local()(is, ik, all, all);
+          // Contiguous copies of the strided shared-memory slices the convolutions read
+          G_kq_t = G_t(all, is, ikq, i_rng, all);
+          G_k_t = G_t(all, is, ik, all, j_rng);
+          // ΔDm_blk = [src_blk] − T_β[(G_{k+q}[i, :] X) * G_k[:, j]]
+          for (long t = 0; t < _nts; ++t)
+            nda::blas::gemm(ComplexType(1.0), G_kq_t(t, all, all), X, ComplexType(0.0), GX_t(t, all, all));
+          _dyson.FT()->tau_to_beta(_dyson.FT()->dlr_convolve(GX_t, G_k_t), DeltaG_beta);
+          if (sDeltaDm_src) DeltaDm_blk(s, k, all, all) = sDeltaDm_src->local()(is, ik, i_rng, j_rng);
+          else DeltaDm_blk(s, k, all, all) = 0.0;
+          DeltaDm_blk(s, k, all, all) -= DeltaG_beta;
+        }
+      }
     }
+    math::nda::gather_to_shm(dDeltaDm_skij, sDeltaDm_skij);
   } else {
-    // Matsubara kernel: ΔDm(k) += c_ω · G_{k+q}(iω) · X(k) · G_k(iω) summed over ω
+    // Matsubara kernel: each rank computes whole (s, k) blocks of ΔDm, summed over all ω, into its node's copy; the
+    // blocks computed on other nodes stay zero until the sum below.
+    sDeltaDm_skij.set_zero();
+    auto DeltaDm = sDeltaDm_skij.local();
+    auto [b0, b1] = itertools::chunk_range(0, _ns * _nkpts_ibz, long(_context->comm.size()),
+                                           long(_context->comm.rank()));
     nda::matrix<ComplexType> XG(_nbnd, _nbnd);
     auto G_w = _cached_G_wskij->local();
     for (long b = b0; b < b1; ++b) {
@@ -576,8 +585,8 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
         nda::blas::gemm(ComplexType(1.0), G_kq, XG, ComplexType(1.0), DeltaDm_k);
       }
     }
+    sDeltaDm_skij.all_reduce_parallel();
   }
-  sDeltaDm_skij.all_reduce_parallel();
   _Timer.stop("LR_DYSON_DM_ONLY");
 
   const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density,

@@ -1872,8 +1872,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                "run_lr_calc: 'dyson_no_inversion' is a ground-state input. run_lr takes the Dyson kernel from the "
                "checkpoint ({}/{}/dyson_no_inversion present: imaginary-time convolution, absent: Matsubara nodes); "
                "remove the argument.", input_file, input_grp);
-  // Iteration whose G(τ) and Dm the imaginary-time kernel expands about (-1: final_iter)
-  long gs_iter = input_iter;
   if (dyson_tau) {
     h5::file file(input_file, 'r');
     auto grp = h5::group(file).open_group(input_grp);
@@ -1887,7 +1885,6 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  "run_lr_calc: {}/{}/dyson_no_inversion marks a ground state whose last Dyson solve was an "
                  "imaginary-time Picard sweep, so input_iter must be the final iteration {} (got {}).",
                  input_file, input_grp, final_iter, input_iter);
-    gs_iter = final_iter;
   }
   app_log(1, "LR Dyson kernel: {}", dyson_tau
               ? fmt::format("imaginary-time convolution ({}/dyson_no_inversion)", input_grp)
@@ -1949,17 +1946,32 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     lr_init_timer.start("LR_INIT_UPDATE_G");
     if (dyson_tau) {
-      // The expansion point is the stored G(τ) and Dm, the ground state's own: the last Picard sweep's output, which
-      // is within the ground state's sweep residual of the fixed point of the stored (F, Σ, μ) (logged below). A
-      // Matsubara-node rebuild from (F, Σ, μ) would be the node solution, not a sweep's G.
-      app_log(2, "Reading the unperturbed Green's function and density matrix from the checkpoint "
-                 "({}/iter{})...", input_grp, gs_iter);
-      chkpt::read_G(mpi->node_comm, prefix, gs_iter, sG_tskij, input_grp);
-      chkpt::read_dm(mpi->node_comm, prefix, gs_iter, sDm_skij, input_grp);
-      // Distance of the stored G from the sweep's fixed point (to first order, G_stored - G* ~ this change)
-      double gs_sweep_change = dyson.picard_sweep_change(sG_tskij, sF_skij, sSigma_tskij, mu);
-      app_log(1, "LR Dyson kernel: max|Sweep(G_stored) - G_stored| = {:.3e} (ground-state sweep residual; the "
-                 "expansion point is the stored G)", gs_sweep_change);
+      // Imaginary-time kernel: expand about the fixed point G* = G0 + G0 * Sigma * G* of the stored (F, Sigma, mu), as
+      // the Matsubara-node branch expands about its own solution for the stored (F, Sigma, mu), not about the stored G
+      app_log(2, "Rebuilding the unperturbed Green's function from the checkpoint by converged imaginary-time "
+                 "Picard sweeps...");
+      app_log(2, "  h0_source = {}", h0_source);
+      app_log(2, "  mu = {:.8f}", mu);
+      // The first call of the flagged solver is a Matsubara-node solve: the starting G of the sweeps. It also sets Dm
+      update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+      // Sweeps at fixed (F, Sigma, mu) until G stops changing
+      // LiH scGW (DLR beta = 100, prec high): the sweep change reaches a round-off floor of 3e-11 to 1.3e-10 after the
+      // first sweep and stays there, so a tolerance below it is never met
+      const double sweep_tol = 1e-9;
+      const int max_sweeps = 200;
+      int n_sweeps = 0;
+      double sweep_change = 0.0;
+      do {
+        dyson.solve_dyson(sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu);  // Dm = -G(beta) of the swept G
+        sweep_change = dyson.last_sweep_change();
+        ++n_sweeps;
+      } while (sweep_change >= sweep_tol and n_sweeps < max_sweeps);
+      app_log(1, "LR Dyson kernel: {} Picard sweeps at the stored (F, Sigma, mu), final max|G_new - G_prev| = {:.3e}",
+              n_sweeps, sweep_change);
+      utils::check(sweep_change < sweep_tol,
+                   "run_lr_calc: the imaginary-time Picard sweeps at the stored (F, Sigma, mu) did not converge in {} "
+                   "sweeps (max|G_new - G_prev| = {:.3e} >= {:.1e}): the ground-state Dyson map is not contracting.",
+                   max_sweeps, sweep_change, sweep_tol);
     } else {
       // Compute G from F and Sigma via Dyson equation
       app_log(2, "Computing unperturbed Green's function from checkpoint...");

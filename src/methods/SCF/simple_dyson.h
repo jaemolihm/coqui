@@ -137,14 +137,6 @@ public:
   void solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
 
   /**
-   * max|Sweep(G) - G| for one imaginary-time Picard sweep (solve_dyson_tau) of the given (F, Sigma, mu) from G, which is
-   * left unchanged. Used by run_lr to log how far a stored ground-state G is from the sweep's fixed point
-   * (for a sweep of contraction factor ρ < 1, |G - G*| <= change / (1 - ρ)). Requires dyson_no_inversion; collective.
-   */
-  template<typename G_t, typename F_t, typename Sigma_t>
-  double picard_sweep_change(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
-
-  /**
    * Compute the eigenvalues of _F + _Sigma(iwn)
    * @param spectra - [OUTPUT] eigenvalues, (nw, ns, nkpts_ibz, nbnd)
    */
@@ -183,11 +175,10 @@ private:
    * Dyson solution of the stored (F, Sigma). Limits: DLR basis only, S = 1 (checked at construction), tested on
    * gapped systems.
    *
-   * @param store_G - [INPUT] false: _G_shm is left untouched (only the change is computed)
-   * @return max|G_new - G_prev| over all elements and ranks
+   * Sets last_sweep_change() to max|G_new - G_prev| over all elements and ranks.
    */
   template<typename G_t, typename F_t, typename Sigma_t>
-  double solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu, bool store_G = true);
+  void solve_dyson_tau(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
 
   /// Abort unless the IAFT basis is DLR and the overlap matrix is the identity (requirements of solve_dyson_tau).
   void check_dyson_no_inversion_requirements();
@@ -216,6 +207,7 @@ private:
 
   utils::TimerManager _Timer;
   bool _last_solve_tau = false;  // set by every solve_dyson call: true iff it ran solve_dyson_tau
+  double _last_sweep_change = 0.0;  // max|G_new - G_prev| of the last solve_dyson_tau call
   bool _G_has_previous_solution = false;  // true once solve_dyson has stored a G in _G_shm (the start of the next Picard sweep)
 
 public:
@@ -230,6 +222,9 @@ public:
   /// True iff the last solve_dyson call was an imaginary-time Picard sweep (a ground state whose stored G is the
   /// fixed point of the sweep, not the Matsubara-node solution); false before any call.
   bool last_solve_was_tau() const { return _last_solve_tau; }
+  /// max|G_new - G_prev| of the last imaginary-time Picard sweep (0 before any sweep); read by run_lr to converge the
+  /// ground-state G(tau) at fixed (F, Sigma, mu).
+  double last_sweep_change() const { return _last_sweep_change; }
   std::optional<double>& fixed_mu() { return _fixed_mu; }
   const std::optional<double>& fixed_mu() const { return _fixed_mu; }
   auto H0() const& { return _sH0_skij.local(); }
