@@ -128,6 +128,14 @@ namespace {
       _Timer.stop("REDISTRIBUTE");
       dG_wskij.reset(); 
 
+      // Keep the Dyson G(iw) for LR (see keep_G_omega)
+      if (_keep_G_omega) {
+        if (_sG_omega == nullptr)
+          _sG_omega = std::make_shared<sArray_t<Array_view_5D_t>>(
+              math::shm::make_shared_array<Array_view_5D_t>(*_context, {_nw, _ns, _nkpts_ibz, _nbnd, _nbnd}));
+        math::nda::gather_to_shm(dG_wskij_tmp, *_sG_omega);
+      }
+
       auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
                                                          {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
       auto Gt_loc = dG_tskij.local();

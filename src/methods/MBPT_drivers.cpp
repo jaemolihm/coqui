@@ -1866,6 +1866,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
   utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
 
+  // Exact unperturbed G(iω) that lr_dyson linearizes about: kept by simple_dyson (Dyson path) or built from the MOs
+  // (mf_dft path).
+  std::optional<sArray_t<Array_view_5D_t>> opt_sG_wskij_mf;
+  const sArray_t<Array_view_5D_t>* pG_wskij = nullptr;
   double mu = 0.0;
   if (unperturbed == "mf_dft") {
     // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
@@ -1879,6 +1883,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     app_log(2, "  DFT reference mu = {:.8f}", mu);
     update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
     update_Dm(sDm_skij, sMO_skia, sE_ska, mu, ft.beta());
+    opt_sG_wskij_mf.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+        *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+    update_G_omega(*opt_sG_wskij_mf, sMO_skia, sE_ska, mu, ft);
+    pG_wskij = &(*opt_sG_wskij_mf);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   } else {
@@ -1894,7 +1902,10 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     app_log(2, "  h0_source = {}", h0_source);
     app_log(2, "  mu = {:.8f}", mu);
     lr_init_timer.start("LR_INIT_UPDATE_G");
+    dyson.keep_G_omega(true);
     update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+    dyson.keep_G_omega(false);
+    pG_wskij = &dyson.G_omega();
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   }
@@ -2327,7 +2338,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_max_iter = precond_max_iter;
   p.hessian_stationary = hessian_stationary;
 
-  driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
+  driver.lr_setup(sG_tskij, *pG_wskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
   nda::array<long, 1> niter_m(nmodes);
   nda::array<double, 1> Delta_mu_m(nmodes);

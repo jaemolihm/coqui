@@ -316,6 +316,9 @@ public:
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
+   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::G_omega; mean field: update_G_omega) that lr_dyson
+   * linearizes about; the caller keeps it alive and in place until the last solve.
+   *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
    * lr_rpa_pi / lr_scr_coulomb_t solvers and their kpq maps are all latched to
    * the constructor's q, and none of them re-checks it; a batch spanning several
@@ -323,6 +326,7 @@ public:
    */
   void lr_setup(
       const sArray_t<Array_view_5D_t>& sG_tskij,
+      const sArray_t<Array_view_5D_t>& sG_wskij,
       thc_reader_t& thc,
       dArr_4D_t* dW_wqPQ_in,
       const lr_params& p);
@@ -592,9 +596,6 @@ private:
   std::unique_ptr<lr_gcr> _pc_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
-  // sG_wskij must be a member, not a local: lr_dyson caches dN/dμ against the
-  // *address* of this array, so a per-call local would silently invalidate it.
-  std::optional<sArray_t<Array_view_5D_t>> _sG_wskij;
   std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), q-dist
   std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist
   std::optional<dArr_3D_t> _opt_dWc0_qPQ;        // W_c(iν=0)(q,P,Q), HSEX kernel

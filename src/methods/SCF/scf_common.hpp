@@ -287,6 +287,15 @@ void update_G(sArray_t<Array_view_5D_t> &sG_tskij,
               const sArray_t<Array_view_4D_t> &sMO_skia, const sArray_t<Array_view_3D_t> &sE_ska,
               double mu, const imag_axes_ft::IAFT &FT);
 
+/**
+ * Exact G(iw) = sum_a C_a C_a^dagger / (iw + mu - e_a) = [(iw + mu) S - H_MF]^-1 of a mean field with MOs C and
+ * energies e (S-orthonormal), at the Matsubara nodes of FT. Called by run_lr_calc for unperturbed = "mf_dft", so that LR
+ * linearizes about the exact G(iw) as in the Dyson path (simple_dyson::keep_G_omega) and not about tau_to_w(G(tau)).
+ */
+void update_G_omega(sArray_t<Array_view_5D_t> &sG_wskij,
+                    const sArray_t<Array_view_4D_t> &sMO_skia, const sArray_t<Array_view_3D_t> &sE_ska,
+                    double mu, const imag_axes_ft::IAFT &FT);
+
 template<nda::ArrayOfRank<5> Array_base_t>
 void compute_G_from_mf(h5::group iter_grp, imag_axes_ft::IAFT &ft, sArray_t<Array_base_t> &sG_tskij);
 

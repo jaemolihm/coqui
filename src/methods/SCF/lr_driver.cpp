@@ -169,6 +169,7 @@ void lr_driver::lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_ful
 
 void lr_driver::lr_setup(
     const sArray_t<Array_view_5D_t>& sG_tskij,
+    const sArray_t<Array_view_5D_t>& sG_wskij,
     thc_reader_t& thc,
     dArr_4D_t* dW_wqPQ_in,
     const lr_params& p) {
@@ -373,15 +374,9 @@ void lr_driver::lr_setup(
     _Timer.stop("LR_DRIVER_SETUP_G_R");
   }
 
-  // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT
-  // per iteration). Held as a member: lr_dyson keys its dN/dμ cache on this
-  // array's address, so a per-call local would invalidate it every solve.
-  utils::memlog("lr_driver::lr_setup: before sG_wskij precompute");
-  _Timer.start("LR_DRIVER_SETUP_G_OMEGA");
-  _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
-  _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
-  _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
-  utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
+  // lr_dyson linearizes about the caller's exact G(iω). It caches dN/dμ against this array's *address*, so the
+  // caller keeps the array alive and in place for every solve.
+  _lr_dyson.set_cached_G_omega(&sG_wskij);
 
   // Precompute the Δμ response if needed for fix_density mode at q=0
   if (p.fix_density && _lr_dyson.is_q_gamma()) {
