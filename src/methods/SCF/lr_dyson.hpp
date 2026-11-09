@@ -215,10 +215,13 @@ public:
    * kernel takes set_cached_G_omega() instead. The caller retains ownership; the pointed-to array must outlive all
    * solve_lr_dyson calls.
    *
-   * @param sG_tskij - [INPUT] Pointer to the shared GS G(τ) (nt, ns, nk, nb, nb), the stored output of the GS
+   * @param sG_tskij - [INPUT] Pointer to the shared GS G(τ) (nt, ns, nk, nb, nb): the fixed point of the imaginary-time
+   *                   Dyson map at the GS (F, Σ, μ), as rebuilt by run_lr
    */
   void set_G_tau(const sArray_t<Array_view_5D_t>* sG_tskij) {
-    // Same invalidation as set_cached_G_omega: the Δμ response is a function of G and S alone.
+    // A different G array is a different ground state. The Δμ response (dN/dμ, dG/dμ, dDm/dμ and the node-functional P, Q
+    // built from the GS (F, Σ, μ)) is cached under the address of G alone, so it is dropped here and rebuilt by
+    // build_dmu_response.
     if (_sG_tskij != sG_tskij) {
       _dN_dmu_cached = false;
       _cached_dN_dmu = 0.0;

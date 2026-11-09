@@ -80,8 +80,7 @@ namespace methods {
   void read_ovlp(mpi3::shared_communicator node_comm, std::string output, shared_array_t &S);
 
   template<typename shared_array_t>
-  void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm,
-               std::string const& h5_grp = "scf");
+  void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm);
 
   /**
    * Write a full-BZ checkpoint from a dyson-type checkpoint of a calculation on the IBZ.

@@ -383,8 +383,10 @@ void lr_dyson::solve_lr_dyson_tau_impl(
                                                           {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
   _Timer.stop("LR_DYSON_ALLOC");
 
-  auto [nt_loc, ns_loc, nk_loc, ni_loc, nj_loc] = dDeltaG_tskij.local_shape();
-  auto [t_org, s_org, k_org, i_org, j_org] = dDeltaG_tskij.origin();
+  auto local_shape = dDeltaG_tskij.local_shape();
+  auto origin = dDeltaG_tskij.origin();
+  const long ns_loc = local_shape[1], nk_loc = local_shape[2], ni_loc = local_shape[3], nj_loc = local_shape[4];
+  const long s_org = origin[1], k_org = origin[2];
   auto i_rng = dDeltaG_tskij.local_range(3);
   auto j_rng = dDeltaG_tskij.local_range(4);
   auto DeltaG_loc = dDeltaG_tskij.local();
@@ -530,8 +532,10 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
     auto t_pgrid = lr_dyson_tau_pgrid(_context->comm.size(), _nkpts_ibz);
     auto dDeltaDm_skij = math::nda::make_distributed_array<Array_4D_t>(
         _context->comm, {1, t_pgrid[2], t_pgrid[3], t_pgrid[4]}, {_ns, _nkpts_ibz, _nbnd, _nbnd});
-    auto [ns_loc, nk_loc, ni_loc, nj_loc] = dDeltaDm_skij.local_shape();
-    auto [s_org, k_org, i_org, j_org] = dDeltaDm_skij.origin();
+    auto local_shape = dDeltaDm_skij.local_shape();
+    auto origin = dDeltaDm_skij.origin();
+    const long ns_loc = local_shape[0], nk_loc = local_shape[1], ni_loc = local_shape[2], nj_loc = local_shape[3];
+    const long s_org = origin[0], k_org = origin[1];
     auto i_rng = dDeltaDm_skij.local_range(2);
     auto j_rng = dDeltaDm_skij.local_range(3);
     auto DeltaDm_blk = dDeltaDm_skij.local();

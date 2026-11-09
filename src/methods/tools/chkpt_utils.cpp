@@ -248,17 +248,16 @@ void read_ovlp(mpi3::shared_communicator node_comm, std::string output, shared_a
 }
 
 template<typename shared_array_t>
-void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm,
-             std::string const& h5_grp) {
+void read_dm(mpi3::shared_communicator node_comm, std::string output, long iter, shared_array_t &Dm) {
   if (node_comm.root()) {
     std::string filename = output + ".mbpt.h5";
     h5::file file(filename, 'r');
-    auto scf_grp = h5::group(file).open_group(h5_grp);
+    auto scf_grp = h5::group(file).open_group("scf");
 
     if (iter == -1) h5::h5_read(scf_grp, "final_iter", iter);
 
     utils::check(scf_grp.has_subgroup("iter"+std::to_string(iter)),
-                 "read_dm: \"{}/iter{}\" h5 group does not exist.", h5_grp, iter);
+                 "read_dm: \"scf/iter{}\" h5 group does not exist.", iter);
 
     auto Dm_loc = Dm.local();
     auto iter_grp = scf_grp.open_group("iter"+std::to_string(iter));
@@ -604,8 +603,7 @@ template long read_scf(
 
 template void read_H0(mpi3::shared_communicator, std::string, sArray_t<Array_view_4D_t>&);
 template void read_ovlp(mpi3::shared_communicator, std::string, sArray_t<Array_view_4D_t>&);
-template void read_dm(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_4D_t>&,
-                      std::string const&);
+template void read_dm(mpi3::shared_communicator, std::string, long, sArray_t<Array_view_4D_t>&);
 
 template long read_qpscf(
     mpi3::shared_communicator, sArray_t<Array_view_4D_t>&,
@@ -696,13 +694,14 @@ void unfold_scf_checkpoint(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF
   write_metadata(ctx.comm, mf_unfold, ft, sH0, sS, out_prefix);
   dump_scf(ctx.comm, iter, sDm, sG, sF, sSigma, mu, out_prefix, "scf", iter);
 
-  // Coulomb divergence settings, copied when present
+  // Coulomb divergence settings and the imaginary-time Dyson mark, copied when present (the sweep acts per (s, k), so
+  // the unfolded G(tau) is a fixed point of the same map)
   if (ctx.comm.root()) {
     h5::file fin(in_file, 'r');
     h5::file fout(out_file, 'a');
     auto in_scf = h5::group(fin).open_group("scf");
     auto out_scf = h5::group(fout).open_group("scf");
-    for (std::string name : {"div_treatment", "hf_div_treatment"})
+    for (std::string name : {"div_treatment", "hf_div_treatment", "dyson_no_inversion"})
       if (in_scf.has_dataset(name)) utils::h5_copy(in_scf, name, out_scf);
   }
   ctx.comm.barrier();

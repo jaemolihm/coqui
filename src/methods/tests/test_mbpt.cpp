@@ -256,6 +256,22 @@ namespace bdft_tests {
     auto mf_unfold = mf::make_MF(mpi, mf::bdft_source, "./", unfold_prefix, mf::h5_input_type);
     methods::chkpt::unfold_scf_checkpoint(*mpi, mf_ibz, mf_unfold, in, out);
 
+    // The "dyson_no_inversion" mark is copied when present and stays absent otherwise
+    auto has_mark = [&](std::string const& prefix) {
+      int r = 0;
+      if (comm.root()) {
+        h5::file file(prefix + ".mbpt.h5", 'r');
+        r = h5::group(file).open_group("scf").has_dataset("dyson_no_inversion");
+      }
+      comm.broadcast_n(&r, 1, 0);
+      return r == 1;
+    };
+    std::string out_marked = "unfold_scf_out_marked";
+    REQUIRE(not has_mark(out));
+    methods::chkpt::dump_dyson_no_inversion(comm, in + ".mbpt.h5", true);
+    methods::chkpt::unfold_scf_checkpoint(*mpi, mf_ibz, mf_unfold, in, out_marked);
+    REQUIRE(has_mark(out_marked));
+
     // k_weight of the output: 1/nkpts at every k, summing to 1
     int kw_ok = 0;
     if (comm.root()) {
@@ -368,6 +384,7 @@ namespace bdft_tests {
     if (comm.root()) {
       std::remove((in + ".mbpt.h5").c_str());
       std::remove((out + ".mbpt.h5").c_str());
+      std::remove((out_marked + ".mbpt.h5").c_str());
       std::remove((unfold_prefix + ".h5").c_str());
     }
     comm.barrier();

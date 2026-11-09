@@ -1954,24 +1954,35 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       app_log(2, "  mu = {:.8f}", mu);
       // The first call of the flagged solver is a Matsubara-node solve: the starting G of the sweeps. It also sets Dm
       update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
-      // Sweeps at fixed (F, Sigma, mu) until G stops changing
-      // LiH scGW (DLR beta = 100, prec high): the sweep change reaches a round-off floor of 3e-11 to 1.3e-10 after the
-      // first sweep and stays there, so a tolerance below it is never met
+      // Sweeps at fixed (F, Sigma, mu) until the change drops below sweep_tol, or stops decreasing (the round-off floor,
+      // which grows with |Sigma||G| and the DLR lambda: 3e-11 to 1.3e-10 on LiH, beta = 100, prec high). A change that
+      // grows 10x over its minimum is a non-contracting map.
       const double sweep_tol = 1e-9;
       const int max_sweeps = 200;
       int n_sweeps = 0;
-      double sweep_change = 0.0;
-      do {
+      double sweep_change = 0.0, prev_change = 0.0, min_change = 0.0;
+      std::string stop_reason;  // set when the loop stops; empty after max_sweeps sweeps with neither stop
+      while (n_sweeps < max_sweeps) {
         dyson.solve_dyson(sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu);  // Dm = -G(beta) of the swept G
+        prev_change = sweep_change;
         sweep_change = dyson.last_sweep_change();
         ++n_sweeps;
-      } while (sweep_change >= sweep_tol and n_sweeps < max_sweeps);
-      app_log(1, "LR Dyson kernel: {} Picard sweeps at the stored (F, Sigma, mu), final max|G_new - G_prev| = {:.3e}",
-              n_sweeps, sweep_change);
-      utils::check(sweep_change < sweep_tol,
-                   "run_lr_calc: the imaginary-time Picard sweeps at the stored (F, Sigma, mu) did not converge in {} "
-                   "sweeps (max|G_new - G_prev| = {:.3e} >= {:.1e}): the ground-state Dyson map is not contracting.",
-                   max_sweeps, sweep_change, sweep_tol);
+        min_change = (n_sweeps == 1) ? sweep_change : std::min(min_change, sweep_change);
+        utils::check(sweep_change <= 10.0 * min_change,
+                     "run_lr_calc: the imaginary-time Picard sweeps at the stored (F, Sigma, mu) are not contracting: "
+                     "max|G_new - G_prev| = {:.3e} after {} sweeps, 10x above its minimum {:.3e}.",
+                     sweep_change, n_sweeps, min_change);
+        if (sweep_change < sweep_tol) { stop_reason = "converged below the tolerance"; break; }
+        if (n_sweeps >= 2 and sweep_change >= prev_change) { stop_reason = "stagnated at the round-off floor"; break; }
+      }
+      utils::check(!stop_reason.empty(),
+                   "run_lr_calc: the imaginary-time Picard sweeps at the stored (F, Sigma, mu) neither converged nor "
+                   "stagnated in {} sweeps (max|G_new - G_prev| = {:.3e}).", max_sweeps, sweep_change);
+      app_log(1, "LR Dyson kernel: {} Picard sweeps at the stored (F, Sigma, mu), final max|G_new - G_prev| = {:.3e} ({})",
+              n_sweeps, sweep_change, stop_reason);
+      if (sweep_change >= sweep_tol)
+        app_log(1, "[WARNING] LR Dyson kernel: the Picard sweeps stopped at max|G_new - G_prev| = {:.3e} >= {:.1e}; "
+                   "the expansion point is only that close to the fixed point.", sweep_change, sweep_tol);
     } else {
       // Compute G from F and Sigma via Dyson equation
       app_log(2, "Computing unperturbed Green's function from checkpoint...");

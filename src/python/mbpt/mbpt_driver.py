@@ -542,8 +542,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Unperturbed reference (default "checkpoint"):
         - "checkpoint": interacting G rebuilt from the checkpoint F+Σ (scGW LR). A checkpoint
           with ``scf/dyson_no_inversion`` (written by ``run_gw`` with ``dyson_no_inversion``, see
-          there) is the exception: its stored G(τ) is used as is, the Dyson equation is
-          differentiated in imaginary time, and ``input_iter`` must be the final iteration.
+          there) is the exception: G(τ) is rebuilt from the checkpoint F+Σ by converged
+          imaginary-time Picard sweeps (after one Matsubara-node solve) at the stored (F, Σ, μ), the Dyson
+          equation is differentiated in imaginary time about that fixed point, and ``input_iter`` must be the
+          final iteration.
           The Dyson kernel is taken from the checkpoint; passing ``dyson_no_inversion`` to
           ``run_lr`` is an error.
         - "mf_dft": DFT/KS mean-field G0 built directly from the mean-field
