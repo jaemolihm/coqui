@@ -988,8 +988,7 @@ class IAFT(object):
         :param Ow: numpy.ndarray, shape (nw_f, ...)
         :return: numpy.ndarray, shape (nt_f, ...)
         """
-        impl = self._impl
-        return impl.w_to_tau_w_weighted(Ow) if hasattr(impl, "w_to_tau_w_weighted") else impl.w_to_tau(Ow, 'f')
+        return self._impl.w_to_tau_w_weighted(Ow)
 
     def tau_to_w_phsym(self, Ot, stats: str):
         """

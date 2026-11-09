@@ -473,8 +473,9 @@ namespace imag_axes_ft {
       // Used only for G(iw) from the Dyson equation (IAFT::w_to_tau_w_weighted; its callers are listed there).
       // For such G ~ 1/(i omega), which is nearly representable on the nt_f DLR tau nodes, the part of G(iw)
       // outside the range of Twt (one direction of C^{nw_f}, as nw_f = nt_f + 1 on the SYM fermionic mesh) lies
-      // where |G| is large, so the relative error of G(tau) stays small: for G ~ 1/(i omega) and a Matsubara
-      // residual r, the tau error is bounded by ||T W^-1||_2 ||W r||, hence ||T W^-1||_2 is the measure of the gain.
+      // where |G| is large, so the relative error of G(tau) stays small: a residual r proportional to
+      // |G(i omega_n)| ~ 1/|omega_n| has W r = O(eps) at every node, and ||T r|| <= ||T W^-1||_2 ||W r||, so
+      // ||T W^-1||_2 measures the gain.
       // Measured ||Ttw W^-1||_2 = 244 for Ttw_ff and 4.5 for Ttw_ff_w_weighted on beta 1000, wmax 30, high; the gain
       // is grid dependent (unchanged on beta 200, wmax 3, high and on beta 100, wmax 4, high).
       // Not for general data (impurity Sigma from CT-SEG/ED through w_interpolate): the weighted projection
