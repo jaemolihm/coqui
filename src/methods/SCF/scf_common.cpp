@@ -58,7 +58,7 @@ double compute_Nelec(double mu, const nda::array<ComplexType, 4> &spectra,
     }
   }
 
-  FT.w_to_tau(Xw, Xt, imag_axes_ft::fermion);
+  FT.w_to_tau_w_weighted(Xw, Xt);
   FT.tau_to_beta(Xt, nelecs);
 
   ComplexType nelec = scl*std::accumulate(nelecs.begin(),nelecs.end(),ComplexType(0.0));
@@ -350,14 +350,14 @@ auto eval_thermodynamic_properties(comm_t& comm, dyson_type &dyson,
 
 template<typename dyson_type, typename X_t, typename Xt_t>
 void update_G(dyson_type &dyson, const mf::MF &mf, const imag_axes_ft::IAFT &FT, X_t & Dm, Xt_t &G,
-              const X_t & F, const Xt_t &Sigma, double &mu, bool const_mu) {
+              const X_t & F, const Xt_t &Sigma, double &mu, bool const_mu, sArray_t<Array_view_5D_t>* G_w_out) {
   app_log(2, "* Solving Green's function:");
   if(!const_mu) {
     dyson.Timer().start("UPDATE_MU");
     mu = update_mu(mu, dyson, mf, FT, F, Sigma);
     dyson.Timer().stop("UPDATE_MU");
   }
-  dyson.solve_dyson(Dm, G, F, Sigma, mu);
+  dyson.solve_dyson(Dm, G, F, Sigma, mu, G_w_out);
 }
 
 namespace detail {
@@ -729,7 +729,7 @@ template auto eval_thermodynamic_properties(mpi3::communicator&, simple_dyson&, 
 template void update_G(simple_dyson &, const mf::MF &, const imag_axes_ft::IAFT &,
                        sArray_t<Array_view_4D_t> & Dm, sArray_t<Array_view_5D_t> &G,
                        const sArray_t<Array_view_4D_t> & F, const sArray_t<Array_view_5D_t> &Sigma, double&,
-                       bool);
+                       bool, sArray_t<Array_view_5D_t>*);
 
 template double update_mu(double, simple_dyson&, const mf::MF &, const imag_axes_ft::IAFT &,
                           const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t>&);

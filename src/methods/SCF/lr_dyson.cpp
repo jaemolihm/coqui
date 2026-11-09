@@ -43,7 +43,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   // c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω): ω→τ followed by τ→β⁻, so ΔDm = Σ_ω c_ω ΔG(iω).
   {
-    auto Ttw = _dyson.FT()->Ttw_ff();
+    auto Ttw = _dyson.FT()->Ttw_ff_w_weighted();
     auto Tb = _dyson.FT()->T_beta_t_ff();
     _c_beta_w = nda::array<ComplexType, 1>(_nw);
     for (long n = 0; n < _nw; ++n) {
@@ -280,7 +280,7 @@ void lr_dyson::solve_lr_dyson_impl(
     auto DeltaGt_loc = dDeltaG_tskij.local();
     auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
     _Timer.start("LR_DYSON_G_W_TO_T");
-    _dyson.FT()->w_to_tau(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
+    _dyson.FT()->w_to_tau_w_weighted(DeltaGw_loc, DeltaGt_loc);
     _Timer.stop("LR_DYSON_G_W_TO_T");
 
     _Timer.start("LR_DYSON_MISC");

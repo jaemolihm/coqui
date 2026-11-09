@@ -146,6 +146,17 @@ namespace imag_axes_ft {
      */
     template<nda::MemoryArray ndaArray_A, nda::MemoryArray ndaArray_B>
     void w_to_tau(ndaArray_A &&X_wi, ndaArray_B &&X_ti, stats_e stats) const;
+
+    /**
+     * Fermionic Matsubara frequency to imaginary time with the |omega|-weighted fit Ttw_ff_w_weighted().
+     * Used only for G(iw) from the Dyson equation (simple_dyson, dca_dyson, compute_Nelec, lr_dyson, pproc_t
+     * Wannier-basis G), where G ~ 1/(i omega) is nearly representable and the weighted fit keeps its relative error small; all other data use w_to_tau
+     * (see DLR::Ttw_ff_w_weighted). Same array conventions as w_to_tau(X_wi, X_ti, fermion).
+     * @param X_wi  - [INPUT] Matsubara frequency tensor
+     * @param X_ti  - [OUTPUT] imaginary-time tensor
+     */
+    template<nda::MemoryArray ndaArray_A, nda::MemoryArray ndaArray_B>
+    void w_to_tau_w_weighted(ndaArray_A &&X_wi, ndaArray_B &&X_ti) const;
  
     /**
      * version for FT with particle-hole symmetry
@@ -352,6 +363,16 @@ namespace imag_axes_ft {
     }
     decltype(auto) Ttw_ff() const {
       return std::visit( [&](auto&& v) { return v.Ttw_ff(); }, grid_var);
+    }
+    // |omega|-weighted fermionic w -> tau matrix of the DLR grid; IR keeps its orthogonal Ttw_ff.
+    decltype(auto) Ttw_ff_w_weighted() const {
+      return std::visit( [&](auto&& v) -> decltype(auto) {
+#ifdef ENABLE_DLR
+        if constexpr (std::is_same_v<std::decay_t<decltype(v)>, dlr::DLR>) return v.Ttw_ff_w_weighted();
+        else
+#endif
+        return v.Ttw_ff();
+      }, grid_var);
     }
     decltype(auto) Twt_ff() const {
       return std::visit( [&](auto&& v) { return v.Twt_ff(); }, grid_var);

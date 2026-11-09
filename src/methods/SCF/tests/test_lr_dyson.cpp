@@ -39,7 +39,6 @@
 #include "methods/SCF/scf_common.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/SCF/lr_dyson.hpp"
-#include "methods/SCF/lr_precompute.hpp"
 #include "hamiltonian/pseudo/pseudopot.h"
 
 namespace lr_dyson_tests {
@@ -127,7 +126,8 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     // Create a random Hermitian perturbation
@@ -157,8 +157,7 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    // Precompute G(iω) in shared memory and pass to lr_dyson before solving
-    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
+    // Pass the exact Dyson G(iω) kept by update_G to lr_dyson before solving
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
@@ -350,7 +349,8 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     // Hermitian ΔH0, zero ΔF
@@ -373,7 +373,6 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
@@ -470,7 +469,8 @@ namespace lr_dyson_tests {
     if (context->node_comm.root()) Sigma.local()() = 0.0;
     context->comm.barrier();
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
     if (context->node_comm.root()) {
@@ -493,7 +493,6 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     auto fro = [](auto const& a, auto const& b, double sb) {
       double d = 0.0;
       for (long n = 0; n < a.size(); ++n) d += std::norm(a.data()[n] - sb * b.data()[n]);
@@ -644,10 +643,10 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
-    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
-    auto sG_wskij = lr_precompute_G_omega(*context, G, ft);
     lr_dys.set_cached_G_omega(&sG_wskij);
 
     // --- under test: dN/dmu from the Delta_mu response ---
@@ -697,6 +696,166 @@ namespace lr_dyson_tests {
     // build_dmu_response() is cached: a second call must not rebuild or drift.
     lr_dys.build_dmu_response();
     VALUE_EQUAL(lr_dys.dN_dmu(), dN_dmu, 1e-14);
+  }
+
+  TEST_CASE("simple_dyson_G_w_out_dlr", "[methods_scf]") {
+    /**
+     * simple_dyson::solve_dyson(..., G_w_out) on a DLR grid vs a serial inverse.
+     *
+     * G_w_out of a solve with a nonzero Sigma(tau) = 0.05 G0(tau) is compared, at four Matsubara nodes and all
+     * (s, k), with the serial [(iw + mu) S - H0 - F - Sigma(iw)]^-1 (Sigma(iw) by the serial tau_to_w). The
+     * distributed Dyson kernel, the redistribute and the gather to shared memory share no code with that reference.
+     * A solve with G_w_out == nullptr must give the same G(tau) to round-off.
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::dlr_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+    int nw = ft.nw_f();
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G_no_out(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {nw, ns, nk, nb, nb});
+
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+    if (context->node_comm.root()) Sigma.local()() = 0.0;
+    context->comm.barrier();
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+
+    // Sigma(tau) = 0.05 G0(tau), with G0 the Sigma = 0 solution
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true);
+    if (context->node_comm.root()) Sigma.local() = 0.05 * G.local();
+    context->comm.barrier();
+
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
+    update_G(dyson, mf, ft, Dm, G_no_out, F, Sigma, mu, true);
+    context->comm.barrier();
+    ARRAY_EQUAL(G.local(), G_no_out.local(), 1e-14);
+
+    decltype(nda::range::all) all;
+    auto S_loc = dyson.sS_skij().local();
+    auto H0_loc = dyson.H0();
+    auto F_loc = F.local();
+    auto Sigma_loc = Sigma.local();
+    auto G_w = sG_wskij.local();
+    nda::array<ComplexType, 3> Sigma_t(nt, nb, nb), Sigma_w(nw, nb, nb);
+    double err2 = 0.0, ref2 = 0.0;
+    for (int is = 0; is < ns; ++is) {
+      for (int ik = 0; ik < nk; ++ik) {
+        Sigma_t = Sigma_loc(all, is, ik, all, all);
+        ft.tau_to_w(Sigma_t, Sigma_w, imag_axes_ft::fermion);
+        for (int n : {0, nw / 3, nw / 2, nw - 1}) {
+          ComplexType z = ft.omega(ft.wn_mesh()(n)) + mu;
+          nda::matrix<ComplexType> X(nb, nb);
+          X = z * S_loc(is, ik, all, all) - H0_loc(is, ik, all, all) - F_loc(is, ik, all, all) - Sigma_w(n, all, all);
+          nda::matrix<ComplexType> G_ref = nda::inverse(X);
+          for (int i = 0; i < nb; ++i) {
+            for (int j = 0; j < nb; ++j) {
+              err2 += std::norm(G_w(n, is, ik, i, j) - G_ref(i, j));
+              ref2 += std::norm(G_ref(i, j));
+            }
+          }
+        }
+      }
+    }
+    double rel_err = std::sqrt(err2 / ref2);
+    app_log(2, "[TEST] G_w_out vs serial Dyson inverse (DLR): rel. err = {:.3e}", rel_err);
+    REQUIRE(rel_err < 1e-12);
+  }
+
+  TEST_CASE("update_G_omega_vs_dyson_G_w_out", "[methods_scf]") {
+    /**
+     * update_G_omega (run_lr's mf_dft path) on a DLR grid vs the Dyson G(iw) of the same mean field.
+     *
+     * (1) update_G_omega(MOs, e, mu) vs G_w_out of a Sigma = 0 solve_dyson at the same mu with F = F_KS - H0, so that
+     *     H0 + F = F_KS: both are [(iw + mu) S - F_KS]^-1, one from the eigendecomposition, one from a matrix inverse.
+     * (2) update_G_omega vs tau_to_w of update_G(tau) of the same MOs: equal only to the DLR representation accuracy of
+     *     the tau -> w round trip, which is why mf_dft LR keeps the exact G(iw).
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    double beta = 100;
+    double wmax = 4.0;
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(beta, wmax, imag_axes_ft::dlr_basis);
+
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+    int nw = ft.nw_f();
+
+    // MOs and mu as in run_lr_calc for unperturbed = "mf_dft"
+    auto [sMO_skia, sE_ska] = get_mf_MOs(*context, mf);
+    double mu = update_mu(0.0, mf, sE_ska, ft.beta());
+    auto sG_wskij_mf = math::shm::make_shared_array<Array_view_5D_t>(*context, {nw, ns, nk, nb, nb});
+    update_G_omega(sG_wskij_mf, sMO_skia, sE_ska, mu, ft);
+
+    // (1) Dyson reference with Sigma = 0 and H0 + F = F_KS
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    sArray_t<Array_view_4D_t> F_KS(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> F(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_4D_t> Dm(math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> G(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    sArray_t<Array_view_5D_t> Sigma(math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb}));
+    auto sG_wskij_dyson = math::shm::make_shared_array<Array_view_5D_t>(*context, {nw, ns, nk, nb, nb});
+    hamilt::set_fock(mf, nullptr, F_KS, false);
+    if (context->node_comm.root()) {
+      F.local() = F_KS.local() - dyson.H0();
+      Sigma.local()() = 0.0;
+    }
+    context->comm.barrier();
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij_dyson);
+    context->comm.barrier();
+
+    auto fro_rel = [](auto const& a, auto const& b) {
+      double d = 0.0, r = 0.0;
+      for (long n = 0; n < a.size(); ++n) {
+        d += std::norm(a.data()[n] - b.data()[n]);
+        r += std::norm(b.data()[n]);
+      }
+      return std::sqrt(d / r);
+    };
+    double err_dyson = fro_rel(sG_wskij_mf.local(), sG_wskij_dyson.local());
+    app_log(2, "[TEST] update_G_omega vs Dyson G_w_out (DLR): rel. err = {:.3e}", err_dyson);
+    REQUIRE(err_dyson < 1e-12);
+
+    // (2) tau_to_w of update_G(tau)
+    auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb});
+    update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
+    decltype(nda::range::all) all;
+    nda::array<ComplexType, 3> G_t(nt, nb, nb), G_w(nw, nb, nb), G_w_mf(nw, nb, nb);
+    double d2 = 0.0, r2 = 0.0;
+    for (int is = 0; is < ns; ++is) {
+      for (int ik = 0; ik < nk; ++ik) {
+        G_t = sG_tskij.local()(all, is, ik, all, all);
+        ft.tau_to_w(G_t, G_w, imag_axes_ft::fermion);
+        G_w_mf = sG_wskij_mf.local()(all, is, ik, all, all);
+        for (long n = 0; n < G_w.size(); ++n) {
+          d2 += std::norm(G_w.data()[n] - G_w_mf.data()[n]);
+          r2 += std::norm(G_w_mf.data()[n]);
+        }
+      }
+    }
+    double err_tau = std::sqrt(d2 / r2);
+    app_log(2, "[TEST] update_G_omega vs tau_to_w(update_G(tau)) (DLR): rel. err = {:.3e}", err_tau);
+    REQUIRE(err_tau < 1e-8);
   }
 
 } // lr_dyson_tests

@@ -226,18 +226,29 @@ namespace imag_axes_ft {
 
     private:
       // Ttw = pinv(Twt), with the exact pairing Ttw(:, -wn) = conj(Ttw(:, wn)).
+      // With weight(n) = W_nn given, T = (W B)^+ W instead: y = T x solves min_y sum_n weight(n)^2 |(B y)_n - x_n|^2
+      // (T B = 1 for any weight). Called with an empty weight (unit weights) for Ttw_ff and Ttw_bb, and with
+      // weight = |omega_n| for Ttw_ff_w_weighted.
       // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
       // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
       // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, so Twt(-wn, :) = conj(Twt(wn, :))
       // holds bitwise and pinv(Twt) = cf2it * cf2if^+ / beta is the same operator in exact arithmetic.
       static nda::matrix<ComplexType> paired_left_inverse(nda::matrix<ComplexType> const &B,
-                                                          nda::array<long, 1> const &wn_mesh) {
+                                                          nda::array<long, 1> const &wn_mesh,
+                                                          nda::array<double, 1> const &weight = {}) {
         long nw = B.extent(0);
         long nt = B.extent(1);
         auto Bf = nda::matrix<ComplexType, nda::F_layout>(B);
         auto rhs = nda::matrix<ComplexType, nda::F_layout>(nw, nw);
         rhs() = 0.0;
         for (long i = 0; i < nw; ++i) rhs(i, i) = 1.0;
+        // Scale the rows of B and of the identity right-hand side by the weight, then solve (W B) T = W
+        if (weight.size() != 0) {
+          for (long i = 0; i < nw; ++i) {
+            for (long t = 0; t < nt; ++t) Bf(i, t) *= weight(i);
+            rhs(i, i) = weight(i);
+          }
+        }
         auto s = nda::vector<double>(nt);
         int rank = 0;
         nda::lapack::gelss(Bf, rhs, s, -1.0, rank);
@@ -414,6 +425,9 @@ namespace imag_axes_ft {
         // Matsubara frequency to imaginary time
         Ttw_ff = paired_left_inverse(Twt_ff, wn_mesh_f);
         Ttw_bb = paired_left_inverse(Twt_bb, wn_mesh_b);
+        nda::array<double, 1> weight_f(nw_f);
+        for (long i = 0; i < nw_f; ++i) weight_f(i) = std::abs(double(wn_mesh_f(i))) * M_PI / beta; // |omega_n|
+        Ttw_ff_w_weighted = paired_left_inverse(Twt_ff, wn_mesh_f, weight_f);
 
         // fermion <-> boson tau interpolation (same DLR tau nodes)
         Ttt_bf = nda::eye<ComplexType>(nt_b);
@@ -455,6 +469,21 @@ namespace imag_axes_ft {
 
       // transformation from w_f to t_f
       nda::matrix<ComplexType> Ttw_ff;
+      // |omega|-weighted transformation from w_f to t_f, min_y sum_n omega_n^2 |(Twt y)_n - x_n|^2.
+      // Used only for G(iw) from the Dyson equation (IAFT::w_to_tau_w_weighted; its callers are listed there).
+      // For such G ~ 1/(i omega), which is nearly representable on the nt_f DLR tau nodes, the part of G(iw)
+      // outside the range of Twt (one direction of C^{nw_f}, as nw_f = nt_f + 1 on the SYM fermionic mesh) lies
+      // where |G| is large, so the relative error of G(tau) stays small: a residual r proportional to
+      // |G(i omega_n)| ~ 1/|omega_n| has W r = O(eps) at every node, and ||T r|| <= ||T W^-1||_2 ||W r||, so
+      // ||T W^-1||_2 measures the gain.
+      // Measured ||Ttw W^-1||_2 = 244 for Ttw_ff and 4.5 for Ttw_ff_w_weighted on beta 1000, wmax 30, high; the gain
+      // is grid dependent (unchanged on beta 200, wmax 3, high and on beta 100, wmax 4, high).
+      // Not for general data (impurity Sigma from CT-SEG/ED through w_interpolate): the weighted projection
+      // Twt Ttw_w is oblique; it moves the removed component, along W^-2 u, onto the lowest |omega| nodes and
+      // amplifies it (||Twt Ttw_w||_2 = 2.3 / 6.8 / 42 on beta 1000, wmax 30, high / beta 200, wmax 3, high /
+      // beta 1000, wmax 30, medium), whereas the orthogonal fit Ttw_ff changes the data minimally.
+      // tau -> w -> tau stays exact (Ttw_w Twt = 1).
+      nda::matrix<ComplexType> Ttw_ff_w_weighted;
       // transformation from t_f to w_f
       nda::matrix<ComplexType> Twt_ff;
       // transformation from w_b to t_b

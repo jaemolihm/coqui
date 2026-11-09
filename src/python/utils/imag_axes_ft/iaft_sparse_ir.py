@@ -360,6 +360,10 @@ class _IAFTIRAdapter(object):
         Ow = Ow.reshape((Twt_pos.shape[0],) + Ot_shape[1:])
         return Ow
 
+    def w_to_tau_w_weighted(self, Ow):
+        # IR has no weighted variant: same as w_to_tau
+        return self.w_to_tau(Ow, 'f')
+
     def w_to_tau(self, Ow, stats):
         """
         Fourier transform from Matsubara-frequency axis to imaginary-time axis.

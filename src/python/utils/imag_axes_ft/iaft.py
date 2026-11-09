@@ -336,6 +336,20 @@ class _IAFTCppAdapter(object):
         Ot = Ot_2d.reshape((Ot_2d.shape[0],) + Ow_shape[1:])
         return Ot
 
+    def w_to_tau_w_weighted(self, Ow):
+        """
+        Fermionic Matsubara-frequency to imaginary-time transform with the |omega|-weighted fit
+        (C++ ``IAFT::w_to_tau_w_weighted``; see there for when to use it).
+
+        :param Ow: numpy.ndarray, shape (nw_f, ...)
+        :return: numpy.ndarray, shape (nt_f, ...)
+        """
+        Ow_shape = Ow.shape
+        Ow_2d = Ow.reshape(Ow.shape[0], -1)
+        Ot_2d = self._iaft_cpp.w_to_tau_w_weighted_2d(Ow_2d)
+        Ot = Ot_2d.reshape((Ot_2d.shape[0],) + Ow_shape[1:])
+        return Ot
+
     def tau_to_w_phsym(self, Ot, stats: str):
         """
         Particle-hole-symmetric Fourier transform from imaginary-time to Matsubara-frequency.
@@ -962,6 +976,19 @@ class IAFT(object):
             Array sampled on the imaginary-time mesh returned by :meth:`tau_mesh`.
         """
         return self._impl.w_to_tau(Ow, stats) if not ph_sym else self._impl.w_to_tau_phsym(Ow, stats)
+
+    def w_to_tau_w_weighted(self, Ow):
+        """
+        Fermionic Matsubara-frequency to imaginary-time transform with the |omega|-weighted fit of the DLR grid.
+
+        Use it only for the Dyson G(iw) = [iw + mu - H - Sigma(iw)]^-1 (or its linear response), which is nearly
+        representable on the tau nodes; every other conversion, in particular noisy data (CT-SEG/ED Sigma, Delta),
+        uses :meth:`w_to_tau`. On the IR basis there is no weighted variant and this equals ``w_to_tau(Ow, 'f')``.
+
+        :param Ow: numpy.ndarray, shape (nw_f, ...)
+        :return: numpy.ndarray, shape (nt_f, ...)
+        """
+        return self._impl.w_to_tau_w_weighted(Ow)
 
     def tau_to_w_phsym(self, Ot, stats: str):
         """

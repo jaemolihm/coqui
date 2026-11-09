@@ -103,6 +103,27 @@ def test_ir_compatibility():
         compare_sparse_ir_h5(wmax=wmax, prec="high")
 
 
+def test_w_to_tau_w_weighted_dlr():
+    """DLR w_to_tau_w_weighted vs the identity on tau data (tau_to_w then weighted w_to_tau, round-off) and vs w_to_tau
+    on random paired iw data (must differ: the weighted fit is not the orthogonal one)."""
+    pytest.importorskip("coqui._lib.iaft_module")
+    rng = np.random.default_rng(7)
+    iaft = IAFT(beta=100.0, wmax=4.0, prec="high", basis="dlr", verbose=False)
+
+    # tau -> iw -> tau with the weighted fit vs the input
+    X_t = rng.normal(size=(iaft.nt_f, 3)) + 1j * rng.normal(size=(iaft.nt_f, 3))
+    X_t_back = iaft.w_to_tau_w_weighted(iaft.tau_to_w(X_t, 'f'))
+    assert np.linalg.norm(X_t_back - X_t) / np.linalg.norm(X_t) < 1e-13
+
+    # random iw data with X(-iw_n) = conj(X(iw_n)): weighted vs orthogonal fit
+    wn = list(iaft.wn_mesh('f'))
+    mirror = [wn.index(-n) for n in wn]
+    Y_w = rng.normal(size=(len(wn), 3)) + 1j * rng.normal(size=(len(wn), 3))
+    Y_w = 0.5 * (Y_w + np.conj(Y_w[mirror]))
+    diff = np.linalg.norm(iaft.w_to_tau_w_weighted(Y_w) - iaft.w_to_tau(Y_w, 'f')) / np.linalg.norm(Y_w)
+    assert diff > 1e-6
+
+
 @pytest.mark.parametrize("stats,ph_sym,basis", [
     ('f', False, "dlr"),
     ('b', False, "dlr"),

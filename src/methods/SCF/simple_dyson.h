@@ -120,12 +120,19 @@ public:
   ~simple_dyson(){}
 
   /**
-   * Solve Dyson's equation and update _G_tskij_view for current _mu, _F, and _Sigma
+   * Solve Dyson's equation and update _G_shm (G(tau)) for current mu, _sF_skij, and _Sigma_shm. If G_w_out is not
+   * nullptr, it also receives the exact Dyson G(iw) = [(iw + mu) S - H0 - F - Sigma(iw)]^-1 in shared memory
+   * (nw, ns, nk, nb, nb), copied before the w -> tau step by the same gather as G(tau); nullptr allocates and copies
+   * nothing. Called by run_lr_calc (through update_G), so that lr_driver::lr_setup linearizes about the exact G(iw) and
+   * not about tau_to_w(G(tau)), which differs from it by the omega -> tau -> omega projection of the IAFT basis (DLR and
+   * IR). The caller allocates G_w_out.
    */
   template<typename G_t, typename F_t, typename Sigma_t>
-  void solve_dyson(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
+  void solve_dyson(G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu,
+                   sArray_t<Array_view_5D_t>* G_w_out = nullptr);
   template<typename Dm_t, typename G_t, typename F_t, typename Sigma_t>
-  void solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu);
+  void solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, const Sigma_t &_Sigma_shm, double mu,
+                   sArray_t<Array_view_5D_t>* G_w_out = nullptr);
 
   /**
    * Compute the eigenvalues of _F + _Sigma(iwn)

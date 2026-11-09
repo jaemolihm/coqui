@@ -40,57 +40,6 @@
 namespace methods {
 
 /**
- * @brief Precompute G(iω) in shared memory for LR Dyson equation.
- *
- * Transforms sG_tskij from tau to frequency space and stores the result in
- * a shared memory array. Node root performs the FT; all ranks on the same
- * node share the result via shared memory.
- *
- * @param mpi        - [INPUT] MPI context (comm, node_comm, internode_comm)
- * @param sG_tskij   - [INPUT] Unperturbed Green's function in tau (nt, ns, nk, nb, nb)
- * @param FT         - [INPUT] IAFT object for Fourier transform
- * @return Shared memory G(iω) array (nw, ns, nk, nb, nb)
- */
-template<math::shm::SharedArray sArr_t>
-auto lr_precompute_G_omega(utils::mpi_context_t<mpi3::communicator>& mpi,
-                           const sArr_t& sG_tskij,
-                           const imag_axes_ft::IAFT& FT) {
-  decltype(nda::range::all) all;
-  auto [nts, ns, nkpts_ibz, nbnd, nbnd2] = sG_tskij.shape();
-  auto nw = FT.nw_f();
-
-  app_log(2, "lr_precompute_G_omega: FT G(tau) -> G(iw) [shared memory]");
-  app_log(2, "  shape: ({}, {}, {}, {}, {}) -> ({}, {}, {}, {}, {})",
-          nts, ns, nkpts_ibz, nbnd, nbnd, nw, ns, nkpts_ibz, nbnd, nbnd);
-
-  using Array_view_5D_t = nda::array_view<ComplexType, 5>;
-  auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
-      mpi, {nw, ns, nkpts_ibz, nbnd, nbnd});
-
-  // Fan out (s, k) work across mpi.comm; each rank writes its slab and
-  // all_reduce makes the result visible to every node.
-  sG_wskij.set_zero();  // ends with fence + node_sync
-
-  int rank = mpi.comm.rank();
-  int size = mpi.comm.size();
-  nda::array<ComplexType, 3> G_t_buf(nts, nbnd, nbnd);
-  nda::array<ComplexType, 3> G_w_buf(nw, nbnd, nbnd);
-  auto G_t_loc = sG_tskij.local();
-  auto G_w_loc = sG_wskij.local();
-  for (int i = rank; i < ns * nkpts_ibz; i += size) {
-    int is = i / nkpts_ibz;
-    int ik = i % nkpts_ibz;
-    G_t_buf = G_t_loc(all, is, ik, all, all);
-    FT.tau_to_w(G_t_buf, G_w_buf, imag_axes_ft::fermion);
-    G_w_loc(all, is, ik, all, all) = G_w_buf;
-  }
-  sG_wskij.win().fence();
-  sG_wskij.all_reduce();
-
-  return sG_wskij;
-}
-
-/**
  * @brief In-place q→R Fourier transform of W, (t,q,P,Q) → (t,R,P,Q).
  *
  * Input/output: dW_tqPQ with (t,q,P,Q) layout, pgrid (tpools,1,np_P,np_Q).

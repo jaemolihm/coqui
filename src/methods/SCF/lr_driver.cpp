@@ -61,7 +61,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_SCF", "LR_DRIVER_SETUP",
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_WC0",
-                  "LR_DRIVER_SETUP_G_OMEGA", "LR_DRIVER_SETUP_G_R",
+                  "LR_DRIVER_SETUP_G_R",
                   "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_RESET",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
@@ -169,6 +169,7 @@ void lr_driver::lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_ful
 
 void lr_driver::lr_setup(
     const sArray_t<Array_view_5D_t>& sG_tskij,
+    const sArray_t<Array_view_5D_t>& sG_wskij,
     thc_reader_t& thc,
     dArr_4D_t* dW_wqPQ_in,
     const lr_params& p) {
@@ -373,15 +374,9 @@ void lr_driver::lr_setup(
     _Timer.stop("LR_DRIVER_SETUP_G_R");
   }
 
-  // Precompute G(iω) in shared memory and pass to lr_dyson (avoids redundant FT
-  // per iteration). Held as a member: lr_dyson keys its dN/dμ cache on this
-  // array's address, so a per-call local would invalidate it every solve.
-  utils::memlog("lr_driver::lr_setup: before sG_wskij precompute");
-  _Timer.start("LR_DRIVER_SETUP_G_OMEGA");
-  _sG_wskij.emplace(lr_precompute_G_omega(*_mpi, sG_tskij, *_dyson.FT()));
-  _lr_dyson.set_cached_G_omega(&(*_sG_wskij));
-  _Timer.stop("LR_DRIVER_SETUP_G_OMEGA");
-  utils::memlog("lr_driver::lr_setup: after sG_wskij precompute");
+  // lr_dyson linearizes about the caller's exact G(iω). It caches dN/dμ against this array's *address*, so the
+  // caller keeps the array alive and in place for every solve.
+  _lr_dyson.set_cached_G_omega(&sG_wskij);
 
   // Precompute the Δμ response if needed for fix_density mode at q=0
   if (p.fix_density && _lr_dyson.is_q_gamma()) {
@@ -1424,7 +1419,6 @@ void lr_driver::print_setup_timers() {
   app_log(2, "      - W_full(iω):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_FULL"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_FULL"));
   app_log(2, "      - W_tRPQ:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_TRPQ"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_TRPQ"));
   app_log(2, "      - W_c(iν=0) (HSEX):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_WC0"), _Timer.number_of_calls("LR_DRIVER_SETUP_WC0"));
-  app_log(2, "      - G(iω) precompute:       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_OMEGA"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_OMEGA"));
   app_log(2, "      - G^R pair precompute:    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_R"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_R"));
   app_log(2, "      - Δμ response precompute: {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DELTAMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DELTAMU"));
   app_log(2, "      - Alloc:                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_ALLOC"), _Timer.number_of_calls("LR_DRIVER_SETUP_ALLOC"));

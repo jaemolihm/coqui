@@ -47,7 +47,8 @@ namespace {
 
   template<typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(G_t &_G_shm,
-                                 const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu) {
+                                 const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu,
+                                 sArray_t<Array_view_5D_t>* G_w_out) {
     _Timer.start("DYSON");
     using math::nda::make_distributed_array;
     using Array_5D_t = nda::array<ComplexType, 5>;
@@ -128,11 +129,14 @@ namespace {
       _Timer.stop("REDISTRIBUTE");
       dG_wskij.reset(); 
 
+      // Hand the exact Dyson G(iw) to the caller (see solve_dyson)
+      if (G_w_out != nullptr) math::nda::gather_to_shm(dG_wskij_tmp, *G_w_out);
+
       auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
                                                          {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
       auto Gt_loc = dG_tskij.local();
       auto Gw_loc = dG_wskij_tmp.local();
-      _FT->w_to_tau(Gw_loc, Gt_loc, imag_axes_ft::fermion);
+      _FT->w_to_tau_w_weighted(Gw_loc, Gt_loc);
       dG_wskij_tmp.reset();
 
       _FT->check_leakage(dG_tskij, imag_axes_ft::fermion, "Green's function");
@@ -149,8 +153,8 @@ namespace {
 
   template<typename Dm_t, typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(Dm_t &_sDm_skij, G_t &_G_shm, const F_t &_sF_skij,
-                                 const Sigma_t &_Sigma_shm, double mu) {
-    solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu);
+                                 const Sigma_t &_Sigma_shm, double mu, sArray_t<Array_view_5D_t>* G_w_out) {
+    solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu, G_w_out);
     _Timer.start("DM_TAU_TO_BETA");
     if (_context->node_comm.root()) {
       auto Dm = _sDm_skij.local();
@@ -253,9 +257,9 @@ namespace {
 
   /** Instantiation of public template **/
   template void simple_dyson::solve_dyson(sArray_t<Array_view_5D_t>&,
-      const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double);
+      const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double, sArray_t<Array_view_5D_t>*);
   template void simple_dyson::solve_dyson(sArray_t<Array_view_4D_t>&, sArray_t<Array_view_5D_t>&,
-      const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double);
+      const sArray_t<Array_view_4D_t>&, const sArray_t<Array_view_5D_t> &, double, sArray_t<Array_view_5D_t>*);
 
   template void simple_dyson::compute_eigenspectra(const sArray_t<Array_view_4D_t>&,
       const sArray_t<Array_view_5D_t> &, nda::array<ComplexType, 4> &);

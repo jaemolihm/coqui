@@ -73,6 +73,15 @@ namespace imag_axes_ft {
 	}
 
 	C2PY_WRAP_AS_METHOD
+	nda::array<ComplexType, 2> w_to_tau_w_weighted_2d(
+		const IAFT &iaft, 
+		const nda::array<ComplexType, 2> &X_wi) {
+		nda::array<ComplexType, 2> X_ti(iaft.nt_f(), X_wi.shape(1));
+		iaft.w_to_tau_w_weighted(X_wi, X_ti);
+		return X_ti;
+	}
+
+	C2PY_WRAP_AS_METHOD
 	nda::array<ComplexType, 2> w_to_tau_phsym_2d(
 		const IAFT &iaft, 
 		const nda::array<ComplexType, 2> &X_wi_pos) {

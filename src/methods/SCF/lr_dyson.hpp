@@ -180,10 +180,11 @@ public:
    * Must be called before solve_lr_dyson. The caller retains ownership;
    * the pointed-to array must outlive all solve_lr_dyson calls.
    *
-   * @param G_wskij - [INPUT] Pointer to precomputed shared G(iω) (nw, ns, nk, nb, nb)
+   * @param G_wskij - [INPUT] Pointer to the exact shared G(iω) (nw, ns, nk, nb, nb): the Dyson G(iω) kept by
+   *                  simple_dyson::solve_dyson, or the analytic MO G(iω) of update_G_omega, not tau_to_w(G(τ))
    */
   void set_cached_G_omega(const sArray_t<Array_view_5D_t>* G_wskij) {
-    // Invalidate the whole Δμ-response cache when G changes: dN/dμ, dG/dμ(τ) and
+    // Invalidate the whole Δμ-response cache when the pointer changes: dN/dμ, dG/dμ(τ) and
     // dDm/dμ are all functions of G(iω) and S alone.
     if (_cached_G_wskij != G_wskij) {
       _dN_dmu_cached = false;
@@ -446,7 +447,7 @@ private:
   bool _is_q_gamma;                 // True if q is approximately zero
 
   // Cached G(iω) in shared memory — set via set_cached_G_omega().
-  // Non-owning pointer; caller (lr_driver) owns the array.
+  // Non-owning pointer; caller (run_lr_calc) owns the array.
   const sArray_t<Array_view_5D_t>* _cached_G_wskij = nullptr;
 
   // ΔG(τ) of the last solve, still distributed, awaiting a consumer.

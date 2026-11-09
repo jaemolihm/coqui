@@ -201,7 +201,7 @@ void dca_dyson::solve_dyson(Dm_t&_sDm_skij, G_t&_G_shm, const F_t&_sF_skij, cons
                                                        {_FT->nt_f(), _MF->nspin(), _MF->nkpts(), _MF->nbnd(), _MF->nbnd()});
     auto Gt_loc = dG_tskij.local();
     auto Gw_loc = dG_wskij_tmp.local();
-    _FT->w_to_tau(Gw_loc, Gt_loc, imag_axes_ft::fermion);
+    _FT->w_to_tau_w_weighted(Gw_loc, Gt_loc);
     dG_wskij_tmp.reset();
 
     _FT->check_leakage(dG_tskij, imag_axes_ft::fermion, "Green's function");

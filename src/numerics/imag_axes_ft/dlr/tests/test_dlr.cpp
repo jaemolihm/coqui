@@ -268,6 +268,189 @@ namespace bdft_tests {
     }
   }
 
+  // Ttw_ff_w_weighted vs its definition as the |omega|-weighted least-squares left inverse of Twt_ff, and Ttw_ff
+  // vs its definition as the unweighted one (random complex x, nw_f = nt_f + 1):
+  //  (1) Ttw_w Twt vs 1 (round-off), so tau -> omega -> tau is exact;
+  //  (2) weighted normal equations Twt^H W^2 (Twt Ttw_w x - x) vs 0, relative to |Twt^H W^2 x|
+  //      (round-off scaled by cond(Twt), hence the 1e-8 tolerance);
+  //  (3) pairing Ttw_w(:, -wn) vs conj(Ttw_w(:, wn));
+  //  (4) orthogonal normal equations Twt^H (Twt Ttw x - x) vs 0, relative to |Twt^H x|, same tolerance.
+  TEST_CASE("dlr_w_to_tau_weighted_least_squares", "[iaft][dlr]") {
+    double beta = 1000.0, wmax = 30.0;
+    imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
+    long nt = dlr.nt_f, nw = dlr.nw_f;
+    REQUIRE(nw == nt + 1);
+
+    // Ttw_w Twt vs 1
+    nda::matrix<ComplexType> TB = dlr.Ttw_ff_w_weighted * dlr.Twt_ff;
+    double err_id = 0.0;
+    for (long i = 0; i < nt; ++i)
+      for (long j = 0; j < nt; ++j) err_id = std::max(err_id, std::abs(TB(i, j) - (i == j ? 1.0 : 0.0)));
+    app_log(2, "dlr weighted: max|Ttw_w Twt - I| = {}", err_id);
+    REQUIRE(err_id < 1e-11);
+
+    // Normal equations: weighted for Ttw_w (weight w^2), unweighted for Ttw (weight 1)
+    std::mt19937 gen(5);
+    std::normal_distribution<double> dist(0.0, 1.0);
+    nda::vector<ComplexType> x(nw);
+    for (long i = 0; i < nw; ++i) x(i) = ComplexType(dist(gen), dist(gen));
+    auto normal_eq_err = [&](nda::matrix<ComplexType> const &T, bool weighted) {
+      nda::vector<ComplexType> y(nt), r(nw), Wr(nw), Wx(nw);
+      y = T * x;
+      r = dlr.Twt_ff * y - x;
+      for (long i = 0; i < nw; ++i) {
+        double w2 = weighted ? std::pow(std::abs(double(dlr.wn_mesh_f(i))) * M_PI / beta, 2) : 1.0;
+        Wr(i) = w2 * r(i);
+        Wx(i) = w2 * x(i);
+      }
+      nda::vector<ComplexType> ne_r(nt), ne_x(nt);
+      ne_r = nda::transpose(nda::conj(dlr.Twt_ff)) * Wr;
+      ne_x = nda::transpose(nda::conj(dlr.Twt_ff)) * Wx;
+      return nda::norm(ne_r) / nda::norm(ne_x);
+    };
+    double err_ne_w = normal_eq_err(dlr.Ttw_ff_w_weighted, true);
+    double err_ne_o = normal_eq_err(dlr.Ttw_ff, false);
+    app_log(2, "dlr weighted normal equations: {}, orthogonal normal equations: {}", err_ne_w, err_ne_o);
+    REQUIRE(err_ne_w < 1e-8);
+    REQUIRE(err_ne_o < 1e-8);
+
+    // Pairing
+    std::map<long, long> index_of;
+    for (long i = 0; i < nw; ++i) index_of[dlr.wn_mesh_f(i)] = i;
+    double err_pair = 0.0;
+    for (long i = 0; i < nw; ++i)
+      for (long t = 0; t < nt; ++t)
+        err_pair = std::max(err_pair, std::abs(dlr.Ttw_ff_w_weighted(t, index_of.at(-dlr.wn_mesh_f(i))) -
+                                               std::conj(dlr.Ttw_ff_w_weighted(t, i))));
+    REQUIRE(err_pair == 0.0);
+  }
+
+  // IAFT::w_to_tau_w_weighted vs its definition: on DLR it is the gemm with dlr.Ttw_ff_w_weighted (bitwise); on IR it
+  // is w_to_tau(X, fermion) (bitwise), since IR has no weighted variant. Random complex X(iw, 3).
+  TEST_CASE("iaft_w_to_tau_w_weighted_dispatch", "[iaft][dlr]") {
+    double beta = 1000.0, wmax = 30.0;
+    std::mt19937 gen(11);
+    std::normal_distribution<double> dist(0.0, 1.0);
+    auto random_X = [&](long nw) {
+      nda::array<ComplexType, 2> X(nw, 3);
+      for (long i = 0; i < nw; ++i)
+        for (long j = 0; j < 3; ++j) X(i, j) = ComplexType(dist(gen), dist(gen));
+      return X;
+    };
+
+    // DLR: w_to_tau_w_weighted vs gemm with Ttw_ff_w_weighted
+    {
+      imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+      imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
+      auto X = random_X(iaft.nw_f());
+      nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
+      iaft.w_to_tau_w_weighted(X, Y);
+      nda::blas::gemm(dlr.Ttw_ff_w_weighted, X, Y_ref);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
+      // and it differs from the orthogonal w_to_tau
+      nda::array<ComplexType, 2> Y_o(iaft.nt_f(), 3);
+      iaft.w_to_tau(X, Y_o, imag_axes_ft::fermion);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_o)) > 0.0);
+    }
+    // IR: w_to_tau_w_weighted vs w_to_tau
+    {
+      imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::ir_basis, "high");
+      auto X = random_X(iaft.nw_f());
+      nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
+      iaft.w_to_tau_w_weighted(X, Y);
+      iaft.w_to_tau(X, Y_ref, imag_axes_ft::fermion);
+      REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
+    }
+  }
+
+  // Node Dyson G = w_to_tau_w_weighted[(iw - h - tau_to_w Sigma)^{-1}] on the DLR grid vs the exact G(tau) of a gapped
+  // 2-orbital model whose Sigma(iw) = sum_p V_p V_p^H / (iw - xi_p) comes from bath poles inside wmax. The exact G
+  // is the system block of the resolvent of the embedding Hamiltonian [[h, V], [V^H, diag(xi)]] and Sigma(tau) is
+  // exact on the nodes. Relative L2 error of the |omega|-weighted fit < 2e-11 (measured 2.6e-12); the orthogonal fit
+  // (w_to_tau) is > 1e-10 on this grid (measured 3.5e-10), which is why the Dyson path uses the weighted one.
+  TEST_CASE("dlr_node_dyson_vs_exact", "[iaft][dlr]") {
+    double beta = 1000.0, wmax = 30.0;
+    imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
+    long nt = dlr.nt_f, nw = dlr.nw_f;
+    constexpr int no = 2, nb = 4, ne = no + nb;
+    double h[no][no] = {{-0.15, 0.05}, {0.05, 0.25}};
+    double xi[nb] = {-1.2, 0.9, -0.6 * wmax, 0.75 * wmax};
+    double V[no][nb] = {{0.30, 0.10, 0.25, 0.20}, {0.05, 0.30, 0.15, 0.25}};
+
+    // g(tau) = -exp(-tau e) / (1 + exp(-beta e)), written with tau (e >= 0) or beta - tau (e < 0) to avoid overflow
+    auto g_tau = [&](double tau, double bmt, double e) {
+      return e >= 0 ? -std::exp(-tau * e) / (1.0 + std::exp(-beta * e)) : -std::exp(bmt * e) / (1.0 + std::exp(beta * e));
+    };
+
+    // Eigen-decomposition of the embedding Hamiltonian (real symmetric)
+    std::vector<double> A(ne * ne, 0.0), E(ne);
+    for (int a = 0; a < no; ++a) {
+      for (int b = 0; b < no; ++b) A[a + ne * b] = h[a][b];
+      for (int p = 0; p < nb; ++p) A[a + ne * (no + p)] = A[(no + p) + ne * a] = V[a][p];
+    }
+    for (int p = 0; p < nb; ++p) A[(no + p) + ne * (no + p)] = xi[p];
+    {
+      int lwork = 64 * ne, info = 0;
+      std::vector<double> work(lwork);
+      nda::lapack::f77::syev('V', 'U', ne, A.data(), ne, E.data(), work.data(), lwork, info);
+      REQUIRE(info == 0);
+    }
+
+    // Exact G(tau) and Sigma(tau) on the DLR tau nodes, flattened as (t, a, b)
+    nda::array<ComplexType, 3> G_ex(nt, no, no), Sig_t(nt, no, no);
+    for (long t = 0; t < nt; ++t) {
+      double t_rel = dlr._it_ops.get_itnodes(t);
+      double tau = t_rel >= 0 ? t_rel * beta : beta + t_rel * beta;
+      double bmt = t_rel >= 0 ? beta - t_rel * beta : -t_rel * beta;
+      for (int a = 0; a < no; ++a)
+        for (int b = 0; b < no; ++b) {
+          double ge = 0.0, sg = 0.0;
+          for (int k = 0; k < ne; ++k) ge += A[a + ne * k] * g_tau(tau, bmt, E[k]) * A[b + ne * k];
+          for (int p = 0; p < nb; ++p) sg += V[a][p] * g_tau(tau, bmt, xi[p]) * V[b][p];
+          G_ex(t, a, b) = ge;
+          Sig_t(t, a, b) = sg;
+        }
+    }
+
+    // Node Dyson: G(iw_n) = (iw_n - h - Sigma(iw_n))^{-1}, then w_to_tau
+    nda::array<ComplexType, 3> G_w(nw, no, no);
+    nda::matrix<ComplexType> Sig_flat(nt, no * no);
+    for (long t = 0; t < nt; ++t)
+      for (int a = 0; a < no; ++a)
+        for (int b = 0; b < no; ++b) Sig_flat(t, a * no + b) = Sig_t(t, a, b);
+    nda::matrix<ComplexType> Sw = dlr.Twt_ff * Sig_flat;
+    for (long n = 0; n < nw; ++n) {
+      ComplexType iw(0.0, M_PI * dlr.wn_mesh_f(n) / beta);
+      ComplexType m00 = iw - h[0][0] - Sw(n, 0), m01 = -h[0][1] - Sw(n, 1);
+      ComplexType m10 = -h[1][0] - Sw(n, 2), m11 = iw - h[1][1] - Sw(n, 3);
+      ComplexType det = m00 * m11 - m01 * m10;
+      G_w(n, 0, 0) = m11 / det;
+      G_w(n, 0, 1) = -m01 / det;
+      G_w(n, 1, 0) = -m10 / det;
+      G_w(n, 1, 1) = m00 / det;
+    }
+    nda::matrix<ComplexType> G_flat(nw, no * no);
+    for (long n = 0; n < nw; ++n)
+      for (int a = 0; a < no; ++a)
+        for (int b = 0; b < no; ++b) G_flat(n, a * no + b) = G_w(n, a, b);
+    auto rel_err = [&](nda::matrix<ComplexType> const &Gt) {
+      double num = 0.0, den = 0.0;
+      for (long t = 0; t < nt; ++t)
+        for (int a = 0; a < no; ++a)
+          for (int b = 0; b < no; ++b) {
+            num += std::norm(Gt(t, a * no + b) - G_ex(t, a, b));
+            den += std::norm(G_ex(t, a, b));
+          }
+      return std::sqrt(num / den);
+    };
+    nda::matrix<ComplexType> Gt_w = dlr.Ttw_ff_w_weighted * G_flat;
+    nda::matrix<ComplexType> Gt_o = dlr.Ttw_ff * G_flat;
+    double err_w = rel_err(Gt_w), err_o = rel_err(Gt_o);
+    app_log(2, "dlr node Dyson vs exact: weighted {}, orthogonal {}", err_w, err_o);
+    REQUIRE(err_w < 2e-11);
+    REQUIRE(err_o > 1e-10);
+  }
+
   // DLR Ttw * X(iw) for a noisy but paired X(iw) (Dyson-like G with a non-DLR-representable Sigma noise of
   // size 1e-6, as from CT-SEG) vs the requirement that the tau function and its density are real
   TEST_CASE("dlr_w_to_tau_noisy_real", "[iaft][dlr]") {

@@ -442,6 +442,16 @@ static auto const _c2py_fun_38 = c2py::dispatcher_f_kw_t{c2py::cmethod(
         const std::string &>(&imag_axes_ft::w_to_tau_2d),
     "iaft", "X_wi", "stats")};
 
+// w_to_tau_w_weighted_2d
+static auto const _c2py_fun_54 = c2py::dispatcher_f_kw_t{c2py::cmethod(
+    c2py::cast<
+        const imag_axes_ft::IAFT &,
+        const nda::basic_array<std::complex<double>, 2, nda::C_layout, 'A',
+                               nda::heap_basic<nda::mem::mallocator<
+                                   nda::mem::AddressSpace::Host>>> &>(
+        &imag_axes_ft::w_to_tau_w_weighted_2d),
+    "iaft", "X_wi")};
+
 // w_to_tau_cross_stats_2d
 static auto const _c2py_fun_39 = c2py::dispatcher_f_kw_t{c2py::cmethod(
     c2py::cast<
@@ -537,6 +547,7 @@ static const auto _c2py_doc_43 = _c2py_fun_43.doc(R"DOC()DOC");
 static const auto _c2py_doc_44 = _c2py_fun_44.doc(R"DOC()DOC");
 static const auto _c2py_doc_45 = _c2py_fun_45.doc(R"DOC()DOC");
 static const auto _c2py_doc_53 = _c2py_fun_53.doc(R"DOC()DOC");
+static const auto _c2py_doc_54 = _c2py_fun_54.doc(R"DOC()DOC");
 
 // ----- Method table ----
 template <>
@@ -617,6 +628,8 @@ PyMethodDef c2py::tp_methods<_c2py_cls_1>[] = {
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_40.c_str()},
     {"w_to_tau_phsym_2d", (PyCFunction)c2py::pyfkw<_c2py_fun_41>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_41.c_str()},
+    {"w_to_tau_w_weighted_2d", (PyCFunction)c2py::pyfkw<_c2py_fun_54>,
+     METH_VARARGS | METH_KEYWORDS, _c2py_doc_54.c_str()},
     {"wmax", (PyCFunction)c2py::pyfkw<_c2py_fun_42>,
      METH_VARARGS | METH_KEYWORDS, _c2py_doc_42.c_str()},
     {"wn_mesh", (PyCFunction)c2py::pyfkw<_c2py_fun_43>,

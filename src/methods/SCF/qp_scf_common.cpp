@@ -143,6 +143,33 @@ void update_G(sArray_t<Array_view_5D_t> &sG_tskij,
   sG_tskij.communicator()->barrier();
 }
 
+void update_G_omega(sArray_t<Array_view_5D_t> &sG_wskij,
+                    const sArray_t<Array_view_4D_t> &sMO_skia, const sArray_t<Array_view_3D_t> &sE_ska,
+                    double mu, const imag_axes_ft::IAFT &FT) {
+  auto [nw, ns, nkpts, nbnd, nbnd2] = sG_wskij.shape();
+  nda::array<ComplexType, 2> GCdag_aj(nbnd, nbnd);
+
+  sG_wskij.win().fence();
+  for (size_t wsk = sG_wskij.node_comm()->rank(); wsk < nw*ns*nkpts; wsk += sG_wskij.node_comm()->size()) {
+    size_t iw = wsk / (ns*nkpts); // wsk = iw*ns*nkpts + is*nkpts + ik
+    size_t is = (wsk / nkpts) % ns;
+    size_t ik = wsk % nkpts;
+
+    // G_ij(iw) = sum_a C_ia conj(C_ja) / (iw + mu - e_a)
+    ComplexType z = FT.omega(FT.wn_mesh()(iw)) + mu;
+    GCdag_aj = nda::transpose(nda::conj(sMO_skia.local()(is, ik, nda::ellipsis{})));
+    for (size_t a = 0; a < nbnd; ++a) {
+      GCdag_aj(a, nda::range::all) *= 1.0 / (z - sE_ska.local()(is, ik, a).real());
+    }
+
+    auto C_ia = sMO_skia.local()(is, ik, nda::ellipsis{});
+    auto G_ij = sG_wskij.local()(iw, is, ik, nda::ellipsis{});
+    nda::blas::gemm(C_ia, GCdag_aj, G_ij);
+  }
+  sG_wskij.win().fence();
+  sG_wskij.communicator()->barrier();
+}
+
 template<nda::ArrayOfRank<5> Array_base_t>
 void compute_G_from_mf(h5::group iter_grp, imag_axes_ft::IAFT &ft,
                        sArray_t<Array_base_t> &sG_tskij) {

@@ -671,7 +671,7 @@ namespace methods {
       }
 
       {
-        FT.w_to_tau(G_wskab_inter, Sigma_tskab_inter, imag_axes_ft::fermion);
+        FT.w_to_tau_w_weighted(G_wskab_inter, Sigma_tskab_inter);
         FT.check_leakage(Sigma_tskab_inter, imag_axes_ft::fermion, std::addressof(_context.comm), "Green's function in Wannier basis");
       }
 
