@@ -1317,11 +1317,12 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   //     lr_dyson runs before the Π/W/Σ steps and frees its scratch first, so the
   //     two never coexist — the peak adds only the larger of the two phases.
   if (tau_dyson) {
-    // Per-rank convolution workspace of the τ kernel: G_{k+q}[i], G_k[:, j], G*X (+ ΔΣ_k and its convolution), the
-    // (nt, i, j) result block, all on one (k, i, j) block of the lr_dyson_tau_pgrid
+    // Per-rank workspace of the τ kernel on one (k, i, j) block of lr_dyson_tau_pgrid: the contiguous G_{k+q}[i], G_k[:, j],
+    // G*X and ΔΣ_k copies and the coefficient and Hilbert-transform arrays of the two DLR convolutions, ~12 arrays of
+    // nt·nb² at a full band block (an over-estimate when the bands are split)
     arrays.push_back({"τ convolution workspace (lr_dyson)",
-                      fmt::format("~(3 nb + {} nb)·nt per rank, x{} ranks", any_Sigma ? 3 : 1, _mpi->comm.size()),
-                      double(nt) * nb * (3 * nb + (any_Sigma ? 3 : 1) * nb) * _mpi->comm.size(), true, T_DYSON});
+                      fmt::format("{} ranks x 12x({},{},{})", _mpi->comm.size(), nt, nb, nb),
+                      12.0 * double(nt) * nb * nb * _mpi->comm.size(), true, T_DYSON});
   } else {
     arrays.push_back({"ΔG(iω) (lr_dyson)", shp5b(nw), band5(nw), true, T_DYSON});
     if (any_Sigma)
