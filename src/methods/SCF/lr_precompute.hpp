@@ -40,6 +40,44 @@
 namespace methods {
 
 /**
+ * @brief Unperturbed G(τ) of the LR kernels: the weighted fit of the exact G(iω), G(τ) = w_to_tau_w_weighted(G(iω)).
+ *
+ * Called once by lr_driver::lr_setup, which takes the exact Dyson (or mean-field) G(iω) as its only unperturbed G.
+ * Deriving G(τ) here makes the τ operand of the kernels (ΔΠ, ΔΣ, G^R, IBC) the fit of the very G(iω) that lr_dyson
+ * linearizes about, by the same map as solve_dyson's ω -> τ step, so no caller has to keep two consistent arrays.
+ *
+ * @param mpi      - [INPUT] MPI context (comm, node_comm)
+ * @param sG_wskij - [INPUT] exact unperturbed G(iω), shared (nw, ns, nk, nb, nb)
+ * @param FT       - [INPUT] IAFT object
+ * @return shared G(τ), (nt, ns, nk, nb, nb)
+ */
+template<math::shm::SharedArray sArr_t>
+auto lr_precompute_G_tau(utils::mpi_context_t<mpi3::communicator>& mpi,
+                         const sArr_t& sG_wskij,
+                         const imag_axes_ft::IAFT& FT) {
+  decltype(nda::range::all) all;
+  using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+  auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
+  long nt = FT.nt_f();
+  auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(mpi, {nt, ns, nk, nb, nb});
+
+  auto G_w_loc = sG_wskij.local();
+  auto G_t_loc = sG_tskij.local();
+  nda::array<ComplexType, 3> G_w_buf(nw, nb, nb), G_t_buf(nt, nb, nb);
+  // Each rank of a node fits its share of the (s, k) slabs into the node's shared G(τ); no inter-node communication
+  sG_tskij.win().fence();
+  for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
+    long is = sk / nk, ik = sk % nk;
+    G_w_buf = G_w_loc(all, is, ik, all, all);
+    FT.w_to_tau_w_weighted(G_w_buf, G_t_buf, imag_axes_ft::fermion);
+    G_t_loc(all, is, ik, all, all) = G_t_buf;
+  }
+  sG_tskij.win().fence();
+  mpi.comm.barrier();
+  return sG_tskij;
+}
+
+/**
  * @brief In-place q→R Fourier transform of W, (t,q,P,Q) → (t,R,P,Q).
  *
  * Input/output: dW_tqPQ with (t,q,P,Q) layout, pgrid (tpools,1,np_P,np_Q).
