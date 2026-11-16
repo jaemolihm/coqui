@@ -200,10 +200,22 @@ void lr_driver::lr_setup(
   // Unperturbed G(τ) of the kernels: the weighted fit of the exact G(iω), the same map as solve_dyson's ω -> τ step
   _Timer.start("LR_DRIVER_SETUP_G_TAU");
   {
+    decltype(nda::range::all) all;
     auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
-    _sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_dyson.FT()->nt_f(), ns, nk, nb, nb}));
-    if (_mpi->node_comm.root())
-      _dyson.FT()->w_to_tau_w_weighted(sG_wskij.local(), _sG_tskij->local(), imag_axes_ft::fermion);
+    long nt = _dyson.FT()->nt_f();
+    _sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {nt, ns, nk, nb, nb}));
+    auto G_w_loc = sG_wskij.local();
+    auto G_t_loc = _sG_tskij->local();
+    nda::array<ComplexType, 3> G_w_buf(nw, nb, nb), G_t_buf(nt, nb, nb);
+    // Each rank of a node fits its share of the (s, k) slabs into the node's shared G(τ)
+    _sG_tskij->win().fence();
+    for (long sk = _mpi->node_comm.rank(); sk < ns * nk; sk += _mpi->node_comm.size()) {
+      long is = sk / nk, ik = sk % nk;
+      G_w_buf = G_w_loc(all, is, ik, all, all);
+      _dyson.FT()->w_to_tau_w_weighted(G_w_buf, G_t_buf, imag_axes_ft::fermion);
+      G_t_loc(all, is, ik, all, all) = G_t_buf;
+    }
+    _sG_tskij->win().fence();
     _mpi->comm.barrier();
   }
   _Timer.stop("LR_DRIVER_SETUP_G_TAU");
