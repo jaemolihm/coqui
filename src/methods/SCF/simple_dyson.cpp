@@ -48,7 +48,7 @@ namespace {
   template<typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(G_t &_G_shm,
                                  const F_t &_sF_skij, const Sigma_t &_Sigma_shm, double mu,
-                                 sArray_t<Array_view_5D_t>* G_w_out) {
+                                 sArray_t<Array_view_5D_t>* G_w) {
     _Timer.start("DYSON");
     using math::nda::make_distributed_array;
     using Array_5D_t = nda::array<ComplexType, 5>;
@@ -130,7 +130,7 @@ namespace {
       dG_wskij.reset(); 
 
       // Hand the exact Dyson G(iw) to the caller (see solve_dyson)
-      if (G_w_out != nullptr) math::nda::gather_to_shm(dG_wskij_tmp, *G_w_out);
+      if (G_w != nullptr) math::nda::gather_to_shm(dG_wskij_tmp, *G_w);
 
       auto dG_tskij = make_distributed_array<Array_5D_t>(_context->comm, t_pgrid,
                                                          {_nts, _ns, _nkpts_ibz, _nbnd, _nbnd});
@@ -153,8 +153,8 @@ namespace {
 
   template<typename Dm_t, typename G_t, typename F_t, typename Sigma_t>
   void simple_dyson::solve_dyson(Dm_t &_sDm_skij, G_t &_G_shm, const F_t &_sF_skij,
-                                 const Sigma_t &_Sigma_shm, double mu, sArray_t<Array_view_5D_t>* G_w_out) {
-    solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu, G_w_out);
+                                 const Sigma_t &_Sigma_shm, double mu, sArray_t<Array_view_5D_t>* G_w) {
+    solve_dyson(_G_shm, _sF_skij, _Sigma_shm, mu, G_w);
     _Timer.start("DM_TAU_TO_BETA");
     if (_context->node_comm.root()) {
       auto Dm = _sDm_skij.local();

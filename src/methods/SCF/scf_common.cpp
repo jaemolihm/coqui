@@ -350,14 +350,14 @@ auto eval_thermodynamic_properties(comm_t& comm, dyson_type &dyson,
 
 template<typename dyson_type, typename X_t, typename Xt_t>
 void update_G(dyson_type &dyson, const mf::MF &mf, const imag_axes_ft::IAFT &FT, X_t & Dm, Xt_t &G,
-              const X_t & F, const Xt_t &Sigma, double &mu, bool const_mu, sArray_t<Array_view_5D_t>* G_w_out) {
+              const X_t & F, const Xt_t &Sigma, double &mu, bool const_mu, sArray_t<Array_view_5D_t>* G_w) {
   app_log(2, "* Solving Green's function:");
   if(!const_mu) {
     dyson.Timer().start("UPDATE_MU");
     mu = update_mu(mu, dyson, mf, FT, F, Sigma);
     dyson.Timer().stop("UPDATE_MU");
   }
-  dyson.solve_dyson(Dm, G, F, Sigma, mu, G_w_out);
+  dyson.solve_dyson(Dm, G, F, Sigma, mu, G_w);
 }
 
 namespace detail {

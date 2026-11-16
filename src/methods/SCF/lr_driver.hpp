@@ -316,7 +316,7 @@ public:
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
-   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field:
+   * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w; mean field:
    * update_G_omega) and the only unperturbed G the driver takes: lr_dyson linearizes about it, and the G(τ) of the
    * kernels is fitted from it here (w_to_tau_w_weighted, as in solve_dyson). The caller keeps it alive and in place until the
    * last solve.

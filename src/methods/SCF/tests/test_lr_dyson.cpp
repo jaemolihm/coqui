@@ -692,14 +692,14 @@ namespace lr_dyson_tests {
 
   }
 
-  TEST_CASE("simple_dyson_G_w_out_dlr", "[methods_scf]") {
+  TEST_CASE("simple_dyson_G_w_dlr", "[methods_scf]") {
     /**
-     * simple_dyson::solve_dyson(..., G_w_out) on a DLR grid vs a serial inverse.
+     * simple_dyson::solve_dyson(..., G_w) on a DLR grid vs a serial inverse.
      *
-     * G_w_out of a solve with a nonzero Sigma(tau) = 0.05 G0(tau) is compared, at four Matsubara nodes and all
+     * G_w of a solve with a nonzero Sigma(tau) = 0.05 G0(tau) is compared, at four Matsubara nodes and all
      * (s, k), with the serial [(iw + mu) S - H0 - F - Sigma(iw)]^-1 (Sigma(iw) by the serial tau_to_w). The
      * distributed Dyson kernel, the redistribute and the gather to shared memory share no code with that reference.
-     * A solve with G_w_out == nullptr must give the same G(tau) to round-off.
+     * A solve with G_w == nullptr must give the same G(tau) to round-off.
      */
     auto& context = utils::make_unit_test_mpi_context();
     std::string source_path = PROJECT_SOURCE_DIR;
@@ -767,15 +767,15 @@ namespace lr_dyson_tests {
       }
     }
     double rel_err = std::sqrt(err2 / ref2);
-    app_log(2, "[TEST] G_w_out vs serial Dyson inverse (DLR): rel. err = {:.3e}", rel_err);
+    app_log(2, "[TEST] G_w vs serial Dyson inverse (DLR): rel. err = {:.3e}", rel_err);
     REQUIRE(rel_err < 1e-12);
   }
 
-  TEST_CASE("update_G_omega_vs_dyson_G_w_out", "[methods_scf]") {
+  TEST_CASE("update_G_omega_vs_dyson_G_w", "[methods_scf]") {
     /**
      * update_G_omega (run_lr's mf_dft path) on a DLR grid vs the Dyson G(iw) of the same mean field.
      *
-     * (1) update_G_omega(MOs, e, mu) vs G_w_out of a Sigma = 0 solve_dyson at the same mu with F = F_KS - H0, so that
+     * (1) update_G_omega(MOs, e, mu) vs G_w of a Sigma = 0 solve_dyson at the same mu with F = F_KS - H0, so that
      *     H0 + F = F_KS: both are [(iw + mu) S - F_KS]^-1, one from the eigendecomposition, one from a matrix inverse.
      * (2) update_G_omega vs tau_to_w of update_G(tau) of the same MOs: equal only to the DLR representation accuracy of
      *     the tau -> w round trip, which is why mf_dft LR keeps the exact G(iw).
@@ -827,7 +827,7 @@ namespace lr_dyson_tests {
       return std::sqrt(d / r);
     };
     double err_dyson = fro_rel(sG_wskij_mf.local(), sG_wskij_dyson.local());
-    app_log(2, "[TEST] update_G_omega vs Dyson G_w_out (DLR): rel. err = {:.3e}", err_dyson);
+    app_log(2, "[TEST] update_G_omega vs Dyson G_w (DLR): rel. err = {:.3e}", err_dyson);
     REQUIRE(err_dyson < 1e-12);
 
     // (2) tau_to_w of update_G(tau)
