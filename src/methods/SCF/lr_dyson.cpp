@@ -43,7 +43,7 @@ lr_dyson::lr_dyson(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   // c_ω = −Σ_τ T_β(τ)·Ttw(τ,ω): ω→τ followed by τ→β⁻, so ΔDm = Σ_ω c_ω ΔG(iω).
   {
-    auto Ttw = _dyson.FT()->Ttw_ff();
+    auto Ttw = _dyson.FT()->Ttw_ff_w_weighted();
     auto Tb = _dyson.FT()->T_beta_t_ff();
     _c_beta_w = nda::array<ComplexType, 1>(_nw);
     for (long n = 0; n < _nw; ++n) {
@@ -280,7 +280,7 @@ void lr_dyson::solve_lr_dyson_impl(
     auto DeltaGt_loc = dDeltaG_tskij.local();
     auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
     _Timer.start("LR_DYSON_G_W_TO_T");
-    _dyson.FT()->w_to_tau(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
+    _dyson.FT()->w_to_tau_w_weighted(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
     _Timer.stop("LR_DYSON_G_W_TO_T");
 
     _Timer.start("LR_DYSON_MISC");
@@ -341,7 +341,7 @@ double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density) {
   if (!(fix_density and _is_q_gamma)) return 0.0;
   utils::check(_dN_dmu_cached and _dG_dmu_tskij and _sdDm_dmu_skij,
                "lr_dyson: fix_density=true but the Δμ response is not cached. "
-               "Call build_dmu_response() before the SCF loop.");
+               "Pass with_dmu_response = true to set_cached_G_omega() before the SCF loop.");
   app_log(3, "lr_dyson: fix_density mode (computing Δμ to enforce ΔN=0)");
   const double dN_dmu = _cached_dN_dmu;
 
@@ -522,11 +522,6 @@ void lr_dyson::build_dmu_response() {
   // exactly ΔG(Δμ=1) = dG/dμ and ΔDm(Δμ=1) = dDm/dμ, with no post-hoc sign to
   // get wrong, and laid out the way the real solve lays out its ΔG(τ) by
   // construction.
-  //
-  // Idempotent, so lr_driver can call it as the fix_density setup hook without
-  // tracking whether the current G(iω) has already been through it.
-  if (_dN_dmu_cached) return;
-
   utils::check(_is_q_gamma,
                "build_dmu_response: the Δμ response is not meaningful for q≠0. "
                "This should only be called for q=0 perturbations.");

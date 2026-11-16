@@ -1859,13 +1859,22 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  // G(τ) of the ground state, read by the W recompute and the GW+EDMFT Gloc before lr_setup and released there:
+  // the LR kernels use lr_setup's own fit of sG_wskij
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
+  opt_sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  auto& sG_tskij = *opt_sG_tskij;
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
 
   utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
 
+  // Exact unperturbed G(iω) that lr_dyson linearizes about: filled by solve_dyson (Dyson path) or built from the MOs
+  // (mf_dft path).
+  auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  utils::memlog("run_lr_calc: after sG_wskij alloc");
   double mu = 0.0;
   if (unperturbed == "mf_dft") {
     // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
@@ -1879,6 +1888,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     app_log(2, "  DFT reference mu = {:.8f}", mu);
     update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
     update_Dm(sDm_skij, sMO_skia, sE_ska, mu, ft.beta());
+    update_G_omega(sG_wskij, sMO_skia, sE_ska, mu, ft);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   } else {
@@ -1894,7 +1904,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     app_log(2, "  h0_source = {}", h0_source);
     app_log(2, "  mu = {:.8f}", mu);
     lr_init_timer.start("LR_INIT_UPDATE_G");
-    update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true);
+    update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true, &sG_wskij);
     mpi->comm.barrier();
     lr_init_timer.stop("LR_INIT_UPDATE_G");
   }
@@ -2327,7 +2337,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_max_iter = precond_max_iter;
   p.hessian_stationary = hessian_stationary;
 
-  driver.lr_setup(sG_tskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
+  opt_sG_tskij.reset();
+  driver.lr_setup(sG_wskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
   nda::array<long, 1> niter_m(nmodes);
   nda::array<double, 1> Delta_mu_m(nmodes);
@@ -2362,7 +2373,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        sG_tskij, sDeltaH0_skij, thc, p,
+        sDeltaH0_skij, thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,

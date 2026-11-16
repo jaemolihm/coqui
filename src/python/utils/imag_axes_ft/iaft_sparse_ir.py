@@ -360,6 +360,12 @@ class _IAFTIRAdapter(object):
         Ow = Ow.reshape((Twt_pos.shape[0],) + Ot_shape[1:])
         return Ow
 
+    def w_to_tau_w_weighted(self, Ow, stats):
+        # IR has no weighted variant: same as w_to_tau
+        if _normalize_stats(stats) != 'f':
+            raise NotImplementedError("w_to_tau_w_weighted: fermions only; use w_to_tau for bosons")
+        return self.w_to_tau(Ow, 'f')
+
     def w_to_tau(self, Ow, stats):
         """
         Fourier transform from Matsubara-frequency axis to imaginary-time axis.
