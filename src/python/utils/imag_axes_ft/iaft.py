@@ -342,11 +342,12 @@ class _IAFTCppAdapter(object):
         (C++ ``IAFT::w_to_tau_w_weighted``; see there for when to use it).
 
         :param Ow: numpy.ndarray, shape (nw_f, ...)
-        :param stats: 'f' only; bosons raise NotImplementedError
+        :param stats: 'f'/'fermion' only; bosons raise NotImplementedError
         :return: numpy.ndarray, shape (nt_f, ...)
         """
-        if stats != 'f':
-            raise NotImplementedError("w_to_tau_w_weighted: fermions only (stats='f'); use w_to_tau for bosons")
+        stats = _normalize_stats(stats)
+        if stats != 'fermion':
+            raise NotImplementedError("w_to_tau_w_weighted: fermions only; use w_to_tau for bosons")
         Ow_shape = Ow.shape
         Ow_2d = Ow.reshape(Ow.shape[0], -1)
         Ot_2d = self._iaft_cpp.w_to_tau_w_weighted_2d(Ow_2d, stats)
@@ -989,7 +990,7 @@ class IAFT(object):
         uses :meth:`w_to_tau`. On the IR basis there is no weighted variant and this equals ``w_to_tau(Ow, 'f')``.
 
         :param Ow: numpy.ndarray, shape (nw_f, ...)
-        :param stats: 'f' only; bosons raise NotImplementedError
+        :param stats: 'f'/'fermion' only; bosons raise NotImplementedError
         :return: numpy.ndarray, shape (nt_f, ...)
         """
         return self._impl.w_to_tau_w_weighted(Ow, stats)
