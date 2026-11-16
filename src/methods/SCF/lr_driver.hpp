@@ -317,7 +317,9 @@ public:
    * must not use it afterwards.
    *
    * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field:
-   * update_G_omega) that lr_dyson linearizes about; the caller keeps it alive and in place until the last solve.
+   * update_G_omega) and the only unperturbed G the driver takes: lr_dyson linearizes about it, and the G(τ) of the
+   * kernels is fitted from it here (lr_fit_G_tau_from_G_omega). The caller keeps it alive and in place until the
+   * last solve.
    *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
    * lr_rpa_pi / lr_scr_coulomb_t solvers and their kpq maps are all latched to
@@ -325,7 +327,6 @@ public:
    * q-points would silently reuse the wrong maps.
    */
   void lr_setup(
-      const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_5D_t>& sG_wskij,
       thc_reader_t& thc,
       dArr_4D_t* dW_wqPQ_in,
@@ -359,7 +360,6 @@ public:
       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
       sArray_t<Array_view_4D_t>& sDeltaF_skij,
       sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-      const sArray_t<Array_view_5D_t>& sG_tskij,
       const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
       thc_reader_t& thc,
       const lr_params& p,
@@ -493,8 +493,7 @@ private:
    * @param pDeltaSigma_out - [OUTPUT] this kernel's ΔΣ, overwritten; null
    *                                   evaluates the ΔF branch alone.
    * @param sDeltaDm_skij   - [INPUT]  ΔDm the ΔF branch contracts
-   * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts
-   * @param sG_tskij        - [INPUT]  unperturbed G, for ΔΠ and term 2
+   * @param sDeltaG_tskij   - [INPUT]  ΔG the Σ branch contracts (ΔΠ and term 2 use the unperturbed _sG_tskij)
    * @param sDeltaSigma_term2_tskij - [OUTPUT] ΔΣ term 2 alone; non-null iff
    *                                   p.split_sigma_terms
    * @param DeltaF_PQ_out   - [OUTPUT] optional root-only aux-basis ΔF_PQ
@@ -505,7 +504,6 @@ private:
                     sArray_t<Array_view_5D_t>* pDeltaSigma_out,
                     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
                     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                    const sArray_t<Array_view_5D_t>& sG_tskij,
                     thc_reader_t& thc,
                     const lr_params& p,
                     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
@@ -523,7 +521,6 @@ private:
    */
   void apply_kernel_gw(sArray_t<Array_view_5D_t>& sSigma_tskij_out,
                        const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                       const sArray_t<Array_view_5D_t>& sG_tskij,
                        thc_reader_t& thc,
                        const lr_params& p,
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
@@ -539,8 +536,7 @@ private:
    * Collective on comm.
    */
   void precond_apply(nda::array<ComplexType, 1> const& r, nda::array<ComplexType, 1>& z,
-                     const sArray_t<Array_view_5D_t>& sG_tskij, thc_reader_t& thc,
-                     const lr_params& p);
+                     thc_reader_t& thc, const lr_params& p);
 
   /**
    * The inner solve of precond_apply on shared arrays: y_F = K_pc[Pχ(r_F + y_F, r_Σ)]
@@ -561,8 +557,7 @@ private:
    */
   void precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                      const sArray_t<Array_view_5D_t>* r_S,
-                     const sArray_t<Array_view_5D_t>& sG_tskij, thc_reader_t& thc,
-                     const lr_params& p);
+                     thc_reader_t& thc, const lr_params& p);
 
   /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or
   /// the preconditioner is HSEX.
@@ -596,6 +591,7 @@ private:
   std::unique_ptr<lr_gcr> _pc_gcr;
 
   // --- Cached operands (constant across perturbations and SCF iterations) ---
+  std::optional<sArray_t<Array_view_5D_t>> _sG_tskij;  // unperturbed G(τ), fitted from lr_setup's G(iω)
   std::optional<dArr_4D_t> _opt_dW_full_wqPQ;    // W_full(iω), q-dist
   std::optional<dArr_4D_t> _opt_dW_tRPQ;         // W_c(t,R,P,Q), τ-dist
   std::optional<dArr_3D_t> _opt_dWc0_qPQ;        // W_c(iν=0)(q,P,Q), HSEX kernel

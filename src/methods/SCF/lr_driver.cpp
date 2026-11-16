@@ -61,7 +61,7 @@ lr_driver::lr_driver(simple_dyson& dyson, nda::array<double, 1> const& q_vec)
 
   for (auto& v : {"LR_SCF", "LR_DRIVER_SETUP",
                   "LR_DRIVER_SETUP_W_FULL", "LR_DRIVER_SETUP_W_TRPQ", "LR_DRIVER_SETUP_WC0",
-                  "LR_DRIVER_SETUP_G_R",
+                  "LR_DRIVER_SETUP_G_TAU", "LR_DRIVER_SETUP_G_R",
                   "LR_DRIVER_SETUP_DELTAMU", "LR_DRIVER_SETUP_ALLOC", "LR_DRIVER_SETUP_IBC", "LR_RESET",
                   "LR_DYSON", "LR_HF", "LR_GW_SIGMA",
                    "LR_GW_PI", "LR_GW_W", "LR_QPGW_STATIC",
@@ -168,7 +168,6 @@ void lr_driver::lr_setup_W(dArr_4D_t* dW_wqPQ_in, thc_reader_t& thc, bool gw_ful
 }
 
 void lr_driver::lr_setup(
-    const sArray_t<Array_view_5D_t>& sG_tskij,
     const sArray_t<Array_view_5D_t>& sG_wskij,
     thc_reader_t& thc,
     dArr_4D_t* dW_wqPQ_in,
@@ -197,6 +196,12 @@ void lr_driver::lr_setup(
   utils::check(!p.precond_kernel.has_sigma(),
                "lr_driver::lr_setup: the GCR preconditioner kernel ({}) must be "
                "Σ-free.", p.precond_kernel.to_string());
+
+  // Unperturbed G(τ) of the kernels: the weighted fit of the exact G(iω), as in solve_dyson
+  _Timer.start("LR_DRIVER_SETUP_G_TAU");
+  _sG_tskij.emplace(lr_fit_G_tau_from_G_omega(*_mpi, sG_wskij, *_dyson.FT()));
+  _Timer.stop("LR_DRIVER_SETUP_G_TAU");
+  utils::memlog("lr_driver::lr_setup: after G(tau) fit");
 
   // Every output downstream, ΔG(τ) included, is produced by the Dyson pass after
   // the loop, so zero iterations return the start of the iteration: with a
@@ -367,7 +372,7 @@ void lr_driver::lr_setup(
   if (K.sigma_G_dW) {
     _Timer.start("LR_DRIVER_SETUP_G_R");
     utils::memlog("lr_driver::lr_setup: before G^R pair precompute");
-    auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(sG_tskij.local(), thc);
+    auto [dG_tsRPQ, dG_mtau_tsRPQ] = lr_precompute_G_R_pair(_sG_tskij->local(), thc);
     _opt_dG_tsRPQ.emplace(std::move(dG_tsRPQ));
     _opt_dG_mtau_tsRPQ.emplace(std::move(dG_mtau_tsRPQ));
     utils::memlog("lr_driver::lr_setup: after G^R pair precompute");
@@ -432,7 +437,7 @@ void lr_driver::lr_setup(
         *_mpi, _MF, thc,
         p.sDeltaX_left->local(), p.sDeltaX_right->local(),
         _lr_dyson.kpq_map(),
-        p.Dm_ab, &sG_tskij,
+        p.Dm_ab, &(*_sG_tskij),
         _opt_dW_tRPQ ? &(*_opt_dW_tRPQ) : nullptr,
         K.hartree, K.exchange, K.has_sigma(),
         p.keep_F_PQ));
@@ -487,7 +492,6 @@ nda::array<ComplexType, 5> lr_driver::dc_sigma_response(
 void lr_driver::apply_kernel_gw(
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-    const sArray_t<Array_view_5D_t>& sG_tskij,
     thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij) {
@@ -524,7 +528,7 @@ void lr_driver::apply_kernel_gw(
   // Step 3b: ΔP = -ΔG·G - G·ΔG
   _Timer.start("LR_GW_PI");
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
-      sG_tskij.local(), sDeltaG_tskij.local(), thc,
+      _sG_tskij->local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
   // ΔΠ += upfold(δΠ_imp - δΠ_dc[δG^loc]), on ΔΠ's own blocks, before the ΔW solve
   nda::array<ComplexType, 5> dGloc_tsIab;
@@ -581,7 +585,7 @@ void lr_driver::apply_kernel_gw(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ, thc, ibc_ptr,
         &S_loc, p.eps_inv_head);
     _lr_gw2->evaluate_sigma_DeltaW(
-        *sDeltaSigma_term2_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
+        *sDeltaSigma_term2_tskij, _sG_tskij->local(), dDeltaW_tqPQ, thc,
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, &S_loc, &delta_eps_inv_head);
     // Accumulate term2 into sSigma_tskij_out so it holds the total ΔΣ.
     // Both arrays are node-replicated shared memory (each solver all_reduced
@@ -597,7 +601,7 @@ void lr_driver::apply_kernel_gw(
     auto S_loc = sS_skij.local();
     gw_solver.evaluate_sigma(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ,
-        sG_tskij.local(), dDeltaW_tqPQ, thc,
+        _sG_tskij->local(), dDeltaW_tqPQ, thc,
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
         &S_loc, p.eps_inv_head, &delta_eps_inv_head);
   }
@@ -628,7 +632,6 @@ void lr_driver::apply_kernel(
     sArray_t<Array_view_5D_t>* pDeltaSigma_out,
     const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-    const sArray_t<Array_view_5D_t>& sG_tskij,
     thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
@@ -655,7 +658,7 @@ void lr_driver::apply_kernel(
 
   // K_pc is Σ-free.
   if (terms.has_sigma() && pDeltaSigma_out) {
-    apply_kernel_gw(*pDeltaSigma_out, sDeltaG_tskij, sG_tskij, thc, p,
+    apply_kernel_gw(*pDeltaSigma_out, sDeltaG_tskij, thc, p,
                     sDeltaSigma_term2_tskij);
   }
 }
@@ -663,7 +666,6 @@ void lr_driver::apply_kernel(
 
 void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               nda::array<ComplexType, 1>& z,
-                              const sArray_t<Array_view_5D_t>& sG_tskij,
                               thc_reader_t& thc, const lr_params& p) {
   auto& r_F = *_sDeltaF_pc_r;
   auto& r_S = *_sDeltaSigma_r;
@@ -677,7 +679,7 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   _hist_layout.S_view_slice(r_S.local()) = r(S_range);
   utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), r_F, r_S);
 
-  precond_solve(r_F, &r_S, sG_tskij, thc, p);
+  precond_solve(r_F, &r_S, thc, p);
 
   // z = (r_F + y_F, r_Σ)
   z(F_range) = r(F_range) + _hist_layout.F_view_slice(_sDeltaF_pc_y->local());
@@ -687,7 +689,6 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
 
 void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                               const sArray_t<Array_view_5D_t>* r_S,
-                              const sArray_t<Array_view_5D_t>& sG_tskij,
                               thc_reader_t& thc, const lr_params& p) {
   auto& y_F = *_sDeltaF_pc_y;
 
@@ -716,8 +717,8 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
     _lr_dyson.solve_lr_dyson_dm_only(*_sDeltaDm_pc_y, r_F, y_F,
                                      r_S ? &(*_sDeltaDm_pc) : nullptr, p.fix_density);
     _Timer.stop("LR_DYSON");
-    // K_pc is Σ-free and reads no ΔG; sG_tskij only fills the slot.
-    apply_kernel(/*precond=*/true, y_F, nullptr, *_sDeltaDm_pc_y, sG_tskij, sG_tskij,
+    // K_pc is Σ-free and reads no ΔG; _sG_tskij only fills the slot.
+    apply_kernel(/*precond=*/true, y_F, nullptr, *_sDeltaDm_pc_y, *_sG_tskij,
                  thc, p);
     // ‖r_in,0‖ = ‖K_pc[Pχ(r_F, r_Σ)]‖, the inner residual at y_F = 0.
     if (sweep == 1)
@@ -752,7 +753,6 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     sArray_t<Array_view_4D_t>& sDeltaF_skij,
     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-    const sArray_t<Array_view_5D_t>& sG_tskij,
     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
     thc_reader_t& thc,
     const lr_params& p,
@@ -811,7 +811,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // by the reset above), so that V_0 = ΔH0 + ΔF = M⁻¹ ΔH0.
   if (!p.precond_kernel.empty()) {
     _Timer.start("LR_PRECOND");
-    precond_solve(sDeltaH0_skij, nullptr, sG_tskij, thc, p);
+    precond_solve(sDeltaH0_skij, nullptr, thc, p);
     _Timer.stop("LR_PRECOND");
     copy_shm(sDeltaF_skij, *_sDeltaF_pc_y);
     app_log(1, "  initial guess: preconditioner solution of ΔH0 ({} sweeps)", _pc_sweeps);
@@ -830,7 +830,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   if (!p.precond_kernel.empty())
     pc_fn = [&](auto const& r, auto& z) {
       _Timer.start("LR_PRECOND");
-      precond_apply(r, z, sG_tskij, thc, p);
+      precond_apply(r, z, thc, p);
       _Timer.stop("LR_PRECOND");
     };
 
@@ -923,7 +923,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
 
     // Steps 2-3: apply the kernel — the ΔF branch, then the ΔΠ -> ΔW -> ΔΣ pipeline.
     apply_kernel(/*precond=*/false, sDeltaF_skij, pDeltaSigma,
-                 sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
+                 sDeltaDm_skij, sDeltaG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
 
     // Step 3g (qp mode): statify the dynamic ΔΣ(iω) into the static ΔV_QPGW(k)
@@ -1104,7 +1104,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   // keeps ΔF/ΔΣ as the iterate the final Dyson pass was fed.
   if (p.hessian() && p.hessian_stationary) {
     apply_kernel(/*precond=*/false, sDeltaF_skij, pDeltaSigma,
-                 sDeltaDm_skij, sDeltaG_tskij, sG_tskij, thc, p,
+                 sDeltaDm_skij, sDeltaG_tskij, thc, p,
                  sDeltaSigma_term2_tskij);
   }
 
@@ -1146,7 +1146,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     auto sDeltaF_scratch = math::shm::make_shared_array<Array_view_4D_t>(
         *_mpi, {_ns, _nkpts_ibz, _nbnd, _nbnd});
     apply_kernel(/*precond=*/false, sDeltaF_scratch, nullptr, sDeltaDm_skij,
-                 sDeltaG_tskij, sG_tskij, thc, p, nullptr, DeltaF_PQ_out);
+                 sDeltaG_tskij, thc, p, nullptr, DeltaF_PQ_out);
   }
 
   // Hierarchical timer report for this perturbation (verbosity >= 2). Per-step
@@ -1210,7 +1210,6 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   auto shp5a = [&](long n0) { return fmt::format("({},{},{},{},{})", n0, ns, nq, NP, NP); };
 
   // --- Persistent, shared (replicated per node), band basis ~ nk·nt·nb² ---
-  // sG_tskij is caller-owned but resident throughout the solve, so count it here.
   arrays.push_back({"sG_tskij",       shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sDeltaG_tskij",  shp5b(nt), band5(nt), false, PERSIST});
   arrays.push_back({"sG_wskij",       shp5b(nw), band5(nw), false, PERSIST});
@@ -1419,6 +1418,7 @@ void lr_driver::print_setup_timers() {
   app_log(2, "      - W_full(iω):             {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_FULL"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_FULL"));
   app_log(2, "      - W_tRPQ:                 {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_W_TRPQ"), _Timer.number_of_calls("LR_DRIVER_SETUP_W_TRPQ"));
   app_log(2, "      - W_c(iν=0) (HSEX):       {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_WC0"), _Timer.number_of_calls("LR_DRIVER_SETUP_WC0"));
+  app_log(2, "      - G(τ) fit of G(iω):      {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_TAU"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_TAU"));
   app_log(2, "      - G^R pair precompute:    {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_G_R"), _Timer.number_of_calls("LR_DRIVER_SETUP_G_R"));
   app_log(2, "      - Δμ response precompute: {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_DELTAMU"), _Timer.number_of_calls("LR_DRIVER_SETUP_DELTAMU"));
   app_log(2, "      - Alloc:                  {0:8.3f} sec  {1:4d} calls", _Timer.elapsed("LR_DRIVER_SETUP_ALLOC"), _Timer.number_of_calls("LR_DRIVER_SETUP_ALLOC"));

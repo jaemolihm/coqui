@@ -1859,8 +1859,12 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
+  // G(τ) of the ground state, read by the W recompute and the GW+EDMFT Gloc before lr_setup and released there:
+  // the LR kernels use lr_setup's own fit of sG_wskij
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
+  opt_sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  auto& sG_tskij = *opt_sG_tskij;
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
 
@@ -2333,7 +2337,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.precond_max_iter = precond_max_iter;
   p.hessian_stationary = hessian_stationary;
 
-  driver.lr_setup(sG_tskij, sG_wskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
+  opt_sG_tskij.reset();
+  driver.lr_setup(sG_wskij, thc, opt_dW ? &(*opt_dW) : nullptr, p);
 
   nda::array<long, 1> niter_m(nmodes);
   nda::array<double, 1> Delta_mu_m(nmodes);
@@ -2368,7 +2373,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
 
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        sG_tskij, sDeltaH0_skij, thc, p,
+        sDeltaH0_skij, thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
