@@ -175,24 +175,25 @@ public:
   ~lr_dyson() {}
 
   /**
-   * @brief Set cached G(iω) for the LR Dyson equation
+   * @brief Set the unperturbed G(iω) the LR Dyson equation linearizes about, and build what depends on it
    *
-   * Must be called before solve_lr_dyson. The caller retains ownership;
-   * the pointed-to array must outlive all solve_lr_dyson calls.
+   * Must be called before solve_lr_dyson; lr_driver::lr_setup calls it once. It is the only place where the G(iω)
+   * of this lr_dyson and its Δμ response (dG/dμ(τ), dDm/dμ, dN/dμ: functions of G(iω) and S alone) change: every call
+   * drops the response of the previous G(iω) and, with `with_dmu_response`, rebuilds it from this one. The caller
+   * retains ownership and keeps the array unchanged until the last solve_lr_dyson.
    *
-   * @param G_wskij - [INPUT] Pointer to the exact shared G(iω) (nw, ns, nk, nb, nb): the Dyson G(iω) kept by
-   *                  simple_dyson::solve_dyson, or the analytic MO G(iω) of update_G_omega, not tau_to_w(G(τ))
+   * @param G_wskij           - [INPUT] Pointer to the exact shared G(iω) (nw, ns, nk, nb, nb): the Dyson G(iω) kept by
+   *                            simple_dyson::solve_dyson, or the analytic MO G(iω) of update_G_omega, not tau_to_w(G(τ))
+   * @param with_dmu_response - [INPUT] build the Δμ response (fix_density at q = 0 only; aborts for q ≠ 0)
    */
-  void set_cached_G_omega(const sArray_t<Array_view_5D_t>* G_wskij) {
-    // Invalidate the whole Δμ-response cache when the pointer changes: dN/dμ, dG/dμ(τ) and
-    // dDm/dμ are all functions of G(iω) and S alone.
-    if (_cached_G_wskij != G_wskij) {
-      _dN_dmu_cached = false;
-      _cached_dN_dmu = 0.0;
-      _dG_dmu_tskij.reset();
-      _sdDm_dmu_skij.reset();
-    }
+  void set_cached_G_omega(const sArray_t<Array_view_5D_t>* G_wskij, bool with_dmu_response) {
     _cached_G_wskij = G_wskij;
+    // Drop the Δμ response of the previous G(iω)
+    _dN_dmu_cached = false;
+    _cached_dN_dmu = 0.0;
+    _dG_dmu_tskij.reset();
+    _sdDm_dmu_skij.reset();
+    if (with_dmu_response) build_dmu_response();
   }
 
   /**
@@ -298,29 +299,9 @@ public:
   template<typename DeltaDm_t>
   double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
 
-  /**
-   * @brief Build the Δμ response of the LR solution from the cached G(iω) (q=0 only)
-   *
-   * Builds dG/dμ(τ), dDm/dμ and
-   *   dN/dμ = Tr[S · (G·S·G)(τ=β⁻)] = Σ_k w_k Tr[S(k) · G(k)·S(k)·G(k)(τ=β⁻)],
-   * the three pieces solve_lr_dyson needs in fix_density mode: Δμ = -ΔN_0/(dN/dμ),
-   * and then the axpy that turns the Δμ=0 solution into the solution at Δμ. All
-   * three depend only on the unperturbed G and S — not on ΔH0, ΔF or ΔΣ — so one
-   * Dyson pass here serves the whole SCF loop. Idempotent: a second call leaves
-   * the cache untouched; set_cached_G_omega() drops it when G changes.
-   *
-   * This is the setup hook of the fix_density, q=Γ path and the only place that
-   * allocates the ~ΔG-sized dG/dμ(τ); lr_driver calls it exactly when
-   * `fix_density && is_q_gamma()`, so no other path pays for it.
-   *
-   * Requires: set_cached_G_omega() must have been called first.
-   *
-   * @throws std::runtime_error if q≠0
-   */
-  void build_dmu_response();
 
   /// dN/dμ, the density of states at the Fermi level. Valid once
-  /// build_dmu_response() has run; zero before that.
+  /// set_cached_G_omega(..., with_dmu_response = true) has run; zero before that.
   double dN_dmu() const { return _cached_dN_dmu; }
 
   /// Print the LR Dyson timer block (header + total + subclocks) at log level `level`.
@@ -398,6 +379,24 @@ public:
   bool is_q_gamma() const { return _is_q_gamma; }
 
 private:
+  /**
+   * @brief Build the Δμ response of the LR solution from the cached G(iω) (q=0 only)
+   *
+   * Builds dG/dμ(τ), dDm/dμ and
+   *   dN/dμ = Tr[S · (G·S·G)(τ=β⁻)] = Σ_k w_k Tr[S(k) · G(k)·S(k)·G(k)(τ=β⁻)],
+   * the three pieces solve_lr_dyson needs in fix_density mode: Δμ = -ΔN_0/(dN/dμ),
+   * and then the axpy that turns the Δμ=0 solution into the solution at Δμ. All
+   * three depend only on the unperturbed G and S — not on ΔH0, ΔF or ΔΣ — so one
+   * Dyson pass here serves the whole SCF loop.
+   *
+   * Called only by set_cached_G_omega(..., with_dmu_response = true), right after the G(iω) is set; the only place
+   * that allocates the ~ΔG-sized dG/dμ(τ). lr_driver asks for it exactly when `fix_density && is_q_gamma()`, so no
+   * other path pays for it.
+   *
+   * @throws std::runtime_error if q≠0
+   */
+  void build_dmu_response();
+
   // Internal implementation of the LR Dyson solve (single pass with given Δμ).
   // Uses _cached_G_wskij for G(iω); caller must ensure cache is populated.
   // ΔDm = -ΔG(τ=β⁻) is produced here rather than in a separate pass: it is a

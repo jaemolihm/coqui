@@ -158,7 +158,7 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     // Pass the exact Dyson G(iω) kept by update_G to lr_dyson before solving
-    lr_dys.set_cached_G_omega(&sG_wskij);
+    lr_dys.set_cached_G_omega(&sG_wskij, false);
 
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
@@ -373,7 +373,7 @@ namespace lr_dyson_tests {
     }
     context->comm.barrier();
 
-    lr_dys.set_cached_G_omega(&sG_wskij);
+    lr_dys.set_cached_G_omega(&sG_wskij, false);
     lr_dys.solve_lr_dyson(DeltaDm, DeltaH0, DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
@@ -504,8 +504,7 @@ namespace lr_dyson_tests {
     for (auto q : {std::array<double, 3>{0.0, 0.0, 0.0}, std::array<double, 3>{0.5, 0.0, 0.0}}) {
       nda::array<double, 1> q_vec{q[0], q[1], q[2]};
       lr_dyson lr_dys(dyson, q_vec);
-      lr_dys.set_cached_G_omega(&sG_wskij);
-      if (lr_dys.is_q_gamma()) lr_dys.build_dmu_response();
+      lr_dys.set_cached_G_omega(&sG_wskij, lr_dys.is_q_gamma());
 
       for (bool fd : {false, true}) {
         if (fd and not lr_dys.is_q_gamma()) continue;
@@ -647,10 +646,8 @@ namespace lr_dyson_tests {
     update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
     context->comm.barrier();
 
-    lr_dys.set_cached_G_omega(&sG_wskij);
-
     // --- under test: dN/dmu from the Delta_mu response ---
-    lr_dys.build_dmu_response();
+    lr_dys.set_cached_G_omega(&sG_wskij, true);
     double dN_dmu = lr_dys.dN_dmu();
 
     // --- reference: Tr[S . (G.S.G)(beta-)], serial per (s, k) ---
@@ -693,9 +690,6 @@ namespace lr_dyson_tests {
             dN_dmu, dN_dmu_ref.real(), rel_err);
     REQUIRE(rel_err < 1e-10);
 
-    // build_dmu_response() is cached: a second call must not rebuild or drift.
-    lr_dys.build_dmu_response();
-    VALUE_EQUAL(lr_dys.dN_dmu(), dN_dmu, 1e-14);
   }
 
   TEST_CASE("simple_dyson_G_w_out_dlr", "[methods_scf]") {

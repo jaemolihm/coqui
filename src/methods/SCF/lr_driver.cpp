@@ -385,16 +385,11 @@ void lr_driver::lr_setup(
     _Timer.stop("LR_DRIVER_SETUP_G_R");
   }
 
-  // lr_dyson linearizes about the caller's exact G(iω). It caches dN/dμ against this array's *address*, so the
-  // caller keeps the array alive and in place for every solve.
-  _lr_dyson.set_cached_G_omega(&sG_wskij);
-
-  // Precompute the Δμ response if needed for fix_density mode at q=0
-  if (p.fix_density && _lr_dyson.is_q_gamma()) {
-    _Timer.start("LR_DRIVER_SETUP_DELTAMU");
-    _lr_dyson.build_dmu_response();
-    _Timer.stop("LR_DRIVER_SETUP_DELTAMU");
-  }
+  // lr_dyson linearizes about the caller's exact G(iω) (kept alive and unchanged until the last solve); the Δμ
+  // response of fix_density at q = 0 is built from it in the same call
+  _Timer.start("LR_DRIVER_SETUP_DELTAMU");
+  _lr_dyson.set_cached_G_omega(&sG_wskij, p.fix_density && _lr_dyson.is_q_gamma());
+  _Timer.stop("LR_DRIVER_SETUP_DELTAMU");
 
   _Timer.start("LR_DRIVER_SETUP_ALLOC");
   // _prev_vec (ΔF and ΔΣ, or ΔV_QPGW in qp mode) and _DeltaDm_prev hold the iterate y that entered the
