@@ -197,9 +197,15 @@ void lr_driver::lr_setup(
                "lr_driver::lr_setup: the GCR preconditioner kernel ({}) must be "
                "Σ-free.", p.precond_kernel.to_string());
 
-  // Unperturbed G(τ) of the kernels: the weighted fit of the exact G(iω), as in solve_dyson
+  // Unperturbed G(τ) of the kernels: the weighted fit of the exact G(iω), the same map as solve_dyson's ω -> τ step
   _Timer.start("LR_DRIVER_SETUP_G_TAU");
-  _sG_tskij.emplace(lr_fit_G_tau_from_G_omega(*_mpi, sG_wskij, *_dyson.FT()));
+  {
+    auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
+    _sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*_mpi, {_dyson.FT()->nt_f(), ns, nk, nb, nb}));
+    if (_mpi->node_comm.root())
+      _dyson.FT()->w_to_tau_w_weighted(sG_wskij.local(), _sG_tskij->local(), imag_axes_ft::fermion);
+    _mpi->comm.barrier();
+  }
   _Timer.stop("LR_DRIVER_SETUP_G_TAU");
   utils::memlog("lr_driver::lr_setup: after G(tau) fit");
 

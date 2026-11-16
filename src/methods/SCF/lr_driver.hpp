@@ -318,7 +318,7 @@ public:
    *
    * `sG_wskij` is the exact unperturbed G(iω) (Dyson: simple_dyson::solve_dyson's G_w_out; mean field:
    * update_G_omega) and the only unperturbed G the driver takes: lr_dyson linearizes about it, and the G(τ) of the
-   * kernels is fitted from it here (lr_fit_G_tau_from_G_omega). The caller keeps it alive and in place until the
+   * kernels is fitted from it here (w_to_tau_w_weighted, as in solve_dyson). The caller keeps it alive and in place until the
    * last solve.
    *
    * **q_vec is fixed for the lifetime of the driver.** _lr_hf, the lr_gw /
