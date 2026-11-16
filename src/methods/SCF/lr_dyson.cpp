@@ -280,7 +280,7 @@ void lr_dyson::solve_lr_dyson_impl(
     auto DeltaGt_loc = dDeltaG_tskij.local();
     auto DeltaGw_loc = dDeltaG_wskij_tmp.local();
     _Timer.start("LR_DYSON_G_W_TO_T");
-    _dyson.FT()->w_to_tau_w_weighted(DeltaGw_loc, DeltaGt_loc);
+    _dyson.FT()->w_to_tau_w_weighted(DeltaGw_loc, DeltaGt_loc, imag_axes_ft::fermion);
     _Timer.stop("LR_DYSON_G_W_TO_T");
 
     _Timer.start("LR_DYSON_MISC");

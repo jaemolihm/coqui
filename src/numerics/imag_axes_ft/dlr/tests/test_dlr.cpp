@@ -344,7 +344,7 @@ namespace bdft_tests {
       imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
       auto X = random_X(iaft.nw_f());
       nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
-      iaft.w_to_tau_w_weighted(X, Y);
+      iaft.w_to_tau_w_weighted(X, Y, imag_axes_ft::fermion);
       nda::blas::gemm(dlr.Ttw_ff_w_weighted, X, Y_ref);
       REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
       // and it differs from the orthogonal w_to_tau
@@ -357,7 +357,7 @@ namespace bdft_tests {
       imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::ir_basis, "high");
       auto X = random_X(iaft.nw_f());
       nda::array<ComplexType, 2> Y(iaft.nt_f(), 3), Y_ref(iaft.nt_f(), 3);
-      iaft.w_to_tau_w_weighted(X, Y);
+      iaft.w_to_tau_w_weighted(X, Y, imag_axes_ft::fermion);
       iaft.w_to_tau(X, Y_ref, imag_axes_ft::fermion);
       REQUIRE(nda::max_element(nda::abs(Y - Y_ref)) == 0.0);
     }

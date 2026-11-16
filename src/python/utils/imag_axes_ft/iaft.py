@@ -336,17 +336,20 @@ class _IAFTCppAdapter(object):
         Ot = Ot_2d.reshape((Ot_2d.shape[0],) + Ow_shape[1:])
         return Ot
 
-    def w_to_tau_w_weighted(self, Ow):
+    def w_to_tau_w_weighted(self, Ow, stats):
         """
         Fermionic Matsubara-frequency to imaginary-time transform with the |omega|-weighted fit
         (C++ ``IAFT::w_to_tau_w_weighted``; see there for when to use it).
 
         :param Ow: numpy.ndarray, shape (nw_f, ...)
+        :param stats: 'f' only; bosons raise NotImplementedError
         :return: numpy.ndarray, shape (nt_f, ...)
         """
+        if stats != 'f':
+            raise NotImplementedError("w_to_tau_w_weighted: fermions only (stats='f'); use w_to_tau for bosons")
         Ow_shape = Ow.shape
         Ow_2d = Ow.reshape(Ow.shape[0], -1)
-        Ot_2d = self._iaft_cpp.w_to_tau_w_weighted_2d(Ow_2d)
+        Ot_2d = self._iaft_cpp.w_to_tau_w_weighted_2d(Ow_2d, stats)
         Ot = Ot_2d.reshape((Ot_2d.shape[0],) + Ow_shape[1:])
         return Ot
 
@@ -977,7 +980,7 @@ class IAFT(object):
         """
         return self._impl.w_to_tau(Ow, stats) if not ph_sym else self._impl.w_to_tau_phsym(Ow, stats)
 
-    def w_to_tau_w_weighted(self, Ow):
+    def w_to_tau_w_weighted(self, Ow, stats):
         """
         Fermionic Matsubara-frequency to imaginary-time transform with the |omega|-weighted fit of the DLR grid.
 
@@ -986,9 +989,10 @@ class IAFT(object):
         uses :meth:`w_to_tau`. On the IR basis there is no weighted variant and this equals ``w_to_tau(Ow, 'f')``.
 
         :param Ow: numpy.ndarray, shape (nw_f, ...)
+        :param stats: 'f' only; bosons raise NotImplementedError
         :return: numpy.ndarray, shape (nt_f, ...)
         """
-        return self._impl.w_to_tau_w_weighted(Ow)
+        return self._impl.w_to_tau_w_weighted(Ow, stats)
 
     def tau_to_w_phsym(self, Ot, stats: str):
         """

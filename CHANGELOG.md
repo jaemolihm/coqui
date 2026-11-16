@@ -11,7 +11,7 @@
 
 - Imaginary-time and Matsubara meshes to h5 checkpoint, written by both the C++ and the Python IAFT. (#51)
 - `CPPDLR` CMake variable to configure against a local cppdlr source tree instead of the one fetched by `FetchContent`. (#51)
-- `IAFT.w_to_tau_w_weighted` in Python: the `|omega|`-weighted fermionic Matsubara -> tau fit of the C++ `IAFT::w_to_tau_w_weighted` (IR: same as `w_to_tau`).
+- `IAFT.w_to_tau_w_weighted(Ow, stats)` in Python: the `|omega|`-weighted fermionic Matsubara -> tau fit of the C++ `IAFT::w_to_tau_w_weighted` (IR: same as `w_to_tau`); `stats` as in `w_to_tau`, fermions only (bosons raise `NotImplementedError`).
 
 ### Improved
 

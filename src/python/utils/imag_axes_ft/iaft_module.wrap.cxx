@@ -448,9 +448,9 @@ static auto const _c2py_fun_54 = c2py::dispatcher_f_kw_t{c2py::cmethod(
         const imag_axes_ft::IAFT &,
         const nda::basic_array<std::complex<double>, 2, nda::C_layout, 'A',
                                nda::heap_basic<nda::mem::mallocator<
-                                   nda::mem::AddressSpace::Host>>> &>(
-        &imag_axes_ft::w_to_tau_w_weighted_2d),
-    "iaft", "X_wi")};
+                                   nda::mem::AddressSpace::Host>>> &,
+        const std::string &>(&imag_axes_ft::w_to_tau_w_weighted_2d),
+    "iaft", "X_wi", "stats")};
 
 // w_to_tau_cross_stats_2d
 static auto const _c2py_fun_39 = c2py::dispatcher_f_kw_t{c2py::cmethod(

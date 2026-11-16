@@ -151,12 +151,13 @@ namespace imag_axes_ft {
      * Fermionic Matsubara frequency to imaginary time with the |omega|-weighted fit Ttw_ff_w_weighted().
      * Used only for G(iw) from the Dyson equation (simple_dyson, dca_dyson, compute_Nelec, lr_dyson, pproc_t
      * Wannier-basis G), where G ~ 1/(i omega) is nearly representable and the weighted fit keeps its relative error small; all other data use w_to_tau
-     * (see DLR::Ttw_ff_w_weighted). Same array conventions as w_to_tau(X_wi, X_ti, fermion).
+     * (see DLR::Ttw_ff_w_weighted). Same array conventions as w_to_tau(X_wi, X_ti, stats).
      * @param X_wi  - [INPUT] Matsubara frequency tensor
      * @param X_ti  - [OUTPUT] imaginary-time tensor
+     * @param stats - [INPUT] statistics: fermion only (aborts for bosons, which have no weighted fit)
      */
     template<nda::MemoryArray ndaArray_A, nda::MemoryArray ndaArray_B>
-    void w_to_tau_w_weighted(ndaArray_A &&X_wi, ndaArray_B &&X_ti) const;
+    void w_to_tau_w_weighted(ndaArray_A &&X_wi, ndaArray_B &&X_ti, stats_e stats) const;
  
     /**
      * version for FT with particle-hole symmetry
