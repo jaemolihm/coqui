@@ -656,9 +656,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Dynamic one-body source ΔH(iω), (nmodes, nw_f, ns, nk, nb, nb), or (nw_f, ns, nk, nb, nb) for a
         single perturbation (then DeltaH0_skij must be rank 4), on the fermionic Matsubara grid of the
         checkpoint: values at iω_n = i·wn·π/β (Ha) with wn = ``iaft.wn_mesh("fermion")`` (not
-        ``phys_notation=True``). At q = Γ the source must satisfy ΔH(-iω) = ΔH(iω)†; run_lr
-        aborts if fix_density = True and ΔN comes out complex, and does not check it otherwise.
-        Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the right-hand side of the
+        ``phys_notation=True``). At q = Γ the source must satisfy ΔH_k(-iω_n) = ΔH_k(iω_n)†; run_lr
+        checks it on the input, per mode, and aborts if ‖ΔH(-iω) - ΔH(iω)†‖_F / ‖ΔH‖_F > 1e-10 (valid
+        sources are exact to round-off, ~1e-15) or if the grid has no -iω_n partner. It is not checked at
+        q != Γ, where the condition couples q and -q. Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the right-hand side of the
         Dyson equation of mode m at every iteration, and to the hessian's left operand
         (Tr_ω(ΔH_λ, ΔG_p) beside Tr(ΔH0_λ, ΔDm_p)). A source constant in iω equal to A gives the
         same result as ΔH0 = A. Rejected together with DeltaX_left/DeltaX_right/DeltaV_qPQ,

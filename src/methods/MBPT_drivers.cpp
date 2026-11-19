@@ -1990,6 +1990,54 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   }
   mpi->comm.broadcast_n(&nmodes, 1, 0);
 
+  // Input check of the dynamic source at q = Γ: a Hermitian perturbation obeys ΔH_k(-iω_n) = ΔH_k(iω_n)^†
+  // (the iω-transform of a Hermitian ΔH(τ)); a source violating it makes ΔG(τ), ΔDm and ΔN complex.
+  // At q != Γ the condition couples q and -q (ΔH_{k,k+q}(-iω) = ΔH_{k+q,k;-q}(iω)^†), whose data are not
+  // given in one call, so it is not checked there. A valid source is exact to round-off, hence the 1e-10 bound.
+  if (has_dynamic_source && utils::is_q_gamma(q_vec)) {
+    // 1. Partner index of every fermionic node: wn(refl(n)) = -wn(n); the grid must be closed under negation
+    nda::array<long, 1> wn(ft.wn_mesh_f());
+    nda::array<long, 1> refl(ft.nw_f());
+    refl() = -1;
+    for (long n = 0; n < ft.nw_f(); ++n)
+      for (long m = 0; m < ft.nw_f(); ++m)
+        if (wn(m) == -wn(n)) { refl(n) = m; break; }
+    for (long n = 0; n < ft.nw_f(); ++n)
+      utils::check(refl(n) >= 0,
+                   "run_lr_calc: the fermionic Matsubara grid is not closed under negation (no partner for "
+                   "index {}, wn = {}), so DeltaH_mwskij cannot be checked for DeltaH(-iw) = DeltaH(iw)^dagger.",
+                   n, wn(n));
+    // 2. On root, per mode: sqrt(sum_{n,s,k} ||ΔH(-iω_n) - ΔH(iω_n)^†||_F^2 / sum ||ΔH(iω_n)||_F^2)
+    nda::array<double, 1> herm_dev(nmodes);
+    herm_dev() = 0.0;
+    if (mpi->comm.root()) {
+      auto const& dw = *DeltaH_mwskij_root;
+      for (long m = 0; m < nmodes; ++m) {
+        double dev2 = 0.0, norm2 = 0.0;
+        for (long n = 0; n < dw.shape(1); ++n)
+          for (long s = 0; s < dw.shape(2); ++s)
+            for (long k = 0; k < dw.shape(3); ++k) {
+              auto a = dw(m, n, s, k, nda::ellipsis{});
+              auto b = dw(m, refl(n), s, k, nda::ellipsis{});
+              for (long i = 0; i < a.shape(0); ++i)
+                for (long j = 0; j < a.shape(1); ++j) {
+                  dev2  += std::norm(b(i, j) - std::conj(a(j, i)));
+                  norm2 += std::norm(a(i, j));
+                }
+            }
+        herm_dev(m) = (norm2 > 0.0) ? std::sqrt(dev2 / norm2) : 0.0;
+      }
+    }
+    // 3. Root's verdict reaches every rank, all ranks abort identically
+    mpi->comm.broadcast_n(herm_dev.data(), nmodes, 0);
+    for (long m = 0; m < nmodes; ++m)
+      utils::check(herm_dev(m) <= 1e-10,
+                   "run_lr_calc: DeltaH_mwskij of mode {} violates DeltaH(-iw) = DeltaH(iw)^dagger at q = Gamma: "
+                   "||DeltaH(-iw) - DeltaH(iw)^dagger||_F / ||DeltaH||_F = {:.3e} > 1e-10. A Hermitian "
+                   "perturbation needs the iw-transform of a Hermitian DeltaH(tau); pair iw_n with -iw_n.",
+                   m, herm_dev(m));
+  }
+
   // The δX/δV IBC path is per-perturbation in a way this loop does not yet
   // handle: build_lr_ibc mixes mode-independent V_HF/F_PQ with the ΔF_ibc/ΔΣ_ibc
   // built from *this* δX, and lr_driver moves F_PQ_skij out of the IBC object on

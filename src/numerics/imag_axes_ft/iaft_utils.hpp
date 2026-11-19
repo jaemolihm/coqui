@@ -90,8 +90,14 @@ namespace imag_axes_ft {
   /**
    * Fermionic Matsubara sum (1/β) Σ_n c(iω_n) = -c(τ = β⁻) of a function on the fermionic ω grid.
    *
-   * c(iω_n) -> c(τ) by the IAFT's w_to_tau, then evaluated at τ = β⁻; the second form is the one
-   * computed. Shared by every contraction that closes a Matsubara sum (the LR hessian's Tr_ω).
+   * c(iω_n) -> c(τ) by the IAFT's |ω|-weighted fit w_to_tau_w_weighted, then evaluated at τ = β⁻; the
+   * second form is the one computed. Shared by every contraction that closes a Matsubara sum (the LR
+   * hessian's Tr_ω).
+   *
+   * Why the weighted fit: lr_dyson forms ΔDm and ΔG(τ) from ΔG(iω) with the same functional, so the
+   * hessian Tr_ω(ΔH_λ, ΔG_p) is the exact second derivative of the functional that produced ΔDm only if
+   * the closing sum uses it too. With the plain w_to_tau the DLR hessian is Hermitian to 1.6e-9, with this
+   * fit to 5e-12 (issue #135). On IR w_to_tau_w_weighted is w_to_tau, so the result is unchanged.
    *
    * @param FT  - IAFT whose fermionic grid c lives on
    * @param c_w - [INPUT] (nw_f, 1), already reduced over ranks by the caller
@@ -100,7 +106,8 @@ namespace imag_axes_ft {
   inline ComplexType fermion_matsubara_sum(IAFT const& FT, nda::array<ComplexType, 2> const& c_w) {
     nda::array<ComplexType, 2> c_tau(FT.nt_f(), 1);
     nda::array<ComplexType, 1> c_beta(1);
-    FT.w_to_tau(c_w, c_tau, fermion);
+    // 1. c(iω_n) -> c(τ) with the |ω|-weighted fit; 2. -c(β⁻)
+    FT.w_to_tau_w_weighted(c_w, c_tau, fermion);
     FT.tau_to_beta(c_tau, c_beta);
     return -c_beta(0);
   }
