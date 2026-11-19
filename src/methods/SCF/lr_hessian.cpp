@@ -273,9 +273,9 @@ ComplexType lr_hessian_t::matsubara_sum(nda::array<ComplexType, 2>& c) const {
   // c is a per-rank partial over the element slice, so it is reduced before the FT.
   _mpi->comm.all_reduce_in_place_n(c.data(), c.size(), std::plus<>{});
   // lr_dyson forms ΔDm from ΔG(iω) with w_to_tau_w_weighted, and the closing sum uses the same functional
-  // so that Tr_ω(ΔH_λ, ΔG_p) matches Tr(ΔH0_λ, ΔDm_p) for a static ΔH_λ. A dynamic ΔH_λ(iω) does not commute with
-  // the projector inside it, which leaves the 5e-12 residual of the DLR hessian's Hermiticity (plain
-  // w_to_tau closing: 1.6e-9, issue #135). On IR the two fits coincide.
+  // so that Tr_ω(ΔH_λ, ΔG_p) matches Tr(ΔH0_λ, ΔDm_p) for a static ΔH_λ. With it the DLR hessian of a dynamic
+  // source is Hermitian to 5e-12 (Si HF, below the IR floor 1e-11; plain w_to_tau closing: 1.6e-9, issue #135).
+  // On IR the two fits coincide.
   return imag_axes_ft::fermion_matsubara_sum(*_FT, c);
 }
 
