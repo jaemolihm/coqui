@@ -272,7 +272,8 @@ inline void shared_tau_to_w(const imag_axes_ft::IAFT& FT,
                "shared_tau_to_w: X(tau) must be (nt_f, ns, nk, nb, nb) and X(iw) (nw_f, ns, nk, nb, nb) of the same IAFT.");
   auto* node_comm = sX_wskij.node_comm();
 
-  // 1. Make X(τ) written by other ranks visible
+  // 1. Make X(τ) written by other ranks visible, and X(iω) free to be overwritten (earlier readers are done)
+  sX_tskij.node_comm()->barrier();
   sX_wskij.node_sync();
   // 2. X(iω)_sk = FT.tau_to_w X(τ)_sk, for the (s,k) strided over this node's ranks
   nda::array<ComplexType, 3> X_t(nt, nbnd, nbnd2), X_w(FT.nw_f(), nbnd, nbnd2);

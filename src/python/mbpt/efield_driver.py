@@ -61,14 +61,16 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         GW0 only: also evaluate the one-shot K^W diagnostic, ``chi2_KW`` and ``eps_inf_KW``.
     reuse_W, recompute_W, screened_interaction_file
         As run_lr. With ``reuse_W`` the W of the call stays cached for the next call
-        (``release_lr_W_cache()`` drops it); without it a W kept by an earlier call is released at the end.
+        (``release_lr_W_cache()`` drops it); with ``recompute_W`` and no ``reuse_W`` the W built by this call is
+        released at its end; with neither, a W kept by an earlier call is neither read nor changed.
 
     Returns
     -------
     dict
         The datasets of ``linear_response_efield/`` of ``<output>.mbpt.h5``, the same on every rank: ``eps_inf``,
         ``chi2`` (3, 3); its terms ``chi2_GE_sym``, ``chi2_GE_plain``, ``chi2_vGpvGp``, ``chi2_Sigma2``; the
-        diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``g_thermal``, ``kappa_bar``,
+        diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``g_thermal`` (max |tr G(beta/2)| of the ground
+        state, not the thermal occupation), ``kappa_bar``,
         ``dkappa_dmu``, ``DeltaDm_Gp_rel``, ``B_minus_S_rel``, ``trace_GE_rel`` (3,), ``niter`` (8,); with GW0 and
         ``kw_correction`` also ``chi2_KW``, ``eps_inf_KW``, ``KW_Gp_rel``; and ``method``, ``tol``.
 
@@ -106,7 +108,11 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
             out_file = str(params.get("output", params["prefix"])) + ".mbpt.h5"
             with h5py.File(out_file, "r") as f:
                 grp = f["linear_response_efield"]
-                result = {k: grp[k][()] for k in grp.keys()}
+                # complex datasets (flagged by the __complex__ attribute) are stored as (..., 2) reals
+                result = {}
+                for k in grp.keys():
+                    a = grp[k][()]
+                    result[k] = a[..., 0] + 1j * a[..., 1] if "__complex__" in grp[k].attrs else a
                 result.update({k: (v.decode() if isinstance(v, bytes) else v) for k, v in grp.attrs.items()})
             payload = ("ok", result)
         except Exception as exc:                                      # noqa: BLE001

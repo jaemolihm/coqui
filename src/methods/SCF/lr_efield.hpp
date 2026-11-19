@@ -147,10 +147,11 @@ ComplexType matsubara_pairing(utils::mpi_context_t<mpi3::communicator>& mpi, ima
                               nda::array<double, 1> const& k_weight, double spin_factor, double volume);
 
 /**
- * max_{s,k} |tr G(τ*)|, the thermal occupation of the ground state: tr G(τ) at the node nearest the middle of the
- * interval, e^{-βΔ/2} for a gapped system at midgap μ.
+ * max_{s,k} |tr G(τ*)|: the trace of G(τ) at the node nearest the middle of the interval, an amplitude (not the thermal
+ * occupation). For a gapped system tr G(β/2) ~ n e^{-β|ξ_edge|/2}, ξ_edge the band edge nearest μ, i.e. e^{-βΔ/4} at midgap
+ * and the square root of the thermal occupation e^{-β|ξ_edge|}.
  *
- * Called by run_lr_efield_calc on the unperturbed G(τ) for the g_thermal diagnostic. The IR grid cannot interpolate
+ * Called by run_lr_efield_calc on the unperturbed G(τ) for the g_thermal diagnostic (written as `g_thermal`). The IR grid cannot interpolate
  * to β/2, so the node of smallest |x| in the reduced coordinate x = 2τ/β - 1 is used; its τ is not exactly β/2.
  */
 double thermal_occupation(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij);

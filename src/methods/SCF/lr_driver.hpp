@@ -383,7 +383,7 @@ public:
    *
    * Public wrapper of apply_kernel(precond = false, ...), which stays private so that the preconditioner branch,
    * whose state only some setups build, is not reachable from outside. Applies the kernel to stored
-   * ΔDm, ΔG(τ) of earlier solves (the caller of run_lr_efield's W-term phase), including the split term 2
+   * ΔDm, ΔG(τ) of earlier solves kept by the caller, including the split term 2
    * (sDeltaSigma_term2_out, non-null iff p.split_sigma_terms).
    *
    * Collective; the input and output arrays are node-shared. `p` must be the one lr_setup was given. The

@@ -1511,7 +1511,8 @@ namespace {
 /**
  * Reads the `iter_alg.*` keys of an LR run into lr_iter_params.
  *
- * Called by run_lr_calc, once per run; shared so that every LR driver reads the same keys with the same defaults.
+ * Called by run_lr_calc and run_lr_efield_calc, once per run; shared so that every LR driver reads the same keys with
+ * the same defaults.
  */
 lr_iter_params read_lr_iter_params(ptree const& pt, bool qp_static_sigma) {
   lr_iter_params iter_params;
@@ -1547,7 +1548,7 @@ struct lr_unperturbed_state {
 /**
  * Builds the unperturbed Dyson solver, F, Σ(τ), μ, G(τ), Dm and G(iω) of an LR run.
  *
- * Called by run_lr_calc after its input checks. `unperturbed` = "checkpoint" reads F, Σ, μ from the checkpoint
+ * Called by run_lr_calc and run_lr_efield_calc after their input checks. `unperturbed` = "checkpoint" reads F, Σ, μ from the checkpoint
  * and solves the Dyson equation; "mf_dft" builds the DFT/KS mean-field G0 (F, Σ stay unused). `ft` stays
  * caller-owned: the Dyson solver keeps a pointer to it. The timers LR_INIT_DYSON, LR_INIT_READ_SCF and
  * LR_INIT_UPDATE_G of `init_timer` are the run's init table.
@@ -1637,7 +1638,7 @@ struct lr_W_inputs {
  * Loads (or recomputes, or reuses) the screened interaction W_c(iω) of an LR run, with the ε⁻¹ heads, and reads
  * the divergence treatments of the ground state.
  *
- * Called by run_lr_calc after the unperturbed state is built. W is either read from disk (explicit
+ * Called by run_lr_calc and, once per phase, run_lr_efield_calc after the unperturbed state is built. W is either read from disk (explicit
  * screened_interaction_file, else the path derived from the checkpoint), recomputed on the fly from the G(τ)
  * `sG_tskij` (RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W_cache (`reuse_W`).
  * Both hand W to lr_driver as W_c(iω) on the q-dist distribution (utils::lr_W_tau_local_dist). `needs_W` is
@@ -1748,7 +1749,7 @@ lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& 
 /**
  * Sets the kernel, solver and W fields of `p` that every LR driver takes from its inputs.
  *
- * Called by run_lr_calc right before lr_setup. The pointers into `W` stay valid only while `W` lives, which is as
+ * Called by run_lr_calc and run_lr_efield_calc right before lr_setup. The pointers into `W` stay valid only while `W` lives, which is as
  * long as the lr_driver that `p` is given to.
  */
 void fill_lr_kernel_params(lr_params& p, lr_kernel_spec const& kernel, lr_W_inputs const& W,
@@ -2728,8 +2729,8 @@ template std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr_calc
  *   iter_alg.*      as run_lr
  *   kw_correction   GW0 only: add phase F (true)
  *   reuse_W, recompute_W, screened_interaction_file   as run_lr. A W kept by an earlier call is replaced when
- *                   recompute_W is set without reuse_W, and the W kept by this call is released at its end
- *                   unless reuse_W is set.
+ *                   recompute_W is set without reuse_W, and that W is released at the end of this call unless
+ *                   reuse_W is set. Without recompute_W and reuse_W the call neither reads nor changes the kept W.
  * The kernel, hessian, fix_density and preconditioner keys of run_lr are driven here and rejected if given.
  *
  * Requires a full-BZ, npol = 1 mean field with the velocity matrix v0 (pw2coqui add_velocity), and a ground state
@@ -2901,7 +2902,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     // 1. B(iω) = S + ΔF + τ->ω ΔΣ(τ)
     opt_sB_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, &sS_skij, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
-    // 2. κ̄ = -ΔN[G']/Ω with G' = -ΔG;  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k)
+    // 2. κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k)
     kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij) / volume;
     const double S_norm2 = norm2_of(sS_skij);
     DeltaDm_Gp_rel = std::sqrt(norm2_of(sDeltaDm_skij) / S_norm2);
@@ -3055,7 +3056,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     mpi->comm.barrier();
   }
   thc.release_dZ_cache();
-  if (!reuse_W) W_cache.reset();
+  if (recompute_W && !reuse_W) W_cache.reset();  // drop only the W this call built; an earlier reuse_W call's W stays
 
   // 9. χ̄⁽²⁾ = ½(T + Tᵀ), T = term 1 + term 2 + term 3 (+ K^W); ε∞ = δ - 4π Re χ̄⁽²⁾
   nda::array<ComplexType, 2> chi2_GE_sym(3, 3), chi2_GE_plain(3, 3), T(3, 3), chi2(3, 3), chi2_KW_total(3, 3);
@@ -3082,8 +3083,8 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   const double KW_norm = std::sqrt(nda::sum(nda::abs(chi2_KW) * nda::abs(chi2_KW)));
   if (mpi->comm.root()) {  // every rank holds the same values; one warning is enough
     if (g_thermal > 1e-6)
-      app_warning("run_lr_efield_calc: g_thermal = {:.2e} > 1e-6, the ground state is not gapped at its μ; "
-                  "the thermal terms of ε∞ are not included.", g_thermal);
+      app_warning("run_lr_efield_calc: max|tr G(β/2)| = {:.2e} > 1e-6, the ground state is not gapped at its μ "
+                  "(or β is too small); the thermal terms of ε∞ are not included.", g_thermal);
     if (std::abs(kappa_bar) * 4.0 * M_PI / eps_scale > 1e-6)
       app_warning("run_lr_efield_calc: |κ̄| 4π/|ε∞ - 1| = {:.2e} > 1e-6, the compressibility ∂N/∂μ is not negligible.",
                   std::abs(kappa_bar) * 4.0 * M_PI / eps_scale);
