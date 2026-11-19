@@ -565,7 +565,7 @@ void lr_dyson::build_dmu_response() {
   // is the one the Δμ = -ΔN(0)/(dN/dμ) closed form must be consistent with for
   // the axpy to land on ΔN = 0.
   const ComplexType dN_dmu = compute_lr_Nelec(*_sdDm_dmu_skij);
-  _cached_dN_dmu = dN_dmu.real();  // Tr[S dDm/dμ] for the Hermitian source -S is real; Im is round-off
+  _cached_dN_dmu = dN_dmu.real();  // Tr[S dDm/dμ] for the Hermitian source -S is real; |Im κ| ~ 1e-9 absolute, 2.7e-5 relative on Si HF; kept real by decision D2
   _dN_dmu_cached = true;
   app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached), Im = {:.3e}", _cached_dN_dmu, dN_dmu.imag());
 

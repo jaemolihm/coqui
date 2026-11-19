@@ -367,9 +367,12 @@ def read_lr_hessian(filename: str) -> dict:
         for key in complex_keys:
             if key not in lr_grp:
                 continue
-            a = lr_grp[key][()]
-            # CoQui writes complex as a trailing (..., 2) real/imag axis.
-            out[key] = a[..., 0] + 1j * a[..., 1]
+            ds = lr_grp[key]
+            a = ds[()]
+            if "__complex__" in ds.attrs:  # CoQui writes complex as a trailing (..., 2) real/imag axis
+                out[key] = a[..., 0] + 1j * a[..., 1]
+            else:  # real dataset (Delta_mu_improved of a checkpoint written before it became complex)
+                out[key] = a.astype(complex)
         for key in real_keys:
             if key in lr_grp:
                 out[key] = lr_grp[key][()]

@@ -656,9 +656,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Dynamic one-body source ΔH(iω), (nmodes, nw_f, ns, nk, nb, nb), or (nw_f, ns, nk, nb, nb) for a
         single perturbation (then DeltaH0_skij must be rank 4), on the fermionic Matsubara grid of the
         checkpoint: values at iω_n = i·wn·π/β (Ha) with wn = ``iaft.wn_mesh("fermion")`` (not
-        ``phys_notation=True``). Any source, Hermitian or not, gives the exact linear response; with
-        fix_density at Γ, Δμ is complex for a non-Hermitian source. The exactness holds at npol = 1
-        (the npol > 1 ΔF symmetrization in lr_hf assumes a Hermitian ΔF). Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the
+        ``phys_notation=True``). Complex linear combinations of the sources the kernels treat exactly
+        (time-reversal-even Hermitian ones) give the exact linear response, at npol = 1 (the npol > 1
+        ΔF symmetrization in lr_hf assumes a Hermitian ΔF); with fix_density at Γ, Δμ is complex for
+        such a combination. Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the
         right-hand side of the Dyson equation of mode m at every iteration, and to the hessian's left operand
         (Tr_ω(ΔH_λ, ΔG_p) beside Tr(ΔH0_λ, ΔDm_p)). A source constant in iω equal to A gives the
         same result as ΔH0 = A. Rejected together with DeltaX_left/DeltaX_right/DeltaV_qPQ,
@@ -689,7 +690,8 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     tuple[int, complex] or tuple[np.ndarray, np.ndarray]
         (niter, Delta_mu) — scalars for a 4-D DeltaH0_skij, per-mode arrays for
         a 5-D one. Delta_mu is always complex; it is nonzero only for fix_density at q = Γ,
-        and complex there for a non-Hermitian source (Δμ = -ΔN_0/κ, κ = dN/dμ real).
+        and complex there for a non-Hermitian source (Δμ = -ΔN_0/κ, κ = dN/dμ real). For a Hermitian
+        source Im Δμ is numerical noise (up to ~1e-5 of Re Δμ on Si).
 
     Notes
     -----
