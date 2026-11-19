@@ -301,10 +301,12 @@ public:
    *
    * @throws std::runtime_error if q≠0 (ΔN is not well-defined for q≠0)
    * @param sDeltaDm_skij   - [INPUT] LR density matrix (ns, nk, nb, nb)
-   * @return ΔN, the change in particle number
+   * @param check_imag      - [INPUT] abort if |Im ΔN| > 1e-6·max(1, |Re ΔN|) (a source violating ΔH(-iω) = ΔH(iω)†).
+   *                          False for ΔN after the Δμ shift: Re ΔN is then ~0 and Im ΔN carries Δμ·Im(dN/dμ).
+   * @return Re ΔN, the change in particle number
    */
   template<typename DeltaDm_t>
-  double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
+  double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_imag = true);
 
 
   /// dN/dμ, the density of states at the Fermi level. Valid once

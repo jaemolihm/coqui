@@ -377,7 +377,7 @@ double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density) {
 
   // Verify ΔN ≈ 0
   _Timer.start("LR_DYSON_NELEC");
-  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
+  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij, false);
   _Timer.stop("LR_DYSON_NELEC");
   app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
   return Delta_mu;
@@ -479,7 +479,7 @@ void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) 
 
 
 template<typename DeltaDm_t>
-double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
+double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_imag) {
   // ΔN = Tr[S · ΔDm] = Σ_k w_k Tr[S(k) · ΔDm(k)]
   utils::check(_is_q_gamma,
                "compute_lr_Nelec: ΔN is not well-defined for q≠0. "
@@ -514,9 +514,11 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
   // after the reduce, so it multiplies the total exactly once
   DeltaN *= spin_factor;
 
-  if (std::abs(DeltaN.imag()) > 1e-10) {
-    app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN) = {:.2e}", DeltaN.imag());
-  }
+  // ΔN is real for a source with ΔH(-iω) = ΔH(iω)†; valid sources give |Im ΔN| <= ~2e-9
+  utils::check(!check_imag or std::abs(DeltaN.imag()) <= 1e-6 * std::max(1.0, std::abs(DeltaN.real())),
+               "compute_lr_Nelec: Im(ΔN) = {:.3e} against Re(ΔN) = {:.3e}. The likely cause is a dynamic source "
+               "violating ΔH(-iω) = ΔH(iω)† (e.g. frequencies given as integer indices instead of iω_n = n·π/β in Ha).",
+               DeltaN.imag(), DeltaN.real());
 
   app_log(3, "compute_lr_Nelec: ΔN = {:.6e}", DeltaN.real());
   return DeltaN.real();
@@ -590,6 +592,6 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_5D_t>*);
 
 template double lr_dyson::compute_lr_Nelec(
-    const sArray_t<Array_view_4D_t>&);
+    const sArray_t<Array_view_4D_t>&, bool);
 
 } // namespace methods
