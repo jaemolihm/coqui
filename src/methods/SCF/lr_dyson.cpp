@@ -85,7 +85,8 @@ double lr_dyson::solve_lr_dyson(
     const DeltaF_t& sDeltaF_skij,
     const DeltaSigma_t* sDeltaSigma_tskij,
     bool fix_density,
-    const DeltaF_t* sDeltaVcorr_skij) {
+    const DeltaF_t* sDeltaVcorr_skij,
+    const sArray_t<Array_view_5D_t>* sDeltaH_wskij) {
 
   utils::check(_cached_G_wskij != nullptr,
                "solve_lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
@@ -136,7 +137,7 @@ double lr_dyson::solve_lr_dyson(
   // steps 2-3 are conditional.
   solve_lr_dyson_impl(sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
                       dDeltaSigma_wskij, /*Delta_mu=*/0.0,
-                      sDeltaVcorr_skij);
+                      sDeltaVcorr_skij, sDeltaH_wskij);
 
   const double Delta_mu = apply_fix_density(sDeltaDm_skij, fix_density);
   if (Delta_mu != 0.0) apply_dmu_shift_G(Delta_mu);
@@ -155,7 +156,8 @@ void lr_dyson::solve_lr_dyson_impl(
     const DeltaF_t& sDeltaF_skij,
     const dArray_5D_t* dDeltaSigma_wskij,
     double Delta_mu,
-    const DeltaF_t* sDeltaVcorr_skij) {
+    const DeltaF_t* sDeltaVcorr_skij,
+    const sArray_t<Array_view_5D_t>* sDeltaH_wskij) {
 
   using math::nda::make_distributed_array;
   using Array_5D_t = nda::array<ComplexType, 5>;
@@ -207,6 +209,8 @@ void lr_dyson::solve_lr_dyson_impl(
   auto S_loc = _dyson.sS_skij().local();
   // Optional static ΔV_QPGW (LR-qpGW): frequency-independent one-body term.
   bool has_Vcorr = (sDeltaVcorr_skij != nullptr);
+  // Optional dynamic source ΔH(iω), node-replicated: read with global (iω, s, k) indices.
+  bool has_DeltaH_w = (sDeltaH_wskij != nullptr);
 
   // Temporary matrices
   nda::matrix<ComplexType> X_ij(_nbnd, _nbnd);
@@ -228,7 +232,7 @@ void lr_dyson::solve_lr_dyson_impl(
         auto DeltaH0_k = DeltaH0_loc(is, ik, nda::range::all, nda::range::all);
         auto DeltaF_k = DeltaF_loc(is, ik, nda::range::all, nda::range::all);
 
-        // Build X = ΔH0 + ΔF [+ ΔΣ] [+ ΔV_QPGW] - Δμ·S
+        // Build X = ΔH0 + ΔF [+ ΔΣ] [+ ΔV_QPGW] [+ ΔH(iω)] - Δμ·S
         auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
         X_ij = DeltaH0_k + DeltaF_k - Delta_mu * S_k;
         if (dDeltaSigma_wskij) {
@@ -238,6 +242,9 @@ void lr_dyson::solve_lr_dyson_impl(
         }
         if (has_Vcorr) {
           X_ij += sDeltaVcorr_skij->local()(is, ik, nda::range::all, nda::range::all);
+        }
+        if (has_DeltaH_w) {
+          X_ij += sDeltaH_wskij->local()(iw, is, ik, nda::range::all, nda::range::all);
         }
 
         // ΔG = G_{k+q} @ X @ G_k
@@ -402,7 +409,8 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
                                         const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
                                         const sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                         const sArray_t<Array_view_4D_t>* sDeltaDm_src,
-                                        bool fix_density) {
+                                        bool fix_density,
+                                        const sArray_t<Array_view_5D_t>* sDeltaH_wskij) {
   utils::check(_cached_G_wskij != nullptr,
                "lr_dyson: cached G(iω) not set. Call set_cached_G_omega() first.");
   _Timer.start("LR_DYSON");
@@ -416,6 +424,7 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
   auto G_w = _cached_G_wskij->local();
   auto DeltaDm = sDeltaDm_skij.local();
   nda::matrix<ComplexType> X(_nbnd, _nbnd);
+  nda::matrix<ComplexType> X_w(_nbnd, _nbnd);
   nda::matrix<ComplexType> XG(_nbnd, _nbnd);
   auto [b0, b1] = itertools::chunk_range(0, _ns * _nkpts_ibz, long(_context->comm.size()),
                                          long(_context->comm.rank()));
@@ -431,7 +440,14 @@ double lr_dyson::solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij
     for (long iw = 0; iw < _nw; ++iw) {
       auto G_k = G_w(iw, s, ik, nda::range::all, nda::range::all);
       auto G_kq = G_w(iw, s, ikq, nda::range::all, nda::range::all);
-      nda::blas::gemm(_c_beta_w(iw), X, G_k, ComplexType(0.0), XG);
+      if (sDeltaH_wskij) {
+        // With a dynamic source, X(iω) = X + ΔH(iω)
+        X_w = X + sDeltaH_wskij->local()(iw, s, ik, nda::range::all, nda::range::all);
+        nda::blas::gemm(_c_beta_w(iw), X_w, G_k, ComplexType(0.0), XG);
+      } else {
+        // Static X only: one X per (s, k)
+        nda::blas::gemm(_c_beta_w(iw), X, G_k, ComplexType(0.0), XG);
+      }
       nda::blas::gemm(ComplexType(1.0), G_kq, XG, ComplexType(1.0), DeltaDm_k);
     }
   }
@@ -537,7 +553,8 @@ void lr_dyson::build_dmu_response() {
   app_log(3, "build_dmu_response: building dG/dμ(τ) = ∂ΔG(τ)/∂Δμ");
   solve_lr_dyson_impl(sdDm_dmu_skij, sZero_skij, sZero_skij,
                       /*opt_dDeltaSigma_wskij=*/nullptr, /*Delta_mu=*/1.0,
-                      static_cast<const sArray_t<Array_view_4D_t>*>(nullptr));
+                      static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
+                      /*sDeltaH_wskij=*/nullptr);
 
   utils::check(bool(_dDeltaG_tau_buffer),
                "build_dmu_response: the Dyson pass retained no ΔG(τ).");
@@ -569,7 +586,8 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_4D_t>&,
     const sArray_t<Array_view_5D_t>*,
     bool,
-    const sArray_t<Array_view_4D_t>*);
+    const sArray_t<Array_view_4D_t>*,
+    const sArray_t<Array_view_5D_t>*);
 
 template double lr_dyson::compute_lr_Nelec(
     const sArray_t<Array_view_4D_t>&);

@@ -319,15 +319,17 @@ static auto const fun_14 = c2py::dispatcher_f_kw_t{c2py::cfun(
        std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
        std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells,
        std::optional<std::map<std::string, nda::array<ComplexType, 5>>>
-           lr_impurity_response) {
+           lr_impurity_response,
+       std::optional<nda::array<ComplexType, 6>> DeltaH_mwskij) {
       return coqui_py::run_lr(lr_params, h_int, q_vec, DeltaH0_mskij,
                               DeltaX_left, DeltaX_right, DeltaV_qPQ, proj_mat,
                               band_window, kpts_w90, local_polarizabilities,
-                              dc_cells, lr_impurity_response);
+                              dc_cells, lr_impurity_response, DeltaH_mwskij);
     },
     "lr_params", "h_int", "q_vec", "DeltaH0_mskij", "DeltaX_left",
     "DeltaX_right", "DeltaV_qPQ", "proj_mat", "band_window", "kpts_w90",
-    "local_polarizabilities", "dc_cells", "lr_impurity_response")};
+    "local_polarizabilities", "dc_cells", "lr_impurity_response",
+    "DeltaH_mwskij")};
 
 // lr_DeltaH0_from_thc_aux
 static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
@@ -753,6 +755,10 @@ dc_cells : {par_11}
 lr_impurity_response : {par_12}
    - [INPUT] Optional response of the impurity {"Sigma": δΣ_imp(iω), "Pi": δΠ_imp(iν)} in the layouts of the
      ground state; needs local_polarizabilities
+DeltaH_mwskij : {par_13}
+   - [INPUT] Optional dynamic one-body source ΔH(iω) (nmodes, nw_f, ns, nk, nb, nb) on the fermionic Matsubara grid
+     of the checkpoint (root only); added to ΔH0 + ΔF + ΔΣ(iω) at every Dyson pass of mode m. Not combined with
+     DeltaX/DeltaV, qp_static_sigma or the projector
 
 Returns
 -------
@@ -771,7 +777,8 @@ Returns
      {c2py::python_typename<std::optional<nda::array<double, 2>>>()},
      {},
      {},
-     {}},
+     {},
+     {c2py::python_typename<std::optional<nda::array<ComplexType, 6>>>()}},
     {c2py::python_typename<
         std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
 static const auto doc_d_15 = fun_15.doc(

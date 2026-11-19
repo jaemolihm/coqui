@@ -252,6 +252,9 @@ struct lr_params {
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
+  /// The caller passes a dynamic source ΔH(iω) to lr_solve_one. Sizes the memory report and the
+  /// hessian ω stores at lr_setup; lr_solve_one checks that it agrees with its argument.
+  bool has_dynamic_source = false;
 
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
   bool hessian() const { return hessian_nmodes > 0; }
@@ -353,6 +356,11 @@ public:
    * only if p.save_DeltaG is set or p.hessian() and the kernel has a Σ (the
    * hessian's Σ refresh reads it).
    *
+   * `sDeltaH_wskij`, when given, is a dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated.
+   * It is a constant of the affine map ΔF, ΔΣ -> ΔDm, ΔG, so it enters every outer Dyson pass (the
+   * preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
+   * preconditioner applies. Given exactly when p.has_dynamic_source.
+   *
    * @return Tuple of (number of iterations, final Δμ)
    */
   std::tuple<int, double> lr_solve_one(
@@ -367,7 +375,8 @@ public:
       sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
+      const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
 
   /**
    * @brief The run's LR Dyson solver.
@@ -417,6 +426,9 @@ public:
    * (0 = off). Its two striped ω stores scale with it and are the largest thing the
    * feature allocates, so they are listed here with everything else rather than
    * reported separately by lr_hessian_t.
+   *
+   * `has_dynamic_source` adds the caller's ΔH(iω) array and, with a hessian, its ω store (and the
+   * ΔG ω store a Σ-free kernel does not otherwise keep).
    */
   void print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
                              long n_sigma_prev = 0,
@@ -424,7 +436,8 @@ public:
                              bool precond = false,
                              bool need_Delta_mu = false,
                              bool exchange_static_W = false,
-                             long hessian_nmodes = 0);
+                             long hessian_nmodes = 0,
+                             bool has_dynamic_source = false);
 
   /**
    * Report (verbosity 2) the MPI distribution (proc-grid) each family of large
@@ -531,7 +544,7 @@ private:
    * them; GCR and the damping iteration both call it.
    *
    * Solves z_F = r_F + K_pc[Pχ(z_F, r_Σ)] for the ΔF part and passes ΔΣ through,
-   * z_Σ = r_Σ: gather r, then precond_solve(r_F, &r_Σ), then z = (r_F + y_F, r_Σ).
+   * z_Σ = r_Σ: gather r, then precond_solve(r_F, &r_Σ, nullptr), then z = (r_F + y_F, r_Σ).
    *
    * Collective on comm.
    */
@@ -542,7 +555,8 @@ private:
    * The inner solve of precond_apply on shared arrays: y_F = K_pc[Pχ(r_F + y_F, r_Σ)]
    * from y_F = 0, left in *_sDeltaF_pc_y. For r_S = null there is no ΔΣ part (the
    * start y_F = K_pc χ(ΔH0 + y_F)); otherwise one full Dyson pass gives the ΔDm of
-   * r_Σ, and each sweep is a ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation
+   * r_Σ and of the dynamic source ΔH(iω) (sDeltaH_wskij, given only by the start solve of a run with
+   * a source), and each sweep is a ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation
    * and one step of the ΔF-only _pc_gcr on y_F. The sweeps stop at
    * ‖r_in‖ ≤ p.precond_tol·‖r_in,0‖ or after p.precond_max_iter; the outer GCR is
    * flexible, so there the inner accuracy changes the rate only. The _pc_gcr basis
@@ -557,6 +571,7 @@ private:
    */
   void precond_solve(const sArray_t<Array_view_4D_t>& r_F,
                      const sArray_t<Array_view_5D_t>* r_S,
+                     const sArray_t<Array_view_5D_t>* sDeltaH_wskij,
                      thc_reader_t& thc, const lr_params& p);
 
   /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or

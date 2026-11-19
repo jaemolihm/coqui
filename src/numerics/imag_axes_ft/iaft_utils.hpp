@@ -88,6 +88,24 @@ namespace imag_axes_ft {
   } // namespace test_utils
 
   /**
+   * Fermionic Matsubara sum (1/β) Σ_n c(iω_n) = -c(τ = β⁻) of a function on the fermionic ω grid.
+   *
+   * c(iω_n) -> c(τ) by the IAFT's w_to_tau, then evaluated at τ = β⁻; the second form is the one
+   * computed. Shared by every contraction that closes a Matsubara sum (the LR hessian's Tr_ω).
+   *
+   * @param FT  - IAFT whose fermionic grid c lives on
+   * @param c_w - [INPUT] (nw_f, 1), already reduced over ranks by the caller
+   * @return (1/β) Σ_n c(iω_n)
+   */
+  inline ComplexType fermion_matsubara_sum(IAFT const& FT, nda::array<ComplexType, 2> const& c_w) {
+    nda::array<ComplexType, 2> c_tau(FT.nt_f(), 1);
+    nda::array<ComplexType, 1> c_beta(1);
+    FT.w_to_tau(c_w, c_tau, fermion);
+    FT.tau_to_beta(c_tau, c_beta);
+    return -c_beta(0);
+  }
+
+  /**
    * Reconstruct IAFT object from the metadata in CoQui checkpoint file. 
    * @return IAFT
    */

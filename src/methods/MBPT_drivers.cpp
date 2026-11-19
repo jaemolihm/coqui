@@ -1522,6 +1522,8 @@ void release_lr_W_cache() { W_cache.reset(); }
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
+ * @param DeltaH_mwskij_root - [INPUT] Optional dynamic source ΔH(iω) (nmodes, nw_f, ns, nk, nb, nb), root only
+ *                           (see MBPT_drivers.h)
  *
  * Kernel and SCF keys read from `pt`:
  *   include_hartree        ΔJ in the SCF loop (default true)
@@ -1569,7 +1571,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root,
-                                     const lr_local_inputs* local) {
+                                     const lr_local_inputs* local,
+                                     std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root) {
   auto mf = eri.corr_eri->get().MF();
   auto& mpi = eri.corr_eri->get().mpi();
 
@@ -1733,6 +1736,23 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     has_pert_arrays = (DeltaX_left_root.has_value() || DeltaX_right_root.has_value() ||
                        DeltaV_qPQ_root.has_value()) ? 1 : 0;
   mpi->comm.broadcast_n(&has_pert_arrays, 1, 0);
+
+  // Dynamic source ΔH(iω): present on the root only, so the flag is broadcast. It enters the Dyson
+  // pass and the hessian's left operand only, so every other source of the one-body term is rejected.
+  int has_dynamic_source_int = (mpi->comm.root() && DeltaH_mwskij_root.has_value()) ? 1 : 0;
+  mpi->comm.broadcast_n(&has_dynamic_source_int, 1, 0);
+  const bool has_dynamic_source = (has_dynamic_source_int == 1);
+  if (has_dynamic_source) {
+    utils::check(!has_pert_arrays,
+                 "run_lr_calc: the dynamic source DeltaH_mwskij is incompatible with the DeltaX (IBC) and "
+                 "DeltaV_qPQ perturbations.");
+    utils::check(!qp_static_sigma,
+                 "run_lr_calc: the dynamic source DeltaH_mwskij is incompatible with qp_static_sigma, which "
+                 "replaces the dynamic ΔΣ(iω) of the Dyson right-hand side by a static ΔV_QPGW.");
+    utils::check(local == nullptr,
+                 "run_lr_calc: the dynamic source DeltaH_mwskij is incompatible with the local projection "
+                 "(embedding).");
+  }
 
   // Scope of the LR hessian ("plain" or "symmetric"): the bare-vertex path. Both
   // exclusions are places where its algebra stops holding rather than places it
@@ -1957,6 +1977,16 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                  dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3), dh.shape(4));
     utils::check(dh.shape(0) > 0, "run_lr_calc: DeltaH0_mskij has no perturbations.");
     nmodes = dh.shape(0);
+
+    if (has_dynamic_source) {
+      auto const& dw = *DeltaH_mwskij_root;
+      utils::check(dw.shape() == std::array<long, 6>{nmodes, ft.nw_f(), mf->nspin(), mf->nkpts_ibz(),
+                                                    mf->nbnd(), mf->nbnd()},
+                   "run_lr_calc: DeltaH_mwskij shape mismatch: expected (nmodes,nw_f,ns,nk,nb,nb) = "
+                   "({},{},{},{},{},{}), got ({},{},{},{},{},{})",
+                   nmodes, ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
+                   dw.shape(0), dw.shape(1), dw.shape(2), dw.shape(3), dw.shape(4), dw.shape(5));
+    }
   }
   mpi->comm.broadcast_n(&nmodes, 1, 0);
 
@@ -1981,6 +2011,13 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
     return math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first);
   }();
+  // The dynamic source ΔH(iω): one rank-5 shm window refilled per perturbation like ΔH0.
+  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaH_wskij;
+  if (has_dynamic_source) {
+    std::optional<nda::array<ComplexType, 5>> h_first;
+    if (mpi->comm.root()) h_first.emplace((*DeltaH_mwskij_root)(0, nda::ellipsis{}));
+    opt_sDeltaH_wskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, h_first));
+  }
   auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -2331,6 +2368,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
+  p.has_dynamic_source = has_dynamic_source;
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
@@ -2352,7 +2390,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     nda::array<double, 1> k_weight(mf->k_weight());
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
     opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
-                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/!hessian_stationary);
+                     mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/!hessian_stationary,
+                     /*has_source=*/has_dynamic_source);
   }
 
   for (long m = 0; m < nmodes; ++m) {
@@ -2368,6 +2407,11 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
       if (mpi->comm.root())
         sDeltaH0_skij.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
       sDeltaH0_skij.broadcast_to_nodes(0);
+      if (has_dynamic_source) {
+        if (mpi->comm.root())
+          opt_sDeltaH_wskij->local() = (*DeltaH_mwskij_root)(m, nda::ellipsis{});
+        opt_sDeltaH_wskij->broadcast_to_nodes(0);
+      }
       mpi->comm.barrier();
     }
 
@@ -2377,7 +2421,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
-        output_aux_fock ? &DeltaF_PQ_skij : nullptr);
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr,
+        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
     niter_m(m) = niter;
     Delta_mu_m(m) = Delta_mu;
     mpi->comm.barrier();
@@ -2441,7 +2486,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     // happens after this loop.
     if (opt_hessian) {
       opt_hessian->store_mode(m, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
-                              pDeltaSigma, include_gw_sigma ? &sDeltaG_tskij : nullptr);
+                              pDeltaSigma,
+                              (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
+                              has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
       mpi->comm.barrier();
     }
 
@@ -2486,8 +2533,9 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   if (opt_hessian) {
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        include_gw_sigma ? &sDeltaG_tskij : nullptr,
-        DeltaH0_mskij_root, fix_density);
+        (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
+        DeltaH0_mskij_root, fix_density,
+        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
     opt_hessian->print_timers();
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
@@ -2563,7 +2611,8 @@ template std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr_calc(
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 4>> const&,
     std::optional<nda::array<ComplexType, 3>> const&,
-    const lr_local_inputs*);
+    const lr_local_inputs*,
+    std::optional<nda::array<ComplexType, 6>> const&);
 
 
 

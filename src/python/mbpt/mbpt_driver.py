@@ -412,7 +412,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            precond_tol=None, precond_max_iter=None,
            hessian="none",
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None,
-           reuse_W=False, exclude_hartree_head=False):
+           reuse_W=False, exclude_hartree_head=False, DeltaH_mwskij=None):
     """
     Run unified linear response calculation.
 
@@ -652,6 +652,14 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         solve yields the macroscopically unscreened χ̄; exchange, W and GW keep the full v.
         The removed term is that of the THC's q image, from its stored basis head; a
         no-op at q = Γ. Requires the Hartree rung. Assumes a bare-Coulomb THC.
+    DeltaH_mwskij : ndarray or None, optional
+        Dynamic one-body source ΔH(iω), (nmodes, nw_f, ns, nk, nb, nb), or (nw_f, ns, nk, nb, nb) for a
+        single perturbation (then DeltaH0_skij must be rank 4), on the fermionic Matsubara grid of the
+        checkpoint. Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the right-hand side of the
+        Dyson equation of mode m at every iteration, and to the hessian's left operand
+        (Tr_ω(ΔH_λ, ΔG_p) beside Tr(ΔH0_λ, ΔDm_p)). A source constant in iω equal to A gives the
+        same result as ΔH0 = A. Rejected together with DeltaX_left/DeltaX_right/DeltaV_qPQ,
+        qp_static_sigma and projector_info.
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
@@ -728,6 +736,19 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     else:
         DeltaH0_skij = None
     squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
+
+    # The source carries the mode axis like ΔH0: promote a single perturbation's (nw, ns, nk, nb, nb)
+    if MPI.COMM_WORLD.Get_rank() == 0 and DeltaH_mwskij is not None:
+        DeltaH_mwskij = np.asarray(DeltaH_mwskij, dtype=np.complex128)
+        if DeltaH_mwskij.ndim != (5 if squeeze else 6):
+            raise ValueError(
+                "run_lr: DeltaH_mwskij must have rank 5 (nw_f, ns, nk, nb, nb) for a rank-4 "
+                "DeltaH0_skij, or rank 6 (nmodes, nw_f, ns, nk, nb, nb) for a rank-5 one; got shape "
+                f"{DeltaH_mwskij.shape}.")
+        if squeeze:
+            DeltaH_mwskij = DeltaH_mwskij[None]
+    else:
+        DeltaH_mwskij = None
 
     if recompute_W and screened_interaction_file is not None:
         raise ValueError(
@@ -823,7 +844,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
-        *proj_args)
+        *proj_args, DeltaH_mwskij)
     if squeeze:
         return int(niter[0]), float(delta_mu[0])
     return niter, delta_mu

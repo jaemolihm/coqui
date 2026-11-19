@@ -262,6 +262,10 @@ struct lr_local_inputs {
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
  * @param DeltaH0_mskij_root - [INPUT] Perturbations (nmodes, ns, nk, nb, nb) on the
  *                            MPI global root; std::nullopt on every other rank.
+ * @param DeltaH_mwskij_root - [INPUT] Optional dynamic one-body source ΔH(iω) (nmodes, nw_f, ns, nk, nb, nb) on
+ *                            the fermionic Matsubara grid of the checkpoint, on the MPI global root; nullopt elsewhere
+ *                            and when there is no source. Added to X = ΔH0 + ΔF + ΔΣ(iω) at every outer Dyson pass
+ *                            of mode m; rejected together with DeltaX/DeltaV, qp_static_sigma and `local`.
  * @param local            - [INPUT] Optional projector (nullptr: none); full BZ, single impurity.
  *                            Writes DeltaGloc_tsIab (nt, ns, 1, n, n) and, with gw_mode "full",
  *                            DeltaWloc_tabcd (nt_half, n, n, n, n) per mode to "linear_response/".
@@ -280,7 +284,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root = std::nullopt,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root = std::nullopt,
-                                     const lr_local_inputs* local = nullptr);
+                                     const lr_local_inputs* local = nullptr,
+                                     std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root = std::nullopt);
 
 /// Drop the W_c(iw) and eps^-1 head kept by run_lr_calc(reuse_W = true). No-op if none is kept.
 void release_lr_W_cache();
