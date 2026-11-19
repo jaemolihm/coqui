@@ -245,19 +245,41 @@ namespace imag_axes_ft {
         }
       }
 
-      // Rows B(n, :) = beta * cf2if(n, :) * cf2it^{-1} of the tau -> iw matrix at the cppdlr frequency indices n_dlr,
-      // solved one row at a time (solve_cf2it_row) and reflection-projected (project_tau_reflection(., 1)), so that
-      // a row depends only on its own n and B(-n, :) = conj B(n, :) bitwise.
+      // Rows B(n, :) = beta * cf2if(n, :) * cf2it^{-1} of the tau -> iw matrix at the cppdlr frequency indices n_dlr:
+      // Twt (n_dlr = the DLR mesh, init()) and B_out of construct_w_interpolate_matrix (n_dlr = the output points).
+      // The exact matrix satisfies two relations, which this builder enforces bitwise on any list of output points:
+      //   (a) B(-n, :) = conj B(n, :)   (cf2if(-n, :) = conj cf2if(n, :), cf2it real), so a real X(tau) goes to
+      //       X(-iwn) = conj X(iwn);
+      //   (b) B(n, nt - 1 - t) = s conj B(n, t)   (project_tau_reflection).
+      // The cf2it solve (cond ~1e13) leaves rounding of 3e-4 relative (#108), which (a) keeps only if the BLAS rounds
+      // row(n) and row(-n) as conjugates. A multi-row solve (cppdlr::build_it2if) does not under MKL_CBWR=COMPATIBLE
+      // (9e-7, issue #129); the single-row solve here does on every MKL path tested, so the averaging below is a
+      // bitwise no-op there and makes (a) independent of the BLAS. Each row is solved for n and for its mirror -n
+      // (one row at a time, solve_cf2it_row, so a row depends only on its own n), and averaged:
+      //   B(n, :) = (row(n) + conj row(-n)) / 2,   Re row(0) for the bosonic wn = 0.
+      // Both averages are orthogonal projections onto matrices that satisfy the relation, and they commute.
       nda::matrix<ComplexType> build_tau_to_w_rows(cppdlr::imfreq_ops const &if_ops, std::vector<int> const &n_dlr,
                                                    imag_axes_ft::stats_e stats) const {
         auto r = _it_ops.rank();
         auto eye_r = nda::eye<ComplexType>(r);
         auto zlu = nda::matrix<ComplexType>(_it_ops.get_it2cf_zlu());
         auto piv = nda::array<int, 1>(_it_ops.get_it2cf_piv());
+        auto row = [&](int n) {
+          auto cf2if = nda::vector<ComplexType>(if_ops.coefs2eval(eye_r, n));
+          return nda::vector<ComplexType>(beta * solve_cf2it_row(zlu, piv, cf2if));
+        };
         auto B = nda::matrix<ComplexType>(n_dlr.size(), r);
         for (long i = 0; i < long(n_dlr.size()); ++i) {
-          auto cf2if = nda::vector<ComplexType>(if_ops.coefs2eval(eye_r, n_dlr[i]));
-          B(i, nda::range::all) = beta * solve_cf2it_row(zlu, piv, cf2if);
+          // cppdlr index of -wn: fermion wn = (2n + 1) pi / beta -> -n - 1; boson wn = 2 n pi / beta -> -n
+          int n = n_dlr[i];
+          int n_mirror = (stats == imag_axes_ft::fermion) ? -n - 1 : -n;
+          auto row_n = row(n);
+          if (n_mirror == n) { // bosonic wn = 0: real row
+            for (long t = 0; t < r; ++t) B(i, t) = std::real(row_n(t));
+          } else {             // pair with the conjugate of the mirror row
+            auto row_m = row(n_mirror);
+            for (long t = 0; t < r; ++t) B(i, t) = 0.5 * (row_n(t) + std::conj(row_m(t)));
+          }
         }
         project_tau_reflection(B, 1, stats);
         return B;
@@ -267,11 +289,12 @@ namespace imag_axes_ft {
       // Ttw(nt - 1 - t, :) = s conj Ttw(t, :) (project_tau_reflection(., 0)).
       // With weight(n) = W_nn given, T = (W B)^+ W instead: y = T x solves min_y sum_n weight(n)^2 |(B y)_n - x_n|^2
       // (T B = 1 for any weight). Called with an empty weight (unit weights) for Ttw_ff and Ttw_bb, and with
-      // weight = |omega_n| for Ttw_ff_w_weighted. A weight even in wn keeps both relations of the exact T.
+      // weight = |omega_n| for Ttw_ff_w_weighted. The exact T keeps the reflection for any real diagonal W, and the
+      // pairing for W even in wn.
       // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
       // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
-      // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, so Twt(-wn, :) = conj(Twt(wn, :))
-      // holds bitwise and pinv(Twt) = cf2it * cf2if^+ / beta is the same operator in exact arithmetic.
+      // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, and pinv(Twt) = cf2it * cf2if^+ / beta is the
+      // same operator in exact arithmetic. Twt arrives with both relations exact (build_tau_to_w_rows).
       // The reflection of the projected Twt carries over to its pinv up to rounding of the SVD solve,
       // which the projection makes exact.
       static nda::matrix<ComplexType> paired_left_inverse(nda::matrix<ComplexType> const &B,
@@ -335,7 +358,6 @@ namespace imag_axes_ft {
           }
         }
 
-        // The projection acts per column and conj distributes over its average, so the pairing is kept.
         // A reflection defect above 1e-8 means a wrong Twt or mesh, not rounding.
         double refl_err = 0.0;
         double sgn = (stats == imag_axes_ft::fermion) ? -1.0 : 1.0;
@@ -345,6 +367,7 @@ namespace imag_axes_ft {
         utils::check(refl_err <= 1e-8 * T_max,
                      "imag_axes_ft::dlr::DLR: pinv(Twt) violates T(nt-1-t, :) = s conj(T(t, :)) by {} (relative), > 1e-8.",
                      refl_err / T_max);
+        // The projection acts per column and conj distributes over its average, so the pairing is kept.
         project_tau_reflection(T, 0, stats);
         return T;
       }
@@ -471,9 +494,11 @@ namespace imag_axes_ft {
 
         // The reflections enforced below need mirror-symmetric meshes: wn(i) = -wn(nw-1-i), tau(i) = -tau(nt-1-i)
         for (int i = 0; i < nw_f; ++i)
-          utils::check(wn_mesh_f(i) == -wn_mesh_f(nw_f - 1 - i), "imag_axes_ft::dlr::DLR: fermionic wn mesh is not mirror symmetric.");
+          utils::check(wn_mesh_f(i) == -wn_mesh_f(nw_f - 1 - i),
+                       "imag_axes_ft::dlr::DLR: fermionic wn mesh is not mirror symmetric.");
         for (int i = 0; i < nw_b; ++i)
-          utils::check(wn_mesh_b(i) == -wn_mesh_b(nw_b - 1 - i), "imag_axes_ft::dlr::DLR: bosonic wn mesh is not mirror symmetric.");
+          utils::check(wn_mesh_b(i) == -wn_mesh_b(nw_b - 1 - i),
+                       "imag_axes_ft::dlr::DLR: bosonic wn mesh is not mirror symmetric.");
         for (int i = 0; i < nt_f; ++i)
           utils::check(std::abs(tau_mesh_f(i) + tau_mesh_f(nt_f - 1 - i)) <= 1e-12,
                        "imag_axes_ft::dlr::DLR: tau mesh is not mirror symmetric.");
