@@ -2534,7 +2534,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-        DeltaH0_mskij_root, fix_density,
+        DeltaH0_mskij_root, DeltaH_mwskij_root, fix_density,
         has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
     opt_hessian->print_timers();
 

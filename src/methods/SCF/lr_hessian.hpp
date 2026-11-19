@@ -309,8 +309,10 @@ public:
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
    * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
    *                                     the global root only
+   * @param DeltaH_mwskij_root - [INPUT] (nmodes,nw,ns,nk,nb,nb) source ΔH(iω) stack, engaged on the
+   *                                     global root only; unengaged without a source
    * @param fix_density- [INPUT] the flag the original solves used
-   * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the store and handed
+   * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
    *                     to the extra solve; null without a source
    */
   lr_hessian_result_t evaluate(
@@ -321,6 +323,7 @@ public:
       sArray_t<Array_view_5D_t>* sDeltaSigma,
       sArray_t<Array_view_5D_t>* sDeltaG,
       std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
+      std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
       bool fix_density,
       sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr);
 
@@ -330,8 +333,8 @@ public:
 
 private:
   /**
-   * @brief Put the stored raw ΔF_p / ΔΣ_p (and the source ΔH_p(iω)) back into shm, so the extra
-   *        Dyson solve can be handed ΔV = ΔH0 + ΔF + ΔΣ + ΔH(iω).
+   * @brief Put the stored raw ΔF_p / ΔΣ_p back into shm, so the extra Dyson solve can be handed
+   *        ΔV = ΔH0 + ΔF + ΔΣ.
    *
    * ΔΣ(τ) is rebuilt by a rank-local `w_to_tau` of this rank's ω slab followed by
    * one completion collective per τ point; the τ axis is never split, which is why
@@ -348,8 +351,7 @@ private:
    */
   void rebuild_raw_kernel(long p,
                           sArray_t<Array_view_4D_t>& sDeltaF_out,
-                          sArray_t<Array_view_5D_t>* sDeltaSigma_out,
-                          sArray_t<Array_view_5D_t>* sDeltaH_out);
+                          sArray_t<Array_view_5D_t>* sDeltaSigma_out);
 
   /// Σ_e w_e conj(a_e) b_e over this rank's elements, `b` already weighted.
   ComplexType trace_static_local(nda::array<ComplexType, 1> const& a,

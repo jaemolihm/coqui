@@ -738,17 +738,22 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
 
     # The source carries the mode axis like ΔH0: promote a single perturbation's (nw, ns, nk, nb, nb)
+    # The rank check is made on the root and its verdict broadcast, so every rank raises together
+    source_error = None
     if MPI.COMM_WORLD.Get_rank() == 0 and DeltaH_mwskij is not None:
         DeltaH_mwskij = np.asarray(DeltaH_mwskij, dtype=np.complex128)
         if DeltaH_mwskij.ndim != (5 if squeeze else 6):
-            raise ValueError(
+            source_error = (
                 "run_lr: DeltaH_mwskij must have rank 5 (nw_f, ns, nk, nb, nb) for a rank-4 "
                 "DeltaH0_skij, or rank 6 (nmodes, nw_f, ns, nk, nb, nb) for a rank-5 one; got shape "
                 f"{DeltaH_mwskij.shape}.")
-        if squeeze:
+        elif squeeze:
             DeltaH_mwskij = DeltaH_mwskij[None]
     else:
         DeltaH_mwskij = None
+    source_error = MPI.COMM_WORLD.bcast(source_error, root=0)
+    if source_error is not None:
+        raise ValueError(source_error)
 
     if recompute_W and screened_interaction_file is not None:
         raise ValueError(

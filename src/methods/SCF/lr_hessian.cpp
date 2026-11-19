@@ -229,8 +229,7 @@ void lr_hessian_t::store_mode(long p,
 void lr_hessian_t::rebuild_raw_kernel(
     long p,
     sArray_t<Array_view_4D_t>& sDeltaF_out,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_out,
-    sArray_t<Array_view_5D_t>* sDeltaH_out) {
+    sArray_t<Array_view_5D_t>* sDeltaSigma_out) {
   _Timer.start("LR_HESS_REBUILD");
   // Every rank writes its own disjoint element slice of the node-replicated
   // window, then one allgatherv among the node roots completes every replica —
@@ -271,26 +270,6 @@ void lr_hessian_t::rebuild_raw_kernel(
     sDeltaSigma_out->win().fence();
   }
 
-  if (_has_source) {
-    // ΔH(iω) is stored as it was given, so the rebuild is the pack undone: every rank writes its
-    // element slice of each ω slab, then one completion per ω point, as for ΔΣ(τ).
-    utils::check(sDeltaH_out != nullptr, "lr_hessian_t::rebuild_raw_kernel: a hessian built with a source needs the ΔH(iω) window.");
-    auto loc = sDeltaH_out->local();
-    utils::check(loc.size() == _nw * _nF,
-                 "lr_hessian_t::rebuild_raw_kernel: ΔH(iω) destination has {} "
-                 "elements, expected {}.", loc.size(), _nw * _nF);
-    auto flat = nda::reshape(loc, std::array<long, 1>{_nw * _nF});
-    if (_nloc > 0)
-      for (long n = 0; n < _nw; ++n)
-        flat(nda::range(n * _nF + _i0, n * _nF + _i1)) = _Hw[p](n, nda::range::all);
-    sDeltaH_out->win().fence();
-    _mpi->node_comm.barrier();
-    if (_mpi->node_comm.root())
-      for (long n = 0; n < _nw; ++n)
-        utils::complete_node_slices(_mpi->internode_comm, _pmap,
-                                    loc.data() + n * _nF, _nF);
-    sDeltaH_out->win().fence();
-  }
   _mpi->comm.barrier();
   _Timer.stop("LR_HESS_REBUILD");
 }
@@ -338,6 +317,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     sArray_t<Array_view_5D_t>* sDeltaSigma,
     sArray_t<Array_view_5D_t>* sDeltaG,
     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
+    std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
     bool fix_density,
     sArray_t<Array_view_5D_t>* sDeltaH_w) {
 
@@ -405,7 +385,18 @@ lr_hessian_result_t lr_hessian_t::evaluate(
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
-    rebuild_raw_kernel(p, sDeltaF, sDeltaSigma, sDeltaH_w);
+    rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
+
+    // Mode p's ΔH(iω) into shm, as for ΔH0: the root writes its slice, broadcast_to_nodes publishes it.
+    if (_has_source) {
+      utils::check(sDeltaH_w != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) window.");
+      if (_mpi->comm.root()) {
+        utils::check(DeltaH_mwskij_root.has_value(),
+                     "lr_hessian_t::evaluate: the ΔH(iω) stack must be provided on the MPI global root.");
+        sDeltaH_w->local() = (*DeltaH_mwskij_root)(p, nda::ellipsis{});
+      }
+      sDeltaH_w->broadcast_to_nodes(0);
+    }
 
     // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
     // costs. ΔG(τ) is replicated only when the Matsubara term needs it — that
