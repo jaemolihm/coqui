@@ -592,13 +592,13 @@ namespace bdft_tests {
   }
 
 
-  // The DLR tau <-> iw transforms satisfy the exact reflection tau -> beta - tau of the exact matrices
-  // (s = +1 boson, -1 fermion): Twt(n, nt-1-t) = s conj Twt(n, t), Ttw(nt-1-t, n) = s conj Ttw(t, n), compared with ==;
-  // the PHsym round trips on random data vs the identity (round-off, rtol 1e-12);
-  // single-row interpolation rows vs the same rows of a larger request (== where they are one computation).
+  // Bitwise (==) symmetries of the DLR transforms, s = +1 boson, -1 fermion: Twt(n, nt-1-t) vs s conj Twt(n, t) and
+  // Ttw(nt-1-t, n) vs s conj Ttw(t, n) (tau -> beta - tau), Twt(-wn, :) vs conj Twt(wn, :), tau-interpolation rows
+  // T(-x, t) vs T(x, nt-1-t), T(beta) vs T_beta_t_ff, T_beta vs reversed T_zero; single-frequency
+  // construct_w_interpolate_matrix vs the same row on the native mesh (1e-14 relative: the product with Ttw rounds by
+  // matrix size); PHsym round trips on random real data vs the identity (rtol 1e-12).
   TEST_CASE("dlr_tau_reflection", "[iaft][dlr]") {
-    struct Grid { double beta, wmax; };
-    for (auto [beta, wmax] : {Grid{200.0, 3.0}, Grid{100.0, 1.2}, Grid{1000.0, 12.0}}) {
+    for (auto [beta, wmax] : {std::pair{200.0, 3.0}, std::pair{100.0, 1.2}, std::pair{1000.0, 12.0}}) {
       imag_axes_ft::dlr::DLR dlr(beta, wmax, "high", false);
       long nt = dlr.nt_f;
 
@@ -609,16 +609,14 @@ namespace bdft_tests {
         auto const &Ttw = ferm ? dlr.Ttw_ff : dlr.Ttw_bb;
         long nw = Twt.extent(0);
 
-        // Twt(n, nt-1-t) vs s conj Twt(n, t); Twt(nw-1-n, nt-1-t) vs s Twt(n, t); Ttw(nt-1-t, n) vs s conj Ttw(t, n)
-        bool refl_Twt = true, refl_both = true, refl_Ttw = true;
+        // Twt(n, nt-1-t) vs s conj Twt(n, t); Ttw(nt-1-t, n) vs s conj Ttw(t, n)
+        bool refl_Twt = true, refl_Ttw = true;
         for (long n = 0; n < nw; ++n)
           for (long t = 0; t < nt; ++t) {
             refl_Twt = refl_Twt and (Twt(n, nt - 1 - t) == s * std::conj(Twt(n, t)));
-            refl_both = refl_both and (Twt(nw - 1 - n, nt - 1 - t) == s * Twt(n, t));
             refl_Ttw = refl_Ttw and (Ttw(nt - 1 - t, n) == s * std::conj(Ttw(t, n)));
           }
         REQUIRE(refl_Twt);
-        REQUIRE(refl_both);
         REQUIRE(refl_Ttw);
 
         // Twt(-wn, :) vs conj Twt(wn, :) (mesh mirror nw-1-n), compared with ==; the MKL_CBWR=COMPATIBLE path runs in
@@ -627,13 +625,6 @@ namespace bdft_tests {
         for (long n = 0; n < nw; ++n)
           for (long t = 0; t < nt; ++t) pair_Twt = pair_Twt and (Twt(nw - 1 - n, t) == std::conj(Twt(n, t)));
         REQUIRE(pair_Twt);
-
-        // middle node t = nt-1-t: Twt real for bosons, imaginary for fermions
-        long mid = nt / 2;
-        REQUIRE(nt % 2 == 1);
-        bool mid_ok = true;
-        for (long n = 0; n < nw; ++n) mid_ok = mid_ok and ((ferm ? Twt(n, mid).real() : Twt(n, mid).imag()) == 0.0);
-        REQUIRE(mid_ok);
 
         // construct_w_interpolate_matrix on a single native frequency vs the same row of the full native mesh
         // (rows depend only on their own frequency; the product with Ttw agrees to rounding)
@@ -672,6 +663,7 @@ namespace bdft_tests {
       // PHsym round trips, tau -> iw -> tau and iw -> tau -> iw, vs the identity on random real data
       {
         imag_axes_ft::IAFT iaft(beta, wmax, imag_axes_ft::dlr_basis, "high");
+        REQUIRE(nt % 2 == 1);
         long nth = nt / 2 + 1, nwh = dlr.nw_b / 2 + 1;
         std::mt19937 gen(5);
         std::normal_distribution<double> dist(0.0, 1.0);
@@ -682,13 +674,8 @@ namespace bdft_tests {
         iaft.w_to_tau_PHsym(Xw, Xt2);
         iaft.w_to_tau_PHsym(Yw, Yt);
         iaft.tau_to_w_PHsym(Yt, Xw2);
-        auto fnorm = [](auto const &A) {
-          double sum = 0.0;
-          for (auto const &a : A) sum += std::norm(a);
-          return std::sqrt(sum);
-        };
-        double err_t = fnorm(nda::array<ComplexType, 2>(Xt2 - Xt)) / fnorm(Xt);
-        double err_w = fnorm(nda::array<ComplexType, 2>(Xw2 - Yw)) / fnorm(Yw);
+        double err_t = nda::frobenius_norm(nda::array<ComplexType, 2>(Xt2 - Xt)) / nda::frobenius_norm(Xt);
+        double err_w = nda::frobenius_norm(nda::array<ComplexType, 2>(Xw2 - Yw)) / nda::frobenius_norm(Yw);
         app_log(2, "dlr beta={} wmax={}: PHsym round trip tau {}, iw {}", beta, wmax, err_t, err_w);
         REQUIRE(err_t < 1e-12);
         REQUIRE(err_w < 1e-12);

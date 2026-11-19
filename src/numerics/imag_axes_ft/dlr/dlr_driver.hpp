@@ -118,20 +118,19 @@ namespace imag_axes_ft {
       auto nt_out = tau_mesh_out.size();
       auto nt_in = _it_ops.rank();
       auto eye_nt_in = nda::eye<ComplexType>(nt_in);
-      auto zlu = nda::matrix<ComplexType>(_it_ops.get_it2cf_zlu());
-      auto piv = nda::array<int, 1>(_it_ops.get_it2cf_piv());
 
       auto solve_tau_row = [&](double x) {
         auto cf2eval = _it_ops.coefs2eval(eye_nt_in, cppdlr::abs2rel((x + 1.0) * 0.5)); // [-1, 1] -> [0, 1]
-        return solve_cf2it_row(zlu, piv, nda::vector<ComplexType>(cf2eval));
+        return solve_cf2it_row(nda::vector<ComplexType>(cf2eval));
       };
 
       auto T_full = nda::array<ComplexType, 2>(nt_out, nt_in);
       for (int it_out = 0; it_out < nt_out; ++it_out) {
         double x = tau_mesh_out(it_out);
-        auto r_x = solve_tau_row(x);
-        auto r_mx = solve_tau_row(-x);
-        for (int it = 0; it < nt_in; ++it) T_full(it_out, it) = 0.5 * (r_x(it) + r_mx(nt_in - 1 - it));
+        auto row_x = solve_tau_row(x);
+        auto row_mirror = solve_tau_row(-x);
+        for (int it_in = 0; it_in < nt_in; ++it_in)
+          T_full(it_out, it_in) = 0.5 * (row_x(it_in) + row_mirror(nt_in - 1 - it_in));
       }
 
       if (not ph_sym) return T_full;
@@ -162,22 +161,7 @@ namespace imag_axes_ft {
       // composed with the paired w_to_tau. B_out is built by build_tau_to_w_rows, as Twt, so that
       // B_out(wn_mesh) = Twt.
       auto const &Ttw = (stats == imag_axes_ft::fermion) ? Ttw_ff : Ttw_bb;
-      std::vector<int> n_dlr(nw_out);
-      for (int iw_out = 0; iw_out < nw_out; ++iw_out) {
-        long n_ir = wn_mesh_out(iw_out);
-        if (stats == imag_axes_ft::fermion) {
-          utils::check((n_ir % 2) != 0,
-                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                       "fermionic wn_mesh_out must be odd in IR notation, got {}.", n_ir);
-        } else {
-          utils::check((n_ir % 2) == 0,
-                       "dlr_driver.hpp::DLR::construct_w_interpolate_matrix: "
-                       "bosonic wn_mesh_out must be even in IR notation, got {}.", n_ir);
-        }
-        // IR notation -> cppdlr notation: fermion n_ir = 2*n_dlr + 1; boson n_ir = 2*n_dlr
-        n_dlr[iw_out] = static_cast<int>((stats == imag_axes_ft::fermion) ? (n_ir - 1) / 2 : n_ir / 2);
-      }
-      auto B_out = build_tau_to_w_rows(if_ops, n_dlr, stats);
+      auto B_out = build_tau_to_w_rows(if_ops, wn_mesh_out, stats);
       auto rhs = nda::matrix<ComplexType>(B_out * Ttw);
 
       if (not ph_sym) 
@@ -215,70 +199,69 @@ namespace imag_axes_ft {
     private:
       // x^T cf2it^{-1} for one row x (cf2it^T y = x, nrhs = 1). getrs rounds differently for different nrhs, so a
       // row solved together with other rows depends on them; a single-row solve depends only on x.
-      static nda::vector<ComplexType> solve_cf2it_row(nda::matrix<ComplexType> const &zlu, nda::array<int, 1> const &piv,
-                                                      nda::vector<ComplexType> const &x) {
+      nda::vector<ComplexType> solve_cf2it_row(nda::vector<ComplexType> const &x) const {
         auto y = nda::matrix<ComplexType, nda::F_layout>(x.size(), 1);
         y(nda::range::all, 0) = x;
-        auto info = nda::lapack::getrs(nda::transpose(zlu), y, piv);
+        auto info = nda::lapack::getrs(nda::transpose(_it_ops.get_it2cf_zlu()), y, _it_ops.get_it2cf_piv());
         utils::check(info == 0, "dlr_driver.hpp::DLR: Linear solve failed for cf2it^T y = x (getrs info = {}).", info);
         return nda::vector<ComplexType>(y(nda::range::all, 0));
       }
 
-      // Enforce, per row (tau_axis = 1: M(n, t)) or per column (tau_axis = 0: M(t, n)),
-      //   M(t) = s conj M(nt - 1 - t),   s = +1 boson, -1 fermion,
-      // by M(t) <- (M(t) + s conj M(nt - 1 - t)) / 2 and M(nt-1-t) <- s conj M(t) (bitwise s conj of the same sum).
-      // The exact tau -> iw matrix has it: cppdlr SYM gives poles omega_j = -omega_{r-1-j} and nodes
-      // tau_{nt-1-t} = beta - tau_t, with kernels K(beta - tau, omega) = K(tau, -omega); the LU solve with cf2it
-      // (cond ~1e13) does not keep it (~3e-4 relative). An entry with t = nt - 1 - t becomes Re (boson) or i Im (fermion).
-      static void project_tau_reflection(nda::matrix<ComplexType> &M, int tau_axis, imag_axes_ft::stats_e stats) {
+      // Projects M onto M(t) = s conj M(nt - 1 - t), s = +1 boson, -1 fermion, per row (tau_axis = 1: M(n, t)) or
+      // per column (tau_axis = 0: M(t, n)): M(t) <- (M(t) + s conj M(nt-1-t)) / 2, M(nt-1-t) <- s conj M(t); a middle
+      // entry t = nt-1-t becomes Re (boson) or i Im (fermion). Returns max |M(t) - s conj M(nt-1-t)| before projecting.
+      // The exact tau <-> iw matrices satisfy it: cppdlr SYM nodes tau_{nt-1-t} = beta - tau_t, poles
+      // omega_j = -omega_{r-1-j}, K(beta - tau, omega) = K(tau, -omega); the cf2it solve (cond ~1e13) breaks it
+      // in Twt at ~3e-4 relative, the gelss solve in Ttw to rounding.
+      static double project_tau_reflection(nda::matrix<ComplexType> &M, int tau_axis, imag_axes_ft::stats_e stats) {
         double s = (stats == imag_axes_ft::fermion) ? -1.0 : 1.0;
         long nt = M.extent(tau_axis);
-        long nother = M.extent(1 - tau_axis);
+        long n_other = M.extent(1 - tau_axis);
         auto at = [&](long t, long k) -> ComplexType & { return tau_axis == 1 ? M(k, t) : M(t, k); };
-        for (long k = 0; k < nother; ++k) {
+        double defect = 0.0;
+        for (long k = 0; k < n_other; ++k) {
           for (long t = 0; t <= (nt - 1) / 2; ++t) {
             long mt = nt - 1 - t;
+            defect = std::max(defect, std::abs(at(t, k) - s * std::conj(at(mt, k))));
             ComplexType a = 0.5 * (at(t, k) + s * std::conj(at(mt, k)));
             at(t, k) = a;
             at(mt, k) = s * std::conj(a);
           }
         }
+        return defect;
       }
 
-      // Rows B(n, :) = beta * cf2if(n, :) * cf2it^{-1} of the tau -> iw matrix at the cppdlr frequency indices n_dlr:
-      // Twt (n_dlr = the DLR mesh, init()) and B_out of construct_w_interpolate_matrix (n_dlr = the output points).
-      // The exact matrix satisfies two relations, which this builder enforces bitwise on any list of output points:
-      //   (a) B(-n, :) = conj B(n, :)   (cf2if(-n, :) = conj cf2if(n, :), cf2it real), so a real X(tau) goes to
-      //       X(-iwn) = conj X(iwn);
-      //   (b) B(n, nt - 1 - t) = s conj B(n, t)   (project_tau_reflection).
-      // The cf2it solve (cond ~1e13) leaves rounding of 3e-4 relative (#108), which (a) keeps only if the BLAS rounds
-      // row(n) and row(-n) as conjugates. A multi-row solve (cppdlr::build_it2if) does not under MKL_CBWR=COMPATIBLE
-      // (9e-7, issue #129); the single-row solve here does on every MKL path tested, so the averaging below is a
-      // bitwise no-op there and makes (a) independent of the BLAS. Each row is solved for n and for its mirror -n
-      // (one row at a time, solve_cf2it_row, so a row depends only on its own n), and averaged:
-      //   B(n, :) = (row(n) + conj row(-n)) / 2,   Re row(0) for the bosonic wn = 0.
-      // Both averages are orthogonal projections onto matrices that satisfy the relation, and they commute.
-      nda::matrix<ComplexType> build_tau_to_w_rows(cppdlr::imfreq_ops const &if_ops, std::vector<int> const &n_dlr,
+      // B(i, :) = beta * cf2if(wn_i, :) * cf2it^{-1}, the tau -> iw matrix at wn_mesh (IR notation): Twt (init()) and
+      // B_out of construct_w_interpolate_matrix. Each row is solved alone (solve_cf2it_row) at wn and at -wn, and
+      // projected onto the two relations of the exact matrix:
+      //   (a) B(-wn, :) = conj B(wn, :) (cf2if(-wn) = conj cf2if(wn), cf2it real):
+      //       B(wn, :) = (row(wn) + conj row(-wn)) / 2, Re row(0) for the bosonic wn = 0;
+      //   (b) B(wn, nt - 1 - t) = s conj B(wn, t): project_tau_reflection.
+      // Single-row solves already give (a) bitwise on every MKL path tested; the average makes it hold on any BLAS.
+      // The two projections commute.
+      nda::matrix<ComplexType> build_tau_to_w_rows(cppdlr::imfreq_ops const &if_ops,
+                                                   nda::MemoryArrayOfRank<1> auto const &wn_mesh,
                                                    imag_axes_ft::stats_e stats) const {
-        auto r = _it_ops.rank();
-        auto eye_r = nda::eye<ComplexType>(r);
-        auto zlu = nda::matrix<ComplexType>(_it_ops.get_it2cf_zlu());
-        auto piv = nda::array<int, 1>(_it_ops.get_it2cf_piv());
-        auto row = [&](int n) {
-          auto cf2if = nda::vector<ComplexType>(if_ops.coefs2eval(eye_r, n));
-          return nda::vector<ComplexType>(beta * solve_cf2it_row(zlu, piv, cf2if));
+        long nt = _it_ops.rank();
+        auto eye_nt = nda::eye<ComplexType>(nt);
+        auto solve_w_row = [&](long wn) {
+          // IR notation -> cppdlr index: fermion wn = 2n + 1, boson wn = 2n
+          utils::check((wn % 2 != 0) == (stats == imag_axes_ft::fermion),
+                       "dlr_driver.hpp::DLR: wn = {} has the wrong parity for {} (IR notation: fermion odd, boson even).",
+                       wn, stats == imag_axes_ft::fermion ? "fermion" : "boson");
+          int n = static_cast<int>((stats == imag_axes_ft::fermion) ? (wn - 1) / 2 : wn / 2);
+          auto cf2if = nda::vector<ComplexType>(if_ops.coefs2eval(eye_nt, n));
+          return nda::vector<ComplexType>(beta * solve_cf2it_row(cf2if));
         };
-        auto B = nda::matrix<ComplexType>(n_dlr.size(), r);
-        for (long i = 0; i < long(n_dlr.size()); ++i) {
-          // cppdlr index of -wn: fermion wn = (2n + 1) pi / beta -> -n - 1; boson wn = 2 n pi / beta -> -n
-          int n = n_dlr[i];
-          int n_mirror = (stats == imag_axes_ft::fermion) ? -n - 1 : -n;
-          auto row_n = row(n);
-          if (n_mirror == n) { // bosonic wn = 0: real row
-            for (long t = 0; t < r; ++t) B(i, t) = std::real(row_n(t));
-          } else {             // pair with the conjugate of the mirror row
-            auto row_m = row(n_mirror);
-            for (long t = 0; t < r; ++t) B(i, t) = 0.5 * (row_n(t) + std::conj(row_m(t)));
+        auto B = nda::matrix<ComplexType>(wn_mesh.size(), nt);
+        for (long i = 0; i < long(wn_mesh.size()); ++i) {
+          long wn = wn_mesh(i);
+          auto row_wn = solve_w_row(wn);
+          if (wn == 0) { // bosonic wn = 0: real row
+            for (long t = 0; t < nt; ++t) B(i, t) = std::real(row_wn(t));
+          } else {       // pair with the conjugate of the row at -wn
+            auto row_mirror = solve_w_row(-wn);
+            for (long t = 0; t < nt; ++t) B(i, t) = 0.5 * (row_wn(t) + std::conj(row_mirror(t)));
           }
         }
         project_tau_reflection(B, 1, stats);
@@ -294,9 +277,7 @@ namespace imag_axes_ft {
       // cppdlr::build_if2it is not used: it inverts the complex cf2if (cond ~1e14), whose rounding
       // breaks the wn <-> -wn conjugation pairing and leaves Ttw an inaccurate inverse of Twt.
       // Twt = beta * cf2if * cf2it^{-1} inverts only the real cf2it, and pinv(Twt) = cf2it * cf2if^+ / beta is the
-      // same operator in exact arithmetic. Twt arrives with both relations exact (build_tau_to_w_rows).
-      // The reflection of the projected Twt carries over to its pinv up to rounding of the SVD solve,
-      // which the projection makes exact.
+      // same operator in exact arithmetic.
       static nda::matrix<ComplexType> paired_left_inverse(nda::matrix<ComplexType> const &B,
                                                           nda::array<long, 1> const &wn_mesh,
                                                           imag_axes_ft::stats_e stats,
@@ -358,17 +339,12 @@ namespace imag_axes_ft {
           }
         }
 
-        // A reflection defect above 1e-8 means a wrong Twt or mesh, not rounding.
-        double refl_err = 0.0;
-        double sgn = (stats == imag_axes_ft::fermion) ? -1.0 : 1.0;
-        for (long i = 0; i < nw; ++i)
-          for (long t = 0; t < nt; ++t)
-            refl_err = std::max(refl_err, std::abs(T(t, i) - sgn * std::conj(T(nt - 1 - t, i))));
+        // Reflection, per column, so the pairing above is kept (conj distributes over the average). A defect above
+        // 1e-8 means a wrong Twt or mesh, not rounding.
+        double refl_err = project_tau_reflection(T, 0, stats);
         utils::check(refl_err <= 1e-8 * T_max,
                      "imag_axes_ft::dlr::DLR: pinv(Twt) violates T(nt-1-t, :) = s conj(T(t, :)) by {} (relative), > 1e-8.",
                      refl_err / T_max);
-        // The projection acts per column and conj distributes over its average, so the pairing is kept.
-        project_tau_reflection(T, 0, stats);
         return T;
       }
 
@@ -492,7 +468,8 @@ namespace imag_axes_ft {
         for (int i = 0; i < nw_f; ++i) wn_mesh_f(i) = long(2.0 * _if_ops_f.get_ifnodes(i) + 1);
         for (int i = 0; i < nw_b; ++i) wn_mesh_b(i) = long(2.0 * _if_ops_b.get_ifnodes(i));
 
-        // The reflections enforced below need mirror-symmetric meshes: wn(i) = -wn(nw-1-i), tau(i) = -tau(nt-1-i)
+        // Mirror-symmetric meshes: tau(i) = -tau(nt-1-i) is the reflection index nt-1-t used below;
+        // wn(i) = -wn(nw-1-i) is the positive-half layout of the ph_sym transforms (iw_zero = nw/2).
         for (int i = 0; i < nw_f; ++i)
           utils::check(wn_mesh_f(i) == -wn_mesh_f(nw_f - 1 - i),
                        "imag_axes_ft::dlr::DLR: fermionic wn mesh is not mirror symmetric.");
@@ -504,11 +481,8 @@ namespace imag_axes_ft {
                        "imag_axes_ft::dlr::DLR: tau mesh is not mirror symmetric.");
 
         // imaginary time to Matsubara frequency
-        std::vector<int> n_dlr_f(nw_f), n_dlr_b(nw_b);
-        for (int i = 0; i < nw_f; ++i) n_dlr_f[i] = _if_ops_f.get_ifnodes(i);
-        for (int i = 0; i < nw_b; ++i) n_dlr_b[i] = _if_ops_b.get_ifnodes(i);
-        Twt_ff = build_tau_to_w_rows(_if_ops_f, n_dlr_f, imag_axes_ft::fermion);
-        Twt_bb = build_tau_to_w_rows(_if_ops_b, n_dlr_b, imag_axes_ft::boson);
+        Twt_ff = build_tau_to_w_rows(_if_ops_f, wn_mesh_f, imag_axes_ft::fermion);
+        Twt_bb = build_tau_to_w_rows(_if_ops_b, wn_mesh_b, imag_axes_ft::boson);
         // Matsubara frequency to imaginary time
         Ttw_ff = paired_left_inverse(Twt_ff, wn_mesh_f, imag_axes_ft::fermion);
         Ttw_bb = paired_left_inverse(Twt_bb, wn_mesh_b, imag_axes_ft::boson);
