@@ -449,13 +449,6 @@ void lr_driver::lr_setup(
 }
 
 
-nda::array<ComplexType, 5> lr_driver::dc_sigma_response(
-    const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
-    const nda::array<ComplexType, 5>* dWloc_pb) {
-  utils::check(emb.dc.has_value(), "lr_driver::dc_sigma_response: the embedding has no double counting.");
-  return lr_dc_sigma(emb.dc->Gloc_tsIab, dGloc_tsIab, emb.dc->Wloc_pb, dWloc_pb, emb.dc->cells);
-}
-
 void lr_driver::apply_kernel_gw(
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -481,7 +474,7 @@ void lr_driver::apply_kernel_gw(
     if (dc) {
       auto dGloc_tsIab = local_projection::sum_C_O_Cdag(
           sDeltaG_tskij.local(), p.embedding->C_skIai, p.embedding->W_rng, nullptr, nullptr, &kpq_map, _mpi->comm);
-      auto dSigma_dc_tsIab = dc_sigma_response(*p.embedding, dGloc_tsIab, nullptr);
+      auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, nullptr, dc->cells);
       // ΔΣ_out += up(δΣ_imp - δΣ_dc)
       nda::array<ComplexType, 5> dSigma_imp_tsIab = p.embedding->Sigma_imp_tsIab - dSigma_dc_tsIab;
       local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_imp_tsIab, p.embedding->C_skIai, p.embedding->W_rng,
@@ -574,7 +567,7 @@ void lr_driver::apply_kernel_gw(
   // up_Σ(δΣ_imp - δΣ_dc[δG^loc, δW^loc])
   if (dc) {
     auto dWloc_pb = chemistry_to_product_basis(*_DeltaWloc_tabcd);
-    auto dSigma_dc_tsIab = dc_sigma_response(*p.embedding, dGloc_tsIab, &dWloc_pb);
+    auto dSigma_dc_tsIab = lr_dc_sigma(dc->Gloc_tsIab, dGloc_tsIab, dc->Wloc_pb, &dWloc_pb, dc->cells);
     // ΔΣ_out += up(δΣ_imp - δΣ_dc)
     nda::array<ComplexType, 5> dSigma_imp_tsIab = p.embedding->Sigma_imp_tsIab - dSigma_dc_tsIab;
     local_projection::upfold_accumulate(sSigma_tskij_out, dSigma_imp_tsIab, p.embedding->C_skIai, p.embedding->W_rng,

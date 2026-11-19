@@ -2426,7 +2426,8 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
         if (emb.dc) {
           std::optional<nda::array<ComplexType, 5>> dWloc_pb;
           if (driver.DeltaWloc()) dWloc_pb = chemistry_to_product_basis(*driver.DeltaWloc());
-          auto DeltaSigma_dc_tsIab = driver.dc_sigma_response(emb, DeltaGloc_tsIab, dWloc_pb ? &(*dWloc_pb) : nullptr);
+          auto DeltaSigma_dc_tsIab = lr_dc_sigma(emb.dc->Gloc_tsIab, DeltaGloc_tsIab, emb.dc->Wloc_pb,
+                                                  dWloc_pb ? &(*dWloc_pb) : nullptr, emb.dc->cells);
           nda::h5_write(lr_grp, "DeltaSigma_dc_tsIab", DeltaSigma_dc_tsIab, false);
           nda::h5_write(lr_grp, "DeltaSigma_imp_tsIab", emb.Sigma_imp_tsIab, false);
           app_log(2, "  - DeltaSigma_dc_tsIab, DeltaSigma_imp_tsIab written to \"linear_response/\"");
