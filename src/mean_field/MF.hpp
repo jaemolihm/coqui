@@ -362,6 +362,27 @@ class MF
       return std::get<bdft::bdft_readonly>(var).read_hks_matrix(H);
     }
 
+    // True if the h5 carries the velocity matrix Orbitals/v0_skxij = <m|-i[r_x,H0]|n> (Hartree a.u.,
+    // IBZ only, written by pw2coqui add_velocity or by unfold_mf). Only the qe and bdft backends can.
+    bool has_v0() const
+    {
+      if(std::holds_alternative<bdft::bdft_readonly>(var))
+        return std::get<bdft::bdft_readonly>(var).get_sys().has_v0;
+      if(std::holds_alternative<qe::qe_readonly>(var))
+        return std::get<qe::qe_readonly>(var).get_sys().has_v0;
+      return false;
+    }
+
+    // Read Orbitals/v0_skxij into `v0` (nspin, nkpts_ibz, 3, nb, nb), band-sliced to the leading
+    // nb bands; returns the stored band count. The calling rank performs the h5 read on its own.
+    long read_v0(nda::array_view<ComplexType,5> v0) const
+    {
+      utils::check(has_v0(), "MF::read_v0: no velocity matrix Orbitals/v0_skxij in {}.", filename());
+      if(std::holds_alternative<bdft::bdft_readonly>(var))
+        return std::get<bdft::bdft_readonly>(var).read_v0(v0);
+      return std::get<qe::qe_readonly>(var).read_v0(v0);
+    }
+
     // Per-band THC fit weights over the full BZ, (nspin, nkpts, nbnd): for an
     // augmented basis, min(s,1) for the augmentation states (s = residual
     // singular value of the dtau_step-scaled raw state) and 1 for the original

@@ -37,6 +37,7 @@
 #include "numerics/sparse/sparse.hpp"
 #include "utilities/concepts.hpp"
 #include "utilities/mpi_context.h"
+#include "mean_field/band_matrix_h5.hpp"
 
 #include "mean_field/mf_source.hpp"
 #include "mean_field/qe/qe_interface.h"
@@ -90,6 +91,11 @@ public:
   int nkpts_ibz() const { return sys.bz().nkpts_ibz; }
   decltype(auto) kp_trev() { return sys.bz().kp_trev(); }
   qe_system const& get_sys() const { return sys; }
+
+  // Read the stored velocity matrix Orbitals/v0_skxij of the .coqui.h5 -- (nspin, nkpts_ibz, 3,
+  // nbnd_stored, nbnd_stored) over the IBZ -- into `v0`; see mf::read_band_matrix_dataset.
+  long read_v0(nda::array_view<ComplexType,5> v0) const
+  { return mf::read_band_matrix_dataset<5>(sys.filename, "v0_skxij", v0); }
   decltype(auto) wfc_truncated_grid() const {
     return std::addressof(wfc_g);
   }
