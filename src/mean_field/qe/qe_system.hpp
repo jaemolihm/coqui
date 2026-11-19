@@ -342,6 +342,7 @@ struct qe_system
   // true when efermi carries a value obtained from the source (QE xml, or a
   // fermi_energy attribute in the h5); false means the 0.0 default.
   bool has_efermi=false;
+  bool has_v0=false;                    // h5 carries Orbitals/v0_skxij (set by read_h5)
 
   bool orb_on_fft_grid = true;          // orbitals are stored on FFT grid or not
   double ecutrho = 0.0;                 // plane-wave cutoffs

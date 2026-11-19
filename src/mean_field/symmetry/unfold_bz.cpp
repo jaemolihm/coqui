@@ -426,6 +426,66 @@ namespace {
     }
     nda::h5_write(out_grp, "npw", npw);
   }
+
+  /**
+   * Velocity matrix v(k) = <m|-i[r_x,H0]|n> of the IBZ mean field `mf`, (nspin, nkpts, 3, nbnd, nbnd), at
+   * every full-BZ k. Called by unfold_mf when mf.has_v0(), so that the unfolded file carries the v0 that
+   * run_lr_efield reads. The orbital at k' = S k is the orbital at k_ibz with its plane-wave coefficients
+   * moved from G to G' (conjugated at a time-reversal k'), so (k'+G')_cart = R (k+G)_cart gives
+   *   v(k') = R v(k_ibz),   v(k') = -R conj(v(k_ibz)) at a time-reversal k'.
+   */
+  nda::array<ComplexType,5> unfold_velocity_matrix(MF const& mf)
+  {
+    long ns = mf.nspin(), nkpts = mf.nkpts(), nb = mf.nbnd();
+
+    // 1. IBZ v0, as stored by pw2coqui
+    nda::array<ComplexType,5> v0_ibz(ns, mf.nkpts_ibz(), 3, nb, nb);
+    mf.read_v0(v0_ibz());
+
+    // 2. Cartesian rotation R = recv^T Rinv^T recv^{-T} of each symmetry:
+    //    crystal row vectors transform as (k+G)' = (k+G) Rinv (utils::transform_miller_indices), and
+    //    x_cart = x_crys recv with recv(i,:) = b_i
+    auto symm_list = mf.symm_list();
+    nda::matrix<double> recv_inv(3,3);
+    recv_inv = mf.recv();
+    nda::inverse3_in_place(recv_inv);
+    std::vector<nda::array<double,2>> R_cart;
+    for (auto const& S : symm_list) {
+      // M = recv^{-1} Rinv recv, R = M^T
+      nda::array<double,2> M(3,3), R(3,3);
+      for (int i=0; i<3; ++i)
+        for (int j=0; j<3; ++j) {
+          M(i,j) = 0.0;
+          for (int a=0; a<3; ++a)
+            for (int b=0; b<3; ++b)
+              M(i,j) += recv_inv(i,a) * S.Rinv(a,b) * mf.recv(b,j);
+          R(j,i) = M(i,j);
+        }
+      R_cart.emplace_back(R);
+    }
+
+    // 3. v(k') = R v(k_ibz), or -R conj(v(k_ibz)) at a time-reversal k'
+    nda::array<ComplexType,5> v0_full(ns, nkpts, 3, nb, nb);
+    auto kp_to_ibz = mf.kp_to_ibz();
+    auto kp_trev = mf.kp_trev();
+    auto kp_symm = mf.kp_symm();
+    for (long is=0; is<ns; ++is)
+      for (long ik=0; ik<nkpts; ++ik) {
+        auto const& R = R_cart[kp_symm(ik)];
+        bool trev = kp_trev(ik);  // k' = -S k_ibz
+        for (long x=0; x<3; ++x)
+          for (long m=0; m<nb; ++m)
+            for (long n=0; n<nb; ++n) {
+              ComplexType v = 0.0;
+              for (long y=0; y<3; ++y) {
+                ComplexType vy = v0_ibz(is, kp_to_ibz(ik), y, m, n);
+                v += R(x,y) * (trev ? -std::conj(vy) : vy);
+              }
+              v0_full(is, ik, x, m, n) = v;
+            }
+      }
+    return v0_full;
+  }
 } // anonymous
 
   void unfold_mf(MF &mf, std::string filename) {
@@ -502,6 +562,15 @@ namespace {
               H_full(is, ik, nda::ellipsis{}) = H_ibz(is, kp_to_ibz(ik), nda::ellipsis{});
           }
         nda::h5_write(ogrp, "H_KS_skij", H_full, false);
+      }
+
+      // Velocity matrix Orbitals/v0_skxij: rotated to every k with the orbitals above
+      if (mf.has_v0()) {
+        auto v0_full = unfold_velocity_matrix(mf);
+        nda::h5_write(ogrp, "v0_skxij", v0_full, false);
+        auto v0_ds = ogrp.open_dataset("v0_skxij");
+        h5::h5_write_attribute(v0_ds, "units", std::string("hartree_bohr"));
+        h5::h5_write_attribute(v0_ds, "includes_nonlocal", 1);
       }
 
       // Hamiltonian/: local pseudopotential from the source file, nonlocal projectors from its full-BZ group

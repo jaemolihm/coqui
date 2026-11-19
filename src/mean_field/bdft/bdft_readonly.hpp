@@ -40,6 +40,7 @@
 
 #include "numerics/distributed_array/nda.hpp"
 #include "mean_field/mf_source.hpp"
+#include "mean_field/v0_h5.hpp"
 #include "mean_field/bdft/bdft_system.hpp"
 #include "numerics/sparse/sparse.hpp"
 #include "grids/g_grids.hpp"
@@ -272,6 +273,11 @@ public:
                  std::tuple{nda::range::all, nda::range::all, nda::range(nb), nda::range(nb)});
     return nbnd_stored;
   }
+
+  // Read the stored velocity matrix Orbitals/v0_skxij -- (nspin, nkpts_ibz, 3, nbnd_stored,
+  // nbnd_stored) over the IBZ -- into `v0`; see mf::read_v0_dataset.
+  long read_v0(nda::array_view<ComplexType,5> v0) const
+  { return mf::read_v0_dataset(sys.filename, v0); }
 
   bdft_readonly(bdft_readonly const& other):
     sys(other.sys),

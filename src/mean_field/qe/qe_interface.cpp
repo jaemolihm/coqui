@@ -487,15 +487,19 @@ qe_system read_h5(std::shared_ptr<utils::mpi_context_t<mpi3::communicator>> mpi,
 
   if( mf::bz_symm::can_init_from_h5(sgrp) ) {
     mf::bz_symm bz(sgrp); 
-    return qe_system(std::move(mpi),outdir,prefix,h5_input_type,false,
-                     alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
-                     ecrho,species,at_ids,at_pos,fft_mesh,
-                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,bz);
+    qe_system sys(std::move(mpi),outdir,prefix,h5_input_type,false,
+                  alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
+                  ecrho,species,at_ids,at_pos,fft_mesh,
+                  lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,bz);
+    sys.has_v0 = ogrp.has_dataset("v0_skxij");
+    return sys;
   } else {
-    return qe_system(std::move(mpi),outdir,prefix,h5_input_type,false,
-                     alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
-                     ecrho,species,at_ids,at_pos,fft_mesh,
-                     lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,not noinv);
+    qe_system sys(std::move(mpi),outdir,prefix,h5_input_type,false,
+                  alat,npwx,ngm,ngms,nelec,ndims,nspin,npol,spinorbit,
+                  ecrho,species,at_ids,at_pos,fft_mesh,
+                  lattv,bg,kp_grid,kpts,k_weight,npw,eigval,occ,symm_list,efermi,has_efermi,not noinv);
+    sys.has_v0 = ogrp.has_dataset("v0_skxij");
+    return sys;
   } 
 }
 

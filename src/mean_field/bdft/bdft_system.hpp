@@ -181,6 +181,8 @@ namespace mf {
       // Orbitals/H_KS_skij over the IBZ. The dataset's presence is the flag; the
       // matrix itself is read lazily (hamilt::read_H_KS_aug), never stored here.
       bool has_hks_matrix = false;
+      // true when the h5 carries the velocity matrix Orbitals/v0_skxij over the IBZ; read on demand.
+      bool has_v0 = false;
 
       public:
       // dummy members, just to be consistent with qe_readonly class...
@@ -381,6 +383,8 @@ namespace mf {
             occ(all,ik,all)    = occ(all,ik_ibz,all);
           }
         }
+
+        has_v0 = ogrp.has_dataset("v0_skxij");
 
         if(nbnd_aux>0) {
           nda::h5_read(grp, "Orbitals/eigval_aux",eigval_aux);
