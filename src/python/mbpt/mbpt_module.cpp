@@ -65,7 +65,7 @@ namespace coqui_py {
    *                            at every Dyson pass of mode m. Not combined with DeltaX/DeltaV, qp_static_sigma or the projector
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
-  std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
+  std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_vec,

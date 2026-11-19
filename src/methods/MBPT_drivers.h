@@ -277,7 +277,7 @@ struct lr_local_inputs {
  * @return Per-perturbation (number of iterations, final Δμ), each of length nmodes
  */
 template<typename eri_t>
-std::tuple<nda::array<long, 1>, nda::array<double, 1>>
+std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
                         run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
                                      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,

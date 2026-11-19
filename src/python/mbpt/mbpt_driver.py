@@ -656,10 +656,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Dynamic one-body source ΔH(iω), (nmodes, nw_f, ns, nk, nb, nb), or (nw_f, ns, nk, nb, nb) for a
         single perturbation (then DeltaH0_skij must be rank 4), on the fermionic Matsubara grid of the
         checkpoint: values at iω_n = i·wn·π/β (Ha) with wn = ``iaft.wn_mesh("fermion")`` (not
-        ``phys_notation=True``). At q = Γ the source must satisfy ΔH_k(-iω_n) = ΔH_k(iω_n)†; run_lr
-        checks it on the input, per mode, and aborts if ‖ΔH(-iω) - ΔH(iω)†‖_F / ‖ΔH‖_F > 1e-10 (valid
-        sources are exact to round-off, ~1e-15) or if the grid has no -iω_n partner. It is not checked at
-        q != Γ, where the condition couples q and -q. Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the
+        ``phys_notation=True``). Any source, Hermitian or not, gives the exact linear response; with
+        fix_density at Γ, Δμ is complex for a non-Hermitian source. The exactness holds at npol = 1
+        (the npol > 1 ΔF symmetrization in lr_hf assumes a Hermitian ΔF). Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the
         right-hand side of the Dyson equation of mode m at every iteration, and to the hessian's left operand
         (Tr_ω(ΔH_λ, ΔG_p) beside Tr(ΔH0_λ, ΔDm_p)). A source constant in iω equal to A gives the
         same result as ΔH0 = A. Rejected together with DeltaX_left/DeltaX_right/DeltaV_qPQ,
@@ -687,9 +686,10 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float] or tuple[np.ndarray, np.ndarray]
+    tuple[int, complex] or tuple[np.ndarray, np.ndarray]
         (niter, Delta_mu) — scalars for a 4-D DeltaH0_skij, per-mode arrays for
-        a 5-D one.
+        a 5-D one. Delta_mu is always complex; it is nonzero only for fix_density at q = Γ,
+        and complex there for a non-Hermitian source (Δμ = -ΔN_0/κ, κ = dN/dμ real).
 
     Notes
     -----
@@ -855,7 +855,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
         *proj_args, DeltaH_mwskij)
     if squeeze:
-        return int(niter[0]), float(delta_mu[0])
+        return int(niter[0]), complex(delta_mu[0])
     return niter, delta_mu
 
 def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
@@ -922,7 +922,7 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
 
     Returns
     -------
-    tuple[int, float]
+    tuple[int, complex]
         (niter, Delta_mu). The one-shot loop does not converge, so niter = 2.
     """
     return run_lr(params, h_int, q_vec, DeltaH0_skij,
@@ -994,7 +994,7 @@ def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float]
+    tuple[int, complex]
         (niter, Delta_mu).
 
     Notes

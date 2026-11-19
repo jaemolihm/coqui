@@ -780,7 +780,7 @@ Returns
      {},
      {c2py::python_typename<std::optional<nda::array<ComplexType, 6>>>()}},
     {c2py::python_typename<
-        std::tuple<nda::array<long, 1>, nda::array<double, 1>>>()});
+        std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>>()});
 static const auto doc_d_15 = fun_15.doc(
     R"DOC(
 Band-basis perturbation from a local potential in the THC aux basis

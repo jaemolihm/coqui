@@ -52,7 +52,7 @@ struct lr_hessian_result_t {
   double herm_M = 0.0;       ///< ‖M − M†‖ / ‖M‖  (self-adjointness of K, measured)
   /// Δμ of each mode's extra Dyson solve, as that solve recomputed it. Zero
   /// throughout unless the run is fix_density at q = Γ.
-  nda::array<double, 1> Delta_mu_improved;
+  nda::array<ComplexType, 1> Delta_mu_improved;
 };
 
 /**

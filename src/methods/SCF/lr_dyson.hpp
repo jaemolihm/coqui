@@ -223,11 +223,11 @@ public:
    *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
    * @param sDeltaH_wskij     - [INPUT] dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), nullptr if not used.
    *   Node-replicated, read with global (iω, s, k) indices; added to X at every iω like ΔΣ(iω).
-   * @return The Δμ used: computed if fix_density=true at q=Γ, zero otherwise
+   * @return The Δμ used: computed if fix_density=true at q=Γ (complex for a non-Hermitian source), zero otherwise
    */
   template<typename DeltaDm_t, typename DeltaH0_t,
            typename DeltaF_t, typename DeltaSigma_t>
-  double solve_lr_dyson(
+  ComplexType solve_lr_dyson(
       DeltaDm_t& sDeltaDm_skij,
       const DeltaH0_t& sDeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
@@ -285,12 +285,12 @@ public:
    *
    * @return the Δμ used, as solve_lr_dyson
    */
-  double solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-                                const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
-                                const sArray_t<Array_view_4D_t>& sDeltaF_skij,
-                                const sArray_t<Array_view_4D_t>* sDeltaDm_src,
-                                bool fix_density,
-                                const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
+  ComplexType solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
+                                     const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+                                     const sArray_t<Array_view_4D_t>& sDeltaF_skij,
+                                     const sArray_t<Array_view_4D_t>* sDeltaDm_src,
+                                     bool fix_density,
+                                     const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
 
   /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
@@ -301,10 +301,10 @@ public:
    *
    * @throws std::runtime_error if q≠0 (ΔN is not well-defined for q≠0)
    * @param sDeltaDm_skij   - [INPUT] LR density matrix (ns, nk, nb, nb)
-   * @return Re ΔN, the change in particle number
+   * @return ΔN, the change in particle number (complex for a non-Hermitian ΔDm)
    */
   template<typename DeltaDm_t>
-  double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
+  ComplexType compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
 
 
   /// dN/dμ, the density of states at the Fermi level. Valid once
@@ -428,15 +428,15 @@ private:
   // Turn the Δμ=0 solution retained by the last pass into the solution at Δμ:
   // ΔG(τ) += Δμ·dG/dμ(τ) on the retained distributed array, ΔDm += Δμ·dDm/dμ on the
   // node-replicated one. Both are local adds; nothing is recomputed.
-  void apply_dmu_shift_G(double Delta_mu);
+  void apply_dmu_shift_G(ComplexType Delta_mu);
   template<typename DeltaDm_t>
-  void apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, double Delta_mu);
+  void apply_dmu_shift_Dm(DeltaDm_t& sDeltaDm_skij, ComplexType Delta_mu);
 
   // Steps 2-3 of the fix_density solve for ΔDm, on the Δμ=0 ΔDm the pass left:
   // Δμ from the closed form, then the shift of ΔDm. Returns 0 and touches nothing
   // unless fix_density at q=Γ.
   template<typename DeltaDm_t>
-  double apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density);
+  ComplexType apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density);
 
 
   simple_dyson& _dyson;

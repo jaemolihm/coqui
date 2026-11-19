@@ -349,8 +349,8 @@ def read_lr_hessian(filename: str) -> dict:
     file can contend on the file lock.
     """
     complex_keys = ("hessian", "hessian_sym", "hessian_M", "hessian_M_prime",
-                    "hessian_static_prime")
-    real_keys = ("hessian_call_index", "Delta_mu_improved")
+                    "hessian_static_prime", "Delta_mu_improved")
+    real_keys = ("hessian_call_index",)
     scalar_keys = ("hessian_herm_dev", "hessian_sym_herm_dev", "hessian_M_herm_dev")
 
     with h5py.File(filename, 'r') as f:

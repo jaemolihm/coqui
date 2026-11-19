@@ -510,15 +510,15 @@ namespace lr_dyson_tests {
         if (fd and not lr_dys.is_q_gamma()) continue;
         for (bool with_sigma : {false, true}) {
           const sArray_t<Array_view_5D_t>* pS = with_sigma ? &DeltaSigma : nullptr;
-          double mu_full = lr_dys.solve_lr_dyson(Dm_full, DeltaH0, DeltaF, pS, fd);
+          ComplexType mu_full = lr_dys.solve_lr_dyson(Dm_full, DeltaH0, DeltaF, pS, fd);
           if (with_sigma) lr_dys.solve_lr_dyson(Dm_src, Zero, Zero, &DeltaSigma, false);
-          double mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, DeltaH0, DeltaF,
+          ComplexType mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, DeltaH0, DeltaF,
                                                          with_sigma ? &Dm_src : nullptr, fd);
           context->comm.barrier();
           double err = rel(Dm_only.local(), Dm_full.local());
           app_log(2, "[TEST] dm_only vs full: q = ({},{},{}) fix_density = {} ΔΣ = {}: "
                      "rel ΔDm = {:.3e}, Δμ = {:.6e}, |ΔΔμ| = {:.3e}",
-                  q[0], q[1], q[2], fd, with_sigma, err, mu_full, std::abs(mu_only - mu_full));
+                  q[0], q[1], q[2], fd, with_sigma, err, mu_full.real(), std::abs(mu_only - mu_full));
           INFO("q = (" << q[0] << "," << q[1] << "," << q[2] << ") fd = " << fd
                << " sigma = " << with_sigma);
           CHECK(norm(Dm_full.local()) > 1e-8);
@@ -531,6 +531,115 @@ namespace lr_dyson_tests {
         }
       }
     }
+    context->comm.barrier();
+  }
+
+  TEST_CASE("lr_dyson_fix_density_complex_source", "[methods_scf]") {
+    /**
+     * fix_density at q = Γ with a non-Hermitian source X = X_H + i X_A (X_H, X_A Hermitian):
+     * solve_lr_dyson is C-linear in the source, so Δμ(X) = Δμ(X_H) + i Δμ(X_A) and
+     * ΔDm(X) = ΔDm(X_H) + i ΔDm(X_A), and ΔN(X) = 0 with the complex Δμ. The shifts 0.05 S and 0.03 S
+     * make Δμ(X_H) and Δμ(X_A) nonzero, so a real Δμ (Re ΔN only) fails the Im parts.
+     */
+    auto& context = utils::make_unit_test_mpi_context();
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(100.0, 4.0, imag_axes_ft::ir_basis);
+    int ns = mf.nspin();
+    int nk = mf.nkpts_ibz();
+    int nb = mf.nbnd();
+    int nt = ft.nt_f();
+
+    simple_dyson dyson(std::addressof(mf), std::addressof(ft));
+    auto make4 = [&]() {
+      return math::shm::make_shared_array<Array_view_4D_t>(*context, {ns, nk, nb, nb});
+    };
+    auto make5 = [&]() {
+      return math::shm::make_shared_array<Array_view_5D_t>(*context, {nt, ns, nk, nb, nb});
+    };
+    sArray_t<Array_view_4D_t> F(make4()), Dm(make4()), Zero(make4());
+    sArray_t<Array_view_4D_t> X_H(make4()), X_A(make4()), X(make4());
+    sArray_t<Array_view_4D_t> Dm_H(make4()), Dm_A(make4()), Dm_X(make4());
+    Zero.set_zero();
+    sArray_t<Array_view_5D_t> G(make5()), Sigma(make5());
+
+    hamilt::pseudopot psp(mf);
+    hamilt::set_fock(mf, std::addressof(psp), F, true);
+    if (context->node_comm.root()) Sigma.local()() = 0.0;
+    context->comm.barrier();
+    double mu = update_mu(0.0, dyson, mf, ft, F, Sigma);
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(*context, {ft.nw_f(), ns, nk, nb, nb});
+    update_G(dyson, mf, ft, Dm, G, F, Sigma, mu, true, &sG_wskij);
+    context->comm.barrier();
+
+    // X_H = random Hermitian + 0.05 S, X_A = random Hermitian + 0.03 S, X = X_H + i X_A
+    if (context->node_comm.root()) {
+      std::srand(11);
+      auto rnd = []() { return 0.01 * (std::rand() / double(RAND_MAX) - 0.5); };
+      auto S_loc = dyson.sS_skij().local();
+      auto fill = [&](auto&& A, double shift) {
+        for (int is = 0; is < ns; ++is)
+          for (int ik = 0; ik < nk; ++ik)
+            for (int i = 0; i < nb; ++i)
+              for (int j = 0; j <= i; ++j) {
+                double re = rnd(), im = (i == j) ? 0.0 : rnd();
+                A(is, ik, i, j) = ComplexType(re, im);
+                A(is, ik, j, i) = ComplexType(re, -im);
+              }
+        A += shift * S_loc;
+      };
+      fill(X_H.local(), 0.05);
+      fill(X_A.local(), 0.03);
+      X.local() = X_H.local() + ComplexType(0.0, 1.0) * X_A.local();
+    }
+    context->comm.barrier();
+
+    nda::array<double, 1> q_vec{0.0, 0.0, 0.0};
+    lr_dyson lr_dys(dyson, q_vec);
+    lr_dys.set_cached_G_omega(&sG_wskij, true);
+
+    ComplexType mu_H = lr_dys.solve_lr_dyson(Dm_H, X_H, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    ComplexType mu_A = lr_dys.solve_lr_dyson(Dm_A, X_A, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    ComplexType mu_X = lr_dys.solve_lr_dyson(Dm_X, X, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    context->comm.barrier();
+
+    auto fro = [](auto const& a, auto const& b, ComplexType cb) {
+      double d = 0.0;
+      for (long n = 0; n < a.size(); ++n) d += std::norm(a.data()[n] - cb * b.data()[n]);
+      return std::sqrt(d);
+    };
+    // ΔDm(X) - (ΔDm_H + i ΔDm_A), relative to ΔDm(X)
+    nda::array<ComplexType, 4> Dm_comb = Dm_H.local() + ComplexType(0.0, 1.0) * Dm_A.local();
+    double err_Dm = fro(Dm_X.local(), Dm_comb, 1.0) / fro(Dm_X.local(), Dm_X.local(), 0.0);
+    ComplexType mu_comb = mu_H + ComplexType(0.0, 1.0) * mu_A;
+    // ΔN(X) against the size of its terms spin Σ_k w_k ||S ΔDm(k)||_F
+    double N_scale = 0.0;
+    {
+      auto k_weight = mf.k_weight();
+      auto S_loc = dyson.sS_skij().local();
+      double spin_factor = (ns == 1 && mf.npol() == 1) ? 2.0 : 1.0;
+      nda::matrix<ComplexType> buf(nb, nb);
+      for (int is = 0; is < ns; ++is)
+        for (int ik = 0; ik < nk; ++ik) {
+          nda::blas::gemm(ComplexType(1.0), S_loc(is, ik, nda::range::all, nda::range::all),
+                          Dm_X.local()(is, ik, nda::range::all, nda::range::all), ComplexType(0.0), buf);
+          N_scale += spin_factor * k_weight(ik) * fro(buf, buf, 0.0);
+        }
+    }
+    double dN_X = std::abs(lr_dys.compute_lr_Nelec(Dm_X));
+    // Δμ = -ΔN_0/κ comes from a trace of ΔDm that cancels against the size N_scale of its terms, so its
+    // round-off is compared in ΔN = κ·δΔμ against N_scale
+    double err_mu = std::abs(mu_X - mu_comb) * std::abs(lr_dys.dN_dmu()) / N_scale;
+    app_log(2, "[TEST] fix_density complex source: Δμ_H = {:.6e} {:+.6e}i, Δμ_A = {:.6e} {:+.6e}i, "
+               "Δμ_X = {:.6e} {:+.6e}i; rel ΔDm = {:.3e}, κ|δΔμ|/scale = {:.3e}, |ΔN(X)|/scale = {:.3e}",
+            mu_H.real(), mu_H.imag(), mu_A.real(), mu_A.imag(), mu_X.real(), mu_X.imag(),
+            err_Dm, err_mu, dN_X / N_scale);
+    CHECK(std::abs(mu_A) > 1e-3);   // the 0.03 S shift makes Δμ_A nonzero, so Im Δμ_X is tested
+    CHECK(err_Dm < 1e-12);
+    CHECK(err_mu < 1e-11);
+    CHECK(dN_X / N_scale < 1e-11);
     context->comm.barrier();
   }
 

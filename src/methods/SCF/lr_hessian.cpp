@@ -334,7 +334,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     return r;
   }
 
-  r.Delta_mu_improved = nda::array<double, 1>(_nmodes);
+  r.Delta_mu_improved = nda::array<ComplexType, 1>(_nmodes);
   r.Delta_mu_improved() = 0.0;
 
   // The equation, term by term. Every trace of it is taken in the loop below:

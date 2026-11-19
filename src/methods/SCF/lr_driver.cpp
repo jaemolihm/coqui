@@ -749,7 +749,7 @@ void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
 }
 
 
-std::tuple<int, double> lr_driver::lr_solve_one(
+std::tuple<int, ComplexType> lr_driver::lr_solve_one(
     sArray_t<Array_view_5D_t>& sDeltaG_tskij,
     sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     sArray_t<Array_view_4D_t>& sDeltaF_skij,
@@ -823,7 +823,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     app_log(1, "  initial guess: preconditioner solution of ΔH0 ({} sweeps)", _pc_sweeps);
   }
 
-  double Delta_mu = 0.0;
+  ComplexType Delta_mu = 0.0;
   int iter = 0;
   // An empty kernel has no feedback: the loop is skipped and the Dyson pass after
   // it is the answer.
@@ -1035,19 +1035,19 @@ std::tuple<int, double> lr_driver::lr_solve_one(
     if (iter == 1) {
       if (log_sigma_col) {
         app_log(1, "  {:>4s}    {:.6e}     {:13s}     {:.6e}   {:13s}   {:.6e}   {:13s}   {:.3e}",
-                iter_lbl, norm_DeltaDm, "---", norm_DeltaF, "---", norm_DeltaSigma, "---", Delta_mu);
+                iter_lbl, norm_DeltaDm, "---", norm_DeltaF, "---", norm_DeltaSigma, "---", Delta_mu.real());
       } else {
         app_log(1, "  {:>4s}    {:.6e}     {:13s}     {:.6e}   {:13s}   {:.3e}",
-                iter_lbl, norm_DeltaDm, "---", norm_DeltaF, "---", Delta_mu);
+                iter_lbl, norm_DeltaDm, "---", norm_DeltaF, "---", Delta_mu.real());
       }
     } else {
       if (log_sigma_col) {
         app_log(1, "  {:>4s}    {:.6e}     {:.6e}      {:.6e}   {:.6e}    {:.6e}   {:.6e}    {:.3e}",
                 iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff,
-                norm_DeltaSigma, norm_DeltaSigma_diff, Delta_mu);
+                norm_DeltaSigma, norm_DeltaSigma_diff, Delta_mu.real());
       } else {
         app_log(1, "  {:>4s}    {:.6e}     {:.6e}      {:.6e}   {:.6e}    {:.3e}",
-                iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu);
+                iter_lbl, norm_DeltaDm, norm_DeltaDm_diff, norm_DeltaF, norm_DeltaF_diff, Delta_mu.real());
       }
     }
     if (!use_gcr && pc_fn)  // with GCR, the sweep count is printed on the [GCR] line below
@@ -1125,7 +1125,7 @@ std::tuple<int, double> lr_driver::lr_solve_one(
   } else if (p.max_iter > 1) {
     app_log(1, "\n  [WARNING] LR SCF did NOT converge after {} iterations.", p.max_iter);
   }
-  app_log(1, "  Final Δμ = {:.6e}", Delta_mu);
+  app_log(1, "  Final Δμ = {:.6e} {:+.6e}i", Delta_mu.real(), Delta_mu.imag());
 
   // Expose the precomputed IBC aux→primary correction
   //   δX†·F_PQ·X + X†·F_PQ·δX   (= ∂_τ Σ^(δX) in band basis)

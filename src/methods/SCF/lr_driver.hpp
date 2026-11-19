@@ -363,7 +363,7 @@ public:
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
-  std::tuple<int, double> lr_solve_one(
+  std::tuple<int, ComplexType> lr_solve_one(
       sArray_t<Array_view_5D_t>& sDeltaG_tskij,
       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
       sArray_t<Array_view_4D_t>& sDeltaF_skij,
