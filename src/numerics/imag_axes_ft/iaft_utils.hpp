@@ -29,6 +29,7 @@
 #include "h5/h5.hpp"
 #include "nda/nda.hpp"
 #include "IAFT.hpp"
+#include "utilities/check.hpp"
 
 namespace imag_axes_ft {
 
@@ -88,16 +89,34 @@ namespace imag_axes_ft {
   } // namespace test_utils
 
   /**
+   * Partner of every fermionic Matsubara node under iω_n → -iω_n: wn_mesh_f(refl(n)) = -wn_mesh_f(n).
+   * Used to pair c(iω_n) with c(-iω_n) (the τ-domain conjugate transpose, FT[A(τ)†](iω_n) = A(-iω_n)†),
+   * which is representable only if the grid is closed under negation; aborts otherwise.
+   *
+   * @param FT - IAFT whose fermionic grid is paired
+   * @return (nw_f) partner index of each node
+   */
+  inline nda::array<long, 1> fermion_reflection_index(IAFT const& FT) {
+    nda::array<long, 1> wn(FT.wn_mesh_f());
+    nda::array<long, 1> refl(FT.nw_f());
+    refl() = -1;
+    // 1. Search the partner of every node; 2. every node must have one
+    for (long n = 0; n < FT.nw_f(); ++n)
+      for (long m = 0; m < FT.nw_f(); ++m)
+        if (wn(m) == -wn(n)) { refl(n) = m; break; }
+    for (long n = 0; n < FT.nw_f(); ++n)
+      utils::check(refl(n) >= 0,
+                   "fermion_reflection_index: the fermionic Matsubara grid is not closed under negation "
+                   "(no partner for index {}, wn = {}), so c(iw) and c(-iw) cannot be paired.",
+                   n, wn(n));
+    return refl;
+  }
+
+  /**
    * Fermionic Matsubara sum (1/β) Σ_n c(iω_n) = -c(τ = β⁻) of a function on the fermionic ω grid.
    *
    * c(iω_n) -> c(τ) by the IAFT's |ω|-weighted fit w_to_tau_w_weighted, then evaluated at τ = β⁻; the
-   * second form is the one computed. Shared by every contraction that closes a Matsubara sum (the LR
-   * hessian's Tr_ω).
-   *
-   * Why the weighted fit: lr_dyson forms ΔDm and ΔG(τ) from ΔG(iω) with the same functional, so the
-   * hessian Tr_ω(ΔH_λ, ΔG_p) is the exact second derivative of the functional that produced ΔDm only if
-   * the closing sum uses it too. With the plain w_to_tau the DLR hessian is Hermitian to 1.6e-9, with this
-   * fit to 5e-12 (issue #135). On IR w_to_tau_w_weighted is w_to_tau, so the result is unchanged.
+   * second form is the one computed. On IR w_to_tau_w_weighted is w_to_tau.
    *
    * @param FT  - IAFT whose fermionic grid c lives on
    * @param c_w - [INPUT] (nw_f, 1), already reduced over ranks by the caller

@@ -1996,17 +1996,7 @@ std::tuple<nda::array<long, 1>, nda::array<double, 1>>
   // given in one call, so it is not checked there. A valid source is exact to round-off, hence the 1e-10 bound.
   if (has_dynamic_source && utils::is_q_gamma(q_vec)) {
     // 1. Partner index of every fermionic node: wn(refl(n)) = -wn(n); the grid must be closed under negation
-    nda::array<long, 1> wn(ft.wn_mesh_f());
-    nda::array<long, 1> refl(ft.nw_f());
-    refl() = -1;
-    for (long n = 0; n < ft.nw_f(); ++n)
-      for (long m = 0; m < ft.nw_f(); ++m)
-        if (wn(m) == -wn(n)) { refl(n) = m; break; }
-    for (long n = 0; n < ft.nw_f(); ++n)
-      utils::check(refl(n) >= 0,
-                   "run_lr_calc: the fermionic Matsubara grid is not closed under negation (no partner for "
-                   "index {}, wn = {}), so DeltaH_mwskij cannot be checked for DeltaH(-iw) = DeltaH(iw)^dagger.",
-                   n, wn(n));
+    auto refl = imag_axes_ft::fermion_reflection_index(ft);
     // 2. On root, per mode: sqrt(sum_{n,s,k} ||ΔH(-iω_n) - ΔH(iω_n)^†||_F^2 / sum ||ΔH(iω_n)||_F^2)
     nda::array<double, 1> herm_dev(nmodes);
     herm_dev() = 0.0;

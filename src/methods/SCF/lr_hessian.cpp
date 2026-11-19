@@ -92,20 +92,7 @@ lr_hessian_t::lr_hessian_t(
   // iω_n → −iω_n on the fermionic grid. The pairing is the τ-domain conjugate
   // transpose, FT[A(τ)†](iω_n) = A(−iω_n)†, so the grid has to be closed under
   // negation for it to be representable at all.
-  {
-    nda::array<long, 1> wn(_FT->wn_mesh_f());
-    _refl = nda::array<long, 1>(_nw);
-    _refl() = -1;
-    for (long n = 0; n < _nw; ++n)
-      for (long m = 0; m < _nw; ++m)
-        if (wn(m) == -wn(n)) { _refl(n) = m; break; }
-    for (long n = 0; n < _nw; ++n)
-      utils::check(_refl(n) >= 0,
-                   "lr_hessian_t: the fermionic Matsubara grid is not closed "
-                   "under negation — no partner for index {} (wn = {}). The hessian "
-                   "estimator's inner product is not representable on it.",
-                   n, wn(n));
-  }
+  _refl = imag_axes_ft::fermion_reflection_index(*_FT);
 
   // w_k of each of this rank's elements. The flattened (s,k,i,j) index e gives
   // k = (e / nbnd²) % nk.
@@ -285,6 +272,10 @@ ComplexType lr_hessian_t::trace_static_local(nda::array<ComplexType, 1> const& a
 ComplexType lr_hessian_t::matsubara_sum(nda::array<ComplexType, 2>& c) const {
   // c is a per-rank partial over the element slice, so it is reduced before the FT.
   _mpi->comm.all_reduce_in_place_n(c.data(), c.size(), std::plus<>{});
+  // lr_dyson forms ΔDm from ΔG(iω) with w_to_tau_w_weighted, and the closing sum uses the same functional
+  // so that Tr_ω(ΔH_λ, ΔG_p) matches Tr(ΔH0_λ, ΔDm_p) for a static ΔH_λ. A dynamic ΔH_λ(iω) does not commute with
+  // the projector inside it, which leaves the 5e-12 residual of the DLR hessian's Hermiticity (plain
+  // w_to_tau closing: 1.6e-9, issue #135). On IR the two fits coincide.
   return imag_axes_ft::fermion_matsubara_sum(*_FT, c);
 }
 

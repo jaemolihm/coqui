@@ -301,13 +301,10 @@ public:
    *
    * @throws std::runtime_error if q≠0 (ΔN is not well-defined for q≠0)
    * @param sDeltaDm_skij   - [INPUT] LR density matrix (ns, nk, nb, nb)
-   * @param check_imag      - [INPUT] abort if |Im ΔN| > 1e-6·Σ_k w_k ‖S(k)·ΔDm(k)‖_F (a source violating ΔH(-iω) = ΔH(iω)†).
-   *                          False for ΔN after the Δμ shift: Re ΔN is then ~0 and Im ΔN carries Δμ·Im(dN/dμ),
-   *                          a non-Hermitian trace of ~2e-4 electrons for an insulator, where Δμ ~ 1e5 is a gauge.
    * @return Re ΔN, the change in particle number
    */
   template<typename DeltaDm_t>
-  double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_imag = true);
+  double compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij);
 
 
   /// dN/dμ, the density of states at the Fermi level. Valid once

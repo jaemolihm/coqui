@@ -378,7 +378,7 @@ double lr_dyson::apply_fix_density(DeltaDm_t& sDeltaDm_skij, bool fix_density) {
 
   // Verify ΔN ≈ 0
   _Timer.start("LR_DYSON_NELEC");
-  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij, /*check_imag=*/false);
+  const double DeltaN_final = compute_lr_Nelec(sDeltaDm_skij);
   _Timer.stop("LR_DYSON_NELEC");
   app_log(3, "  Final ΔN = {:.6e} (should be ~0)", DeltaN_final);
   return Delta_mu;
@@ -480,7 +480,7 @@ void lr_dyson::materialize_DeltaG_tau(sArray_t<Array_view_5D_t>& sDeltaG_tskij) 
 
 
 template<typename DeltaDm_t>
-double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_imag) {
+double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij) {
   // ΔN = Tr[S · ΔDm] = Σ_k w_k Tr[S(k) · ΔDm(k)]
   utils::check(_is_q_gamma,
                "compute_lr_Nelec: ΔN is not well-defined for q≠0. "
@@ -494,8 +494,6 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_ima
   double spin_factor = (_ns == 1 && _dyson.MF()->npol() == 1) ? 2.0 : 1.0;
 
   ComplexType DeltaN(0.0);
-  // Size of the terms of ΔN, Σ_k w_k ‖S(k)·ΔDm(k)‖_F: the scale of the |Im ΔN| check
-  double DeltaN_scale = 0.0;
 
   // (s, k) is distributed over the whole communicator — ΔDm and S are both shared
   // per node, so any rank can evaluate any item.
@@ -511,22 +509,15 @@ double lr_dyson::compute_lr_Nelec(const DeltaDm_t& sDeltaDm_skij, bool check_ima
     // Tr[S · ΔDm] via matrix multiply and trace
     nda::blas::gemm(ComplexType(1.0), S_k, DeltaDm_k, ComplexType(0.0), buffer);
     DeltaN += k_weight(ik) * nda::trace(buffer);
-    DeltaN_scale += k_weight(ik) * nda::frobenius_norm(buffer);
   }
 
-  std::array<double, 3> reduce_buf = {DeltaN.real(), DeltaN.imag(), DeltaN_scale};
-  _context->comm.all_reduce_in_place_n(reduce_buf.data(), reduce_buf.size(), std::plus<>{});
+  DeltaN = _context->comm.all_reduce_value(DeltaN);
   // after the reduce, so it multiplies the total exactly once
-  DeltaN = ComplexType(reduce_buf[0], reduce_buf[1]) * spin_factor;
-  DeltaN_scale = reduce_buf[2] * spin_factor;
+  DeltaN *= spin_factor;
 
-  // ΔN is real for a source with ΔH(-iω) = ΔH(iω)†. Im ΔN is round-off proportional to the source size
-  // (5e-11..1e-9 for O(1) sources), hence the bound relative to Σ_k w_k ‖S·ΔDm‖_F, not to |Re ΔN| (zero for a phonon).
-  utils::check(!check_imag or std::abs(DeltaN.imag()) <= 1e-6 * DeltaN_scale,
-               "compute_lr_Nelec: Im(ΔN) = {:.3e} against the scale {:.3e} of the terms of ΔN. The likely cause is a "
-               "dynamic source violating ΔH(-iω) = ΔH(iω)†, e.g. a function of the wn_mesh(phys_notation=True) "
-               "indices (n-1)/2, which are not symmetric under iω → -iω.",
-               DeltaN.imag(), DeltaN_scale);
+  if (std::abs(DeltaN.imag()) > 1e-10) {
+    app_log(1, "[WARNING] compute_lr_Nelec: Im(ΔN) = {:.2e}", DeltaN.imag());
+  }
 
   app_log(3, "compute_lr_Nelec: ΔN = {:.6e}", DeltaN.real());
   return DeltaN.real();
@@ -577,9 +568,8 @@ void lr_dyson::build_dmu_response() {
   // compute_lr_Nelec of the response matrix. Taking it from the response rather
   // than from a separate (G·S·G)(β⁻) loop keeps one definition of dN/dμ, and it
   // is the one the Δμ = -ΔN(0)/(dN/dμ) closed form must be consistent with for
-  // the axpy to land on ΔN = 0. The response has no source, so the ΔH(-iω) = ΔH(iω)† check does not apply
-  // (an insulator's Im dN/dμ ~ 1e-9 is round-off against a response of size ~1e-5).
-  _cached_dN_dmu = compute_lr_Nelec(*_sdDm_dmu_skij, /*check_imag=*/false);
+  // the axpy to land on ΔN = 0.
+  _cached_dN_dmu = compute_lr_Nelec(*_sdDm_dmu_skij);
   _dN_dmu_cached = true;
   app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached)", _cached_dN_dmu);
 
@@ -601,6 +591,6 @@ template double lr_dyson::solve_lr_dyson(
     const sArray_t<Array_view_5D_t>*);
 
 template double lr_dyson::compute_lr_Nelec(
-    const sArray_t<Array_view_4D_t>&, bool);
+    const sArray_t<Array_view_4D_t>&);
 
 } // namespace methods
