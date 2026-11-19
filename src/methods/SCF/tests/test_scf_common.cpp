@@ -257,4 +257,40 @@ namespace bdft_tests {
 
 
 
+  TEST_CASE("shared_tau_to_w", "[methods_scf]") {
+    // shared_tau_to_w of the Si G(tau) vs FT.tau_to_w applied serially to each (s,k) block. Same transform, so the
+    // difference is round-off; a wrong (s,k) stride or a missing node sync mixes blocks and gives O(1).
+    auto& context = utils::make_unit_test_mpi_context();
+
+    std::string source_path = PROJECT_SOURCE_DIR;
+    std::string filepath = source_path + "/tests/unit_test_files/pyscf/si_kp222_krhf/";
+    auto mf = mf::make_MF(context, mf::pyscf_source, filepath, "pyscf");
+    imag_axes_ft::IAFT ft(1000.0, 1.2, imag_axes_ft::ir_basis, "high");
+
+    auto [sMO_skij, sE_ski] = get_mf_MOs(*context, mf);
+    auto sG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {ft.nt_f(), mf.nspin(), mf.nkpts(), mf.nbnd(), mf.nbnd()});
+    auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
+        *context, {ft.nw_f(), mf.nspin(), mf.nkpts(), mf.nbnd(), mf.nbnd()});
+    update_G(sG_tskij, sMO_skij, sE_ski, 0.175, ft);
+    shared_tau_to_w(ft, sG_tskij, sG_wskij);
+
+    decltype(nda::range::all) all;
+    nda::array<ComplexType, 3> G_t(ft.nt_f(), mf.nbnd(), mf.nbnd()), G_w(ft.nw_f(), mf.nbnd(), mf.nbnd()), D(ft.nw_f(), mf.nbnd(), mf.nbnd());
+    double err2 = 0.0, ref2 = 0.0;
+    for (long is = 0; is < mf.nspin(); ++is) {
+      for (long ik = 0; ik < mf.nkpts(); ++ik) {
+        G_t = sG_tskij.local()(all, is, ik, all, all);
+        ft.tau_to_w(G_t, G_w, imag_axes_ft::fermion);
+        D = sG_wskij.local()(all, is, ik, all, all);
+        D -= G_w;
+        err2 += nda::sum(nda::abs(D) * nda::abs(D));
+        ref2 += nda::sum(nda::abs(G_w) * nda::abs(G_w));
+      }
+    }
+    app_log(2, "[TEST] shared_tau_to_w vs serial tau_to_w: rel. err = {:.3e}", std::sqrt(err2 / ref2));
+    REQUIRE(std::sqrt(ref2) > 1.0);
+    REQUIRE(std::sqrt(err2 / ref2) < 1e-14);
+  }
+
 } // bdft_tests
