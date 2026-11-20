@@ -461,13 +461,6 @@ public:
   /// (lr_params::embedding); empty if it ran none.
   const std::optional<nda::array<ComplexType, 5>>& DeltaWloc() const { return _DeltaWloc_tabcd; }
 
-  /**
-   * δΣ_dc(τ) of the double counting for the local response `dGloc_tsIab` and, if given, the product-basis
-   * δW^loc `dWloc_pb` (nullptr: δW^loc = 0), after the τ -> iω -> τ round trip the kernel applies.
-   */
-  nda::array<ComplexType, 5> dc_sigma_response(const embedding_info& emb, const nda::array<ComplexType, 5>& dGloc_tsIab,
-                                               const nda::array<ComplexType, 5>* dWloc_pb);
-
 private:
   /**
    * Turn the caller's W_c(iω) into the two operands the SCF loop reads every
