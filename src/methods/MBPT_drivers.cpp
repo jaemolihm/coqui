@@ -2902,8 +2902,9 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     // 1. B(iω) = S + ΔF + τ->ω ΔΣ(τ)
     opt_sB_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, &sS_skij, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
-    // 2. κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k)
-    kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij) / volume;
+    // 2. κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k).
+    //    κ̄ is real: S = S† and every source obeys ΔH(-iω) = ΔH(iω)†, so ΔDm = ΔDm† and Tr[S ΔDm] is real
+    kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
     const double S_norm2 = norm2_of(sS_skij);
     DeltaDm_Gp_rel = std::sqrt(norm2_of(sDeltaDm_skij) / S_norm2);
     {
@@ -2952,7 +2953,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     niter(4) = it;
     opt_sSigma2_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, nullptr, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
-    dkappa_dmu = driver.dyson().compute_lr_Nelec(sDeltaDm_skij) / volume;
+    dkappa_dmu = driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
     // 3. Terms 2 and 3, then Σ'' is not needed any more
     trace_terms = contract_efield_terms(*mpi, ft, sG_wskij, *opt_sB_wskij,
                                         {&*opt_sv_wskij[0], &*opt_sv_wskij[1], &*opt_sv_wskij[2]},
@@ -3002,7 +3003,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
               for (long j = 0; j < nb; ++j) s2 += std::norm(sS_skij.local()(is, ik, i, j));
             dm_scale += k_weight(ik) * std::sqrt(n2) * std::sqrt(s2);
           }
-        const double dN = driver.dyson().compute_lr_Nelec(sDeltaDm_skij);
+        const ComplexType dN = driver.dyson().compute_lr_Nelec(sDeltaDm_skij);
         trace_GE_rel(a) = std::abs(dN) / (spin_factor * std::max(dm_scale, 1e-300));
       }
       // 3. Store the mode for the hessian; keep ΔG^E(τ), ΔDm^E for K^W
