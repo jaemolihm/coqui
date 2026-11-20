@@ -619,8 +619,7 @@ namespace bdft_tests {
         REQUIRE(refl_Twt);
         REQUIRE(refl_Ttw);
 
-        // Twt(-wn, :) vs conj Twt(wn, :) (mesh mirror nw-1-n), compared with ==; the MKL_CBWR=COMPATIBLE path runs in
-        // ctest test_iaft_dlr_mkl_cbwr_compatible (issue #129)
+        // Twt(-wn, :) vs conj Twt(wn, :) (mesh mirror nw-1-n), compared with ==
         bool pair_Twt = true;
         for (long n = 0; n < nw; ++n)
           for (long t = 0; t < nt; ++t) pair_Twt = pair_Twt and (Twt(nw - 1 - n, t) == std::conj(Twt(n, t)));
