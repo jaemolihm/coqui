@@ -2792,7 +2792,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   kernel_x.hartree = false;
   kernel_x.sigma_G_dW = false;
   const bool has_sigma = kernel_a.has_sigma();
-  // W is cached across phases only if the caller keeps it or it is recomputed (one G(τ) fit, not four)
+  // W is cached across phases only if the caller keeps it or it is recomputed (one G(τ) fit, not three)
   const bool cache_W = reuse_W || recompute_W;
   if (recompute_W && !reuse_W) W_cache.reset();
 
@@ -2863,7 +2863,9 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   };
 
   const lr_iter_params iter_params = read_lr_iter_params(pt, false);
-  const bool use_precond = iter_params.alg != "DIIS";  // true if a Σ kernel gets the HSEX preconditioner; DIIS cannot take one
+  const bool use_precond = iter_params.alg != "DIIS";  // false under DIIS, which takes no preconditioner
+  if (!use_precond)
+    app_log(2, "  - iter_alg DIIS takes no preconditioner: the HSEX preconditioner is dropped");
 
   // The lr_params of one phase. W must outlive the lr_driver that p is given to.
   auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W, lr_iter_params const& iter,
@@ -3038,7 +3040,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
       eps_inf_imag_max = std::max(eps_inf_imag_max, 4.0 * M_PI * std::abs(chi2(a, b).imag()));
     }
 
-  // 9. Diagnostics (note sec:diagnostics); thresholds are proposals, to be set from the first GW0 run
+  // 9. Diagnostics (note sec:diagnostics): warn if max|tr G(β/2)| > 1e-6, |κ̄| 4π/|ε∞ - 1| > 1e-6, trace_GE_rel > 1e-6 or herm_M > 1e-6
   const double eps_scale = std::max(std::abs(eps_inf(0, 0) - 1.0), 1e-300);
   if (mpi->comm.root()) {  // every rank holds the same values; one warning is enough
     if (g_thermal > 1e-6)
