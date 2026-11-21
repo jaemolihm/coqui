@@ -174,28 +174,6 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
   return terms;
 }
 
-ComplexType matsubara_pairing(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                              sArray_t<Array_view_5D_t> const& sA_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                              nda::array<double, 1> const& k_weight, double spin_factor, double volume) {
-  decltype(nda::range::all) all;
-  auto [nw, ns, nk, nb, nb2] = sA_wskij.shape();
-  utils::check(sB_wskij.shape() == sA_wskij.shape(), "matsubara_pairing: the two arrays must have one shape.");
-  nda::array<ComplexType, 2> c_w(nw, 1);
-  c_w() = 0.0;
-  matrix_t A(nb, nb), B(nb, nb);
-  auto [b0, b1] = itertools::chunk_range(0, nw * ns * nk, long(mpi.comm.size()), long(mpi.comm.rank()));
-  for (long b = b0; b < b1; ++b) {
-    long n = b / (ns * nk), is = (b / nk) % ns, ik = b % nk;
-    A = sA_wskij.local()(n, is, ik, all, all);
-    B = sB_wskij.local()(n, is, ik, all, all);
-    // 1. c(iω_n) += spin w_k tr[A B]
-    c_w(n, 0) += spin_factor * k_weight(ik) * trace_of_product(A, B);
-  }
-  // 2. Σ_{s,k} over the global communicator, then (1/β) Σ_n c / Ω
-  mpi.comm.all_reduce_in_place_n(c_w.data(), c_w.size(), std::plus<>{});
-  return imag_axes_ft::fermion_matsubara_sum(FT, c_w) / volume;
-}
-
 double thermal_occupation(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij) {
   decltype(nda::range::all) all;
   auto [nt, ns, nk, nb, nb2] = sG_tskij.shape();

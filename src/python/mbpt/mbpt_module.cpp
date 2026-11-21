@@ -108,7 +108,7 @@ namespace coqui_py {
   /**
    * @brief Electronic dielectric tensor from eight Q = 0 LR solves (see methods::run_lr_efield_calc)
    *
-   * @param efield_params - [INPUT] JSON parameters: prefix, output, method, max_iter, tol, iter_alg, kw_correction,
+   * @param efield_params - [INPUT] JSON parameters: prefix, output, method, max_iter, tol, iter_alg,
    *                        reuse_W, recompute_W, screened_interaction_file. Results are written to
    *                        "linear_response_efield/" of <output>.mbpt.h5
    * @param h_int         - [INPUT] THC Coulomb integrals

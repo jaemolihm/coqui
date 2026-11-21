@@ -660,19 +660,6 @@ void lr_driver::apply_kernel(
 }
 
 
-void lr_driver::evaluate_kernel(
-    const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-    const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-    thc_reader_t& thc,
-    const lr_params& p,
-    sArray_t<Array_view_4D_t>& sDeltaF_out,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_out,
-    sArray_t<Array_view_5D_t>* sDeltaSigma_term2_out) {
-  apply_kernel(/*precond=*/false, sDeltaF_out, sDeltaSigma_out, sDeltaDm_skij, sDeltaG_tskij, thc, p,
-               sDeltaSigma_term2_out);
-}
-
-
 void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
                               nda::array<ComplexType, 1>& z,
                               thc_reader_t& thc, const lr_params& p) {

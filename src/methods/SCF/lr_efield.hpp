@@ -40,9 +40,7 @@
  * with every operator a (nb, nb) matrix per (iω, s, k) of a node-shared (nw_f, ns, nk, nb, nb) array.
  *
  * Why lr_hessian_t's pairing machinery is not reused here: terms 2 and 3 are products of four or five matrices at one
- * (iω, k), not pairings of two stored operands, and the K^W pairing of the driver would need `trace_matsubara` and
- * `pack_to_omega`, which are private stripe helpers of the hessian stores. The pairing of two node-shared ω arrays
- * is therefore written out once here (matsubara_pairing).
+ * (iω, k), not pairings of two stored operands.
  */
 namespace methods {
 
@@ -133,18 +131,6 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
                                          sArray_t<Array_view_5D_t> const& sSigma2_wskij,
                                          nda::array<double, 1> const& k_weight, double spin_factor,
                                          double volume);
-
-/**
- * (1/Ω) (1/β) Σ_n spin Σ_k w_k tr[A(iω_n, k) B(iω_n, k)]: the Matsubara pairing of two node-shared iω arrays.
- *
- * Called by run_lr_efield_calc for the K^W diagnostic, <G^E_a, K^W[G^E_b]>, on the iω forms of the stored G^E(τ) and
- * of K^W[G^E](τ). tr[A B] = Σ_ij conj(A_ij(-iω)) B_ij for A(-iω) = A(iω)†, i.e. the pairing the hessian uses.
- *
- * Collective on the global communicator; every rank returns the same value.
- */
-ComplexType matsubara_pairing(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                              sArray_t<Array_view_5D_t> const& sA_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                              nda::array<double, 1> const& k_weight, double spin_factor, double volume);
 
 /**
  * max_{s,k} |tr G(τ*)|: the trace of G(τ) at the node nearest the middle of the interval, an amplitude (not the thermal

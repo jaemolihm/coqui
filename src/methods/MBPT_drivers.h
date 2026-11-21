@@ -297,8 +297,8 @@ void release_lr_W_cache();
  * linear_response_efield/ (eps_inf, chi2 and its three terms, hessian and thermal diagnostics) to <output>.mbpt.h5.
  *
  * @param eri - [INPUT] ERI handler (must be THC)
- * @param pt  - [INPUT] Parameters as property tree: prefix, output, method ("none", "Hartree", "HF", "GW0"), max_iter,
- *              tol, iter_alg.*, kw_correction, reuse_W, recompute_W, screened_interaction_file, h0_source,
+ * @param pt  - [INPUT] Parameters as property tree: prefix, output, method ("none", "Hartree", "HF", "GW0", "GW"), max_iter,
+ *              tol, iter_alg.*, reuse_W, recompute_W, screened_interaction_file, h0_source,
  *              input_type, input_iter; the key list is on the definition in MBPT_drivers.cpp.
  */
 template<typename eri_t>
