@@ -268,14 +268,19 @@ std::string restart_div_treatment(mpi_context_t& mpi, ptree const& pt, const std
  * A restart from a checkpoint that stores a frozen head (scf/eps_inv_head_frozen_t) continues frozen when the input is
  * omitted and aborts when it is false: the stored map is a frozen-head map, and a self-consistent head would run a
  * different one under the same checkpoint. A restart from a self-consistent checkpoint may freeze (the head is then
- * frozen at the checkpoint's last W, by scr_coulomb_t::update_w).
+ * frozen at the first W of the restart, by scr_coulomb_t::update_w). A frozen checkpoint is
+ * restarted by solver "gw" only.
  */
 template<typename mpi_context_t>
-bool restart_freeze_eps_inv_head(mpi_context_t& mpi, ptree const& pt, const std::string& chkpt_file)
+bool restart_freeze_eps_inv_head(mpi_context_t& mpi, ptree const& pt, const std::string& chkpt_file,
+                                 const std::string& solver_type)
 {
   bool freeze = io::get_value_with_default<bool>(pt, "freeze_eps_inv_head", false);
   nda::array<ComplexType, 1> head_t, head_w;
   bool stored = chkpt::read_eps_inv_head_frozen(mpi.comm, chkpt_file, "scf", head_t, head_w);
+  utils::check(!(stored and solver_type != "gw"),
+               "mbpt: restart from {} with solver \"{}\", but the checkpoint stores a frozen eps^-1 head "
+               "(scf/eps_inv_head_frozen_t), which only solver \"gw\" continues.", chkpt_file, solver_type);
   utils::check(!(stored and io::check_child_exists(pt, "freeze_eps_inv_head") and !freeze),
                "mbpt: restart from {} with freeze_eps_inv_head = false, but the checkpoint stores a frozen eps^-1 head "
                "(scf/eps_inv_head_frozen_t). Pass freeze_eps_inv_head = true (or omit it) to continue, or start a new "
@@ -376,8 +381,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   if (restart) {
     div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
     hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
-    if (solver_type == "gw")
-      freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5");
+    freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5", solver_type);
   }
 
   imag_axes_ft::IAFT ft(
@@ -649,8 +653,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   if (restart) {
     div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
     hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
-    if (solver_type == "gw")
-      freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5");
+    freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5", solver_type);
   }
 
   imag_axes_ft::IAFT ft(
@@ -1389,8 +1392,12 @@ auto load_W_and_eps_inv_head(
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
   // A frozen-head ground state used the stored head, not the one of this W
   nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
-  if (read_frozen_eps_inv_head(mpi, input_file, input_grp, frozen_head_t, frozen_head_w))
+  if (read_frozen_eps_inv_head(mpi, input_file, input_grp, frozen_head_t, frozen_head_w)) {
+    utils::check(frozen_head_t.size() == eps_inv_head.size(),
+                 "load_W_and_eps_inv_head: the frozen eps^-1 head in {} does not match the IAFT grid of the checkpoint.",
+                 input_file);
     eps_inv_head = frozen_head_t;
+  }
   mpi.comm.barrier();
 
   return std::make_tuple(std::move(dW_tqPQ), std::move(eps_inv_head),
@@ -2250,20 +2257,6 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     if (reuse_W && !reuse_W_done) {
       W_cache.emplace(lr_W_cache{*opt_dW, *opt_eps_inv, *opt_eps_inv_w});
     }
-    // A ground state run with freeze_eps_inv_head ran the stored head, not the one of this W, and its map has no
-    // dependence of the head on G: the LR uses the stored head and drops head term 2 (lr_driver::apply_kernel_gw).
-    if (unperturbed != "mf_dft") {
-      nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
-      freeze_eps_inv_head = read_frozen_eps_inv_head(*mpi, input_file, input_grp, frozen_head_t, frozen_head_w);  // true if the checkpoint stores a frozen head
-      if (freeze_eps_inv_head) {
-        utils::check(frozen_head_t.size() == opt_eps_inv->size() and frozen_head_w.size() == opt_eps_inv_w->size(),
-                     "run_lr_calc: the frozen eps^-1 head in {} does not match the IAFT grid of the checkpoint.",
-                     input_file);
-        app_log(1, "LR: frozen eps^-1 head from {} (head term 2 dropped)", input_file);
-        *opt_eps_inv = frozen_head_t;
-        *opt_eps_inv_w = frozen_head_w;
-      }
-    }
     lr_init_timer.stop("LR_INIT_LOAD_W");
   }
 
@@ -2318,6 +2311,26 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       }
     }
     lr_init_timer.stop("LR_INIT_GS_LOCAL");
+  }
+
+  // The GW+EDMFT double counting above uses the head of W itself (as the ground state's embed_eri_t does), so the
+  // frozen head replaces it only after that setup.
+  if (include_gw_sigma || exchange_static_W) {
+    // A ground state run with freeze_eps_inv_head ran the stored head, not the one of this W, and its map has no
+    // dependence of the head on G: the LR uses the stored head and drops head term 2 (lr_driver::apply_kernel_gw).
+    if (unperturbed != "mf_dft") {
+      nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
+      // true if the checkpoint stores a frozen head
+      freeze_eps_inv_head = read_frozen_eps_inv_head(*mpi, input_file, input_grp, frozen_head_t, frozen_head_w);
+      if (freeze_eps_inv_head) {
+        utils::check(frozen_head_t.size() == opt_eps_inv->size() and frozen_head_w.size() == opt_eps_inv_w->size(),
+                     "run_lr_calc: the frozen eps^-1 head in {} does not match the IAFT grid of the checkpoint.",
+                     input_file);
+        app_log(1, "LR: frozen eps^-1 head from {} (head term 2 dropped)", input_file);
+        *opt_eps_inv = frozen_head_t;
+        *opt_eps_inv_w = frozen_head_w;
+      }
+    }
   }
 
   // Bcast presence flag for optional inputs so non-root ranks know whether

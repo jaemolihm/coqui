@@ -230,7 +230,7 @@ def run_gw(params, h_int,
           make the q→0 head of ε⁻¹ − 1 a constant of the run. It is taken from the
           checkpoint (``scf/eps_inv_head_frozen_{t,w}``) when it stores one and
           otherwise frozen at the first W the run evaluates (a restart from a
-          converged self-consistent run freezes at that checkpoint's last W) and
+          self-consistent run freezes at the first W of the restart) and
           stored there. The GW head self-energy is then ``-madelung · h · S G S``
           with a fixed ``h``, the derivative of a functional of G, so ``run_lr``
           on the checkpoint drops the head response to ΔW (head term 2) and its
