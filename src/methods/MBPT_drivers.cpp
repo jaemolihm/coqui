@@ -2713,28 +2713,31 @@ template std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr_calc
  *   χ̄⁽²⁾_ab = <G^E_a, V^E_b> + 1/4 Tr[v_a G' v_b G'] + 1/4 Tr[Σ'' G v_a G v_b G]   (symmetrized in ab),
  *   V^E_a = -(i/2)(v_a G B - B G v_a),  B = S - Σ' = S + ΔF + ΔΣ(iω),  G' = -G B G.
  *
- * The four phases (kernel K_a of `method`; K^X = K_a without the Hartree rung; fix_density = false throughout):
+ * The four phases (kernel K_a of `method`; K^X = K_a without the Hartree and ΔW rungs, i.e. at fixed W;
+ * fix_density = false throughout):
  *   A1  K_a, ΔH0 = S                   -> G', B
  *   X   K^X, v modes (ΔH0 = v0_a) and the Σ'' mode (source 2 B G B)   -> v_a, Σ'', terms 2 and 3
  *   A2  K_a, source V^E_a, hessian     -> G^E_a, term 1 = H_sym[b, a]/Ω
- *   F   K^W one-shot diagnostic (GW0 with kw_correction)   -> chi2_KW, KW_Gp_rel
+ *   F   K^W one-shot diagnostic, run only with kw_correction: KW_Gp_rel = ‖K^W[G']‖/‖ΔΣ_A1‖ and, for GW0, chi2_KW
+ * For method "GW", K_a is the full kernel K = K^H + K^X + K^W, so the A1 and A2 solves contain K^W and phase F
+ * (with kw_correction) reports only KW_Gp_rel (K^W[G'] vanishes for a gapped ground state at T ≪ gap).
  * Each phase builds its own lr_driver and W and destroys them at its end, so the peak memory is one phase's.
  *
  * Called by Python `run_lr_efield`. Writes <output>.mbpt.h5:linear_response_efield/ (replaced if present).
  *
  * Keys read from `pt`:
  *   prefix, output (default prefix), input_type ("scf"), input_iter (-1), h0_source ("compute")
- *   method          "none", "Hartree", "HF" or "GW0" (required; "GW" is rejected, its ΔW kernel is the K^W diagnostic)
+ *   method          "none", "Hartree", "HF", "GW0" or "GW" (required)
  *   max_iter, tol   LR SCF iterations and tolerance of every solve (50, 1e-8)
  *   iter_alg.*      as run_lr
- *   kw_correction   GW0 only: add phase F (true)
+ *   kw_correction   run phase F (true): the K^W[G'] diagnostic KW_Gp_rel, and for GW0 the one-shot correction chi2_KW
  *   reuse_W, recompute_W, screened_interaction_file   as run_lr. A W kept by an earlier call is replaced when
  *                   recompute_W is set without reuse_W, and that W is released at the end of this call unless
  *                   reuse_W is set. Without recompute_W and reuse_W the call neither reads nor changes the kept W.
  * The kernel, hessian, fix_density and preconditioner keys of run_lr are driven here and rejected if given.
  *
  * Requires a full-BZ, npol = 1 mean field with the velocity matrix v0 (pw2coqui add_velocity), and a ground state
- * whose self-energy is that of `method` (Σ = 0 for none/Hartree/HF, the GW Σ for GW0).
+ * whose self-energy is that of `method` (Σ = 0 for none/Hartree/HF, the GW Σ for GW0 and GW).
  */
 template<typename eri_t>
 void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
@@ -2761,9 +2764,8 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   auto screened_interaction_file = io::get_value_with_default<std::string>(pt, "screened_interaction_file", "");
   utils::check(tol >= 0.0, "run_lr_efield_calc: tol must be >= 0, got {}.", tol);
   utils::check(max_iter >= 1, "run_lr_efield_calc: max_iter must be >= 1, got {}.", max_iter);
-  utils::check(method == "none" || method == "Hartree" || method == "HF" || method == "GW0",
-               "run_lr_efield_calc: method must be 'none', 'Hartree', 'HF' or 'GW0', got '{}'. The ΔW kernel of "
-               "'GW' is not solved here; kw_correction reports its leading term.", method);
+  utils::check(method == "none" || method == "Hartree" || method == "HF" || method == "GW0" || method == "GW",
+               "run_lr_efield_calc: method must be 'none', 'Hartree', 'HF', 'GW0' or 'GW', got '{}'.", method);
   for (auto key : {"fix_density", "lr_hessian", "split_sigma_terms", "precond_method", "precond_tol",
                    "precond_max_iter", "include_xc", "include_hartree", "include_exchange", "gw_mode",
                    "exclude_hartree_head", "div_treatment"})
@@ -2774,7 +2776,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                "run_lr_efield_calc: unperturbed must be 'checkpoint'.");
   utils::check(mf->nkpts() == mf->nkpts_ibz(),
                "run_lr_efield_calc: the mean field is symmetry-reduced (nkpts_ibz = {} < nkpts = {}). Unfold it to "
-               "the full BZ first (mean_field.unfold_mf and post_proc.unfold_to_new_h5).", mf->nkpts_ibz(), mf->nkpts());
+               "the full BZ first (mean_field.unfold_mf and post_proc.unfold_checkpoint).", mf->nkpts_ibz(), mf->nkpts());
   utils::check(mf->npol() == 1, "run_lr_efield_calc: npol = {} is not supported, only npol = 1.", mf->npol());
   utils::check(mf->has_v0(),
                "run_lr_efield_calc: the mean field has no velocity matrix Orbitals/v0_skxij. Regenerate it with "
@@ -2786,11 +2788,14 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                "run_lr_efield_calc: a '*_metal' hf_div_treatment is not supported, ε∞ needs the gapped treatment.");
 
   const lr_kernel_spec kernel_a = kernel_spec_from_method(method);
-  lr_kernel_spec kernel_x = kernel_a;  // K^X: the Q → 0 limit of χ̄ takes no Hartree rung
+  lr_kernel_spec kernel_x = kernel_a;  // K^X: the Q → 0 limit of χ̄ takes no Hartree rung and no ΔW rung (fixed W)
   kernel_x.hartree = false;
+  kernel_x.sigma_G_dW = false;
   const lr_kernel_spec kernel_full = kernel_spec_from_method("GW");
   const bool has_sigma = kernel_a.has_sigma();
-  const bool do_phase_F = has_sigma && kw_correction;  // the K^W diagnostic needs a W
+  const bool KW_in_kernel = kernel_a.sigma_G_dW;  // method "GW": the solves of A1 and A2 contain K^W
+  const bool do_phase_F = has_sigma && kw_correction;  // phase F needs a W; true for GW0 and GW with kw_correction
+  const bool do_KW_oneshot = do_phase_F && !KW_in_kernel;  // true for GW0 only: GW has K^W in its solves
   // W is cached across phases only if the caller keeps it or it is recomputed (one G(τ) fit, not four)
   const bool cache_W = reuse_W || recompute_W;
   if (recompute_W && !reuse_W) W_cache.reset();
@@ -2825,8 +2830,8 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   utils::check(has_sigma_gs == has_sigma,
                "run_lr_efield_calc: method '{}' needs a ground state {} a self-energy, but the checkpoint {} {}.",
                method, has_sigma ? "with" : "without", input_file,
-               has_sigma_gs ? "carries one (use method = 'GW0')" : "has Σ = 0 (use method = 'HF' or lower)");
-  app_log(2, "run_lr_efield_calc: method {}, K_a = {{{}}}, K^X = {{{}}}; U = {:.2f} MB, peak ≈ 7U per node",
+               has_sigma_gs ? "carries one (use method = 'GW0' or 'GW')" : "has Σ = 0 (use method = 'HF' or lower)");
+  app_log(2, "run_lr_efield_calc: method {}, K_a = {{{}}}, K^X = {{{}}}; U = {:.2f} MB, efield arrays ≈ 7U per node (lr_setup prints the memory estimate of the solver incl. W)",
           method, kernel_a.to_string(), kernel_x.to_string(), U_MB);
 
   // 3. v0_α into a node-shared (ns, nk, 3, nb, nb) array, read once per node
@@ -2919,7 +2924,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
       BmS2 = mpi->comm.all_reduce_value(BmS2);
       B_minus_S_rel = std::sqrt(BmS2 / (double(nw) * S_norm2));
     }
-    // 3. Keep ΔG'(τ), ΔDm' and ‖ΔΣ‖ of A1 for the K^W diagnostic
+    // 3. Keep ΔG'(τ), ΔDm' and ‖ΔΣ‖ of A1 for the K^W[G'] diagnostic
     if (do_phase_F) {
       opt_sGp_tskij.emplace(sDeltaG_tskij);
       opt_sGp_Dm.emplace(sDeltaDm_skij);
@@ -3010,7 +3015,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
       hessian.store_mode(a, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
                          &sDeltaH_wskij);
       mpi->comm.barrier();
-      if (do_phase_F) {
+      if (do_KW_oneshot) {
         opt_sGE_tskij[a].emplace(sDeltaG_tskij);
         opt_sGE_Dm[a].emplace(sDeltaDm_skij);
       }
@@ -3024,7 +3029,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     mpi->comm.barrier();
   }
 
-  // 8. Phase F: K^W[G^E_b] and K^W[G'] of the full kernel, one-shot (term 2 of the split ΔΣ)
+  // 8. Phase F (kw_correction): K^W[G^E_b] (GW0 only) and K^W[G'] of the full kernel, one-shot (term 2 of the split ΔΣ)
   nda::array<ComplexType, 2> chi2_KW(3, 3);
   chi2_KW() = 0.0;
   double KW_Gp_rel = 0.0;
@@ -3040,15 +3045,18 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     auto sKW_tskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nt, ns, nk, nb, nb});
     auto sSigma_scr = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nt, ns, nk, nb, nb});
-    auto sKW_wskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb});
-    auto sGE_wskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb});
-    // 1. <G^E_a, K^W[G^E_b]> = matsubara_pairing(G^E_a(iω), K^W[G^E_b](iω))
-    for (long b = 0; b < 3; ++b) {
+    std::optional<sArray_5D_t> opt_sKW_wskij, opt_sGE_wskij;  // the chi2_KW pairing of GW0 only
+    if (do_KW_oneshot) {
+      opt_sKW_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
+      opt_sGE_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
+    }
+    // 1. <G^E_a, K^W[G^E_b]> = matsubara_pairing(G^E_a(iω), K^W[G^E_b](iω)), GW0 only
+    for (long b = 0; do_KW_oneshot && b < 3; ++b) {
       driver.evaluate_kernel(*opt_sGE_Dm[b], *opt_sGE_tskij[b], thc, p, sDeltaF_skij, &sSigma_scr, &sKW_tskij);
-      shared_tau_to_w(ft, sKW_tskij, sKW_wskij);
+      shared_tau_to_w(ft, sKW_tskij, *opt_sKW_wskij);
       for (long a = 0; a < 3; ++a) {
-        shared_tau_to_w(ft, *opt_sGE_tskij[a], sGE_wskij);
-        chi2_KW(a, b) = matsubara_pairing(*mpi, ft, sGE_wskij, sKW_wskij, k_weight, spin_factor, volume);
+        shared_tau_to_w(ft, *opt_sGE_tskij[a], *opt_sGE_wskij);
+        chi2_KW(a, b) = matsubara_pairing(*mpi, ft, *opt_sGE_wskij, *opt_sKW_wskij, k_weight, spin_factor, volume);
       }
     }
     // 2. KW_Gp_rel = ‖K^W[G']‖/‖ΔΣ_A1‖
@@ -3094,7 +3102,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
       app_warning("run_lr_efield_calc: trace_GE_rel = {:.2e} > 1e-6, G^E carries a charge response.", trace_GE_rel_max);
     if (hess.herm_M > 1e-6)
       app_warning("run_lr_efield_calc: herm_M = {:.2e} > 1e-6, the kernel is not self-adjoint on this grid.", hess.herm_M);
-    if (do_phase_F && KW_norm > 0.1 * chi2_norm)
+    if (do_KW_oneshot && KW_norm > 0.1 * chi2_norm)
       app_warning("run_lr_efield_calc: |χ̄_KW|/|χ̄⁽²⁾| = {:.2e} > 0.1, the ΔW kernel is not a small correction.",
                   KW_norm / chi2_norm);
   }
@@ -3125,11 +3133,11 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     h5::h5_write(grp, "dkappa_dmu", dkappa_dmu);
     nda::h5_write(grp, "trace_GE_rel", trace_GE_rel, false);
     nda::h5_write(grp, "niter", niter, false);
-    if (do_phase_F) {
+    if (do_KW_oneshot) {
       nda::h5_write(grp, "chi2_KW", chi2_KW, false);
       nda::h5_write(grp, "eps_inf_KW", eps_inf_KW, false);
-      h5::h5_write(grp, "KW_Gp_rel", KW_Gp_rel);
     }
+    if (do_phase_F) h5::h5_write(grp, "KW_Gp_rel", KW_Gp_rel);
     h5::h5_write_attribute(grp, "method", method);
     h5::h5_write_attribute(grp, "tol", tol);
     app_log(2, "  - linear_response_efield/ written to {}", out_file);
