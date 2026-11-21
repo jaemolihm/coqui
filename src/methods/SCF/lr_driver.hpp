@@ -531,6 +531,11 @@ private:
                        const lr_params& p,
                        sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij);
 
+  /// Abort if ΔΠ(τ) is not even under τ -> β-τ (#141); see the definition. Sets _dpi_parity_checked.
+  void check_DeltaPi_tau_parity(dArr_4D_t const& dDeltaPi_tqPQ,
+                                const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+                                thc_reader_t& thc, const lr_ibc_DeltaX* ibc_ptr);
+
   /**
    * The preconditioner z = M⁻¹ r, M = 1 - K_pc Pχ. `r` and `z` are this rank's
    * slices of the concatenated (ΔF, ΔΣ) residual and direction, as lr_gcr holds
@@ -648,6 +653,8 @@ private:
   int _pc_cap_hits = 0;   ///< of them, those that stopped at precond_max_iter above tolerance
 
   bool _setup_done = false;
+  /// True once the current perturbation's ΔΠ has passed the τ-parity check (cleared by lr_solve_one).
+  bool _dpi_parity_checked = false;
 
   int _nts;
   int _ns;

@@ -172,7 +172,8 @@ namespace methods {
         thc_reader_t& thc,
         const dArr_5D_t& dG_tsRPQ,
         const dArr_5D_t& dG_mtau_tsRPQ,
-        const lr_ibc_DeltaX* ibc)
+        const lr_ibc_DeltaX* ibc,
+        bool mirrored_tau)
     {
       using local_Array_4D_t = nda::array<ComplexType, 4>;
       using math::nda::make_distributed_array;
@@ -244,13 +245,19 @@ namespace methods {
                      nt_loc, ns, nkpts, NP_loc, NQ_loc, t_origin, P_origin, Q_origin);
       }
 
+      // Mirrored evaluation: ΔΠ(β-τ_i) uses the same formulas with τ_i -> β-τ_i, which swaps the roles of the
+      // G^R(τ) and G^R(β-τ) caches (the IAFT τ grid is reflection symmetric: τ_i + τ_{nt-1-i} = β).
+      auto const& dG_cache_tau   = mirrored_tau ? dG_mtau_tsRPQ : dG_tsRPQ;
+      auto const& dG_cache_mtau  = mirrored_tau ? dG_tsRPQ : dG_mtau_tsRPQ;
+
       auto had_prod2 = nda::map([](ComplexType x, ComplexType y) { return (x * y); });
 
       // ============================================
       // Main loop over τ
       // ============================================
       for (long it = 0; it < nt_loc; ++it) {
-        long it_global = it + t_origin;
+        long it_half = it + t_origin;
+        long it_global = mirrored_tau ? nt_f - it_half - 1 : it_half;  // τ index of the point evaluated
         long it_beta_minus = nt_f - it_global - 1;
 
         // ============================================
@@ -280,14 +287,14 @@ namespace methods {
 
             _Timer.start("PI_LR_HADPROD");
             auto A_3D = nda::reshape(fft_out, shape_t<3>{nkpts, NP_loc, NQ_loc});
-            auto B_3D = dG_mtau_tsRPQ.local()(it, is, nda::ellipsis{});
+            auto B_3D = dG_cache_mtau.local()(it, is, nda::ellipsis{});
             if (is == 0) DeltaPi_RPQ = had_prod2(A_3D, nda::conj(B_3D));
             else         DeltaPi_RPQ += had_prod2(A_3D, nda::conj(B_3D));
             _Timer.stop("PI_LR_HADPROD");
           }
         } else {
           _Timer.start("PI_LR_HADPROD");
-          auto Gm_skPQ = dG_mtau_tsRPQ.local()(it, nda::ellipsis{});
+          auto Gm_skPQ = dG_cache_mtau.local()(it, nda::ellipsis{});
           DeltaPi_RPQ = had_prod2(DeltaG_skPQ_loc(0, nda::ellipsis{}), nda::conj(Gm_skPQ(0, nda::ellipsis{})));
           for (long s = 1; s < ns; ++s) {
             DeltaPi_RPQ += had_prod2(DeltaG_skPQ_loc(s, nda::ellipsis{}), nda::conj(Gm_skPQ(s, nda::ellipsis{})));
@@ -331,14 +338,14 @@ namespace methods {
             _Timer.stop("PI_LR_TREV_PHASE");
 
             _Timer.start("PI_LR_HADPROD");
-            auto A_3D = dG_tsRPQ.local()(it, is, nda::ellipsis{});
+            auto A_3D = dG_cache_tau.local()(it, is, nda::ellipsis{});
             DeltaPi_RPQ += had_prod2(A_3D, B_3D);
             _Timer.stop("PI_LR_HADPROD");
           }
         } else {
           // nkpts == 1: R = 0 only, where e^{ip·R} = 1
           _Timer.start("PI_LR_HADPROD");
-          auto G_skPQ_cached = dG_tsRPQ.local()(it, nda::ellipsis{});
+          auto G_skPQ_cached = dG_cache_tau.local()(it, nda::ellipsis{});
           for (long s = 0; s < ns; ++s) {
             DeltaPi_RPQ += had_prod2(G_skPQ_cached(s, nda::ellipsis{}), DeltaG_skPQ_loc(s, nda::ellipsis{}));
           }

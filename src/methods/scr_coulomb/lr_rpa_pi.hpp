@@ -90,6 +90,9 @@ namespace methods {
        *                       Π's τ-dist. The G factor is always read from here.
        * @param dG_mtau_tsRPQ    - [IN] cached G^R(β−τ), same layout
        * @param ibc          - [IN] optional DeltaX IBC correction data
+       * @param mirrored_tau - [IN] if true, evaluate ΔΠ at the mirrored points β-τ_i of the half grid
+       *                       (the two G^R caches swap roles). Used once per mode by lr_driver to compare
+       *                       ΔΠ(τ) with ΔΠ(β-τ).
        * @return ΔP(τ,q,P,Q) distributed array (nt_half, nkpts, NP, NP)
        *         Distribution: τ-dist {tpools, 1, np_P, np_Q}.
        */
@@ -99,7 +102,8 @@ namespace methods {
           thc_reader_t& thc,
           const dArr_5D_t& dG_tsRPQ,
           const dArr_5D_t& dG_mtau_tsRPQ,
-          const lr_ibc_DeltaX* ibc = nullptr);
+          const lr_ibc_DeltaX* ibc = nullptr,
+          bool mirrored_tau = false);
 
     /// Print the LR Pi timer block (header + total + subclocks) at log level `level`.
     inline void print_timers(int level = 2) {

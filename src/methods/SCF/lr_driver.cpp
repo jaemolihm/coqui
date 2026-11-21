@@ -450,6 +450,69 @@ void lr_driver::lr_setup(
 }
 
 
+/**
+ * Abort if ΔΠ(τ) is not even under τ -> β-τ. Called by apply_kernel_gw on the first ΔΠ of each perturbation with
+ * ΔG != 0 (lr_solve_one clears _dpi_parity_checked).
+ *
+ * evaluate_lr_Pi computes ΔΠ only on the half τ grid, and the ΔW Dyson solve extends it with the
+ * particle-hole-symmetric bosonic transform, which assumes ΔΠ(β-τ) = ΔΠ(τ). With the real-orbital gauge of the
+ * time-reversal operation T|k> = |-k>, this holds when ΔH0^q(-k-q) = ΔH0^q(k)^T, i.e. for Hermitian
+ * time-reversal-even sources (phonon, E field, v0 v0). v0 obeys ΔH0(-k) = -ΔH0(k)^T and gives an odd ΔΠ, as does
+ * i v0; ΔW then comes out wrong at O(1) (#141). The parity of the response is conserved through the LR SCF loop, so one check per perturbation covers it.
+ *
+ * Steps: 1. S = ||ΔG|| ||G|| (Frobenius norms of the node-replicated arrays); S = 0: return, checked again at the next call;
+ *        2. ΔΠ'(τ_i) = ΔΠ(β-τ_i) from a second evaluation with mirrored τ (cost: one more ΔΠ evaluation);
+ *        3. full-grid norms ||ΔΠ_odd|| with ΔΠ_odd = (ΔΠ(τ) - ΔΠ(β-τ)) / 2, and ||ΔΠ||, reduced over all ranks;
+ *        4. abort if ||ΔΠ_odd|| > 1e-6 S and ||ΔΠ_odd|| > 1e-3 ||ΔΠ||. Odd source: ||ΔΠ_odd|| = ||ΔΠ|| = 8 S (Si v0);
+ *           even source: ||ΔΠ_odd|| ~ 1e-9 ||ΔΠ||. The scale S, not ||ΔΠ|| alone, is needed because ΔΠ is zero by symmetry
+ *           for some sources (a uniform shift at half filling, ||ΔΠ|| <= 2e-8 S): there it is round-off with no parity and
+ *           ||ΔΠ_odd|| / ||ΔΠ|| is O(1) (up to 5e-2), but ||ΔΠ_odd|| is far below 1e-6 S.
+ */
+void lr_driver::check_DeltaPi_tau_parity(
+    dArr_4D_t const& dDeltaPi_tqPQ, const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
+    thc_reader_t& thc, const lr_ibc_DeltaX* ibc_ptr) {
+  auto sq_norm = [](ComplexType x) { return std::norm(x); };
+  // 1. S = ||ΔG|| ||G||; the max over ranks makes the early return collective
+  double DeltaG_G_norm = std::sqrt(nda::sum(nda::map(sq_norm)(sDeltaG_tskij.local())))
+                       * std::sqrt(nda::sum(nda::map(sq_norm)(_sG_tskij->local())));
+  _mpi->comm.all_reduce_in_place_n(&DeltaG_G_norm, 1, mpi3::max<>{});
+  if (DeltaG_G_norm == 0.0) return;  // ΔG = 0 (e.g. the first call of a run): check again at the next call
+  _dpi_parity_checked = true;  // true once a nonzero ΔG has been checked
+  // 2. ΔΠ at the mirrored τ points
+  auto dDeltaPi_mirror = _lr_pi->evaluate_lr_Pi(
+      _sG_tskij->local(), sDeltaG_tskij.local(), thc,
+      *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr, /*mirrored_tau=*/true);
+  // 3. Full-grid squared norms from the half grid: the point of a self-mirror τ (odd nt, index nt_half-1) counts once
+  auto DeltaPi_loc = dDeltaPi_tqPQ.local();
+  auto DeltaPi_mirror_loc = dDeltaPi_mirror.local();
+  const long nt_half = dDeltaPi_tqPQ.global_shape()[0];
+  const long t_origin = dDeltaPi_tqPQ.origin()[0];
+  const bool self_mirror_point = (sDeltaG_tskij.local().shape(0) % 2 == 1);
+  std::array<double, 2> sq_norms = {0.0, 0.0};  // ||ΔΠ||^2, ||ΔΠ_odd||^2
+  for (long it = 0; it < DeltaPi_loc.shape(0); ++it) {
+    auto a = DeltaPi_loc(it, nda::ellipsis{});
+    auto b = DeltaPi_mirror_loc(it, nda::ellipsis{});
+    bool at_self_mirror = self_mirror_point && (it + t_origin == nt_half - 1);
+    sq_norms[0] += nda::sum(nda::map(sq_norm)(a)) + (at_self_mirror ? 0.0 : nda::sum(nda::map(sq_norm)(b)));
+    // ΔΠ_odd = (a - b) / 2 at τ_i and -(a - b) / 2 at β-τ_i
+    if (!at_self_mirror)
+      sq_norms[1] += 0.5 * nda::sum(nda::map([](ComplexType x, ComplexType y) { return std::norm(x - y); })(a, b));
+  }
+  _mpi->comm.all_reduce_in_place_n(sq_norms.data(), sq_norms.size(), std::plus<>{});
+  double DeltaPi_norm = std::sqrt(sq_norms[0]);
+  double DeltaPi_odd_norm = std::sqrt(sq_norms[1]);
+  // 4. abort if ||ΔΠ_odd|| > 1e-6 ||ΔG|| ||G|| and ||ΔΠ_odd|| > 1e-3 ||ΔΠ||
+  app_log(2, "  ΔΠ parity: ||ΔΠ_odd|| / (||ΔG|| ||G||) = {:.3e}, F = ||ΔΠ_odd|| / ||ΔΠ|| = {:.3e} (1 for an odd ΔΠ)",
+          DeltaPi_odd_norm / DeltaG_G_norm, DeltaPi_norm > 0.0 ? DeltaPi_odd_norm / DeltaPi_norm : 0.0);
+  utils::check(!(DeltaPi_odd_norm > 1e-6 * DeltaG_G_norm && DeltaPi_odd_norm > 1e-3 * DeltaPi_norm),
+               "lr_driver: ΔΠ(τ) is not even under τ -> β-τ: ΔΠ_odd = (ΔΠ(τ) - ΔΠ(β-τ)) / 2 has ||ΔΠ_odd|| = {:.3e} > "
+               "1e-6 ||ΔG|| ||G|| = {:.3e} and > 1e-3 ||ΔΠ|| = {:.3e}. The ΔW kernel (method GW) builds ΔΠ on the half "
+               "τ grid and extends it assuming ΔΠ(β-τ) = ΔΠ(τ), so time-reversal-odd sources (e.g. v0 at q = 0) are not "
+               "supported with a ΔW kernel; see issue #141.",
+               DeltaPi_odd_norm, 1e-6 * DeltaG_G_norm, 1e-3 * DeltaPi_norm);
+}
+
+
 void lr_driver::apply_kernel_gw(
     sArray_t<Array_view_5D_t>& sSigma_tskij_out,
     const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
@@ -491,6 +554,7 @@ void lr_driver::apply_kernel_gw(
   auto dDeltaPi_tqPQ = _lr_pi->evaluate_lr_Pi(
       _sG_tskij->local(), sDeltaG_tskij.local(), thc,
       *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr);
+  if (!_dpi_parity_checked) check_DeltaPi_tau_parity(dDeltaPi_tqPQ, sDeltaG_tskij, thc, ibc_ptr);
   // ΔΠ += upfold(δΠ_imp - δΠ_dc[δG^loc]), on ΔΠ's own blocks, before the ΔW solve
   nda::array<ComplexType, 5> dGloc_tsIab;
   if (dc) {
@@ -760,6 +824,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
   if (_pc_gcr) _pc_gcr->reset();
   _pc_applies = 0;
   _pc_cap_hits = 0;
+  _dpi_parity_checked = false;  // the ΔΠ parity depends on the source, so it is checked per perturbation
   // No clock is reset here: the SCF timers and the solvers' sub-clocks both
   // accumulate over every perturbation of the call, so the table printed after
   // the last one is the cost of the whole batch. Each intermediate table is
