@@ -185,7 +185,7 @@ namespace methods {
    * @param sDeltaDm_skij     - [INPUT] LR density matrix
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix
    * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nullptr if not used)
-   * @param Delta_mu          - [INPUT] chemical potential shift (complex for a non-Hermitian source with fix_density)
+   * @param Delta_mu          - [INPUT] chemical potential shift (can be complex for a non-Hermitian source)
    * @param niter             - [INPUT] number of SCF iterations
    * @param include_hartree   - [INPUT] whether Hartree was included
    * @param include_exchange  - [INPUT] whether Exchange was included

@@ -564,12 +564,11 @@ void lr_dyson::build_dmu_response() {
   // than from a separate (G·S·G)(β⁻) loop keeps one definition of dN/dμ, and it
   // is the one the Δμ = -ΔN(0)/(dN/dμ) closed form must be consistent with for
   // the axpy to land on ΔN = 0.
-  const ComplexType dN_dmu = compute_lr_Nelec(*_sdDm_dmu_skij);
-  // κ = Tr[S dDm/dμ] of the Hermitian source -S is real; its Im part is numerical noise
-  // (|Im κ| ~ 1e-9, 2.7e-5 of κ on Si HF) and is dropped, so Δμ = -ΔN(0)/κ divides by a real κ
-  _cached_dN_dmu = dN_dmu.real();
+  // dN/dμ is a property of the unperturbed state (the response to the Hermitian source -S), so real;
+  // compute_lr_Nelec returns a complex number for the ΔN of a non-Hermitian source.
+  _cached_dN_dmu = std::real(compute_lr_Nelec(*_sdDm_dmu_skij));
   _dN_dmu_cached = true;
-  app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached), Im = {:.3e}", _cached_dN_dmu, dN_dmu.imag());
+  app_log(2, "build_dmu_response: dN/dμ = {:.12e} (cached)", _cached_dN_dmu);
 
   // This ran one full Dyson pass through the shared sub-clocks. It happens once,
   // before any solve, and lr_driver already bills it to LR_DRIVER_SETUP_DELTAMU,

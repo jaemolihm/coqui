@@ -53,15 +53,15 @@ lr_hessian_t::lr_hessian_t(
     imag_axes_ft::IAFT const& FT,
     nda::array<double, 1> const& k_weight,
     double spin_factor, long nmodes, bool has_sigma,
-    long ns, long nk_ibz, long nbnd, bool plain_only, bool has_source)
+    long ns, long nk_ibz, long nbnd, bool plain_only, bool has_dynamic_source)
     : _mpi(std::move(mpi)),
       _FT(&FT),
       _spin_factor(spin_factor),
       _nmodes(nmodes),
       _plain_only(plain_only),
       _has_sigma(has_sigma && !plain_only),
-      _has_source(has_source),
-      _has_Gw(_has_sigma || has_source),
+      _has_dynamic_source(has_dynamic_source),
+      _has_Gw(_has_sigma || has_dynamic_source),
       _nt(FT.nt_f()),
       _nw(FT.nw_f()),
       _nk(nk_ibz),
@@ -105,7 +105,7 @@ lr_hessian_t::lr_hessian_t(
 
   _Sw.resize(_has_sigma ? _nmodes : 0);
   _Gw.resize(_has_Gw ? _nmodes : 0);
-  _Hw.resize(_has_source ? _nmodes : 0);
+  _Hw.resize(_has_dynamic_source ? _nmodes : 0);
   _dH0.resize(_nmodes);
   _dF.resize(_nmodes);
   _dDm.resize(_nmodes);
@@ -124,7 +124,7 @@ lr_hessian_t::lr_hessian_t(
   } else {
     app_log(1, "\n  Stationary free-energy-hessian estimator: ON");
     app_log(1, "    perturbations = {}, dynamic ΔΣ = {}, dynamic source ΔH(iω) = {}",
-            _nmodes, _has_sigma ? "yes" : "no", _has_source ? "yes" : "no");
+            _nmodes, _has_sigma ? "yes" : "no", _has_dynamic_source ? "yes" : "no");
     app_log(1, "    plus one extra LR Dyson solve per perturbation");
   }
   app_log(2, "    this rank owns {} of {} elements", _nloc, _nF);
@@ -205,7 +205,7 @@ void lr_hessian_t::store_mode(long p,
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
   if (_has_Gw)
     pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M, plain, static'
-  if (_has_source) {
+  if (_has_dynamic_source) {
     utils::check(sDeltaH_w != nullptr, "lr_hessian_t::store_mode: a hessian built with a source needs ΔH(iω).");
     _Hw[p] = pack_omega(*sDeltaH_w);                          // left  of plain, static'
   }
@@ -321,7 +321,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     for (long p = 0; p < _nmodes; ++p)
       for (long l = 0; l < _nmodes; ++l) {
         _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm[p]);
-        if (_has_source) _plain_dyn(l, p) += trace_matsubara(_Hw[l], _Gw[p]);
+        if (_has_dynamic_source) _plain_dyn(l, p) += trace_matsubara(_Hw[l], _Gw[p]);
       }
     _mpi->comm.all_reduce_in_place_n(_plain_stat.data(), _nmodes * _nmodes, std::plus<>{});
     r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
@@ -359,7 +359,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // once.
   //
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
-  // same bounds. _nmodes, _has_sigma and _has_source are identical on every rank, so they do.
+  // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
   for (long p = 0; p < _nmodes; ++p) {
 
     // Mode p's ΔH0 into the shm window: root writes its slice, broadcast_to_nodes
@@ -379,7 +379,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
 
     // Mode p's ΔH(iω) into shm, as for ΔH0: the root writes its slice, broadcast_to_nodes publishes it.
-    if (_has_source) {
+    if (_has_dynamic_source) {
       utils::check(sDeltaH_w != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) window.");
       if (_mpi->comm.root()) {
         utils::check(DeltaH_mwskij_root.has_value(),
@@ -415,7 +415,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
         _M_dyn(l, p)  += trace_matsubara(_Sw[l], _Gw[p]);
         _Mp_dyn(l, p) += trace_matsubara(_Sw[l], Gw_prime);
       }
-      if (_has_source) {
+      if (_has_dynamic_source) {
         _plain_dyn(l, p)        += trace_matsubara(_Hw[l], _Gw[p]);
         _static_prime_dyn(l, p) += trace_matsubara(_Hw[l], Gw_prime);
       }

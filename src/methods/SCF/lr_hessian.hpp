@@ -42,11 +42,11 @@ namespace methods {
  * reference implementation.
  */
 struct lr_hessian_result_t {
-  nda::array<ComplexType, 2> hessian_plain;  ///< Tr(ΔH0_λ, ΔDm_p), the plain estimator
+  nda::array<ComplexType, 2> hessian_plain;  ///< Tr(ΔH0_λ, ΔDm_p) [+ Tr_ω(ΔH_λ, ΔG_p)], the plain estimator
   nda::array<ComplexType, 2> hessian_sym;    ///< static' + M' − M, the stationary one
   nda::array<ComplexType, 2> M;              ///< ⟨K ΔX_λ, ΔX_p⟩, computed in full
   nda::array<ComplexType, 2> M_prime;        ///< ⟨K ΔX_λ, ΔX'_p⟩
-  nda::array<ComplexType, 2> static_prime;   ///< Tr(ΔH0_λ, ΔDm'_p)
+  nda::array<ComplexType, 2> static_prime;   ///< Tr(ΔH0_λ, ΔDm'_p) [+ Tr_ω(ΔH_λ, ΔG'_p)]
   double herm_plain = 0.0;   ///< ‖hessian_plain − hessian_plain†‖ / ‖hessian_plain‖
   double herm_sym = 0.0;     ///< ‖hessian_sym − hessian_sym†‖ / ‖hessian_sym‖
   double herm_M = 0.0;       ///< ‖M − M†‖ / ‖M‖  (self-adjointness of K, measured)
@@ -64,9 +64,10 @@ struct lr_hessian_result_t {
  *
  * The hessian of the free energy with respect to two perturbations λ, p is
  *
- *   H[λ,p] = Tr(ΔH0_λ, ΔDm_p)
+ *   H[λ,p] = Tr(ΔH0_λ, ΔDm_p) + Tr_ω(ΔH_λ, ΔG_p)
  *
- * and `hessian_plain` is exactly that. It is LINEAR in the error of ΔDm, so a
+ * where the second term is present only for a run with a dynamic one-body source ΔH(iω)
+ * (has_dynamic_source); `hessian_plain` is exactly that. It is LINEAR in the error of ΔDm, so a
  * truncated LR solve pollutes it at first order.
  *
  * ## 2. What the LR solve returns, and what it does not satisfy
@@ -92,17 +93,22 @@ struct lr_hessian_result_t {
  * Write ΔX = (ΔDm, ΔG) and let `ΔX' = (ΔDm', ΔG')` be the Dyson-postprocessed
  * result: ONE more Dyson solve on the potential the returned solution implies,
  *
- *   ΔV = ΔH0 + ΔF + ΔΣ,        ΔX' = D[ΔV].
+ *   ΔV = s + ΔF + ΔΣ,        ΔX' = D[ΔV],      s = ΔH0 [+ ΔH(iω)].
  *
  * Then
  *
- *   hessian_sym[λ,p] = Tr(ΔH0_λ, ΔDm'_p) + M'[λ,p] − M[λ,p]
+ *   hessian_sym[λ,p] = static'[λ,p] + M'[λ,p] − M[λ,p]
+ *   static'[λ,p] = Tr(ΔH0_λ, ΔDm'_p) + Tr_ω(ΔH_λ, ΔG'_p)  = ⟨s_λ, ΔX'_p⟩
  *   M [λ,p] = Tr(ΔF_λ, ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )    = ⟨K ΔX_λ, ΔX_p⟩
  *   M'[λ,p] = Tr(ΔF_λ, ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)    = ⟨K ΔX_λ, ΔX'_p⟩
  *
- * is stationary about the exact solution, so its error is quadratic. The price is
+ * is stationary about the exact solution, so its error is quadratic: with
+ * static' + M' = ⟨ΔV, D ΔV⟩, the diagonal reads E(ΔX) = ⟨ΔV, D ΔV⟩ − ⟨K ΔX, ΔX⟩, and
+ * for self-adjoint D and K, δE = 2 Re⟨K δX, D ΔV − ΔX⟩ = 0 at the fixed point ΔX = D ΔV.
+ * The source s enters only through ΔV, so a dynamic ΔH(iω) changes `static'` (and
+ * `plain`) and leaves M, M' and the form unchanged. The price is
  * the one extra Dyson solve per mode. At convergence ΔX' = ΔX and the correction
- * `M' − M + Tr(ΔH0, ΔDm') − Tr(ΔH0, ΔDm)` cancels identically, which is what
+ * `M' − M + static' − plain` cancels identically, which is what
  * `evaluate` reports as ‖hessian_sym − hessian_plain‖.
  *
  * ## 4. The two traces, and why the dynamic one carries a conj and a −iω_n
@@ -230,7 +236,7 @@ public:
    * @param nmodes      - [INPUT] perturbations solved in this batch
    * @param has_sigma   - [INPUT] the kernel carries a dynamic ΔΣ, so `Tr_ω` is live
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
-   * @param has_source  - [INPUT] the solves carry a dynamic one-body source ΔH(iω): the left
+   * @param has_dynamic_source  - [INPUT] the solves carry a dynamic one-body source ΔH(iω): the left
    *                      operand of the plain and static' terms gains Tr_ω(ΔH_λ, ΔG_p) and
    *                      Tr_ω(ΔH_λ, ΔG'_p), the ΔH(iω) store is kept (for the extra solve as well as
    *                      the contraction), and ΔG(iω) is stored for every kernel, Σ-free ones included.
@@ -246,7 +252,7 @@ public:
                         nda::array<double, 1> const& k_weight,
                         double spin_factor, long nmodes, bool has_sigma,
                         long ns, long nk_ibz, long nbnd, bool plain_only = false,
-                        bool has_source = false);
+                        bool has_dynamic_source = false);
 
   lr_hessian_t(lr_hessian_t const&) = delete;
   lr_hessian_t& operator=(lr_hessian_t const&) = delete;
@@ -405,7 +411,7 @@ private:
   long _nmodes;
   bool _plain_only;
   bool _has_sigma;
-  bool _has_source;   ///< the solves carry a dynamic source ΔH(iω)
+  bool _has_dynamic_source;   ///< the solves carry a dynamic source ΔH(iω)
   bool _has_Gw;       ///< ΔG(iω) is stored and re-formed per mode: a Σ or a source reads it
   long _nt, _nw, _nk, _nbnd, _nF;
   long _i0 = 0, _i1 = 0, _nloc = 0;

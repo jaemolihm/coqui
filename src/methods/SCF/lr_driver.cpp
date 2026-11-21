@@ -675,7 +675,8 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
   _hist_layout.S_view_slice(r_S.local()) = r(S_range);
   utils::complete_shared_slices(*_mpi, _hist_layout.pmap(), r_F, r_S);
 
-  // Homogeneous pass: no dynamic source
+  // M⁻¹ r is linear in r, so the source ΔH(iω) of the right-hand side is not passed: it enters only the
+  // start solve of lr_solve_one, precond_solve(ΔH0, nullptr, ΔH(iω))
   precond_solve(r_F, &r_S, /*sDeltaH_wskij=*/nullptr, thc, p);
 
   // z = (r_F + y_F, r_Σ)

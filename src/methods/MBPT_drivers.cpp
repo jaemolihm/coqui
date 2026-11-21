@@ -2391,7 +2391,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     const double spin_factor = (mf->nspin() == 1 && mf->npol() == 1) ? 2.0 : 1.0;
     opt_hessian.emplace(mpi, ft, k_weight, spin_factor, nmodes, include_gw_sigma,
                      mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), /*plain_only=*/!hessian_stationary,
-                     /*has_source=*/has_dynamic_source);
+                     /*has_dynamic_source=*/has_dynamic_source);
   }
 
   for (long m = 0; m < nmodes; ++m) {

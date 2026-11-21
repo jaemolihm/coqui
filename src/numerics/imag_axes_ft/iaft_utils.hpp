@@ -115,8 +115,11 @@ namespace imag_axes_ft {
   /**
    * Fermionic Matsubara sum (1/β) Σ_n c(iω_n) = -c(τ = β⁻) of a function on the fermionic ω grid.
    *
-   * c(iω_n) -> c(τ) by the IAFT's |ω|-weighted fit w_to_tau_w_weighted, then evaluated at τ = β⁻; the
-   * second form is the one computed. On IR w_to_tau_w_weighted is w_to_tau.
+   * The second form is the one computed: c(iω_n) -> c(τ) by w_to_tau_w_weighted, then c(β⁻). On a DLR grid
+   * the sum over the nw_f nodes is defined only through such a fit. w_to_tau_w_weighted is the fit that forms
+   * Dm = -G(β⁻) from G(iω_n) (lr_dyson, compute_Nelec), and the closing is linear in c, so for
+   * c(iω_n) = Σ_ij conj(A_ij) B_ij(iω_n) with an ω-independent A it returns Σ_ij conj(A_ij) Dm_ij[B] exactly.
+   * On IR w_to_tau_w_weighted is w_to_tau.
    *
    * @param FT  - IAFT whose fermionic grid c lives on
    * @param c_w - [INPUT] (nw_f, 1), already reduced over ranks by the caller
