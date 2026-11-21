@@ -33,7 +33,7 @@ _METHODS = ("none", "Hartree", "HF", "GW0", "GW")
 
 
 def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=None,
-                  kw_correction=True, reuse_W=False, recompute_W=False,
+                  reuse_W=False, recompute_W=False,
                   screened_interaction_file=None):
     r"""
     Electronic dielectric tensor eps_inf of an insulator from Q = 0 LR solves.
@@ -58,10 +58,9 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         K = K^H + K^X + K^W with dW = W dPi W: the G' and G^E_a solves use K, the v_a and Sigma'' solves
         use K^X at fixed W (K^W, and the Hartree rung, are left out of them). "GW0" omits K^W from all solves.
     max_iter, tol, iter_alg
-        LR SCF iterations, tolerance and accelerator of every solve, as run_lr.
-    kw_correction : bool
-        Run the one-shot K^W phase: ``KW_Gp_rel`` for GW0 and GW, and for GW0 also the correction ``chi2_KW`` and
-        ``eps_inf_KW`` (GW has K^W in its solves, so it has no such correction).
+        LR SCF iterations, tolerance and accelerator of every solve, as run_lr. The solves of GW0 and GW are
+        preconditioned by HSEX (run_lr's ``precond_method``, default tolerance and sweeps) unless the accelerator
+        is DIIS, which cannot take a preconditioner; the preconditioner changes the rate, not the answer.
     reuse_W, recompute_W, screened_interaction_file
         As run_lr. With ``reuse_W`` the W of the call stays cached for the next call
         (``release_lr_W_cache()`` drops it); with ``recompute_W`` and no ``reuse_W`` the W built by this call is
@@ -74,9 +73,8 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         ``chi2`` (3, 3); its terms ``chi2_GE_sym``, ``chi2_GE_plain``, ``chi2_vGpvGp``, ``chi2_Sigma2``; the
         diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``g_thermal`` (max |tr G(beta/2)| of the ground
         state, not the thermal occupation), ``kappa_bar``,
-        ``dkappa_dmu``, ``DeltaDm_Gp_rel``, ``B_minus_S_rel``, ``trace_GE_rel`` (3,), ``niter`` (8,); with GW0 and
-        ``kw_correction`` also ``chi2_KW``, ``eps_inf_KW``; with GW0 or GW and ``kw_correction`` also
-        ``KW_Gp_rel`` = ||K^W[G']|| / ||dSigma of the G' solve||; and ``method``, ``tol``.
+        ``dkappa_dmu``, ``DeltaDm_Gp_rel``, ``B_minus_S_rel``, ``trace_GE_rel`` (3,), ``niter`` (8,); and
+        ``method``, ``tol``, ``precond_method`` ("HSEX" or "none").
 
     Notes
     -----
@@ -95,7 +93,6 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
     efield_params["max_iter"] = int(max_iter)
     efield_params["tol"] = float(tol)
     efield_params["iter_alg"] = dict(iter_alg or {})
-    efield_params["kw_correction"] = bool(kw_correction)
     efield_params["reuse_W"] = bool(reuse_W)
     efield_params["recompute_W"] = bool(recompute_W)
     if screened_interaction_file is not None:

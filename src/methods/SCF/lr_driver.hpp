@@ -379,26 +379,6 @@ public:
       const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
 
   /**
-   * @brief K[ΔDm, ΔG] of the run's kernel p.kernel, without a Dyson solve.
-   *
-   * Public wrapper of apply_kernel(precond = false, ...), which stays private so that the preconditioner branch,
-   * whose state only some setups build, is not reachable from outside. Applies the kernel to stored
-   * ΔDm, ΔG(τ) of earlier solves kept by the caller, including the split term 2
-   * (sDeltaSigma_term2_out, non-null iff p.split_sigma_terms).
-   *
-   * Collective; the input and output arrays are node-shared. `p` must be the one lr_setup was given. The
-   * outputs are overwritten; sDeltaF_out is untouched when the kernel carries no ΔF, and a null
-   * sDeltaSigma_out evaluates the ΔF branch alone.
-   */
-  void evaluate_kernel(const sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-                       const sArray_t<Array_view_5D_t>& sDeltaG_tskij,
-                       thc_reader_t& thc,
-                       const lr_params& p,
-                       sArray_t<Array_view_4D_t>& sDeltaF_out,
-                       sArray_t<Array_view_5D_t>* sDeltaSigma_out,
-                       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_out = nullptr);
-
-  /**
    * @brief The run's LR Dyson solver.
    *
    * Exposed for the stationary hessian functional, which needs ONE more solve on
