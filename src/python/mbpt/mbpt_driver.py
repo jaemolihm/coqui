@@ -226,6 +226,17 @@ def run_gw(params, h_int,
             correlated subspace.
         - ``dump_w_to_h5`` *(bool, optional, default ``False``)* — if ``True``,
           saves the screened interaction W to the checkpoint file.
+        - ``freeze_eps_inv_head`` *(bool, optional, default ``False``, GW only)* —
+          make the q→0 head of ε⁻¹ − 1 a constant of the run. It is taken from the
+          checkpoint (``scf/eps_inv_head_frozen_{t,w}``) when it stores one and
+          otherwise frozen at the first W the run evaluates (a restart from a
+          self-consistent run freezes at the first W of the restart) and
+          stored there. The GW head self-energy is then ``-madelung · h · S G S``
+          with a fixed ``h``, the derivative of a functional of G, so ``run_lr``
+          on the checkpoint drops the head response to ΔW (head term 2) and its
+          kernel is self-adjoint at q = Γ (``hessian="symmetric"``, #141). Omitted
+          on a restart from a frozen checkpoint it continues frozen; ``False``
+          there is an error. Ignored (logged) for ``ignore_g0`` or one q-point.
 
     h_int : ThcCoulomb or CholCoulomb
         Primary Coulomb interaction object, used for both the polarizability and
@@ -548,7 +559,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         Divergence treatment for the ε⁻¹ head. Accepted only for
         unperturbed="mf_dft"; a hard error otherwise, since the LR run must reuse
         the ground-state treatment, read from "scf/div_treatment" and
-        "scf/hf_div_treatment" in the checkpoint.
+        "scf/hf_div_treatment" in the checkpoint. A checkpoint of a ground state run
+        with ``freeze_eps_inv_head`` also supplies its stored head, and the LR then
+        drops the head response to ΔW (head term 2).
     save_DeltaG : bool, optional
         Write DeltaG_tskij to the checkpoint (default True). It is the largest
         LR dataset and nothing downstream reads it back, so a phonon sweep can

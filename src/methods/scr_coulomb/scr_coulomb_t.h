@@ -87,7 +87,8 @@ namespace solvers {
     scr_coulomb_t(
         const imag_axes_ft::IAFT *ft,
         std::string screen_type,
-      std::string div = "gygi");
+      std::string div = "gygi",
+      bool freeze_eps_inv_head = false);
 
     scr_coulomb_t(scr_coulomb_t const&) = default;
     scr_coulomb_t(scr_coulomb_t &&) = default;
@@ -301,6 +302,11 @@ namespace solvers {
     std::string _screen_type = "";
 
     std::string _div_treatment;
+
+    // freeze_eps_inv_head: the q -> 0 head of eps^-1 - 1 is a constant of the run, taken from the checkpoint
+    // (scf/eps_inv_head_frozen_t) or, if absent, frozen at the first W evaluated by update_w.
+    bool _freeze_eps_inv_head = false;
+    std::optional<nda::array<ComplexType, 1>> _frozen_eps_inv_head_t;
     utils::TimerManager _Timer;
 
     // Distributed bosonic τ↔ω FT engine. The public tau_to_w / w_to_tau

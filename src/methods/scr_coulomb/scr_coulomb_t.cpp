@@ -23,6 +23,7 @@
 #include "methods/ERI/thc_reader_t.hpp"
 #include "methods/HF/thc_solver_comm.hpp"
 #include "methods/GW/g0_div_utils.hpp"
+#include "methods/tools/chkpt_utils.h"
 #include "scr_coulomb_t.h"
 #include "rpa_pi.icc"
 #include "edmft_pi.icc"
@@ -32,9 +33,10 @@ namespace solvers {
 
   scr_coulomb_t::scr_coulomb_t(const imag_axes_ft::IAFT *ft,
                                std::string screen_type,
-                               std::string div):
+                               std::string div,
+                               bool freeze_eps_inv_head):
     _ft(ft), _screen_type(screen_type),
-    _div_treatment(div), _Timer(), _scr_fourier(ft) {
+    _div_treatment(div), _freeze_eps_inv_head(freeze_eps_inv_head), _Timer(), _scr_fourier(ft) {
 
     const std::unordered_set<std::string> valid_pi_scheme = {
         "rpa", "rpa_r", "rpa_k",
@@ -98,9 +100,34 @@ namespace solvers {
     // a) dPi_tqPQ is reset during dyson_W_from_Pi_tau()
     // b) pgrid and bsize of dW_tqPQ are forced to be the same as in dPi_tqPQ
     auto dW_tqPQ = dyson_W_from_Pi_tau<false>(dPi_tqPQ, thc, true);
+    nda::array<ComplexType, 1> eps_inv_head_w;
     auto [eps_inv_head_q, eps_inv_head] =
-        div_utils::eps_inv_head_t(dW_tqPQ, thc, *thc.MF(), _ft, _div_treatment);
-    mb_state.eps_inv_head = eps_inv_head;
+        div_utils::eps_inv_head_t(dW_tqPQ, thc, *thc.MF(), _ft, _div_treatment, false, &eps_inv_head_w);
+
+    // Freezing has no effect without a q -> 0 head to freeze
+    bool freeze_head = _freeze_eps_inv_head and _div_treatment != "ignore_g0" and thc.MF()->nqpts_ibz() > 1;
+    if (_freeze_eps_inv_head and !freeze_head)
+      app_log(2, "  freeze_eps_inv_head: no q -> 0 head (div_treatment = ignore_g0 or one q-point); nothing to freeze.");
+    if (freeze_head and !_frozen_eps_inv_head_t) {
+      // First W of this run: the head is a constant of the run from here on
+      auto chkpt_file = mb_state.coqui_prefix + ".mbpt.h5";
+      nda::array<ComplexType, 1> head_t_stored, head_w_stored;
+      if (chkpt::read_eps_inv_head_frozen(thc.mpi()->comm, chkpt_file, "scf", head_t_stored, head_w_stored)) {
+        // The checkpoint already carries a frozen head: use it
+        utils::check(head_t_stored.size() == eps_inv_head.size(),
+                     "scr_coulomb_t::update_w: scf/eps_inv_head_frozen_t in {} has {} points, this run's IAFT grid has {}.",
+                     chkpt_file, head_t_stored.size(), eps_inv_head.size());
+        app_log(1, "  freeze_eps_inv_head: using the frozen eps^-1 head stored in {}", chkpt_file);
+        _frozen_eps_inv_head_t = std::move(head_t_stored);
+      } else {
+        // Freeze at this W and store it in the checkpoint
+        app_log(1, "  freeze_eps_inv_head: freezing the eps^-1 head at the first W; stored in {}", chkpt_file);
+        chkpt::dump_eps_inv_head_frozen(thc.mpi()->comm, chkpt_file, eps_inv_head, eps_inv_head_w);
+        _frozen_eps_inv_head_t = eps_inv_head;
+      }
+    }
+    // The Sigma head of this run uses the frozen head; the per-iteration dump below keeps the head computed from W
+    mb_state.eps_inv_head = freeze_head ? *_frozen_eps_inv_head_t : eps_inv_head;
 
     mb_state.dW_tqPQ.emplace(std::move(dW_tqPQ));
 

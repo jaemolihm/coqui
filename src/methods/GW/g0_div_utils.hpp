@@ -279,12 +279,15 @@ namespace methods {
        * @param thc - [INPUT] THC-ERI
        * @param mf - [INPUT] mean-field object
        * @param is_lr - [INPUT] dW_tqPQ is a linear response ΔW (see extrapolate_eps_inv_q0)
+       * @param eps_inv_q0_w_out - [OUTPUT] if given, the q = 0 head on the Matsubara axis before its
+       *                           transform to imaginary time (keeps the "_metal" nu = 0 pin exact)
        * @return - inverse of symmetric dielectric function at finite q and q = 0
        */
       template<nda::MemoryArrayOfRank<4> Array_w_t, THC_ERI thc_t, typename communicator_t>
       static auto eps_inv_head_t(memory::darray_t<Array_w_t, communicator_t> &dW_tqPQ, thc_t &thc,
                                  mf::MF &mf, const imag_axes_ft::IAFT *ft,
-                                 std::string div_treatment="gygi", bool is_lr=false)
+                                 std::string div_treatment="gygi", bool is_lr=false,
+                                 nda::array<ComplexType, 1> *eps_inv_q0_w_out=nullptr)
       -> std::tuple<nda::array<ComplexType, 2>, nda::array<ComplexType, 1> > {
 
         // Compute the head (i.e. G=G'=0 component) of the inverse dielectric function at finite q
@@ -305,6 +308,8 @@ namespace methods {
         // Perform q=0 extrapolation on frequency domain data
         nda::array<ComplexType, 1> eps_inv_q0_w = 
           extrapolate_eps_inv_q0(eps_inv_w, mf, div_treatment, is_lr);
+
+        if (eps_inv_q0_w_out != nullptr) *eps_inv_q0_w_out = eps_inv_q0_w;
 
         // Convert result back to time domain
         nda::array<ComplexType, 1> eps_inv_q0_t(nts);

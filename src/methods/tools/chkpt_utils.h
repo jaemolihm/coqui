@@ -265,6 +265,27 @@ namespace methods {
                              std::string const& hf_div_treatment);
 
   /**
+   * Store the frozen q->0 head of epsilon^-1 - 1 (GS flag freeze_eps_inv_head) on the "scf" group:
+   * "eps_inv_head_frozen_t" (imaginary-time axis, what Sigma_div_correction uses) and
+   * "eps_inv_head_frozen_w" (Matsubara axis with the "_metal" nu=0 pin intact, read by the HSEX
+   * preconditioner). The presence of the two datasets is what marks a checkpoint as frozen.
+   * Written once, first writer wins: a later call on a checkpoint that has them changes nothing.
+   */
+  template<typename communicator_t>
+  void dump_eps_inv_head_frozen(communicator_t& comm, std::string filename,
+                                nda::array<ComplexType, 1> const& head_t,
+                                nda::array<ComplexType, 1> const& head_w);
+
+  /**
+   * Read the frozen head written by dump_eps_inv_head_frozen from group `grp_name` of `filename`
+   * (root reads, all ranks receive).
+   * @return false, leaving the outputs untouched, when the group or the datasets are absent.
+   */
+  template<typename communicator_t>
+  bool read_eps_inv_head_frozen(communicator_t& comm, std::string filename, std::string const& grp_name,
+                                nda::array<ComplexType, 1>& head_t, nda::array<ComplexType, 1>& head_w);
+
+  /**
    * Record on the group `grp_name` ("scf" or "embed", the groups LR reads) that the
    * ground state was run at a fixed chemical potential (dataset "fixed_mu", a.u.), so
    * that LR can refuse fix_density on it. Written only when `mu` has a value; without

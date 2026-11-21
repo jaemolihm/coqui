@@ -264,6 +264,35 @@ std::string restart_div_treatment(mpi_context_t& mpi, ptree const& pt, const std
 }
 
 /**
+ * Whether a ground-state run freezes the q -> 0 head of eps^-1 - 1 (input "freeze_eps_inv_head", default false).
+ * A restart from a checkpoint that stores a frozen head (scf/eps_inv_head_frozen_t) continues frozen when the input is
+ * omitted and aborts when it is false: the stored map is a frozen-head map, and a self-consistent head would run a
+ * different one under the same checkpoint. A restart from a self-consistent checkpoint may freeze (the head is then
+ * frozen at the first W of the restart, by scr_coulomb_t::update_w). A frozen checkpoint is
+ * restarted by solver "gw" only.
+ */
+template<typename mpi_context_t>
+bool restart_freeze_eps_inv_head(mpi_context_t& mpi, ptree const& pt, const std::string& chkpt_file,
+                                 const std::string& solver_type)
+{
+  bool freeze = io::get_value_with_default<bool>(pt, "freeze_eps_inv_head", false);
+  nda::array<ComplexType, 1> head_t, head_w;
+  bool stored = chkpt::read_eps_inv_head_frozen(mpi.comm, chkpt_file, "scf", head_t, head_w);
+  utils::check(!(stored and solver_type != "gw"),
+               "mbpt: restart from {} with solver \"{}\", but the checkpoint stores a frozen eps^-1 head "
+               "(scf/eps_inv_head_frozen_t), which only solver \"gw\" continues.", chkpt_file, solver_type);
+  utils::check(!(stored and io::check_child_exists(pt, "freeze_eps_inv_head") and !freeze),
+               "mbpt: restart from {} with freeze_eps_inv_head = false, but the checkpoint stores a frozen eps^-1 head "
+               "(scf/eps_inv_head_frozen_t). Pass freeze_eps_inv_head = true (or omit it) to continue, or start a new "
+               "checkpoint for a self-consistent head.", chkpt_file);
+  if (stored and !freeze) {
+    app_log(1, "  restart: freeze_eps_inv_head = true from {}", chkpt_file);
+    freeze = true;
+  }
+  return freeze;
+}
+
+/**
  * Many-body perturbation calculations from a given mean-field and ERI objects with arguments in property tree.
  * Optional arguments (with default values):
  *  - beta: "1000" Inverse temperature (a.u.)
@@ -272,6 +301,8 @@ std::string restart_div_treatment(mpi_context_t& mpi, ptree const& pt, const std
  *  - iaft_prec: "high" Precision of IAFT grids. {choices: "high", "medium", "low"}
  *  - div_treatment: "gygi" Divergent treatment for Coulomb kernel. {choices: "ignore_g0", "gygi"}
  *  - hf_div_treatment: "gygi" Divergent treatment for Coulomb kernel in HF. {choices: "ignore_g0", "gygi"}
+ *  - freeze_eps_inv_head: "false" (solver "gw" only) Freeze the q -> 0 head of eps^-1 - 1 at the first W of the run and
+ *          store it in the checkpoint (scf/eps_inv_head_frozen_{t,w}); a restart reuses the stored head.
  *  - niter: "1" Number of iterations in the self-consistent loop.
  *  - conv_thr: "1e-9" Convergence threshold for the self-consistent loop.
  *  - const_mu: "false" Fix the chemical potential during the self-consistent loop.
@@ -299,6 +330,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   auto hf_div_treatment = io::get_value_with_default<std::string>(pt, "hf_div_treatment", "gygi");
   io::tolower(div_treatment);
   io::tolower(hf_div_treatment);
+  auto freeze_eps_inv_head = io::get_value_with_default<bool>(pt, "freeze_eps_inv_head", false);
+  utils::check(!freeze_eps_inv_head or solver_type == "gw",
+               "mbpt: freeze_eps_inv_head is supported by solver \"gw\" only, got solver \"{}\".", solver_type);
 
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
@@ -347,6 +381,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
   if (restart) {
     div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
     hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
+    freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5", solver_type);
   }
 
   imag_axes_ft::IAFT ft(
@@ -393,7 +428,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt)
     } else {
       iter_solver = nullptr;
     }
-    solvers::scr_coulomb_t scr_eri(&ft, screen_type, div_treatment);
+    solvers::scr_coulomb_t scr_eri(&ft, screen_type, div_treatment, freeze_eps_inv_head);
     solvers::gw_t gw(&ft, div_treatment, output);
     if (screen_type.substr(0,8)=="gw_edmft") {
 
@@ -566,6 +601,9 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   auto hf_div_treatment = io::get_value_with_default<std::string>(pt, "hf_div_treatment", "gygi");
   io::tolower(div_treatment);
   io::tolower(hf_div_treatment);
+  auto freeze_eps_inv_head = io::get_value_with_default<bool>(pt, "freeze_eps_inv_head", false);
+  utils::check(!freeze_eps_inv_head or solver_type == "gw",
+               "mbpt: freeze_eps_inv_head is supported by solver \"gw\" only, got solver \"{}\".", solver_type);
 
   auto niter = io::get_value_with_default<int>(pt,"niter",1);
   auto conv_thr = io::get_value_with_default<double>(pt,"conv_thr",1e-8);
@@ -615,6 +653,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
   if (restart) {
     div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "div_treatment");
     hf_div_treatment = restart_div_treatment(*mpi, pt, output + ".mbpt.h5", "hf_div_treatment");
+    freeze_eps_inv_head = restart_freeze_eps_inv_head(*mpi, pt, output + ".mbpt.h5", solver_type);
   }
 
   imag_axes_ft::IAFT ft(
@@ -637,7 +676,7 @@ void mbpt(std::string solver_type, eri_t &eri, ptree const& pt,
     } else {
       iter_solver = nullptr;
     }
-    solvers::scr_coulomb_t scr_eri(&ft, screen_type, div_treatment);
+    solvers::scr_coulomb_t scr_eri(&ft, screen_type, div_treatment, freeze_eps_inv_head);
     solvers::gw_t gw(&ft, div_treatment, output);
     MBState mb_state(ft, output, mf, projector_ksIai, band_window, kpts_crys, trans_home_cell, false);
     if (local_polarizabilities) {
@@ -1253,6 +1292,20 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
 }
 
 /**
+ * Read the frozen q -> 0 head of eps^-1 - 1 (scf/eps_inv_head_frozen_{t,w}, written by a ground state run with
+ * freeze_eps_inv_head) from `input_grp` of `input_file`, falling back to the "scf" group like read_div_treatment.
+ * Called by every LR path that otherwise recomputes the head from W, so that it linearizes the map that was run.
+ * @return false (outputs untouched) for a checkpoint with a self-consistent head.
+ */
+template<typename mpi_context_t>
+bool read_frozen_eps_inv_head(mpi_context_t& mpi, const std::string& input_file, const std::string& input_grp,
+                              nda::array<ComplexType, 1>& head_t, nda::array<ComplexType, 1>& head_w)
+{
+  return chkpt::read_eps_inv_head_frozen(mpi.comm, input_file, input_grp, head_t, head_w) or
+         (input_grp != "scf" and chkpt::read_eps_inv_head_frozen(mpi.comm, input_file, "scf", head_t, head_w));
+}
+
+/**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
  * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
@@ -1337,6 +1390,14 @@ auto load_W_and_eps_inv_head(
   dW_qtPQ.reset();
   auto [eps_inv_head_q, eps_inv_head] =
       solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
+  // A frozen-head ground state used the stored head, not the one of this W
+  nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
+  if (read_frozen_eps_inv_head(mpi, input_file, input_grp, frozen_head_t, frozen_head_w)) {
+    utils::check(frozen_head_t.size() == eps_inv_head.size(),
+                 "load_W_and_eps_inv_head: the frozen eps^-1 head in {} does not match the IAFT grid of the checkpoint.",
+                 input_file);
+    eps_inv_head = frozen_head_t;
+  }
   mpi.comm.barrier();
 
   return std::make_tuple(std::move(dW_tqPQ), std::move(eps_inv_head),
@@ -2103,6 +2164,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   /// The same head on the ω axis; HSEX reads its ν = 0 component.
   std::optional<nda::array<ComplexType, 1>> opt_eps_inv_w;
   std::string div_treatment = "gygi";
+  /// The ground state froze its eps^-1 head (GS flag freeze_eps_inv_head): head term 2 is absent from its map.
+  bool freeze_eps_inv_head = false;
   // An LR run must reproduce the divergence treatment of the ground state it
   // linearizes: the q→0 head of Σ_GW is the exchange Madelung term screened by
   // ε⁻¹, so the correlation and exchange corrections only cancel (exactly, in a
@@ -2250,6 +2313,26 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     lr_init_timer.stop("LR_INIT_GS_LOCAL");
   }
 
+  // The GW+EDMFT double counting above uses the head of W itself (as the ground state's embed_eri_t does), so the
+  // frozen head replaces it only after that setup.
+  if (include_gw_sigma || exchange_static_W) {
+    // A ground state run with freeze_eps_inv_head ran the stored head, not the one of this W, and its map has no
+    // dependence of the head on G: the LR uses the stored head and drops head term 2 (lr_driver::apply_kernel_gw).
+    if (unperturbed != "mf_dft") {
+      nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
+      // true if the checkpoint stores a frozen head
+      freeze_eps_inv_head = read_frozen_eps_inv_head(*mpi, input_file, input_grp, frozen_head_t, frozen_head_w);
+      if (freeze_eps_inv_head) {
+        utils::check(frozen_head_t.size() == opt_eps_inv->size() and frozen_head_w.size() == opt_eps_inv_w->size(),
+                     "run_lr_calc: the frozen eps^-1 head in {} does not match the IAFT grid of the checkpoint.",
+                     input_file);
+        app_log(1, "LR: frozen eps^-1 head from {} (head term 2 dropped)", input_file);
+        *opt_eps_inv = frozen_head_t;
+        *opt_eps_inv_w = frozen_head_w;
+      }
+    }
+  }
+
   // Bcast presence flag for optional inputs so non-root ranks know whether
   // to participate in make_shared_from_root_input.
   using sArray_4D_t = math::shm::shared_array<Array_view_4D_t>;
@@ -2344,6 +2427,15 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
+  // The kernel of a self-consistent head carries head term 2 (-madelung Δh S G S, Δh = ΔW head), which is not the
+  // derivative of a functional: the hessian pairing is not self-adjoint at q = Γ (#141).
+  if (hessian_stationary and total_kernel.sigma_G_dW and unperturbed != "mf_dft" and !freeze_eps_inv_head and
+      div_treatment != "ignore_g0" and mf->nqpts_ibz() > 1 and utils::is_q_gamma(q_vec)) {
+    app_warning("run_lr: lr_hessian = \"symmetric\" at q = Gamma on a checkpoint with a self-consistent eps^-1 head "
+                "and a dW kernel: the kernel is not self-adjoint there (head term 2, #141), so hessian_M and "
+                "hessian_sym are not Hermitian. Run the ground state with freeze_eps_inv_head = true.");
+  }
+
   lr_params p;
   p.kernel           = total_kernel;
   p.include_xc       = include_xc;
@@ -2358,6 +2450,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
   p.eps_inv_head_w   = opt_eps_inv_w ? &(*opt_eps_inv_w) : nullptr;
   p.div_treatment    = div_treatment;
+  p.freeze_eps_inv_head = freeze_eps_inv_head;
   p.hf_div_treatment = hf_div_treatment;
   p.sDeltaX_left     = pDeltaX_left;
   p.sDeltaX_right    = pDeltaX_right;
@@ -3253,13 +3346,16 @@ nda::array<ComplexType, 5> lr_gw_sigma_DeltaW_calc(
   // convolution for FD tests.
   auto S_loc = sS_skij.local();
   nda::array<ComplexType, 1> delta_eps_inv_head;
-  if (div_corr && utils::is_q_gamma(q_pert)) {
+  // A frozen head has no ΔW dependence: no term 2
+  nda::array<ComplexType, 1> frozen_head_t, frozen_head_w;
+  bool frozen_head = read_frozen_eps_inv_head(*mpi, input_file, input_grp, frozen_head_t, frozen_head_w);
+  if (div_corr && utils::is_q_gamma(q_pert) && !frozen_head) {
     auto [delta_eps_inv_q, delta_head] =
         solvers::div_utils::eps_inv_head_t(dDeltaW_tqPQ, thc, *mf, &ft, div_treatment,
                                            /*is_lr=*/true);
     delta_eps_inv_head = std::move(delta_head);
   }
-  bool apply_div = div_corr && utils::is_q_gamma(q_pert);
+  bool apply_div = div_corr && utils::is_q_gamma(q_pert) && !frozen_head;
   lr.evaluate_sigma_DeltaW(sDeltaSigma_tskij, sG_tskij.local(), dDeltaW_tqPQ, thc,
                            dG_tsRPQ, dG_mtau_tsRPQ,
                            apply_div ? &S_loc : nullptr,
