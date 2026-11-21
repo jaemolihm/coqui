@@ -29,7 +29,7 @@ import h5py
 import numpy as np
 from mpi4py import MPI
 
-_METHODS = ("none", "Hartree", "HF", "GW0")
+_METHODS = ("none", "Hartree", "HF", "GW0", "GW")
 
 
 def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=None,
@@ -52,13 +52,16 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         ``input_iter``, ``h0_source``, as run_lr.
     h_int : ThcCoulomb
         THC Coulomb integrals of a full-BZ, npol = 1 mean field that carries ``Orbitals/v0_skxij``.
-    method : {"none", "Hartree", "HF", "GW0"}
+    method : {"none", "Hartree", "HF", "GW0", "GW"}
         Kernel ladder rung. The ground state must have the self-energy of the rung: Sigma = 0 for
-        none/Hartree/HF, the GW Sigma for GW0 (checked in C++).
+        none/Hartree/HF, the GW Sigma for GW0 and GW (checked in C++). "GW" is the full kernel
+        K = K^H + K^X + K^W with dW = W dPi W: the G' and G^E_a solves use K, the v_a and Sigma'' solves
+        use K^X at fixed W (K^W, and the Hartree rung, are left out of them). "GW0" omits K^W from all solves.
     max_iter, tol, iter_alg
         LR SCF iterations, tolerance and accelerator of every solve, as run_lr.
     kw_correction : bool
-        GW0 only: also evaluate the one-shot K^W diagnostic, ``chi2_KW`` and ``eps_inf_KW``.
+        Run the one-shot K^W phase: ``KW_Gp_rel`` for GW0 and GW, and for GW0 also the correction ``chi2_KW`` and
+        ``eps_inf_KW`` (GW has K^W in its solves, so it has no such correction).
     reuse_W, recompute_W, screened_interaction_file
         As run_lr. With ``reuse_W`` the W of the call stays cached for the next call
         (``release_lr_W_cache()`` drops it); with ``recompute_W`` and no ``reuse_W`` the W built by this call is
@@ -72,7 +75,8 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``g_thermal`` (max |tr G(beta/2)| of the ground
         state, not the thermal occupation), ``kappa_bar``,
         ``dkappa_dmu``, ``DeltaDm_Gp_rel``, ``B_minus_S_rel``, ``trace_GE_rel`` (3,), ``niter`` (8,); with GW0 and
-        ``kw_correction`` also ``chi2_KW``, ``eps_inf_KW``, ``KW_Gp_rel``; and ``method``, ``tol``.
+        ``kw_correction`` also ``chi2_KW``, ``eps_inf_KW``; with GW0 or GW and ``kw_correction`` also
+        ``KW_Gp_rel`` = ||K^W[G']|| / ||dSigma of the G' solve||; and ``method``, ``tol``.
 
     Notes
     -----
