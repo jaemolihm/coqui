@@ -24,6 +24,7 @@
 #include <utility>
 
 #include "methods/SCF/lr_hessian.hpp"
+#include "numerics/imag_axes_ft/iaft_utils.hpp"
 #include "nda/blas.hpp"
 #include "utilities/check.hpp"
 #include "IO/app_loggers.h"
@@ -52,13 +53,15 @@ lr_hessian_t::lr_hessian_t(
     imag_axes_ft::IAFT const& FT,
     nda::array<double, 1> const& k_weight,
     double spin_factor, long nmodes, bool has_sigma,
-    long ns, long nk_ibz, long nbnd, bool plain_only)
+    long ns, long nk_ibz, long nbnd, bool plain_only, bool has_source)
     : _mpi(std::move(mpi)),
       _FT(&FT),
       _spin_factor(spin_factor),
       _nmodes(nmodes),
       _plain_only(plain_only),
       _has_sigma(has_sigma && !plain_only),
+      _has_source(has_source),
+      _has_Gw(_has_sigma || has_source),
       _nt(FT.nt_f()),
       _nw(FT.nw_f()),
       _nk(nk_ibz),
@@ -89,20 +92,7 @@ lr_hessian_t::lr_hessian_t(
   // iω_n → −iω_n on the fermionic grid. The pairing is the τ-domain conjugate
   // transpose, FT[A(τ)†](iω_n) = A(−iω_n)†, so the grid has to be closed under
   // negation for it to be representable at all.
-  {
-    nda::array<long, 1> wn(_FT->wn_mesh_f());
-    _refl = nda::array<long, 1>(_nw);
-    _refl() = -1;
-    for (long n = 0; n < _nw; ++n)
-      for (long m = 0; m < _nw; ++m)
-        if (wn(m) == -wn(n)) { _refl(n) = m; break; }
-    for (long n = 0; n < _nw; ++n)
-      utils::check(_refl(n) >= 0,
-                   "lr_hessian_t: the fermionic Matsubara grid is not closed "
-                   "under negation — no partner for index {} (wn = {}). The hessian "
-                   "estimator's inner product is not representable on it.",
-                   n, wn(n));
-  }
+  _refl = imag_axes_ft::fermion_reflection_index(*_FT);
 
   // w_k of each of this rank's elements. The flattened (s,k,i,j) index e gives
   // k = (e / nbnd²) % nk.
@@ -114,13 +104,14 @@ lr_hessian_t::lr_hessian_t(
   }
 
   _Sw.resize(_has_sigma ? _nmodes : 0);
-  _Gw.resize(_has_sigma ? _nmodes : 0);
+  _Gw.resize(_has_Gw ? _nmodes : 0);
+  _Hw.resize(_has_source ? _nmodes : 0);
   _dH0.resize(_nmodes);
   _dF.resize(_nmodes);
   _dDm.resize(_nmodes);
 
-  for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat,
-                  &_M_dyn, &_Mp_dyn}) {
+  for (auto* a : {&_plain_stat, &_plain_dyn, &_static_prime_stat, &_static_prime_dyn,
+                  &_M_stat, &_Mp_stat, &_M_dyn, &_Mp_dyn}) {
     *a = nda::array<ComplexType, 2>(_nmodes, _nmodes);
     (*a)() = ComplexType(0.0);
   }
@@ -132,7 +123,8 @@ lr_hessian_t::lr_hessian_t(
     app_log(1, "\n  Plain free-energy hessian Tr(ΔH0, ΔDm): ON  (perturbations = {})", _nmodes);
   } else {
     app_log(1, "\n  Stationary free-energy-hessian estimator: ON");
-    app_log(1, "    perturbations = {}, dynamic ΔΣ = {}", _nmodes, _has_sigma ? "yes" : "no");
+    app_log(1, "    perturbations = {}, dynamic ΔΣ = {}, dynamic source ΔH(iω) = {}",
+            _nmodes, _has_sigma ? "yes" : "no", _has_source ? "yes" : "no");
     app_log(1, "    plus one extra LR Dyson solve per perturbation");
   }
   app_log(2, "    this rank owns {} of {} elements", _nloc, _nF);
@@ -163,6 +155,21 @@ void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
 }
 
 
+nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
+    sArray_t<Array_view_5D_t> const& src) const {
+  auto loc = src.local();
+  utils::check(loc.size() == _nw * _nF,
+               "lr_hessian_t: ΔH(iω) has {} elements, expected nw*ns*nk*nb*nb = {}.",
+               loc.size(), _nw * _nF);
+  auto flat = nda::reshape(loc, std::array<long, 1>{_nw * _nF});
+  nda::array<ComplexType, 2> out(_nw, _nloc);
+  if (_nloc > 0)
+    for (long n = 0; n < _nw; ++n)
+      out(n, nda::range::all) = flat(nda::range(n * _nF + _i0, n * _nF + _i1));
+  return out;
+}
+
+
 nda::array<ComplexType, 1> lr_hessian_t::pack_static(
     sArray_t<Array_view_4D_t> const& src, bool weighted) const {
   auto loc = src.local();
@@ -183,7 +190,8 @@ void lr_hessian_t::store_mode(long p,
                                        sArray_t<Array_view_4D_t> const& sDeltaH0,
                                        sArray_t<Array_view_4D_t> const& sDeltaF,
                                        sArray_t<Array_view_5D_t> const* sDeltaSigma,
-                                       sArray_t<Array_view_5D_t> const* sDeltaG) {
+                                       sArray_t<Array_view_5D_t> const* sDeltaG,
+                                       sArray_t<Array_view_5D_t> const* sDeltaH_w) {
   // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
   // contraction is a single unweighted dot over the whole local slab. Which side a
   // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
@@ -193,9 +201,13 @@ void lr_hessian_t::store_mode(long p,
   if (!_plain_only)
     _dF[p] = pack_static(sDeltaF, /*weighted=*/false);   // left  of M, M'
   _dDm[p] = pack_static(sDeltaDm, /*weighted=*/true);    // right of plain, M
-  if (_has_sigma) {
+  if (_has_sigma)
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
-    pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M
+  if (_has_Gw)
+    pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M, plain, static'
+  if (_has_source) {
+    utils::check(sDeltaH_w != nullptr, "lr_hessian_t::store_mode: a hessian built with a source needs ΔH(iω).");
+    _Hw[p] = pack_omega(*sDeltaH_w);                          // left  of plain, static'
   }
   _Timer.stop("LR_HESS_STORE");
 }
@@ -244,6 +256,7 @@ void lr_hessian_t::rebuild_raw_kernel(
                                     loc.data() + t * _nF, _nF);
     sDeltaSigma_out->win().fence();
   }
+
   _mpi->comm.barrier();
   _Timer.stop("LR_HESS_REBUILD");
 }
@@ -259,12 +272,11 @@ ComplexType lr_hessian_t::trace_static_local(nda::array<ComplexType, 1> const& a
 ComplexType lr_hessian_t::matsubara_sum(nda::array<ComplexType, 2>& c) const {
   // c is a per-rank partial over the element slice, so it is reduced before the FT.
   _mpi->comm.all_reduce_in_place_n(c.data(), c.size(), std::plus<>{});
-  // (1/β) Σ_n c(iω_n) = −c(τ = β⁻); the second form is the one evaluated.
-  nda::array<ComplexType, 2> c_tau(_nt, 1);
-  nda::array<ComplexType, 1> c_beta(1);
-  _FT->w_to_tau(c, c_tau, imag_axes_ft::fermion);
-  _FT->tau_to_beta(c_tau, c_beta);
-  return -c_beta(0);
+  // lr_dyson forms ΔDm from ΔG(iω) with w_to_tau_w_weighted, and the closing sum uses the same functional
+  // so that Tr_ω(ΔH_λ, ΔG_p) matches Tr(ΔH0_λ, ΔDm_p) for a static ΔH_λ. With it the DLR hessian of a dynamic
+  // source is Hermitian to 5e-12 (Si HF, below the IR floor 1e-11; plain w_to_tau closing: 1.6e-9, issue #135).
+  // On IR the two fits coincide.
+  return imag_axes_ft::fermion_matsubara_sum(*_FT, c);
 }
 
 
@@ -296,36 +308,40 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     sArray_t<Array_view_5D_t>* sDeltaSigma,
     sArray_t<Array_view_5D_t>* sDeltaG,
     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-    bool fix_density) {
+    std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
+    bool fix_density,
+    sArray_t<Array_view_5D_t>* sDeltaH_w) {
 
   // The accumulators are reduced and rescaled in place, so this is single-shot,
   // after every mode is stored.
   lr_hessian_result_t r;
 
-  // Plain only: Tr(ΔH0_λ, ΔDm_p) from the stores, no Dyson solve.
+  // Plain only: Tr(ΔH0_λ, ΔDm_p) [+ Tr_ω(ΔH_λ, ΔG_p)] from the stores, no Dyson solve.
   if (_plain_only) {
     for (long p = 0; p < _nmodes; ++p)
-      for (long l = 0; l < _nmodes; ++l)
+      for (long l = 0; l < _nmodes; ++l) {
         _plain_stat(l, p) += trace_static_local(_dH0[l], _dDm[p]);
+        if (_has_source) _plain_dyn(l, p) += trace_matsubara(_Hw[l], _Gw[p]);
+      }
     _mpi->comm.all_reduce_in_place_n(_plain_stat.data(), _nmodes * _nmodes, std::plus<>{});
     r.hessian_plain = nda::array<ComplexType, 2>(_nmodes, _nmodes);
     for (long l = 0; l < _nmodes; ++l)
       for (long p = 0; p < _nmodes; ++p)
-        r.hessian_plain(l, p) = ComplexType(_spin_factor) * _plain_stat(l, p);
+        r.hessian_plain(l, p) = ComplexType(_spin_factor) * (_plain_stat(l, p) + _plain_dyn(l, p));
     r.herm_plain = herm_dev(r.hessian_plain);
     app_log(1, "\n  Plain free-energy-hessian diagnostics");
     app_log(1, "    ||H_plain - H_plain^dag||/||H_plain|| = {:.3e}\n", r.herm_plain);
     return r;
   }
 
-  r.Delta_mu_improved = nda::array<double, 1>(_nmodes);
+  r.Delta_mu_improved = nda::array<ComplexType, 1>(_nmodes);
   r.Delta_mu_improved() = 0.0;
 
   // The equation, term by term. Every trace of it is taken in the loop below:
   //
-  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p )
+  //   plain  [λ,p] = Tr  (ΔH0_λ, ΔDm_p ) + Tr_ω(ΔH_λ, ΔG_p )     (ΔH: dynamic source, if any)
   //   M      [λ,p] = Tr  (ΔF_λ,  ΔDm_p ) + Tr_ω(ΔΣ_λ, ΔG_p )
-  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p)
+  //   static'[λ,p] = Tr  (ΔH0_λ, ΔDm'_p) + Tr_ω(ΔH_λ, ΔG'_p)
   //   M'     [λ,p] = Tr  (ΔF_λ,  ΔDm'_p) + Tr_ω(ΔΣ_λ, ΔG'_p)
   //
   //   H_plain = spin · plain
@@ -343,7 +359,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // once.
   //
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
-  // same bounds. _nmodes and _has_sigma are identical on every rank, so they do.
+  // same bounds. _nmodes, _has_sigma and _has_source are identical on every rank, so they do.
   for (long p = 0; p < _nmodes; ++p) {
 
     // Mode p's ΔH0 into the shm window: root writes its slice, broadcast_to_nodes
@@ -362,13 +378,25 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     // the form the Dyson solver takes its right-hand side in.
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
 
+    // Mode p's ΔH(iω) into shm, as for ΔH0: the root writes its slice, broadcast_to_nodes publishes it.
+    if (_has_source) {
+      utils::check(sDeltaH_w != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) window.");
+      if (_mpi->comm.root()) {
+        utils::check(DeltaH_mwskij_root.has_value(),
+                     "lr_hessian_t::evaluate: the ΔH(iω) stack must be provided on the MPI global root.");
+        sDeltaH_w->local() = (*DeltaH_mwskij_root)(p, nda::ellipsis{});
+      }
+      sDeltaH_w->broadcast_to_nodes(0);
+    }
+
     // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
     // costs. ΔG(τ) is replicated only when the Matsubara term needs it — that
     // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
     r.Delta_mu_improved(p) =
-        dyson.solve_lr_dyson(sDeltaDm, sDeltaH0, sDeltaF, sDeltaSigma, fix_density);
-    if (_has_sigma) dyson.materialize_DeltaG_tau(*sDeltaG);
+        dyson.solve_lr_dyson(sDeltaDm, sDeltaH0, sDeltaF, sDeltaSigma, fix_density,
+                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr), sDeltaH_w);
+    if (_has_Gw) dyson.materialize_DeltaG_tau(*sDeltaG);
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");
 
@@ -376,7 +404,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     _Timer.start("LR_HESS_CONTRACT");
     auto dDm_prime = pack_static(sDeltaDm, /*weighted=*/true);
     nda::array<ComplexType, 2> Gw_prime;
-    if (_has_sigma) pack_to_omega(*sDeltaG, Gw_prime, /*weighted=*/true);
+    if (_has_Gw) pack_to_omega(*sDeltaG, Gw_prime, /*weighted=*/true);
 
     for (long l = 0; l < _nmodes; ++l) {
       _plain_stat(l, p)        += trace_static_local(_dH0[l], _dDm[p]);
@@ -386,6 +414,10 @@ lr_hessian_result_t lr_hessian_t::evaluate(
       if (_has_sigma) {
         _M_dyn(l, p)  += trace_matsubara(_Sw[l], _Gw[p]);
         _Mp_dyn(l, p) += trace_matsubara(_Sw[l], Gw_prime);
+      }
+      if (_has_source) {
+        _plain_dyn(l, p)        += trace_matsubara(_Hw[l], _Gw[p]);
+        _static_prime_dyn(l, p) += trace_matsubara(_Hw[l], Gw_prime);
       }
     }
     _Timer.stop("LR_HESS_CONTRACT");
@@ -397,9 +429,9 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
   _Timer.stop("LR_HESS_CONTRACT");
 
-  // Only the static halves are rank-local partials. The dynamic ones came back
-  // complete from trace_matsubara, which reduced them itself, so they are left
-  // alone here — reducing them again would multiply them by the rank count.
+  // Only the static halves are rank-local partials. The dynamic ones (_M_dyn, _Mp_dyn, _plain_dyn,
+  // _static_prime_dyn) came back complete from trace_matsubara, which reduced them itself, so they
+  // are left alone here — reducing them again would multiply them by the rank count.
   const long nm2 = _nmodes * _nmodes;
   for (auto* a : {&_plain_stat, &_static_prime_stat, &_M_stat, &_Mp_stat})
     _mpi->comm.all_reduce_in_place_n(a->data(), nm2, std::plus<>{});
@@ -413,8 +445,8 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   const ComplexType sf(_spin_factor);
   for (long l = 0; l < _nmodes; ++l)
     for (long p = 0; p < _nmodes; ++p) {
-      r.hessian_plain(l, p) = sf * _plain_stat(l, p);
-      r.static_prime(l, p)  = sf * _static_prime_stat(l, p);
+      r.hessian_plain(l, p) = sf * (_plain_stat(l, p) + _plain_dyn(l, p));
+      r.static_prime(l, p)  = sf * (_static_prime_stat(l, p) + _static_prime_dyn(l, p));
       r.M(l, p)             = sf * (_M_stat(l, p)  + _M_dyn(l, p));
       r.M_prime(l, p)       = sf * (_Mp_stat(l, p) + _Mp_dyn(l, p));
       r.hessian_sym(l, p)   = r.static_prime(l, p) + r.M_prime(l, p) - r.M(l, p);

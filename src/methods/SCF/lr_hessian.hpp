@@ -52,7 +52,7 @@ struct lr_hessian_result_t {
   double herm_M = 0.0;       ///< ‖M − M†‖ / ‖M‖  (self-adjointness of K, measured)
   /// Δμ of each mode's extra Dyson solve, as that solve recomputed it. Zero
   /// throughout unless the run is fix_density at q = Γ.
-  nda::array<double, 1> Delta_mu_improved;
+  nda::array<ComplexType, 1> Delta_mu_improved;
 };
 
 /**
@@ -230,6 +230,10 @@ public:
    * @param nmodes      - [INPUT] perturbations solved in this batch
    * @param has_sigma   - [INPUT] the kernel carries a dynamic ΔΣ, so `Tr_ω` is live
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
+   * @param has_source  - [INPUT] the solves carry a dynamic one-body source ΔH(iω): the left
+   *                      operand of the plain and static' terms gains Tr_ω(ΔH_λ, ΔG_p) and
+   *                      Tr_ω(ΔH_λ, ΔG'_p), the ΔH(iω) store is kept (for the extra solve as well as
+   *                      the contraction), and ΔG(iω) is stored for every kernel, Σ-free ones included.
    * @param plain_only  - [INPUT] set by run_lr(hessian="plain"): compute `hessian_plain`
    *                      only, for a run whose ΔF/ΔΣ are not K of the returned ΔDm/ΔG
    *                      (an order-n run, max_iter = n at tol = 0). It reads ΔH0 and ΔDm,
@@ -241,7 +245,8 @@ public:
                         imag_axes_ft::IAFT const& FT,
                         nda::array<double, 1> const& k_weight,
                         double spin_factor, long nmodes, bool has_sigma,
-                        long ns, long nk_ibz, long nbnd, bool plain_only = false);
+                        long ns, long nk_ibz, long nbnd, bool plain_only = false,
+                        bool has_source = false);
 
   lr_hessian_t(lr_hessian_t const&) = delete;
   lr_hessian_t& operator=(lr_hessian_t const&) = delete;
@@ -259,14 +264,16 @@ public:
    * @param sDeltaH0   - [INPUT] ΔH0_p
    * @param sDeltaF    - [INPUT] raw ΔF_p
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
-   * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel (never read then)
+   * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel without a source (never read then)
+   * @param sDeltaH_w  - [INPUT] ΔH_p(iω) (nw, ns, nk, nb, nb), null without a source
    */
   void store_mode(long p,
                   sArray_t<Array_view_4D_t> const& sDeltaDm,
                   sArray_t<Array_view_4D_t> const& sDeltaH0,
                   sArray_t<Array_view_4D_t> const& sDeltaF,
                   sArray_t<Array_view_5D_t> const* sDeltaSigma,
-                  sArray_t<Array_view_5D_t> const* sDeltaG);
+                  sArray_t<Array_view_5D_t> const* sDeltaG,
+                  sArray_t<Array_view_5D_t> const* sDeltaH_w = nullptr);
 
   /**
    * @brief Evaluate the whole functional: for every stored mode, solve the extra
@@ -299,10 +306,14 @@ public:
    * @param sDeltaDm   - [OUT] scratch for ΔDm'_p
    * @param sDeltaF    - [OUT] scratch for the rebuilt raw ΔF_p
    * @param sDeltaSigma- [OUT] scratch for the rebuilt raw ΔΣ_p; null if Σ-free
-   * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free
+   * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
    * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
    *                                     the global root only
+   * @param DeltaH_mwskij_root - [INPUT] (nmodes,nw,ns,nk,nb,nb) source ΔH(iω) stack, engaged on the
+   *                                     global root only; unengaged without a source
    * @param fix_density- [INPUT] the flag the original solves used
+   * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
+   *                     to the extra solve; null without a source
    */
   lr_hessian_result_t evaluate(
       lr_dyson& dyson,
@@ -312,7 +323,9 @@ public:
       sArray_t<Array_view_5D_t>* sDeltaSigma,
       sArray_t<Array_view_5D_t>* sDeltaG,
       std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-      bool fix_density);
+      std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
+      bool fix_density,
+      sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr);
 
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
   /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail.
@@ -320,8 +333,8 @@ public:
 
 private:
   /**
-   * @brief Put the stored raw ΔF_p / ΔΣ_p back into shm, so the extra Dyson solve
-   *        can be handed ΔV = ΔH0 + ΔF + ΔΣ.
+   * @brief Put the stored raw ΔF_p / ΔΣ_p back into shm, so the extra Dyson solve can be handed
+   *        ΔV = ΔH0 + ΔF + ΔΣ.
    *
    * ΔΣ(τ) is rebuilt by a rank-local `w_to_tau` of this rank's ω slab followed by
    * one completion collective per τ point; the τ axis is never split, which is why
@@ -361,7 +374,8 @@ private:
   ComplexType trace_matsubara(nda::array<ComplexType, 2> const& Aw,
                               nda::array<ComplexType, 2> const& Bw) const;
 
-  /// Reduce a striped c(iω_n) and return (1/β) Σ_n c(iω_n) = −c(τ = β⁻).
+  /// Reduce a striped c(iω_n) and return (1/β) Σ_n c(iω_n) = −c(τ = β⁻)
+  /// (imag_axes_ft::fermion_matsubara_sum after the reduction).
   /// Collective; shared by trace_matsubara and self_pairing, which build their
   /// c(iω_n) differently but finish it identically. `c` is consumed.
   ComplexType matsubara_sum(nda::array<ComplexType, 2>& c) const;
@@ -371,6 +385,10 @@ private:
   /// which every RIGHT operand carries and no left operand does.
   void pack_to_omega(sArray_t<Array_view_5D_t> const& src,
                      nda::array<ComplexType, 2>& dst_w, bool weighted) const;
+
+  /// Pack this rank's element slice of a node-replicated (nw,ns,nk,nb,nb) array into `(nw, nloc)`,
+  /// as it is: the source ΔH(iω) is already on the ω grid, so no transform runs.
+  nda::array<ComplexType, 2> pack_omega(sArray_t<Array_view_5D_t> const& src) const;
 
   /// Pack this rank's element slice of a node-replicated (ns,nk,nb,nb) array.
   nda::array<ComplexType, 1> pack_static(sArray_t<Array_view_4D_t> const& src,
@@ -387,6 +405,8 @@ private:
   long _nmodes;
   bool _plain_only;
   bool _has_sigma;
+  bool _has_source;   ///< the solves carry a dynamic source ΔH(iω)
+  bool _has_Gw;       ///< ΔG(iω) is stored and re-formed per mode: a Σ or a source reads it
   long _nt, _nw, _nk, _nbnd, _nF;
   long _i0 = 0, _i1 = 0, _nloc = 0;
 
@@ -401,6 +421,7 @@ private:
   /// operand at store time turns every pair contraction into one flat dotc.
   std::vector<nda::array<ComplexType, 2>> _Sw;    ///< ΔΣ_λ(iω), unweighted
   std::vector<nda::array<ComplexType, 2>> _Gw;    ///< ΔG_p(iω), weighted
+  std::vector<nda::array<ComplexType, 2>> _Hw;    ///< ΔH_λ(iω), unweighted (source only)
   std::vector<nda::array<ComplexType, 1>> _dH0;   ///< ΔH0_λ, unweighted
   std::vector<nda::array<ComplexType, 1>> _dF;    ///< ΔF_λ, unweighted
   std::vector<nda::array<ComplexType, 1>> _dDm;  ///< ΔDm_p, weighted
@@ -414,11 +435,13 @@ private:
   //   *_dyn   are COMPLETE (trace_matsubara reduces internally) and must NOT be
   //           reduced again — doing so would multiply them by the rank count.
   //
-  //   H_plain = plain
-  //   H_sym   = static' + M' − M
+  //   H_plain = plain_stat + plain_dyn
+  //   H_sym   = static'_stat + static'_dyn + M' − M
   //
   nda::array<ComplexType, 2> _plain_stat;         ///< Tr(ΔH0_λ, ΔDm_p)
+  nda::array<ComplexType, 2> _plain_dyn;          ///< Tr_ω(ΔH_λ, ΔG_p)   (source only)
   nda::array<ComplexType, 2> _static_prime_stat;  ///< Tr(ΔH0_λ, ΔDm'_p)
+  nda::array<ComplexType, 2> _static_prime_dyn;   ///< Tr_ω(ΔH_λ, ΔG'_p)  (source only)
   nda::array<ComplexType, 2> _M_stat;             ///< Tr(ΔF_λ, ΔDm_p)
   nda::array<ComplexType, 2> _M_dyn;              ///< Tr_ω(ΔΣ_λ, ΔG_p)
   nda::array<ComplexType, 2> _Mp_stat;            ///< Tr(ΔF_λ, ΔDm'_p)

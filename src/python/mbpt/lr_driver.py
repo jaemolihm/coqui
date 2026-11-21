@@ -349,8 +349,8 @@ def read_lr_hessian(filename: str) -> dict:
     file can contend on the file lock.
     """
     complex_keys = ("hessian", "hessian_sym", "hessian_M", "hessian_M_prime",
-                    "hessian_static_prime")
-    real_keys = ("hessian_call_index", "Delta_mu_improved")
+                    "hessian_static_prime", "Delta_mu_improved")
+    real_keys = ("hessian_call_index",)
     scalar_keys = ("hessian_herm_dev", "hessian_sym_herm_dev", "hessian_M_herm_dev")
 
     with h5py.File(filename, 'r') as f:
@@ -367,9 +367,12 @@ def read_lr_hessian(filename: str) -> dict:
         for key in complex_keys:
             if key not in lr_grp:
                 continue
-            a = lr_grp[key][()]
-            # CoQui writes complex as a trailing (..., 2) real/imag axis.
-            out[key] = a[..., 0] + 1j * a[..., 1]
+            ds = lr_grp[key]
+            a = ds[()]
+            if "__complex__" in ds.attrs:  # CoQui writes complex as a trailing (..., 2) real/imag axis
+                out[key] = a[..., 0] + 1j * a[..., 1]
+            else:  # real dataset (Delta_mu_improved of a checkpoint written before it became complex)
+                out[key] = a.astype(complex)
         for key in real_keys:
             if key in lr_grp:
                 out[key] = lr_grp[key][()]

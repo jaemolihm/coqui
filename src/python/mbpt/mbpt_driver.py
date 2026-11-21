@@ -412,7 +412,7 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
            precond_tol=None, precond_max_iter=None,
            hessian="none",
            *, projector_info=None, local_polarizabilities=None, lr_impurity_response=None,
-           reuse_W=False, exclude_hartree_head=False):
+           reuse_W=False, exclude_hartree_head=False, DeltaH_mwskij=None):
     """
     Run unified linear response calculation.
 
@@ -652,6 +652,18 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
         solve yields the macroscopically unscreened χ̄; exchange, W and GW keep the full v.
         The removed term is that of the THC's q image, from its stored basis head; a
         no-op at q = Γ. Requires the Hartree rung. Assumes a bare-Coulomb THC.
+    DeltaH_mwskij : ndarray or None, optional
+        Dynamic one-body source ΔH(iω), (nmodes, nw_f, ns, nk, nb, nb), or (nw_f, ns, nk, nb, nb) for a
+        single perturbation (then DeltaH0_skij must be rank 4), on the fermionic Matsubara grid of the
+        checkpoint: values at iω_n = i·wn·π/β (Ha) with wn = ``iaft.wn_mesh("fermion")`` (not
+        ``phys_notation=True``). Complex linear combinations of the sources the kernels treat exactly
+        (time-reversal-even Hermitian ones) give the exact linear response, at npol = 1 (the npol > 1
+        ΔF symmetrization in lr_hf assumes a Hermitian ΔF); with fix_density at Γ, Δμ is complex for
+        such a combination. Root rank only. It is added to ΔH0 + ΔF + ΔΣ(iω) on the
+        right-hand side of the Dyson equation of mode m at every iteration, and to the hessian's left operand
+        (Tr_ω(ΔH_λ, ΔG_p) beside Tr(ΔH0_λ, ΔDm_p)). A source constant in iω equal to A gives the
+        same result as ΔH0 = A. Rejected together with DeltaX_left/DeltaX_right/DeltaV_qPQ,
+        qp_static_sigma and projector_info.
     precond_method : str, optional
         Static kernel — "none" (default), "Hartree", "HF" or "HSEX" — used only
         as the preconditioner M = 1 - K_pc χ of the iteration: GCR directions
@@ -675,9 +687,11 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float] or tuple[np.ndarray, np.ndarray]
+    tuple[int, complex] or tuple[np.ndarray, np.ndarray]
         (niter, Delta_mu) — scalars for a 4-D DeltaH0_skij, per-mode arrays for
-        a 5-D one.
+        a 5-D one. Delta_mu is always complex; it is nonzero only for fix_density at q = Γ,
+        and complex there for a non-Hermitian source (Δμ = -ΔN_0/κ, κ = dN/dμ real). For a Hermitian
+        source Im Δμ is numerical noise (up to ~1e-5 of Re Δμ on Si).
 
     Notes
     -----
@@ -728,6 +742,24 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
     else:
         DeltaH0_skij = None
     squeeze = MPI.COMM_WORLD.bcast(squeeze, root=0)
+
+    # The source carries the mode axis like ΔH0: promote a single perturbation's (nw, ns, nk, nb, nb)
+    # The rank check is made on the root and its verdict broadcast, so every rank raises together
+    source_error = None
+    if MPI.COMM_WORLD.Get_rank() == 0 and DeltaH_mwskij is not None:
+        DeltaH_mwskij = np.asarray(DeltaH_mwskij, dtype=np.complex128)
+        if DeltaH_mwskij.ndim != (5 if squeeze else 6):
+            source_error = (
+                "run_lr: DeltaH_mwskij must have rank 5 (nw_f, ns, nk, nb, nb) for a rank-4 "
+                "DeltaH0_skij, or rank 6 (nmodes, nw_f, ns, nk, nb, nb) for a rank-5 one; got shape "
+                f"{DeltaH_mwskij.shape}.")
+        elif squeeze:
+            DeltaH_mwskij = DeltaH_mwskij[None]
+    else:
+        DeltaH_mwskij = None
+    source_error = MPI.COMM_WORLD.bcast(source_error, root=0)
+    if source_error is not None:
+        raise ValueError(source_error)
 
     if recompute_W and screened_interaction_file is not None:
         raise ValueError(
@@ -823,9 +855,9 @@ def run_lr(params, h_int, q_vec, DeltaH0_skij,
 
     niter, delta_mu = run_lr_cpp(
         json.dumps(lr_params), h_int, q_vec, DeltaH0_skij, dx_left, dx_right, dv_qPQ,
-        *proj_args)
+        *proj_args, DeltaH_mwskij)
     if squeeze:
-        return int(niter[0]), float(delta_mu[0])
+        return int(niter[0]), complex(delta_mu[0])
     return niter, delta_mu
 
 def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
@@ -892,7 +924,7 @@ def run_lr_g0w0(params, h_int, q_vec, DeltaH0_skij, div_treatment=None,
 
     Returns
     -------
-    tuple[int, float]
+    tuple[int, complex]
         (niter, Delta_mu). The one-shot loop does not converge, so niter = 2.
     """
     return run_lr(params, h_int, q_vec, DeltaH0_skij,
@@ -964,7 +996,7 @@ def run_lr_qpgw(params, h_int, q_vec, DeltaH0_skij,
 
     Returns
     -------
-    tuple[int, float]
+    tuple[int, complex]
         (niter, Delta_mu).
 
     Notes

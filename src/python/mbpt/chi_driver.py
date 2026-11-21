@@ -344,7 +344,7 @@ def run_chi(params, h_int, mf, q_vec, G_mill,
         save_DeltaG=False, hessian=hessian, div_treatment=div_treatment,
         **kwargs)
     niter = np.atleast_1d(niter).astype(np.int64)
-    delta_mu = np.atleast_1d(delta_mu).astype(np.float64)
+    delta_mu = np.atleast_1d(delta_mu).real.astype(np.float64)  # fix_density=False, so Delta_mu = 0
 
     # A stalled column reports max_iter + 1 (lr_solve_one hands back the loop
     # variable), so max_iter itself is a legitimate last-iteration convergence.
