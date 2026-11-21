@@ -132,11 +132,11 @@ struct lr_hessian_result_t {
  * look like bugs otherwise: the conj and the reflected frequency index come from
  * that substitution, not from an inner-product convention imposed by hand; and NO
  * orbital transpose survives, since summing conj(A_ji) B_ji over all (i,j) is the
- * elementwise Frobenius pairing. So, with `refl(n)` the iω_n → −iω_n permutation
+ * elementwise Frobenius pairing. So, with `minus_w(n)` the index of −iω_n
  * of the fermionic grid:
  *
  *   Tr  (A,B) = spin · Σ_{s,k} w_k Σ_{ij} conj(A[s,k,i,j]) B[s,k,i,j]
- *   c(iω_n)   = Σ_{s,k,i,j} w_k conj(A[refl(n),s,k,i,j]) B[n,s,k,i,j]
+ *   c(iω_n)   = Σ_{s,k,i,j} w_k conj(A[minus_w(n),s,k,i,j]) B[n,s,k,i,j]
  *   Tr_ω(A,B) = spin · (1/β) Σ_n c(iω_n) = −spin · c(τ = β⁻)
  *
  * The single minus sign belongs to the τ = β⁻ form, not to the (1/β) Σ_n one —
@@ -162,7 +162,7 @@ struct lr_hessian_result_t {
  * estimator second order — hence `herm_M` below is a diagnostic of the estimator
  * and not merely of `M`.
  *
- * A static left operand is n-independent under `refl`, so its share of every
+ * A static left operand is n-independent under `minus_w`, so its share of every
  * ⟨ΔΣ,·⟩ collapses onto `Tr` against ΔDm = −ΔG(β⁻). ΔF is therefore never fed
  * through the fermionic FT — a constant is not antiperiodic and has no fermionic
  * representation.
@@ -367,7 +367,7 @@ private:
    * @brief Tr_ω(A,B), whole: the ω sum included, so this returns the number the
    *        equation asks for rather than a per-ω accumulator to be finished later.
    *
-   *   c(iω_n) = Σ_e conj(A[refl(n), e]) B[n, e]        (w_k already folded into B)
+   *   c(iω_n) = Σ_e conj(A[minus_w(n), e]) B[n, e]        (w_k already folded into B)
    *   Tr_ω(A,B) = (1/β) Σ_n c(iω_n) = −c(τ = β⁻)
    *
    * COLLECTIVE on mpi->comm, unlike trace_static_local — c is striped, so it has to
@@ -381,7 +381,7 @@ private:
                               nda::array<ComplexType, 2> const& Bw) const;
 
   /// Reduce a striped c(iω_n) and return (1/β) Σ_n c(iω_n) = −c(τ = β⁻)
-  /// (imag_axes_ft::fermion_matsubara_sum after the reduction).
+  /// (imag_axes_ft::matsubara_sum, |ω|-weighted, after the reduction).
   /// Collective; shared by trace_matsubara and self_pairing, which build their
   /// c(iω_n) differently but finish it identically. `c` is consumed.
   ComplexType matsubara_sum(nda::array<ComplexType, 2>& c) const;
@@ -393,7 +393,9 @@ private:
                      nda::array<ComplexType, 2>& dst_w, bool weighted) const;
 
   /// Pack this rank's element slice of a node-replicated (nw,ns,nk,nb,nb) array into `(nw, nloc)`,
-  /// as it is: the source ΔH(iω) is already on the ω grid, so no transform runs.
+  /// as it is. Used by store_mode for the source ΔH_λ(iω), the left operand of Tr_ω(ΔH_λ, ΔG_p) for every λ
+  /// in evaluate's p loop, while the shm window holds one mode at a time. pack_to_omega does the same for
+  /// τ-grid operands (ΔΣ, ΔG) plus the τ → ω transform; ΔH(iω) is already on the ω grid.
   nda::array<ComplexType, 2> pack_omega(sArray_t<Array_view_5D_t> const& src) const;
 
   /// Pack this rank's element slice of a node-replicated (ns,nk,nb,nb) array.
@@ -418,7 +420,7 @@ private:
 
   utils::part_map _pmap;
   /// iω_n → −iω_n permutation of the fermionic grid.
-  nda::array<long, 1> _refl;
+  nda::array<long, 1> _minus_w;
   /// w_k of each of this rank's elements, and the same as a complex multiplier.
   nda::array<ComplexType, 1> _wloc;
 

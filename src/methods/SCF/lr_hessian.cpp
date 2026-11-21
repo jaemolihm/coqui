@@ -92,7 +92,7 @@ lr_hessian_t::lr_hessian_t(
   // iω_n → −iω_n on the fermionic grid. The pairing is the τ-domain conjugate
   // transpose, FT[A(τ)†](iω_n) = A(−iω_n)†, so the grid has to be closed under
   // negation for it to be representable at all.
-  _refl = imag_axes_ft::fermion_reflection_index(*_FT);
+  _minus_w = imag_axes_ft::minus_w_indices(*_FT, imag_axes_ft::fermion);
 
   // w_k of each of this rank's elements. The flattened (s,k,i,j) index e gives
   // k = (e / nbnd²) % nk.
@@ -276,7 +276,7 @@ ComplexType lr_hessian_t::matsubara_sum(nda::array<ComplexType, 2>& c) const {
   // so that Tr_ω(ΔH_λ, ΔG_p) matches Tr(ΔH0_λ, ΔDm_p) for a static ΔH_λ. With it the DLR hessian of a dynamic
   // source is Hermitian to 5e-12 (Si HF, below the IR floor 1e-11; plain w_to_tau closing: 1.6e-9, issue #135).
   // On IR the two fits coincide.
-  return imag_axes_ft::fermion_matsubara_sum(*_FT, c);
+  return imag_axes_ft::matsubara_sum(*_FT, c, imag_axes_ft::fermion, /*w_weighted=*/true);
 }
 
 
@@ -288,7 +288,7 @@ ComplexType lr_hessian_t::trace_matsubara(nda::array<ComplexType, 2> const& Aw,
   // collective and every rank must reach it.
   if (_nloc > 0)
     for (long n = 0; n < _nw; ++n)
-      c(n, 0) = nda::blas::dotc(Aw(_refl(n), nda::range::all), Bw(n, nda::range::all));
+      c(n, 0) = nda::blas::dotc(Aw(_minus_w(n), nda::range::all), Bw(n, nda::range::all));
   return matsubara_sum(c);
 }
 
@@ -504,7 +504,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
 
 
 ComplexType lr_hessian_t::self_pairing() const {
-  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → refl(n) conjugates it,
+  // ⟨A,A⟩ on a genuinely dynamic operand. Relabelling n → minus_w(n) conjugates it,
   // so it is real by construction, and that reality is what a wrong reflection or
   // a wrong conjugation breaks. A static operand cannot serve here — a constant
   // has no fermionic FT.
@@ -514,7 +514,7 @@ ComplexType lr_hessian_t::self_pairing() const {
     nda::array<ComplexType, 1> bw(_nloc);
     for (long n = 0; n < _nw; ++n) {
       for (long l = 0; l < _nloc; ++l) bw(l) = _Sw[0](n, l) * _wloc(l);
-      sp(n, 0) = nda::blas::dotc(_Sw[0](_refl(n), nda::range::all), bw);
+      sp(n, 0) = nda::blas::dotc(_Sw[0](_minus_w(n), nda::range::all), bw);
     }
   }
   return matsubara_sum(sp);
