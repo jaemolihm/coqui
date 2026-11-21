@@ -60,9 +60,12 @@ namespace coqui_py {
    *                            "cell_size", "orb_block"
    * @param lr_impurity_response - [INPUT] Optional response of the impurity {"Sigma": δΣ_imp(iω), "Pi": δΠ_imp(iν)} in the
    *                            layouts of the ground state; needs local_polarizabilities
+   * @param DeltaH_mwskij     - [INPUT] Optional dynamic one-body source ΔH(iω) (nmodes, nw_f, ns, nk, nb, nb)
+   *                            on the fermionic Matsubara grid of the checkpoint (root only); added to ΔH0 + ΔF + ΔΣ(iω)
+   *                            at every Dyson pass of mode m. Not combined with DeltaX/DeltaV, qp_static_sigma or the projector
    * @return                  - [OUTPUT] Tuple of per-mode (niter, Delta_mu) arrays
    */
-  std::tuple<nda::array<long, 1>, nda::array<double, 1>> run_lr(
+  std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr(
       const std::string &lr_params,
       ThcCoulomb &h_int,
       nda::array<double, 1> const& q_vec,
@@ -75,7 +78,8 @@ namespace coqui_py {
       std::optional<nda::array<double, 2>> kpts_w90,
       std::optional<std::map<std::string, nda::array<ComplexType, 5>>> local_polarizabilities,
       std::optional<std::map<std::string, nda::array<long, 1>>> dc_cells,
-      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> lr_impurity_response) {
+      std::optional<std::map<std::string, nda::array<ComplexType, 5>>> lr_impurity_response,
+      std::optional<nda::array<ComplexType, 6>> DeltaH_mwskij) {
     auto parser = InputParser(lr_params);
     methods::mb_eri_t mb_eri(h_int.get_eri());
     utils::check(bool(proj_mat) == bool(band_window) and bool(proj_mat) == bool(kpts_w90),
@@ -97,7 +101,7 @@ namespace coqui_py {
                                        std::move(lr_impurity_response)};
     return methods::run_lr_calc(mb_eri, parser.get_root(), q_vec, DeltaH0_mskij,
                                 DeltaX_left, DeltaX_right, DeltaV_qPQ,
-                                local ? &(*local) : nullptr);
+                                local ? &(*local) : nullptr, DeltaH_mwskij);
   }
 
 

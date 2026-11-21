@@ -726,7 +726,7 @@ void dump_lr(communicator_t& comm,
              Dm_t const& sDeltaDm_skij,
              F_t const& sDeltaF_skij,
              Sigma_t const* sDeltaSigma_tskij,
-             double Delta_mu,
+             ComplexType Delta_mu,
              int niter,
              bool include_hartree,
              bool include_exchange,
@@ -818,7 +818,7 @@ void dump_lr(communicator_t& comm,
     app_log(2, "LR results written to \"{}\" in {}",
             imode ? fmt::format("linear_response/mode{}/", *imode) : "linear_response/",
             filename);
-    app_log(2, "  - niter = {}, Delta_mu = {:.6e}", niter, Delta_mu);
+    app_log(2, "  - niter = {}, Delta_mu = {:.6e} {:+.6e}i", niter, Delta_mu.real(), Delta_mu.imag());
   }
   comm.barrier();
 }
@@ -950,7 +950,7 @@ template void dump_lr(mpi3::communicator&, std::string,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_4D_t> const&,
                       sArray_t<Array_view_5D_t> const*,
-                      double, int, bool, bool,
+                      ComplexType, int, bool, bool,
                       sArray_t<Array_view_5D_t> const*,
                       sArray_t<Array_view_4D_t> const*,
                       std::optional<long>, bool, std::optional<long>,

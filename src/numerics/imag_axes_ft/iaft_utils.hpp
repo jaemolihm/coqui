@@ -29,6 +29,7 @@
 #include "h5/h5.hpp"
 #include "nda/nda.hpp"
 #include "IAFT.hpp"
+#include "utilities/check.hpp"
 
 namespace imag_axes_ft {
 
@@ -86,6 +87,62 @@ namespace imag_axes_ft {
     }
 
   } // namespace test_utils
+
+  /**
+   * Index of -iω_n on the Matsubara grid of `stats`: wn_mesh(minus_w(n)) = -wn_mesh(n).
+   * Used to pair c(iω_n) with c(-iω_n) (the τ-domain conjugate transpose, FT[A(τ)†](iω_n) = A(-iω_n)†),
+   * which is representable only if the grid is closed under negation; aborts otherwise.
+   *
+   * @param FT    - IAFT whose grid is paired
+   * @param stats - [INPUT] statistics: fermion or boson
+   * @return (nw) index of -iω_n for each node n
+   */
+  inline nda::array<long, 1> minus_w_indices(IAFT const& FT, stats_e stats) {
+    nda::array<long, 1> wn = (stats == fermion) ? nda::array<long, 1>(FT.wn_mesh_f())
+                                                : nda::array<long, 1>(FT.wn_mesh_b());
+    const long nw = wn.size();
+    nda::array<long, 1> minus_w(nw);
+    minus_w() = -1;
+    // 1. Search the partner of every node; 2. every node must have one
+    for (long n = 0; n < nw; ++n)
+      for (long m = 0; m < nw; ++m)
+        if (wn(m) == -wn(n)) { minus_w(n) = m; break; }
+    for (long n = 0; n < nw; ++n)
+      utils::check(minus_w(n) >= 0,
+                   "minus_w_indices: the Matsubara grid is not closed under negation "
+                   "(no partner for index {}, wn = {}), so c(iw) and c(-iw) cannot be paired.",
+                   n, wn(n));
+    return minus_w;
+  }
+
+  /**
+   * Fermionic Matsubara sum (1/β) Σ_n c(iω_n) = -c(τ = β⁻) of a function on the fermionic ω grid.
+   *
+   * The second form is the one computed: c(iω_n) -> c(τ) by w_to_tau (or w_to_tau_w_weighted), then c(β⁻).
+   * On a DLR grid the sum over the nw_f nodes is defined only through such a fit. Use `w_weighted = true` for
+   * G-like c (decaying as 1/ω): w_to_tau_w_weighted is the fit that forms Dm = -G(β⁻) from G(iω_n)
+   * (lr_dyson, compute_Nelec), and the closing is linear in c, so for c(iω_n) = Σ_ij conj(A_ij) B_ij(iω_n)
+   * with an ω-independent A it returns Σ_ij conj(A_ij) Dm_ij[B] exactly. On IR the two fits are the same.
+   *
+   * @param FT         - IAFT whose grid c lives on
+   * @param c_w        - [INPUT] (nw_f, 1), already reduced over ranks by the caller
+   * @param stats      - [INPUT] statistics: fermion only (tau_to_beta is fermionic); aborts for boson
+   * @param w_weighted - [INPUT] use the |ω|-weighted fit w_to_tau_w_weighted instead of w_to_tau
+   * @return (1/β) Σ_n c(iω_n)
+   */
+  inline ComplexType matsubara_sum(IAFT const& FT, nda::array<ComplexType, 2> const& c_w, stats_e stats,
+                                   bool w_weighted = false) {
+    utils::check(stats == fermion, "matsubara_sum: only the fermionic sum is implemented (tau_to_beta is fermionic).");
+    nda::array<ComplexType, 2> c_tau(FT.nt_f(), 1);
+    nda::array<ComplexType, 1> c_beta(1);
+    // 1. c(iω_n) -> c(τ); 2. -c(β⁻)
+    if (w_weighted)
+      FT.w_to_tau_w_weighted(c_w, c_tau, stats);
+    else
+      FT.w_to_tau(c_w, c_tau, stats);
+    FT.tau_to_beta(c_tau, c_beta);
+    return -c_beta(0);
+  }
 
   /**
    * Reconstruct IAFT object from the metadata in CoQui checkpoint file. 
