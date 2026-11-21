@@ -700,7 +700,7 @@ void unfold_scf_checkpoint(utils::mpi_context_t<mpi3::communicator> &ctx, mf::MF
     h5::file fout(out_file, 'a');
     auto in_scf = h5::group(fin).open_group("scf");
     auto out_scf = h5::group(fout).open_group("scf");
-    for (std::string name : {"div_treatment", "hf_div_treatment"})
+    for (std::string name : {"div_treatment", "hf_div_treatment", "eps_inv_head_frozen_t", "eps_inv_head_frozen_w"})
       if (in_scf.has_dataset(name)) utils::h5_copy(in_scf, name, out_scf);
   }
   ctx.comm.barrier();
@@ -868,6 +868,58 @@ void dump_hf_div_treatment(communicator_t& comm, std::string filename,
 }
 
 template<typename communicator_t>
+void dump_eps_inv_head_frozen(communicator_t& comm, std::string filename,
+                              nda::array<ComplexType, 1> const& head_t,
+                              nda::array<ComplexType, 1> const& head_w) {
+  if (comm.root()) {
+    utils::check(std::filesystem::exists(filename),
+                 "dump_eps_inv_head_frozen: File {} does not exist. Cannot append.", filename);
+    h5::file file(filename, 'a');
+    h5::group grp(file);
+    auto scf_grp = grp.has_subgroup("scf") ? grp.open_group("scf") : grp.create_group("scf");
+    if (!scf_grp.has_dataset("eps_inv_head_frozen_t")) {
+      nda::h5_write(scf_grp, "eps_inv_head_frozen_t", head_t, false);
+      nda::h5_write(scf_grp, "eps_inv_head_frozen_w", head_w, false);
+    }
+  }
+  comm.barrier();
+}
+
+template<typename communicator_t>
+bool read_eps_inv_head_frozen(communicator_t& comm, std::string filename, std::string const& grp_name,
+                              nda::array<ComplexType, 1>& head_t, nda::array<ComplexType, 1>& head_w) {
+  int found = 0;
+  nda::array<ComplexType, 1> t, w;
+  long sizes[2] = {0, 0};
+  if (comm.root()) {
+    h5::file file(filename, 'r');
+    h5::group grp(file);
+    if (grp.has_subgroup(grp_name)) {
+      auto g = grp.open_group(grp_name);
+      if (g.has_dataset("eps_inv_head_frozen_t") and g.has_dataset("eps_inv_head_frozen_w")) {
+        nda::h5_read(g, "eps_inv_head_frozen_t", t);
+        nda::h5_read(g, "eps_inv_head_frozen_w", w);
+        sizes[0] = t.size();
+        sizes[1] = w.size();
+        found = 1;
+      }
+    }
+  }
+  comm.broadcast_n(&found, 1, 0);
+  if (!found) return false;
+  comm.broadcast_n(sizes, 2, 0);
+  if (!comm.root()) {
+    t = nda::array<ComplexType, 1>(sizes[0]);
+    w = nda::array<ComplexType, 1>(sizes[1]);
+  }
+  comm.broadcast_n(t.data(), sizes[0], 0);
+  comm.broadcast_n(w.data(), sizes[1], 0);
+  head_t = std::move(t);
+  head_w = std::move(w);
+  return true;
+}
+
+template<typename communicator_t>
 void dump_fixed_mu(communicator_t& comm, std::string filename, std::optional<double> mu,
                    std::string const& grp_name) {
   if (comm.root()) {
@@ -938,6 +990,10 @@ template void dump_qp_params(mpi3::communicator&, std::string,
 template bool read_qp_params(mpi3::communicator&, std::string,
                              std::string&, double&, std::string&, int&);
 template void dump_hf_div_treatment(mpi3::communicator&, std::string, std::string const&);
+template void dump_eps_inv_head_frozen(mpi3::communicator&, std::string,
+                                       nda::array<ComplexType, 1> const&, nda::array<ComplexType, 1> const&);
+template bool read_eps_inv_head_frozen(mpi3::communicator&, std::string, std::string const&,
+                                       nda::array<ComplexType, 1>&, nda::array<ComplexType, 1>&);
 template void dump_fixed_mu(mpi3::communicator&, std::string, std::optional<double>, std::string const&);
 
 template void read_qp_MOs(mpi3::shared_communicator,

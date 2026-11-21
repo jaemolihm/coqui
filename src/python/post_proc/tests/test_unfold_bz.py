@@ -93,8 +93,9 @@ def _runner(kind, arg):
 
 
 def test_unfold_checkpoint(mpi):
-    # Smoke test of mean_field.unfold_mf + post_proc.unfold_checkpoint on a GW checkpoint of qe_lih223_sym (both files
-    # written, nkpts_ibz of the output = nkpts of the input), and of their input guards, out of process: an unmodified
+    # Smoke test of mean_field.unfold_mf + post_proc.unfold_checkpoint on a GW checkpoint of qe_lih223_sym with a frozen
+    # eps^-1 head (both files written, nkpts_ibz of the output = nkpts of the input, scf/eps_inv_head_frozen_{t,w}
+    # copied unchanged), and of their input guards, out of process: an unmodified
     # copy of the checkpoint is accepted (control); rejected are a copy with a swapped k list (guard on mf_ibz vs the
     # checkpoint), a copy with a G, Sigma and tau mesh of one point fewer than the grid rebuilt from beta, wmax, prec
     # (read_iaft validates the stored tau mesh against the rebuilt grid, which keeps G_tskij, sized from the stored tau
@@ -105,7 +106,7 @@ def test_unfold_checkpoint(mpi):
     thc = coqui.make_thc_coulomb(mf, {"storage": "incore", "thresh": 1e-4, "ecut": mf.ecutrho(),
                                       "chol_block_size": 1, "init": True})
     coqui.run_gw({"restart": False, "output": "unfold_gw", "niter": 1, "beta": 10,
-                  "iaft": {"prec": "medium", "basis": "dlr"},
+                  "iaft": {"prec": "medium", "basis": "dlr"}, "freeze_eps_inv_head": True,
                   "iter_alg": {"alg": "damping", "mixing": 0.7}}, h_int=thc)
     mpi.barrier()
 
@@ -122,6 +123,9 @@ def test_unfold_checkpoint(mpi):
         with h5py.File("unfold_gw.mbpt.h5", "r") as fi, h5py.File("unfold_gw_full.mbpt.h5", "r") as fo:
             assert fo["scf/final_iter"][()] == fi["scf/final_iter"][()]
             assert fo["system/number_of_kpoints_ibz"][()] == fi["system/number_of_kpoints"][()]
+            # the frozen eps^-1 head (freeze_eps_inv_head) is copied unchanged
+            for name in ("eps_inv_head_frozen_t", "eps_inv_head_frozen_w"):
+                assert name in fi["scf"] and np.array_equal(fo[f"scf/{name}"][...], fi[f"scf/{name}"][...])
 
         # copies of the checkpoint for the guard cases
         for name in names:

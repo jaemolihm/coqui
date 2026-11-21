@@ -226,6 +226,9 @@ struct lr_params {
   const nda::array<ComplexType, 1>* eps_inv_head_w = nullptr;
   /// Divergence treatments the unperturbed run used, read from the checkpoint.
   std::string div_treatment = "gygi";       ///< correlation / GW head
+  /// The ground state froze its ε⁻¹ head (scf/eps_inv_head_frozen_{t,w}): eps_inv_head and eps_inv_head_w are the
+  /// stored arrays, and the head does not respond to ΔW, so head term 2 (-madelung Δh S G S) is absent.
+  bool freeze_eps_inv_head = false;
   std::string hf_div_treatment = "gygi";    ///< HF exchange Madelung term
 
   // --- Optional inputs ---

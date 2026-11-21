@@ -519,7 +519,9 @@ void lr_driver::apply_kernel_gw(
 
   // Extract Δeps_inv_head from ΔW for divergence correction term 2 (q_pert=0 only)
   nda::array<ComplexType, 1> delta_eps_inv_head;
-  if (p.div_treatment != "ignore_g0" && is_q_gamma()) {
+  // Frozen head: term 2 is absent, and so is the delta_head argument of the evaluators below
+  const bool head_term2 = p.div_treatment != "ignore_g0" && is_q_gamma() && !p.freeze_eps_inv_head;  // true if the head responds to ΔW
+  if (head_term2) {
     auto [delta_eps_inv_q, delta_head] =
         solvers::div_utils::eps_inv_head_t(
             dDeltaW_tqPQ, thc, *thc.MF(), _dyson.FT(), p.div_treatment, /*is_lr=*/true);
@@ -546,7 +548,7 @@ void lr_driver::apply_kernel_gw(
         &S_loc, p.eps_inv_head);
     _lr_gw2->evaluate_sigma_DeltaW(
         *sDeltaSigma_term2_tskij, _sG_tskij->local(), dDeltaW_tqPQ, thc,
-        *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, &S_loc, &delta_eps_inv_head);
+        *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, head_term2 ? &S_loc : nullptr, head_term2 ? &delta_eps_inv_head : nullptr);
     // Accumulate term2 into sSigma_tskij_out so it holds the total ΔΣ.
     // Both arrays are node-replicated shared memory (each solver all_reduced
     // its result), so add once per node on the node root.
@@ -563,7 +565,7 @@ void lr_driver::apply_kernel_gw(
         sSigma_tskij_out, sDeltaG_tskij.local(), *_opt_dW_tRPQ,
         _sG_tskij->local(), dDeltaW_tqPQ, thc,
         *_opt_dG_tsRPQ, *_opt_dG_mtau_tsRPQ, ibc_ptr,
-        &S_loc, p.eps_inv_head, &delta_eps_inv_head);
+        &S_loc, p.eps_inv_head, head_term2 ? &delta_eps_inv_head : nullptr);
   }
   // up_Σ(δΣ_imp - δΣ_dc[δG^loc, δW^loc])
   if (dc) {
