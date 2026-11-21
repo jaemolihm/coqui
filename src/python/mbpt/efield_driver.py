@@ -20,7 +20,7 @@ limitations under the License.
 Electronic dielectric tensor from linear response at Q = 0.
 
 Thin wrapper of methods::run_lr_efield_calc: eight Q = 0 LR solves on one self-consistent ground state give
-chi2 = chi_bar^(2) and eps_inf = delta - 4 pi Re chi2 (see the C++ docstring for the four phases and the equations).
+chi2 = chi_bar^(2) and eps_inf = delta - 4 pi Re chi2 (see the C++ docstring for the three phases and the equations).
 """
 
 import json
