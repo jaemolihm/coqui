@@ -2869,10 +2869,10 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // The lr_params of one phase. W must outlive the lr_driver that p is given to.
   auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W, lr_iter_params const& iter,
-                         bool has_source) {
+                         bool has_dynamic_source) {
     lr_params p;
     fill_lr_kernel_params(p, kernel, W, iter, max_iter, tol, /*fix_density=*/false, /*save_DeltaG=*/false);
-    p.has_dynamic_source = has_source;
+    p.has_dynamic_source = has_dynamic_source;
     if (kernel.has_sigma() && use_precond) {  // HSEX preconditioner, whose K_pc has the Hartree rung only if the kernel has it
       p.precond_kernel = lr_kernel_spec{kernel.hartree, true, false, false};
       p.precond_hsex = true;
@@ -2981,7 +2981,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     p.hessian_stationary = true;
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     lr_hessian_t hessian(mpi, ft, k_weight, spin_factor, 3, has_sigma, ns, nk, nb, /*plain_only=*/false,
-                         /*has_source=*/true);
+                         /*has_dynamic_source=*/true);
     sDeltaH0_skij.set_zero();
     decltype(nda::range::all) all;
     for (long a = 0; a < 3; ++a) {

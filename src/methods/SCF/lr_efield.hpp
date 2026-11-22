@@ -113,7 +113,7 @@ struct efield_trace_terms {
  *
  * Called by run_lr_efield_calc after phase X, while B, v and Σ'' are alive. The flattened (n, s, k) is striped over
  * the global communicator, the (nw_f, 9) traces are reduced and each column goes through
- * imag_axes_ft::fermion_matsubara_sum (the same sum the hessian's Tr_ω closes with).
+ * imag_axes_ft::matsubara_sum (fermion, w_weighted) (the same sum the hessian's Tr_ω closes with).
  *
  * @param sv_wskij    - [INPUT] v_α(iω), α = 0..2
  * @param sSigma2_wskij - [INPUT] Σ''(iω)

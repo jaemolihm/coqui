@@ -167,9 +167,9 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
   for (long a = 0; a < 3; ++a)
     for (long c = 0; c < 3; ++c) {
       c_w(all, 0) = c2(all, a, c);
-      terms.vGpvGp(a, c) = imag_axes_ft::fermion_matsubara_sum(FT, c_w) / (4.0 * volume);
+      terms.vGpvGp(a, c) = imag_axes_ft::matsubara_sum(FT, c_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
       c_w(all, 0) = c3(all, a, c);
-      terms.Sigma2_GvGvG(a, c) = imag_axes_ft::fermion_matsubara_sum(FT, c_w) / (4.0 * volume);
+      terms.Sigma2_GvGvG(a, c) = imag_axes_ft::matsubara_sum(FT, c_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
     }
   return terms;
 }
