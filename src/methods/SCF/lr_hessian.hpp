@@ -316,14 +316,11 @@ public:
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
    * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
    *                                     the global root only
-   * @param DeltaH_mwskij_root - [INPUT] (nmodes,nw,ns,nk,nb,nb) source ΔH(iω) stack, engaged on the
-   *                                     global root only; unengaged without a source
    * @param fix_density- [INPUT] the flag the original solves used
    * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
    *                     to the extra solve; null without a source
-   * @param sDeltaH_mwskij - [INPUT] the same stack, node-shared: the second source path, in place of
-   *                     DeltaH_mwskij_root. Each mode's slice is copied into sDeltaH_w on every node (no root
-   *                     copy, no broadcast). At most one of the two is engaged.
+   * @param sDeltaH_mwskij - [INPUT] (nmodes,nw,ns,nk,nb,nb) source ΔH(iω) stack, node-shared; null without a
+   *                     source. Each mode's slice is copied into sDeltaH_w by every node's root (no broadcast).
    */
   lr_hessian_result_t evaluate(
       lr_dyson& dyson,
@@ -333,7 +330,6 @@ public:
       sArray_t<Array_view_5D_t>* sDeltaSigma,
       sArray_t<Array_view_5D_t>* sDeltaG,
       std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-      std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
       bool fix_density,
       sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr,
       sArray_t<Array_view_6D_t> const* sDeltaH_mwskij = nullptr);

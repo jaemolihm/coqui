@@ -308,13 +308,9 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     sArray_t<Array_view_5D_t>* sDeltaSigma,
     sArray_t<Array_view_5D_t>* sDeltaG,
     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
-    std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
     bool fix_density,
     sArray_t<Array_view_5D_t>* sDeltaH_w,
     sArray_t<Array_view_6D_t> const* sDeltaH_mwskij) {
-
-  utils::check(sDeltaH_mwskij == nullptr or not DeltaH_mwskij_root.has_value(),
-               "lr_hessian_t::evaluate: the ΔH(iω) stack is given both on the root and node-shared.");
 
   // The accumulators are reduced and rescaled in place, so this is single-shot,
   // after every mode is stored.
@@ -385,20 +381,11 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     // Mode p's ΔH(iω) into shm
     if (_has_dynamic_source) {
       utils::check(sDeltaH_w != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) window.");
-      if (sDeltaH_mwskij != nullptr) {
-        // Node-shared stack: each node's root copies its own slice, no broadcast
-        sDeltaH_w->node_sync();
-        if (_mpi->node_comm.root()) sDeltaH_w->local() = sDeltaH_mwskij->local()(p, nda::ellipsis{});
-        sDeltaH_w->node_sync();
-      } else {
-        // Root-only stack: the root writes its slice, broadcast_to_nodes publishes it
-        if (_mpi->comm.root()) {
-          utils::check(DeltaH_mwskij_root.has_value(),
-                       "lr_hessian_t::evaluate: the ΔH(iω) stack must be provided on the MPI global root.");
-          sDeltaH_w->local() = (*DeltaH_mwskij_root)(p, nda::ellipsis{});
-        }
-        sDeltaH_w->broadcast_to_nodes(0);
-      }
+      utils::check(sDeltaH_mwskij != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) stack.");
+      // Each node's root copies mode p's slice of the node-shared stack, no broadcast
+      sDeltaH_w->node_sync();
+      if (_mpi->node_comm.root()) sDeltaH_w->local() = sDeltaH_mwskij->local()(p, nda::ellipsis{});
+      sDeltaH_w->node_sync();
     }
 
     // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form

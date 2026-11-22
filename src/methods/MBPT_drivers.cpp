@@ -2208,12 +2208,15 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
     return math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first);
   }();
-  // The dynamic source ΔH(iω): one rank-5 shm window refilled per perturbation like ΔH0.
+  // The dynamic source ΔH(iω): the whole stack is copied once from the root into a node-shared array (one copy of
+  // the stack per node), and a rank-5 shm window is refilled from it per perturbation, for the per-mode solve and
+  // for the hessian alike.
+  std::optional<math::shm::shared_array<Array_view_6D_t>> opt_sDeltaH_mwskij;
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaH_wskij;
   if (has_dynamic_source) {
-    std::optional<nda::array<ComplexType, 5>> h_first;
-    if (mpi->comm.root()) h_first.emplace((*DeltaH_mwskij_root)(0, nda::ellipsis{}));
-    opt_sDeltaH_wskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, h_first));
+    opt_sDeltaH_mwskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 6>(*mpi, DeltaH_mwskij_root));
+    opt_sDeltaH_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
+        *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
   auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
@@ -2497,12 +2500,13 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       if (mpi->comm.root())
         sDeltaH0_skij.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
       sDeltaH0_skij.broadcast_to_nodes(0);
-      if (has_dynamic_source) {
-        if (mpi->comm.root())
-          opt_sDeltaH_wskij->local() = (*DeltaH_mwskij_root)(m, nda::ellipsis{});
-        opt_sDeltaH_wskij->broadcast_to_nodes(0);
-      }
       mpi->comm.barrier();
+    }
+    if (has_dynamic_source) {
+      // Mode m's ΔH(iω) slice of the node-shared stack: each node's root copies it, no broadcast
+      opt_sDeltaH_wskij->node_sync();
+      if (mpi->node_comm.root()) opt_sDeltaH_wskij->local() = opt_sDeltaH_mwskij->local()(m, nda::ellipsis{});
+      opt_sDeltaH_wskij->node_sync();
     }
 
     auto [niter, Delta_mu] = driver.lr_solve_one(
@@ -2625,8 +2629,9 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-        DeltaH0_mskij_root, DeltaH_mwskij_root, fix_density,
-        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+        DeltaH0_mskij_root, fix_density,
+        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr,
+        has_dynamic_source ? &(*opt_sDeltaH_mwskij) : nullptr);
     opt_hessian->print_timers();
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
@@ -3015,7 +3020,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     std::optional<nda::array<ComplexType, 5>> zero_DeltaH0_root;
     if (mpi->comm.root()) zero_DeltaH0_root.emplace(nda::zeros<ComplexType>(3, ns, nk, nb, nb));
     hess = hessian.evaluate(driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                            zero_DeltaH0_root, std::nullopt, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
+                            zero_DeltaH0_root, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
     hessian.print_timers();
     mpi->comm.barrier();
   }
