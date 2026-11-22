@@ -365,7 +365,17 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   int has_DeltaH0_int = (_mpi->comm.root() && DeltaH0_mskij_root.has_value()) ? 1 : 0;
   _mpi->comm.broadcast_n(&has_DeltaH0_int, 1, 0);
   const bool has_DeltaH0 = (has_DeltaH0_int == 1);  // the root passed a ΔH0 stack
-  if (!has_DeltaH0) sDeltaH0.set_zero();             // ΔH0 = 0: the window stays zero for every mode
+  if (!has_DeltaH0) {                                // ΔH0 = 0: the window stays zero for every mode
+    // The stored modes must then have ΔH0 = 0: the contractions below use the stored _dH0
+    double dH0_norm2 = 0.0;
+    for (long l = 0; l < _nmodes; ++l)
+      for (long i = 0; i < _dH0[l].size(); ++i) dH0_norm2 += std::norm(_dH0[l](i));
+    dH0_norm2 = _mpi->comm.all_reduce_value(dH0_norm2);
+    utils::check(dH0_norm2 == 0.0,
+                 "lr_hessian_t::evaluate: no ΔH0 stack was passed, but the stored modes have a nonzero ΔH0 "
+                 "(‖ΔH0‖² = {:.3e}); pass the ΔH0 stack.", dH0_norm2);
+    sDeltaH0.set_zero();
+  }
 
   for (long p = 0; p < _nmodes; ++p) {
 

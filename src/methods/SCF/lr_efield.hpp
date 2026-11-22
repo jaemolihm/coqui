@@ -143,7 +143,7 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
  * The IR grid cannot interpolate to β/2, so the node of smallest |x| in the reduced coordinate x = 2τ/β - 1 is used;
  * its τ is not exactly β/2.
  */
-double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij);
+double max_trace_G_half_beta(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij);
 
 /**
  * Σ_ij |A_ij|² of a node-shared array, striped over the global communicator.
@@ -153,8 +153,8 @@ double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_
  *
  * Collective on the global communicator; every rank returns the same value.
  */
-double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_4D_t> const& sA);
-double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sA);
+template<typename sArray_type>
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_type const& sA);
 
 /**
  * B_minus_S_rel = ‖B - S‖ / (√nw ‖S‖), the size of the vertex correction B = S - Σ' relative to S.
@@ -182,12 +182,14 @@ nda::array<double, 2> norm_S_sk(sArray_t<Array_view_4D_t> const& sS_skij);
  * Cauchy-Schwarz bound, is the scale that tells a charge response from round-off; 0 if ΔDm = 0.
  *
  *   1. ‖ΔDm_sk‖ at each (s, k)
- *   2. scale = spin Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖
- *   3. result = |ΔN| / scale
+ *   2. dm_scale = Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖
+ *   3. result = |ΔN| / (spin_factor dm_scale)
  *
  * @param dN           - [INPUT] ΔN of the solve (driver.dyson().compute_lr_Nelec(ΔDm))
  * @param sDeltaDm_skij- [INPUT] ΔDm (ns, nk, nb, nb)
  * @param S_norm_sk    - [INPUT] norm_S_sk
+ * @param k_weight     - [INPUT] k-point weights w_k (nk)
+ * @param spin_factor  - [INPUT] 2 for spin-unpolarized, non-spinor; 1 otherwise
  */
 double trace_GE_relative(ComplexType dN, sArray_t<Array_view_4D_t> const& sDeltaDm_skij,
                          nda::array<double, 2> const& S_norm_sk, nda::array<double, 1> const& k_weight,

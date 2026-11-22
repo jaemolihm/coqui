@@ -194,7 +194,7 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
   return terms;
 }
 
-double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij) {
+double max_trace_G_half_beta(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij) {
   decltype(nda::range::all) all;
   auto [nt, ns, nk, nb, nb2] = sG_tskij.shape();
   // 1. τ* = the node of smallest |x|, x = 2τ/β - 1 (τ = β/2)
@@ -214,7 +214,8 @@ double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_
 }
 
 namespace {
-/// Σ |A_i|² over a flat array, striped over the global communicator
+/// Σ |A_i|² over a flat array, striped over the global communicator. utils::striped_norm (element_partition.hpp) is
+/// not reused: it reduces with dotc, which changes the round-off.
 double striped_norm2_flat(utils::mpi_context_t<mpi3::communicator>& mpi, ComplexType const* data, long size) {
   // 1. This rank's contiguous chunk of the flattened array
   auto [i0, i1] = itertools::chunk_range(0, size, long(mpi.comm.size()), long(mpi.comm.rank()));
@@ -225,13 +226,13 @@ double striped_norm2_flat(utils::mpi_context_t<mpi3::communicator>& mpi, Complex
 }
 } // namespace
 
-double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_4D_t> const& sA) {
+template<typename sArray_type>
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_type const& sA) {
   return striped_norm2_flat(mpi, sA.local().data(), long(sA.local().size()));
 }
 
-double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sA) {
-  return striped_norm2_flat(mpi, sA.local().data(), long(sA.local().size()));
-}
+template double striped_norm2(utils::mpi_context_t<mpi3::communicator>&, sArray_t<Array_view_4D_t> const&);
+template double striped_norm2(utils::mpi_context_t<mpi3::communicator>&, sArray_t<Array_view_5D_t> const&);
 
 double B_minus_S_relative_norm(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sB_wskij,
                                sArray_t<Array_view_4D_t> const& sS_skij, double S_norm2) {
@@ -267,7 +268,7 @@ double trace_GE_relative(ComplexType dN, sArray_t<Array_view_4D_t> const& sDelta
                          nda::array<double, 2> const& S_norm_sk, nda::array<double, 1> const& k_weight,
                          double spin_factor) {
   auto [ns, nk, nb, nb2] = sDeltaDm_skij.shape();
-  // 1.-2. scale = Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖ (the spin factor is applied below)
+  // 1.-2. dm_scale = Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖ (the spin factor is applied in step 3)
   double dm_scale = 0.0;
   for (long is = 0; is < ns; ++is)
     for (long ik = 0; ik < nk; ++ik) {

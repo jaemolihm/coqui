@@ -268,7 +268,7 @@ public:
    *
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
-   * @param sDeltaH0   - [INPUT] ΔH0_p
+   * @param sDeltaH0   - [INPUT] ΔH0_p (kept; `evaluate` called without a ΔH0 stack requires it to be zero)
    * @param sDeltaF    - [INPUT] raw ΔF_p
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel without a source (never read then)
@@ -304,6 +304,9 @@ public:
    * The shm arrays are the caller's own mode-loop buffers, free scratch once the
    * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
    * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
+   *
+   * Contract: a call without a ΔH0 stack (`DeltaH0_mskij_root` unengaged) requires every stored mode's ΔH0
+   * (the `sDeltaH0` given to store_mode) to be zero; this is checked (collective reduction of the stored norms).
    *
    * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
    * and every rank returns the same matrices.
