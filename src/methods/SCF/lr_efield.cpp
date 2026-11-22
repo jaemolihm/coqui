@@ -48,10 +48,27 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
                          sArray_t<Array_view_5D_t>& sX_wskij) {
   decltype(nda::range::all) all;
   auto [nw, ns, nk, nb, nb2] = sX_wskij.shape();
-  // 1. X(iω) = τ->ω ΔΣ(τ), or zero for a Σ-free kernel
-  if (sDeltaSigma_tskij) shared_tau_to_w(FT, *sDeltaSigma_tskij, sX_wskij);
-  else sX_wskij.set_zero();
-  // 2. X(iω) += ΔH0 + ΔF at every iω, for the (s,k) strided over this node's ranks
+  if (sDeltaSigma_tskij) {
+    // 1. Make ΔΣ(τ) written by other ranks visible, and X(iω) free to be overwritten (earlier readers are done)
+    utils::check(sDeltaSigma_tskij->shape() == std::array<long, 5>{FT.nt_f(), ns, nk, nb, nb2} and
+                     sX_wskij.shape() == std::array<long, 5>{FT.nw_f(), ns, nk, nb, nb2},
+                 "lr_total_one_body_w: ΔΣ(tau) must be (nt_f, ns, nk, nb, nb) and X(iw) (nw_f, ns, nk, nb, nb) of the same IAFT.");
+    sDeltaSigma_tskij->node_comm()->barrier();
+    sX_wskij.node_sync();
+    // 2. X(iω)_sk = FT.tau_to_w ΔΣ(τ)_sk, for the (s,k) strided over this node's ranks
+    nda::array<ComplexType, 3> X_t(FT.nt_f(), nb, nb2), X_w(FT.nw_f(), nb, nb2);
+    for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
+      long is = sk / nk, ik = sk % nk;
+      X_t = sDeltaSigma_tskij->local()(all, is, ik, all, all);
+      FT.tau_to_w(X_t, X_w, imag_axes_ft::fermion);
+      sX_wskij.local()(all, is, ik, all, all) = X_w;
+    }
+    sX_wskij.node_sync();
+  } else {
+    // 1. Σ-free kernel: X(iω) = 0
+    sX_wskij.set_zero();
+  }
+  // 3. X(iω) += ΔH0 + ΔF at every iω, for the (s,k) strided over this node's ranks
   nda::matrix<ComplexType> one_body(nb, nb2);
   for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
     long is = sk / nk, ik = sk % nk;
@@ -59,7 +76,7 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
     if (sDeltaH0_skij) one_body = one_body + matrix_t(sDeltaH0_skij->local()(is, ik, all, all));
     for (long n = 0; n < nw; ++n) sX_wskij.local()(n, is, ik, all, all) += one_body;
   }
-  // 3. Publish X(iω) to the node
+  // 4. Publish X(iω) to the node
   sX_wskij.node_sync();
 }
 

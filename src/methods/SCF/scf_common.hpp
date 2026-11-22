@@ -254,39 +254,6 @@ auto distributed_tau_to_w(mpi3::communicator& comm,
   return dX_wskij_out;
 }
 
-/**
- * X(iω) = FT.tau_to_w X(τ) of a node-shared fermionic array, into a node-shared array.
- *
- * Called by the LR efield driver on the node-shared ΔΣ(τ) and ΔG(τ) the LR solves return, to form the node-shared
- * iω arrays its contractions read. distributed_tau_to_w returns a distributed array instead, which a node-replicated
- * reader cannot index.
- *
- * Collective on the node communicator; every node fills its own copy, with the (s,k) pairs strided over the node's ranks.
- */
-inline void shared_tau_to_w(const imag_axes_ft::IAFT& FT,
-                            const sArray_t<Array_view_5D_t>& sX_tskij,
-                            sArray_t<Array_view_5D_t>& sX_wskij) {
-  decltype(nda::range::all) all;
-  auto [nt, ns, nkpts, nbnd, nbnd2] = sX_tskij.shape();
-  utils::check(nt == FT.nt_f() and sX_wskij.shape() == std::array<long, 5>{FT.nw_f(), ns, nkpts, nbnd, nbnd2},
-               "shared_tau_to_w: X(tau) must be (nt_f, ns, nk, nb, nb) and X(iw) (nw_f, ns, nk, nb, nb) of the same IAFT.");
-  auto* node_comm = sX_wskij.node_comm();
-
-  // 1. Make X(τ) written by other ranks visible, and X(iω) free to be overwritten (earlier readers are done)
-  sX_tskij.node_comm()->barrier();
-  sX_wskij.node_sync();
-  // 2. X(iω)_sk = FT.tau_to_w X(τ)_sk, for the (s,k) strided over this node's ranks
-  nda::array<ComplexType, 3> X_t(nt, nbnd, nbnd2), X_w(FT.nw_f(), nbnd, nbnd2);
-  for (long sk = node_comm->rank(); sk < ns * nkpts; sk += node_comm->size()) {
-    long is = sk / nkpts, ik = sk % nkpts;
-    X_t = sX_tskij.local()(all, is, ik, all, all);
-    FT.tau_to_w(X_t, X_w, imag_axes_ft::fermion);
-    sX_wskij.local()(all, is, ik, all, all) = X_w;
-  }
-  // 3. Publish X(iω) to the node
-  sX_wskij.node_sync();
-}
-
 template<nda::MemoryArray Array_t>
 void hermitize_in_tau(Array_t &&A_ij, std::string name="") {
   constexpr int rank = ::nda::get_rank<Array_t>;
