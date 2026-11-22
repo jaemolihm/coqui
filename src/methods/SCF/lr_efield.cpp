@@ -213,22 +213,17 @@ double max_trace_G_half_beta(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5
   return max_tr;
 }
 
-namespace {
-/// Σ |A_i|² over a flat array, striped over the global communicator. utils::striped_norm (element_partition.hpp) is
-/// not reused: it reduces with dotc, which changes the round-off.
-double striped_norm2_flat(utils::mpi_context_t<mpi3::communicator>& mpi, ComplexType const* data, long size) {
+// utils::striped_norm (element_partition.hpp) is not reused: it takes a pre-sliced pair (a, b) and returns √‖a‖², while
+// this needs ‖A‖² of a whole node-shared window.
+template<typename sArray_type>
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_type const& sA) {
   // 1. This rank's contiguous chunk of the flattened array
-  auto [i0, i1] = itertools::chunk_range(0, size, long(mpi.comm.size()), long(mpi.comm.rank()));
+  ComplexType const* data = sA.local().data();
+  auto [i0, i1] = itertools::chunk_range(0, long(sA.local().size()), long(mpi.comm.size()), long(mpi.comm.rank()));
   double norm2 = 0.0;
   for (long i = i0; i < i1; ++i) norm2 += std::norm(data[i]);
   // 2. Sum over the ranks
   return mpi.comm.all_reduce_value(norm2);
-}
-} // namespace
-
-template<typename sArray_type>
-double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_type const& sA) {
-  return striped_norm2_flat(mpi, sA.local().data(), long(sA.local().size()));
 }
 
 template double striped_norm2(utils::mpi_context_t<mpi3::communicator>&, sArray_t<Array_view_4D_t> const&);
