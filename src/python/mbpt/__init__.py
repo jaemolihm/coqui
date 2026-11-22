@@ -29,6 +29,7 @@ from .mbpt_driver import (
 )
 from coqui._lib.mbpt_module import release_lr_W_cache
 from .chi_driver import run_chi
+from .efield_driver import run_lr_efield
 from .lr_driver import (
     calculate_kpq_map,
     lr_DeltaH0_from_thc_aux,
@@ -69,4 +70,6 @@ __all__ = [
     "resolve_kernel",
     # Charge susceptibility / dielectric matrix
     "run_chi",
+    # Electronic dielectric tensor from Q = 0 LR solves
+    "run_lr_efield",
 ]

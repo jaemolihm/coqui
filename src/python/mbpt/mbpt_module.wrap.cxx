@@ -339,6 +339,13 @@ static auto const fun_15 = c2py::dispatcher_f_kw_t{c2py::cfun(
     },
     "h_int", "q_vec", "u_mP")};
 
+// run_lr_efield
+static auto const fun_17 = c2py::dispatcher_f_kw_t{c2py::cfun(
+    [](const std::string &efield_params, coqui_py::ThcCoulomb &h_int) {
+      return coqui_py::run_lr_efield(efield_params, h_int);
+    },
+    "efield_params", "h_int")};
+
 // release_lr_W_cache
 static auto const fun_16 = c2py::dispatcher_f_kw_t{
     c2py::cfun([]() { return coqui_py::release_lr_W_cache(); })};
@@ -806,6 +813,22 @@ Returns
 static const auto doc_d_16 = fun_16.doc(R"DOC(
 Drop the W_c(iw) and eps^-1 head kept by run_lr(reuse_W = True)
 )DOC");
+static const auto doc_d_17 = fun_17.doc(
+    R"DOC(
+Electronic dielectric tensor from eight Q = 0 LR solves (see methods::run_lr_efield_calc)
+
+Parameters
+----------
+efield_params : {par_0}
+   - [INPUT] JSON parameters: prefix, output, method, max_iter, tol, iter_alg, kw_correction,
+     reuse_W, recompute_W, screened_interaction_file. Results are written to
+     "linear_response_efield/" of <output>.mbpt.h5
+h_int : {par_1}
+   - [INPUT] THC Coulomb integrals
+)DOC",
+    {{c2py::python_typename<const std::string &>()},
+     {c2py::python_typename<coqui_py::ThcCoulomb &>()}},
+    {});
 //--------------------- module function table  -----------------------------
 
 static PyMethodDef module_methods[] = {
@@ -843,6 +866,8 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS, doc_d_16.c_str()},
     {"run_lr", (PyCFunction)c2py::pyfkw<fun_14>, METH_VARARGS | METH_KEYWORDS,
      doc_d_14.c_str()},
+    {"run_lr_efield", (PyCFunction)c2py::pyfkw<fun_17>,
+     METH_VARARGS | METH_KEYWORDS, doc_d_17.c_str()},
     {nullptr, nullptr, 0, nullptr} // Sentinel
 };
 

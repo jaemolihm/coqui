@@ -227,6 +227,7 @@ public:
   using sArray_t = math::shm::shared_array<Array_base_t>;
   using Array_view_4D_t = nda::array_view<ComplexType, 4>;
   using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+  using Array_view_6D_t = nda::array_view<ComplexType, 6>;
 
   /**
    * @param mpi         - [INPUT] MPI context; the stores are striped over mpi->comm
@@ -320,6 +321,9 @@ public:
    * @param fix_density- [INPUT] the flag the original solves used
    * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
    *                     to the extra solve; null without a source
+   * @param sDeltaH_mwskij - [INPUT] the same stack, node-shared: the second source path, in place of
+   *                     DeltaH_mwskij_root. Each mode's slice is copied into sDeltaH_w on every node (no root
+   *                     copy, no broadcast). At most one of the two is engaged.
    */
   lr_hessian_result_t evaluate(
       lr_dyson& dyson,
@@ -331,7 +335,8 @@ public:
       std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
       std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root,
       bool fix_density,
-      sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr);
+      sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr,
+      sArray_t<Array_view_6D_t> const* sDeltaH_mwskij = nullptr);
 
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
   /// rebuild, the extra Dyson, the pair contractions and the Matsubara tail.
