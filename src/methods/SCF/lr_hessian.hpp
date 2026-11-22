@@ -309,13 +309,13 @@ public:
    * and every rank returns the same matrices.
    *
    * @param dyson      - [IN/OUT] the run's LR Dyson solver
-   * @param sDeltaH0   - [IN/OUT] ΔH0 window, refilled per mode from the stack
+   * @param sDeltaH0   - [IN/OUT] ΔH0 window, refilled per mode from the stack (zeroed if there is none)
    * @param sDeltaDm   - [OUT] scratch for ΔDm'_p
    * @param sDeltaF    - [OUT] scratch for the rebuilt raw ΔF_p
    * @param sDeltaSigma- [OUT] scratch for the rebuilt raw ΔΣ_p; null if Σ-free
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
-   * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on
-   *                                     the global root only
+   * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on the global root only;
+   *                                     unengaged (on every rank): ΔH0 = 0 for every mode, and sDeltaH0 is zeroed
    * @param fix_density- [INPUT] the flag the original solves used
    * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
    *                     to the extra solve; null without a source

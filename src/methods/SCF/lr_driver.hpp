@@ -252,11 +252,14 @@ struct lr_params {
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
-  /// The caller passes a dynamic source ΔH(iω) to lr_solve_one. Sizes the memory report and the
-  /// hessian ω stores at lr_setup; lr_solve_one checks that it agrees with its argument.
-  bool has_dynamic_source = false;
+  /// The caller's dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated; nullptr: none.
+  /// The array is the caller's window: it refills it before each lr_solve_one, which reads it. It enters every outer
+  /// Dyson pass (the preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
+  /// preconditioner applies. Sizes the memory report and the hessian ω stores at lr_setup.
+  const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr;
 
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
+  bool has_dynamic_source() const { return sDeltaH_wskij != nullptr; }
   bool hessian() const { return hessian_nmodes > 0; }
   /// The hessian also takes the stationary (quadratic-error) functional, which
   /// needs one kernel evaluation at the returned ΔDm/ΔG(τ); false: plain hessian only.
@@ -356,10 +359,8 @@ public:
    * only if p.save_DeltaG is set or p.hessian() and the kernel has a Σ (the
    * hessian's Σ refresh reads it).
    *
-   * `sDeltaH_wskij`, when given, is a dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated.
-   * It is a constant of the affine map ΔF, ΔΣ -> ΔDm, ΔG, so it enters every outer Dyson pass (the
-   * preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
-   * preconditioner applies. Given exactly when p.has_dynamic_source.
+   * `p.sDeltaH_wskij`, when set, is a dynamic one-body source ΔH(iω); it is a constant of the affine map
+   * ΔF, ΔΣ -> ΔDm, ΔG (see lr_params).
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
@@ -375,8 +376,7 @@ public:
       sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
 
   /**
    * @brief The run's LR Dyson solver.

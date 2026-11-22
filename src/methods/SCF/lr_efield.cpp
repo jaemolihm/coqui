@@ -49,13 +49,13 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
   decltype(nda::range::all) all;
   auto [nw, ns, nk, nb, nb2] = sX_wskij.shape();
   if (sDeltaSigma_tskij) {
-    // 1. Make ΔΣ(τ) written by other ranks visible, and X(iω) free to be overwritten (earlier readers are done)
+    // 1.1 Make ΔΣ(τ) written by other ranks visible, and X(iω) free to be overwritten (earlier readers are done)
     utils::check(sDeltaSigma_tskij->shape() == std::array<long, 5>{FT.nt_f(), ns, nk, nb, nb2} and
                      sX_wskij.shape() == std::array<long, 5>{FT.nw_f(), ns, nk, nb, nb2},
                  "lr_total_one_body_w: ΔΣ(tau) must be (nt_f, ns, nk, nb, nb) and X(iw) (nw_f, ns, nk, nb, nb) of the same IAFT.");
     sDeltaSigma_tskij->node_comm()->barrier();
     sX_wskij.node_sync();
-    // 2. X(iω)_sk = FT.tau_to_w ΔΣ(τ)_sk, for the (s,k) strided over this node's ranks
+    // 1.2 X(iω)_sk = FT.tau_to_w ΔΣ(τ)_sk, for the (s,k) strided over this node's ranks
     nda::array<ComplexType, 3> X_t(FT.nt_f(), nb, nb2), X_w(FT.nw_f(), nb, nb2);
     for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
       long is = sk / nk, ik = sk % nk;
@@ -65,18 +65,18 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
     }
     sX_wskij.node_sync();
   } else {
-    // 1. Σ-free kernel: X(iω) = 0
+    // 1.1 Σ-free kernel: X(iω) = 0
     sX_wskij.set_zero();
   }
-  // 3. X(iω) += ΔH0 + ΔF at every iω, for the (s,k) strided over this node's ranks
+  // 2. X(iω) += ΔH0 + ΔF at every iω, for the (s,k) strided over this node's ranks
   nda::matrix<ComplexType> one_body(nb, nb2);
   for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
     long is = sk / nk, ik = sk % nk;
     one_body = sDeltaF_skij.local()(is, ik, all, all);
-    if (sDeltaH0_skij) one_body = one_body + matrix_t(sDeltaH0_skij->local()(is, ik, all, all));
+    if (sDeltaH0_skij) one_body += sDeltaH0_skij->local()(is, ik, all, all);
     for (long n = 0; n < nw; ++n) sX_wskij.local()(n, is, ik, all, all) += one_body;
   }
-  // 4. Publish X(iω) to the node
+  // 3. Publish X(iω) to the node
   sX_wskij.node_sync();
 }
 
@@ -91,32 +91,34 @@ void build_field_sources(utils::mpi_context_t<mpi3::communicator>& mpi,
   const ComplexType minus_i_half(0.0, -0.5);
   sVE_xwskij.node_sync();
   matrix_t G(nb, nb), B(nb, nb), v(nb, nb), GB(nb, nb), BG(nb, nb), VE(nb, nb);
-  for (long b = mpi.node_comm.rank(); b < nw * ns * nk; b += mpi.node_comm.size()) {
-    long n = b / (ns * nk), is = (b / nk) % ns, ik = b % nk;
+  for (long nsk = mpi.node_comm.rank(); nsk < nw * ns * nk; nsk += mpi.node_comm.size()) {
+    long n = nsk / (ns * nk), is = (nsk / nk) % ns, ik = nsk % nk;
     G = sG_wskij.local()(n, is, ik, all, all);
     B = sB_wskij.local()(n, is, ik, all, all);
     // 1. GB = G·B, BG = B·G
     GB = G * B;
     BG = B * G;
     // 2. V^E_α = -(i/2)(v_α·GB - BG·v_α)
-    for (long x = 0; x < 3; ++x) {
-      v = sv_wskij[x]->local()(n, is, ik, all, all);
+    for (long a = 0; a < 3; ++a) {
+      v = sv_wskij[a]->local()(n, is, ik, all, all);
       VE = minus_i_half * (v * GB - BG * v);
-      sVE_xwskij.local()(x, n, is, ik, all, all) = VE;
+      sVE_xwskij.local()(a, n, is, ik, all, all) = VE;
     }
   }
   sVE_xwskij.node_sync();
 }
 
-void build_mu2_source(utils::mpi_context_t<mpi3::communicator>& mpi,
-                      sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                      sArray_t<Array_view_5D_t>& sDeltaH_wskij) {
+void build_sigma2_source(utils::mpi_context_t<mpi3::communicator>& mpi,
+                         sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
+                         sArray_t<Array_view_5D_t>& sDeltaH_wskij) {
   decltype(nda::range::all) all;
   auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
+  utils::check(sB_wskij.shape() == sG_wskij.shape() and sDeltaH_wskij.shape() == sG_wskij.shape(),
+               "build_sigma2_source: B(iw) and the source 2BGB must have the shape (nw_f, ns, nk, nb, nb) of G(iw).");
   sDeltaH_wskij.node_sync();
   matrix_t G(nb, nb), B(nb, nb), BG(nb, nb), BGB(nb, nb);
-  for (long b = mpi.node_comm.rank(); b < nw * ns * nk; b += mpi.node_comm.size()) {
-    long n = b / (ns * nk), is = (b / nk) % ns, ik = b % nk;
+  for (long nsk = mpi.node_comm.rank(); nsk < nw * ns * nk; nsk += mpi.node_comm.size()) {
+    long n = nsk / (ns * nk), is = (nsk / nk) % ns, ik = nsk % nk;
     G = sG_wskij.local()(n, is, ik, all, all);
     B = sB_wskij.local()(n, is, ik, all, all);
     // 1. 2 B G B
@@ -137,61 +139,62 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
                                          double volume) {
   decltype(nda::range::all) all;
   auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
-  // c(n, 3a+b): the (iω_n) trace of each term, summed over this rank's (s,k)
-  nda::array<ComplexType, 3> c2(nw, 3, 3), c3(nw, 3, 3);
-  c2() = 0.0;
-  c3() = 0.0;
-  matrix_t G(nb, nb), B(nb, nb), S2(nb, nb), GB(nb, nb), Gp(nb, nb), Y(nb, nb), tmp(nb, nb);
-  std::array<matrix_t, 3> v, P, A, C;
+  // trace_vGpvGp_wab(n, a, b), trace_Sigma2_wab(n, a, b): the (iω_n) trace of each term, summed over this rank's (s,k)
+  nda::array<ComplexType, 3> trace_vGpvGp_wab(nw, 3, 3), trace_Sigma2_wab(nw, 3, 3);
+  trace_vGpvGp_wab() = 0.0;
+  trace_Sigma2_wab() = 0.0;
+  matrix_t G(nb, nb), B(nb, nb), Sigma2(nb, nb), GB(nb, nb), Gp(nb, nb), GSigma2(nb, nb), GSigma2G(nb, nb);
+  std::array<matrix_t, 3> v, vGp, GSigma2Gv, Gv;
   for (long a = 0; a < 3; ++a) {
     v[a] = matrix_t(nb, nb);
-    P[a] = matrix_t(nb, nb);
-    A[a] = matrix_t(nb, nb);
-    C[a] = matrix_t(nb, nb);
+    vGp[a] = matrix_t(nb, nb);
+    GSigma2Gv[a] = matrix_t(nb, nb);
+    Gv[a] = matrix_t(nb, nb);
   }
-  auto [b0, b1] = itertools::chunk_range(0, nw * ns * nk, long(mpi.comm.size()), long(mpi.comm.rank()));
-  for (long b = b0; b < b1; ++b) {
-    long n = b / (ns * nk), is = (b / nk) % ns, ik = b % nk;
+  auto [nsk0, nsk1] = itertools::chunk_range(0, nw * ns * nk, long(mpi.comm.size()), long(mpi.comm.rank()));
+  for (long nsk = nsk0; nsk < nsk1; ++nsk) {
+    long n = nsk / (ns * nk), is = (nsk / nk) % ns, ik = nsk % nk;
     const double w = spin_factor * k_weight(ik);
     G = sG_wskij.local()(n, is, ik, all, all);
     B = sB_wskij.local()(n, is, ik, all, all);
-    S2 = sSigma2_wskij.local()(n, is, ik, all, all);
+    Sigma2 = sSigma2_wskij.local()(n, is, ik, all, all);
     // 1. G' = -G B G
     GB = G * B;
     Gp = -1.0 * (GB * G);
-    // 2. term 2: P_α = v_α G',  c2_αβ += w tr[P_α P_β] = w tr[v_α G' v_β G']
-    // 3. term 3: A_α = (G Σ'' G) v_α, C_β = G v_β,  c3_αβ += w tr[A_α C_β] = w tr[Σ'' G v_α G v_β G]
-    tmp = G * S2;
-    Y = tmp * G;
+    // 2. term 2: vGp_α = v_α G',  trace_vGpvGp_wab += w tr[vGp_a vGp_b] = w tr[v_a G' v_b G']
+    // 3. term 3: GSigma2Gv_α = (G Σ'' G) v_α, Gv_β = G v_β,
+    //    trace_Sigma2_wab += w tr[GSigma2Gv_a Gv_b] = w tr[Σ'' G v_a G v_b G]
+    GSigma2 = G * Sigma2;
+    GSigma2G = GSigma2 * G;
     for (long a = 0; a < 3; ++a) {
       v[a] = sv_wskij[a]->local()(n, is, ik, all, all);
-      P[a] = v[a] * Gp;
-      A[a] = Y * v[a];
-      C[a] = G * v[a];
+      vGp[a] = v[a] * Gp;
+      GSigma2Gv[a] = GSigma2G * v[a];
+      Gv[a] = G * v[a];
     }
     for (long a = 0; a < 3; ++a)
-      for (long c = 0; c < 3; ++c) {
-        c2(n, a, c) += w * trace_of_product(P[a], P[c]);
-        c3(n, a, c) += w * trace_of_product(A[a], C[c]);
+      for (long b = 0; b < 3; ++b) {
+        trace_vGpvGp_wab(n, a, b) += w * trace_of_product(vGp[a], vGp[b]);
+        trace_Sigma2_wab(n, a, b) += w * trace_of_product(GSigma2Gv[a], Gv[b]);
       }
   }
   // 4. Σ_{s,k} over the global communicator
-  mpi.comm.all_reduce_in_place_n(c2.data(), c2.size(), std::plus<>{});
-  mpi.comm.all_reduce_in_place_n(c3.data(), c3.size(), std::plus<>{});
-  // 5. term = (1/(4Ω)) (1/β) Σ_n c(iω_n)
+  mpi.comm.all_reduce_in_place_n(trace_vGpvGp_wab.data(), trace_vGpvGp_wab.size(), std::plus<>{});
+  mpi.comm.all_reduce_in_place_n(trace_Sigma2_wab.data(), trace_Sigma2_wab.size(), std::plus<>{});
+  // 5. term = (1/(4Ω)) (1/β) Σ_n trace(iω_n)
   efield_trace_terms terms{nda::array<ComplexType, 2>(3, 3), nda::array<ComplexType, 2>(3, 3)};
-  nda::array<ComplexType, 2> c_w(nw, 1);
+  nda::array<ComplexType, 2> trace_w(nw, 1);
   for (long a = 0; a < 3; ++a)
-    for (long c = 0; c < 3; ++c) {
-      c_w(all, 0) = c2(all, a, c);
-      terms.vGpvGp(a, c) = imag_axes_ft::matsubara_sum(FT, c_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
-      c_w(all, 0) = c3(all, a, c);
-      terms.Sigma2_GvGvG(a, c) = imag_axes_ft::matsubara_sum(FT, c_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
+    for (long b = 0; b < 3; ++b) {
+      trace_w(all, 0) = trace_vGpvGp_wab(all, a, b);
+      terms.chi2_vGpvGp(a, b) = imag_axes_ft::matsubara_sum(FT, trace_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
+      trace_w(all, 0) = trace_Sigma2_wab(all, a, b);
+      terms.chi2_Sigma2(a, b) = imag_axes_ft::matsubara_sum(FT, trace_w, imag_axes_ft::fermion, /*w_weighted=*/true) / (4.0 * volume);
     }
   return terms;
 }
 
-double thermal_occupation(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij) {
+double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij) {
   decltype(nda::range::all) all;
   auto [nt, ns, nk, nb, nb2] = sG_tskij.shape();
   // 1. τ* = the node of smallest |x|, x = 2τ/β - 1 (τ = β/2)
@@ -208,6 +211,74 @@ double thermal_occupation(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t
       max_tr = std::max(max_tr, std::abs(tr));
     }
   return max_tr;
+}
+
+namespace {
+/// Σ |A_i|² over a flat array, striped over the global communicator
+double striped_norm2_flat(utils::mpi_context_t<mpi3::communicator>& mpi, ComplexType const* data, long size) {
+  // 1. This rank's contiguous chunk of the flattened array
+  auto [i0, i1] = itertools::chunk_range(0, size, long(mpi.comm.size()), long(mpi.comm.rank()));
+  double norm2 = 0.0;
+  for (long i = i0; i < i1; ++i) norm2 += std::norm(data[i]);
+  // 2. Sum over the ranks
+  return mpi.comm.all_reduce_value(norm2);
+}
+} // namespace
+
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_4D_t> const& sA) {
+  return striped_norm2_flat(mpi, sA.local().data(), long(sA.local().size()));
+}
+
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sA) {
+  return striped_norm2_flat(mpi, sA.local().data(), long(sA.local().size()));
+}
+
+double B_minus_S_relative_norm(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sB_wskij,
+                               sArray_t<Array_view_4D_t> const& sS_skij, double S_norm2) {
+  auto [nw, ns, nk, nb, nb2] = sB_wskij.shape();
+  // 1. ‖B - S‖² over (n, s, k, ij), the flattened (n, s, k) striped over the global communicator
+  double B_minus_S_norm2 = 0.0;
+  auto [nsk0, nsk1] = itertools::chunk_range(0, nw * ns * nk, long(mpi.comm.size()), long(mpi.comm.rank()));
+  for (long nsk = nsk0; nsk < nsk1; ++nsk) {
+    long n = nsk / (ns * nk), is = (nsk / nk) % ns, ik = nsk % nk;
+    for (long i = 0; i < nb; ++i)
+      for (long j = 0; j < nb2; ++j)
+        B_minus_S_norm2 += std::norm(sB_wskij.local()(n, is, ik, i, j) - sS_skij.local()(is, ik, i, j));
+  }
+  B_minus_S_norm2 = mpi.comm.all_reduce_value(B_minus_S_norm2);
+  // 2. √(‖B - S‖² / (nw ‖S‖²))
+  return std::sqrt(B_minus_S_norm2 / (double(nw) * S_norm2));
+}
+
+nda::array<double, 2> norm_S_sk(sArray_t<Array_view_4D_t> const& sS_skij) {
+  auto [ns, nk, nb, nb2] = sS_skij.shape();
+  nda::array<double, 2> S_norm_sk(ns, nk);
+  for (long is = 0; is < ns; ++is)
+    for (long ik = 0; ik < nk; ++ik) {
+      double norm2 = 0.0;
+      for (long i = 0; i < nb; ++i)
+        for (long j = 0; j < nb2; ++j) norm2 += std::norm(sS_skij.local()(is, ik, i, j));
+      S_norm_sk(is, ik) = std::sqrt(norm2);
+    }
+  return S_norm_sk;
+}
+
+double trace_GE_relative(ComplexType dN, sArray_t<Array_view_4D_t> const& sDeltaDm_skij,
+                         nda::array<double, 2> const& S_norm_sk, nda::array<double, 1> const& k_weight,
+                         double spin_factor) {
+  auto [ns, nk, nb, nb2] = sDeltaDm_skij.shape();
+  // 1.-2. scale = Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖ (the spin factor is applied below)
+  double dm_scale = 0.0;
+  for (long is = 0; is < ns; ++is)
+    for (long ik = 0; ik < nk; ++ik) {
+      double norm2 = 0.0;
+      for (long i = 0; i < nb; ++i)
+        for (long j = 0; j < nb2; ++j) norm2 += std::norm(sDeltaDm_skij.local()(is, ik, i, j));
+      dm_scale += k_weight(ik) * std::sqrt(norm2) * S_norm_sk(is, ik);
+    }
+  // 3. |ΔN| / (spin scale); ΔDm = 0 has no charge response
+  if (dm_scale == 0.0) return 0.0;
+  return std::abs(dN) / (spin_factor * dm_scale);
 }
 
 } // namespace methods

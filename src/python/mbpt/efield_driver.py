@@ -29,6 +29,8 @@ import h5py
 import numpy as np
 from mpi4py import MPI
 
+from .lr_driver import _as_complex
+
 _METHODS = ("none", "Hartree", "HF", "GW0", "GW")
 
 
@@ -71,8 +73,8 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
     dict
         The datasets of ``linear_response_efield/`` of ``<output>.mbpt.h5``, the same on every rank: ``eps_inf``,
         ``chi2`` (3, 3); its terms ``chi2_GE_sym``, ``chi2_GE_plain``, ``chi2_vGpvGp``, ``chi2_Sigma2``; the
-        diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``g_thermal`` (max |tr G(beta/2)| of the ground
-        state, not the thermal occupation), ``kappa_bar``,
+        diagnostics ``herm_plain``, ``herm_sym``, ``herm_M``, ``eps_inf_imag_max``, ``trace_G_half_beta`` (max |tr G(beta/2)| of the
+        ground state: an amplitude, the square root of the thermal occupation), ``kappa_bar``,
         ``dkappa_dmu``, ``DeltaDm_Gp_rel``, ``B_minus_S_rel``, ``trace_GE_rel`` (3,), ``niter`` (8,); and
         ``method``, ``tol``, ``precond_method`` ("HSEX" or "none").
 
@@ -109,11 +111,7 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
             out_file = str(params.get("output", params["prefix"])) + ".mbpt.h5"
             with h5py.File(out_file, "r") as f:
                 grp = f["linear_response_efield"]
-                # complex datasets (flagged by the __complex__ attribute) are stored as (..., 2) reals
-                result = {}
-                for k in grp.keys():
-                    a = grp[k][()]
-                    result[k] = a[..., 0] + 1j * a[..., 1] if "__complex__" in grp[k].attrs else a
+                result = {k: _as_complex(grp[k]) for k in grp.keys()}
                 result.update({k: (v.decode() if isinstance(v, bytes) else v) for k, v in grp.attrs.items()})
             payload = ("ok", result)
         except Exception as exc:                                      # noqa: BLE001

@@ -91,18 +91,20 @@ void build_field_sources(utils::mpi_context_t<mpi3::communicator>& mpi,
  * Called by run_lr_efield_calc in phase X. Σ'' = ∂²_μ Σ is the kernel response K[G''] to G'' = G (2 B G B + Σ'') G,
  * so the dynamic source of that solve is 2 B G B, while Σ'' itself is the ΔF + ΔΣ the kernel returns.
  *
- * @param sDeltaH_wskij - [OUTPUT] 2 B G B (nw_f, ns, nk, nb, nb), overwritten
+ * @param sG_wskij      - [INPUT] unperturbed G(iω) (nw_f, ns, nk, nb, nb)
+ * @param sB_wskij      - [INPUT] B(iω) = S - Σ', same shape
+ * @param sDeltaH_wskij - [OUTPUT] 2 B G B (nw_f, ns, nk, nb, nb), the dynamic source window of the Σ'' solve, overwritten
  *
  * Collective on the node communicator.
  */
-void build_mu2_source(utils::mpi_context_t<mpi3::communicator>& mpi,
-                      sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                      sArray_t<Array_view_5D_t>& sDeltaH_wskij);
+void build_sigma2_source(utils::mpi_context_t<mpi3::communicator>& mpi,
+                         sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
+                         sArray_t<Array_view_5D_t>& sDeltaH_wskij);
 
 /// Terms 2 and 3 of chi2, (3, 3) complex, unsymmetrized, with the 1/4 and 1/Ω applied.
 struct efield_trace_terms {
-  nda::array<ComplexType, 2> vGpvGp;       ///< 1/4 Tr[v_a G' v_b G'] / Ω
-  nda::array<ComplexType, 2> Sigma2_GvGvG; ///< 1/4 Tr[Σ'' G v_a G v_b G] / Ω
+  nda::array<ComplexType, 2> chi2_vGpvGp;  ///< 1/4 Tr[v_a G' v_b G'] / Ω
+  nda::array<ComplexType, 2> chi2_Sigma2;  ///< 1/4 Tr[Σ'' G v_a G v_b G] / Ω
 };
 
 /**
@@ -137,10 +139,59 @@ efield_trace_terms contract_efield_terms(utils::mpi_context_t<mpi3::communicator
  * occupation). For a gapped system tr G(β/2) ~ n e^{-β|ξ_edge|/2}, ξ_edge the band edge nearest μ, i.e. e^{-βΔ/4} at midgap
  * and the square root of the thermal occupation e^{-β|ξ_edge|}.
  *
- * Called by run_lr_efield_calc on the unperturbed G(τ) for the g_thermal diagnostic (written as `g_thermal`). The IR grid cannot interpolate
- * to β/2, so the node of smallest |x| in the reduced coordinate x = 2τ/β - 1 is used; its τ is not exactly β/2.
+ * Called by run_lr_efield_calc on the unperturbed G(τ) for the trace_G_half_beta diagnostic (written as `trace_G_half_beta`).
+ * The IR grid cannot interpolate to β/2, so the node of smallest |x| in the reduced coordinate x = 2τ/β - 1 is used;
+ * its τ is not exactly β/2.
  */
-double thermal_occupation(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij);
+double max_trace_G_mid_tau(imag_axes_ft::IAFT const& FT, sArray_t<Array_view_5D_t> const& sG_tskij);
+
+/**
+ * Σ_ij |A_ij|² of a node-shared array, striped over the global communicator.
+ *
+ * Called by run_lr_efield_calc for ‖Σ_GS(τ)‖² (is the ground-state self-energy zero), ‖S‖² and ‖ΔDm‖². Every node holds
+ * the full array, so each rank sums one contiguous chunk of the flattened array and the partial sums are reduced.
+ *
+ * Collective on the global communicator; every rank returns the same value.
+ */
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_4D_t> const& sA);
+double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sA);
+
+/**
+ * B_minus_S_rel = ‖B - S‖ / (√nw ‖S‖), the size of the vertex correction B = S - Σ' relative to S.
+ *
+ * Called by run_lr_efield_calc after phase A1, as a diagnostic of how far B(iω) is from the static S.
+ *
+ *   ‖B - S‖² = Σ_{n,s,k,ij} |B_n,s,k,ij - S_s,k,ij|²,    ‖S‖² = S_norm2,   result = √(‖B - S‖² / (nw ‖S‖²))
+ *
+ * @param sB_wskij - [INPUT] B(iω) (nw_f, ns, nk, nb, nb)
+ * @param sS_skij  - [INPUT] S (ns, nk, nb, nb)
+ * @param S_norm2  - [INPUT] ‖S‖² = striped_norm2(S)
+ *
+ * Collective on the global communicator; every rank returns the same value.
+ */
+double B_minus_S_relative_norm(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_t<Array_view_5D_t> const& sB_wskij,
+                               sArray_t<Array_view_4D_t> const& sS_skij, double S_norm2);
+
+/// ‖S_sk‖ (ns, nk): the Frobenius norm of the overlap matrix at each (s, k); computed once and reused by trace_GE_relative.
+nda::array<double, 2> norm_S_sk(sArray_t<Array_view_4D_t> const& sS_skij);
+
+/**
+ * trace_GE_relative = |ΔN| / (spin Σ_{s,k} w_k ‖S_sk‖ ‖ΔDm_sk‖), the charge response of one G^E_α solve.
+ *
+ * Called by run_lr_efield_calc after each phase A2 solve. ΔN = Tr[S ΔDm] (`dN`), and the denominator, its
+ * Cauchy-Schwarz bound, is the scale that tells a charge response from round-off; 0 if ΔDm = 0.
+ *
+ *   1. ‖ΔDm_sk‖ at each (s, k)
+ *   2. scale = spin Σ_{s,k} w_k ‖ΔDm_sk‖ ‖S_sk‖
+ *   3. result = |ΔN| / scale
+ *
+ * @param dN           - [INPUT] ΔN of the solve (driver.dyson().compute_lr_Nelec(ΔDm))
+ * @param sDeltaDm_skij- [INPUT] ΔDm (ns, nk, nb, nb)
+ * @param S_norm_sk    - [INPUT] norm_S_sk
+ */
+double trace_GE_relative(ComplexType dN, sArray_t<Array_view_4D_t> const& sDeltaDm_skij,
+                         nda::array<double, 2> const& S_norm_sk, nda::array<double, 1> const& k_weight,
+                         double spin_factor);
 
 } // namespace methods
 

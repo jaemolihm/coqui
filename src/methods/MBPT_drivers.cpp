@@ -20,6 +20,7 @@
 
 
 
+#include <limits>
 #include <string>
 
 #include "configuration.hpp"
@@ -1521,7 +1522,7 @@ lr_iter_params read_lr_iter_params(ptree const& pt, bool qp_static_sigma) {
       pt, "iter_alg.alg", qp_static_sigma ? std::string("DIIS") : std::string("GCR"));
   utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS" ||
                iter_params.alg == "GCR",
-               "run_lr_calc: unknown iter_alg '{}'. Must be 'damping', 'DIIS' or 'GCR'.",
+               "read_lr_iter_params: unknown iter_alg '{}'. Must be 'damping', 'DIIS' or 'GCR'.",
                iter_params.alg);
   // 2. mixing, subspace size and DIIS warmup
   iter_params.mixing = io::get_value_with_default<double>(pt, "iter_alg.mixing", 1.0);
@@ -1560,12 +1561,12 @@ lr_unperturbed_state load_lr_unperturbed_state(mpi_context_t& mpi, mf::MF& mf, i
                                                std::string const& unperturbed, utils::TimerManager& init_timer) {
   // 1. Dyson solver with the requested H0 source
   utils::check(h0_source == "compute" || h0_source == "checkpoint",
-               "run_lr_calc: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
+               "load_lr_unperturbed_state: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
   init_timer.start("LR_INIT_DYSON");
   simple_dyson dyson = make_dyson_with_h0_source(h0_source, &mf, &ft, prefix);
   init_timer.stop("LR_INIT_DYSON");
 
-  utils::memlog("run_lr_calc: after simple_dyson ctor");
+  utils::memlog("load_lr_unperturbed_state: after simple_dyson ctor");
 
   // 2. Shared arrays of the unperturbed state
   auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
@@ -1579,11 +1580,11 @@ lr_unperturbed_state load_lr_unperturbed_state(mpi_context_t& mpi, mf::MF& mf, i
   auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       mpi, {ft.nt_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
 
-  utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
+  utils::memlog("load_lr_unperturbed_state: after sF/sDm/sG/sSigma alloc");
 
   auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
       mpi, {ft.nw_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-  utils::memlog("run_lr_calc: after sG_wskij alloc");
+  utils::memlog("load_lr_unperturbed_state: after sG_wskij alloc");
 
   // 3. G(τ), Dm, G(iω)
   double mu = 0.0;
@@ -1661,7 +1662,7 @@ lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& 
   // exception is unperturbed='mf_dft', where W0 is built fresh from the DFT G0
   // and the mean-field checkpoint carries no ground-state value to inherit.
   utils::check(unperturbed == "mf_dft" or !io::check_child_exists(pt, "div_treatment"),
-               "run_lr_calc: 'div_treatment' is not accepted for unperturbed='{}'. "
+               "load_lr_W: 'div_treatment' is not accepted for unperturbed='{}'. "
                "The LR run always reuses the ground-state value read from "
                "'{}/div_treatment' in {}, so that ΔΣ matches how Σ was built. "
                "Remove the argument (it is only meaningful for unperturbed='mf_dft').",
@@ -1678,7 +1679,7 @@ lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& 
       // The checkpoint holds no scGW W (or div_treatment), so recompute and
       // take div_treatment from params (default matches the C++ default).
       utils::check(screened_interaction_file.empty(),
-                   "run_lr_calc: unperturbed='mf_dft' builds W0 from G0 (RPA); "
+                   "load_lr_W: unperturbed='mf_dft' builds W0 from G0 (RPA); "
                    "screened_interaction_file must not be set.");
       recompute_W = true;
       W.div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
@@ -1696,7 +1697,7 @@ lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& 
         auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
         long nw_half = (ft.nw_b() + 1) / 2;
         utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
-                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
+                     "load_lr_W: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
                      "({}, {}, {}, {}). reuse_W requires the ground state and THC the kept W was built with; "
                      "call coqui.mbpt.release_lr_W_cache() before switching.",
                      Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
@@ -1731,7 +1732,7 @@ lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& 
         // checkpoint came from different runs, and Σ would mix two treatments.
         // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
         utils::check(div_str == W.div_treatment,
-                     "run_lr_calc: div_treatment mismatch. The screened interaction "
+                     "load_lr_W: div_treatment mismatch. The screened interaction "
                      "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
                      "must come from the same ground-state run.",
                      div_str, input_grp, input_file, W.div_treatment);
@@ -2461,7 +2462,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
-  p.has_dynamic_source = has_dynamic_source;
+  p.sDeltaH_wskij    = has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr;
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
@@ -2515,8 +2516,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
-        output_aux_fock ? &DeltaF_PQ_skij : nullptr,
-        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr);
     niter_m(m) = niter;
     Delta_mu_m(m) = Delta_mu;
     mpi->comm.barrier();
@@ -2712,6 +2712,62 @@ template std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr_calc
 
 
 
+namespace {
+
+/// Warning level of the run_lr_efield_calc diagnostics (trace_G_half_beta, |κ̄| 4π/|ε∞ - 1|, trace_GE_rel, herm_M): a
+/// relative size at which the neglected or violated property would show in ε∞; chosen for the warnings, not derived.
+/// trace_G_half_beta is an amplitude, the square root of the thermal occupation, so its 1e-6 is an occupation of ~1e-12.
+constexpr double efield_diagnostic_tol = 1e-6;
+
+/**
+ * Writes the results of run_lr_efield_calc to the `linear_response_efield/` group of `out_file` (replaced if present).
+ *
+ * Called by run_lr_efield_calc once, at its end; only the global root writes. The arrays and scalars are the ones
+ * named in the Python `run_lr_efield` docstring, written under the same names, plus the attributes method,
+ * precond_method and tol.
+ */
+void write_efield_results(utils::mpi_context_t<mpi3::communicator>& mpi,
+                          std::string const& out_file, std::string const& method, std::string const& precond_method,
+                          double tol, nda::array<double, 2> const& eps_inf, nda::array<ComplexType, 2> const& chi2,
+                          nda::array<ComplexType, 2> const& chi2_GE_sym,
+                          nda::array<ComplexType, 2> const& chi2_GE_plain, efield_trace_terms const& trace_terms,
+                          lr_hessian_result_t const& hess, double eps_inf_imag_max, double trace_G_half_beta,
+                          double kappa_bar, double DeltaDm_Gp_rel, double B_minus_S_rel, double dkappa_dmu,
+                          nda::array<double, 1> const& trace_GE_rel, nda::array<long, 1> const& niter) {
+  if (!mpi.comm.root()) return;
+  // 1. Open the output file, replacing a previous linear_response_efield/
+  h5::file file(out_file, std::filesystem::exists(out_file) ? 'a' : 'w');
+  h5::group root_grp(file);
+  if (root_grp.has_subgroup("linear_response_efield"))
+    H5Ldelete(h5::hid_t(root_grp), "linear_response_efield", H5P_DEFAULT);
+  auto grp = root_grp.create_group("linear_response_efield");
+  // 2. The tensors, the diagnostics and the iteration counts
+  nda::h5_write(grp, "eps_inf", eps_inf, false);
+  nda::h5_write(grp, "chi2", chi2, false);
+  nda::h5_write(grp, "chi2_GE_sym", chi2_GE_sym, false);
+  nda::h5_write(grp, "chi2_GE_plain", chi2_GE_plain, false);
+  nda::h5_write(grp, "chi2_vGpvGp", trace_terms.chi2_vGpvGp, false);
+  nda::h5_write(grp, "chi2_Sigma2", trace_terms.chi2_Sigma2, false);
+  h5::h5_write(grp, "herm_plain", hess.herm_plain);
+  h5::h5_write(grp, "herm_sym", hess.herm_sym);
+  h5::h5_write(grp, "herm_M", hess.herm_M);
+  h5::h5_write(grp, "eps_inf_imag_max", eps_inf_imag_max);
+  h5::h5_write(grp, "trace_G_half_beta", trace_G_half_beta);
+  h5::h5_write(grp, "kappa_bar", kappa_bar);
+  h5::h5_write(grp, "DeltaDm_Gp_rel", DeltaDm_Gp_rel);
+  h5::h5_write(grp, "B_minus_S_rel", B_minus_S_rel);
+  h5::h5_write(grp, "dkappa_dmu", dkappa_dmu);
+  nda::h5_write(grp, "trace_GE_rel", trace_GE_rel, false);
+  nda::h5_write(grp, "niter", niter, false);
+  // 3. The run's settings
+  h5::h5_write_attribute(grp, "method", method);
+  h5::h5_write_attribute(grp, "precond_method", precond_method);
+  h5::h5_write_attribute(grp, "tol", tol);
+  app_log(2, "  - linear_response_efield/ written to {}", out_file);
+}
+
+} // namespace
+
 /**
  * Electronic dielectric tensor ε∞ from eight Q = 0 LR solves on one ground state (note efield_lr.tex, eq:chi2work):
  *
@@ -2725,8 +2781,8 @@ template std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr_calc
  *   X   K^X, v modes (ΔH0 = v0_a) and the Σ'' mode (source 2 B G B)   -> v_a, Σ'', terms 2 and 3
  *   A2  K_a, source V^E_a, hessian     -> G^E_a, term 1 = H_sym[b, a]/Ω
  * For method "GW", K_a is the full kernel K = K^H + K^X + K^W, so the A1 and A2 solves contain K^W; GW0 has K^W = 0.
- * A phase whose kernel has a Σ (GW0, GW) is preconditioned by HSEX (the static kernel {H if K has it, X = V + W_c(iν=0)}
- * of run_lr's precond_method = "HSEX", default precond_tol and precond_max_iter) unless iter_alg is DIIS, which cannot
+ * A phase whose kernel has a Σ (GW0, GW) is preconditioned by HSEX (the static kernel {X = V + W_c(iν=0), and H only if the
+ * phase kernel has it}: run_lr's precond_method = "HSEX" always carries H; default precond_tol and precond_max_iter) unless iter_alg is DIIS, which cannot
  * take a preconditioner; the preconditioner changes the rate, not the answer.
  * Each phase builds its own lr_driver and W and destroys them at its end, so the peak memory is one phase's.
  *
@@ -2750,7 +2806,6 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   auto& thc = eri.corr_eri->get();
   auto mf = thc.MF();
   auto& mpi = thc.mpi();
-  using sArray_4D_t = math::shm::shared_array<Array_view_4D_t>;
   using sArray_5D_t = math::shm::shared_array<Array_view_5D_t>;
   using sArray_6D_t = math::shm::shared_array<Array_view_6D_t>;
 
@@ -2788,8 +2843,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                "pw2coqui add_velocity = .true. (augmented mean fields carry none).");
   std::string input_file = prefix + ".mbpt.h5";
   utils::check(std::filesystem::exists(input_file), "run_lr_efield_calc: Input checkpoint {} does not exist!", input_file);
-  auto ends_with_metal = [](std::string const& s) { return s.size() >= 6 && s.compare(s.size() - 6, 6, "_metal") == 0; };
-  utils::check(!ends_with_metal(read_hf_div_treatment(*mpi, input_file, input_grp)),
+  utils::check(!read_hf_div_treatment(*mpi, input_file, input_grp).ends_with("_metal"),
                "run_lr_efield_calc: a '*_metal' hf_div_treatment is not supported, ε∞ needs the gapped treatment.");
 
   const lr_kernel_spec kernel_a = kernel_spec_from_method(method);
@@ -2802,7 +2856,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   if (recompute_W && !reuse_W) W_cache.reset();
 
   utils::TimerManager init_timer;
-  for (auto& v : {"LR_INIT_DYSON", "LR_INIT_READ_SCF", "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W"}) init_timer.add(v);
+  for (auto& timer : {"LR_INIT_DYSON", "LR_INIT_READ_SCF", "LR_INIT_UPDATE_G", "LR_INIT_LOAD_W"}) init_timer.add(timer);
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
   const long nw = ft.nw_f(), nt = ft.nt_f(), ns = mf->nspin(), nk = mf->nkpts_ibz(), nb = mf->nbnd();
   const double volume = mf->volume();
@@ -2814,20 +2868,13 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   // 2. Unperturbed state: Dyson solver, G(iω), G(τ), Σ(τ), μ; the ground-state diagnostics
   auto state = load_lr_unperturbed_state(*mpi, *mf, ft, h0_source, prefix, input_grp, input_iter, "checkpoint",
                                          init_timer);
-  auto& dyson = state.dyson;
+  auto& gs_dyson = state.dyson;
   auto& sG_wskij = state.sG_wskij;
   auto& sG_tskij = *state.opt_sG_tskij;  // alive until the end: recompute_W reads it in the first phase that builds W
-  auto const& sS_skij = dyson.sS_skij();
-  const double g_thermal = thermal_occupation(ft, sG_tskij);
-  // Σ(τ) of the ground state, striped over the global communicator: has_sigma_gs is true if the GS has a Σ
-  double sigma_gs_norm2 = 0.0;
-  {
-    auto const& Sig = state.sSigma_tskij.local();
-    auto [b0, b1] = itertools::chunk_range(0, long(Sig.size()), long(mpi->comm.size()), long(mpi->comm.rank()));
-    for (long b = b0; b < b1; ++b) sigma_gs_norm2 += std::norm(Sig.data()[b]);
-    sigma_gs_norm2 = mpi->comm.all_reduce_value(sigma_gs_norm2);
-  }
-  const bool has_sigma_gs = sigma_gs_norm2 > 0.0;  // the checkpoint's ground state carries a GW self-energy
+  auto const& sS_skij = gs_dyson.sS_skij();
+  const double trace_G_half_beta = max_trace_G_mid_tau(ft, sG_tskij);
+  const bool has_sigma_gs = striped_norm2(*mpi, state.sSigma_tskij) > 0.0;  // the checkpoint's ground state carries a GW self-energy
+  { auto released = std::move(state.sSigma_tskij); }  // free Σ(τ) of the ground state: nothing below reads it
   utils::check(has_sigma_gs == has_sigma,
                "run_lr_efield_calc: method '{}' needs a ground state {} a self-energy, but the checkpoint {} {}.",
                method, has_sigma ? "with" : "without", input_file,
@@ -2858,28 +2905,22 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     if (mpi->node_comm.root()) dst.local() = src_view;
     dst.node_sync();
   };
-  // Σ_{ij} |A_ij|^2 of a node-shared array, striped over the global communicator
-  auto norm2_of = [&](auto const& sA) {
-    auto const& A = sA.local();
-    auto [b0, b1] = itertools::chunk_range(0, long(A.size()), long(mpi->comm.size()), long(mpi->comm.rank()));
-    double s = 0.0;
-    for (long b = b0; b < b1; ++b) s += std::norm(A.data()[b]);
-    return mpi->comm.all_reduce_value(s);
-  };
 
-  const lr_iter_params iter_params = read_lr_iter_params(pt, false);
+  const lr_iter_params iter_params = read_lr_iter_params(pt, /*qp_static_sigma=*/false);
   const bool use_precond = iter_params.alg != "DIIS";  // false under DIIS, which takes no preconditioner
   if (has_sigma && !use_precond)
     app_log(2, "  - iter_alg DIIS takes no preconditioner: the HSEX preconditioner is dropped");
 
-  // The lr_params of one phase. W must outlive the lr_driver that p is given to.
-  auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W, lr_iter_params const& iter,
-                         bool has_dynamic_source) {
+  // The lr_params of one phase; `sDeltaH_wskij_source` is its dynamic source (nullptr: none). W must outlive the
+  // lr_driver that p is given to.
+  // exclude_hartree_head stays false: at Q = 0 the THC Coulomb has no G = 0 term, so V is already V̄ (lr_hf::build_Uq_PQ).
+  auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W,
+                         sArray_5D_t const* sDeltaH_wskij_source) {
     lr_params p;
-    fill_lr_kernel_params(p, kernel, W, iter, max_iter, tol, /*fix_density=*/false, /*save_DeltaG=*/false);
-    p.has_dynamic_source = has_dynamic_source;
+    fill_lr_kernel_params(p, kernel, W, iter_params, max_iter, tol, /*fix_density=*/false, /*save_DeltaG=*/false);
+    p.sDeltaH_wskij = sDeltaH_wskij_source;
     if (kernel.has_sigma() && use_precond) {  // HSEX preconditioner, whose K_pc has the Hartree rung only if the kernel has it
-      p.precond_kernel = lr_kernel_spec{kernel.hartree, true, false, false};
+      p.precond_kernel = lr_kernel_spec{.hartree = kernel.hartree, .exchange = true};
       p.precond_hsex = true;
     }
     return p;
@@ -2887,12 +2928,13 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   auto load_W_of_phase = [&](lr_kernel_spec const& kernel) {
     auto W = load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, kernel.has_sigma(), recompute_W, cache_W,
                        screened_interaction_file, "checkpoint", sG_tskij, nullptr, init_timer);
-    utils::check(!ends_with_metal(W.div_treatment),
+    utils::check(!W.div_treatment.ends_with("_metal"),
                  "run_lr_efield_calc: a '*_metal' div_treatment ('{}') is not supported, ε∞ needs the gapped "
                  "treatment (note sec:largeDN).", W.div_treatment);
     return W;
   };
 
+  // niter = [A1, v_x, v_y, v_z, Σ'', G^E_x, G^E_y, G^E_z]
   nda::array<long, 1> niter(8);
   niter() = 0;
   double kappa_bar = 0.0, DeltaDm_Gp_rel = 0.0, B_minus_S_rel = 0.0, dkappa_dmu = 0.0;
@@ -2905,63 +2947,53 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   // 4. Phase A1: G' and B = S + ΔF + ΔΣ(iω), from the response to ΔH0 = S
   {
     auto W = load_W_of_phase(kernel_a);
-    lr_driver driver(dyson, q_vec);
-    auto p = make_params(kernel_a, W, iter_params, false);
+    lr_driver driver(gs_dyson, q_vec);
+    auto p = make_params(kernel_a, W, /*sDeltaH_wskij_source=*/nullptr);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
+    // 4.1 ΔH0 = S solve, ΔF and ΔΣ(τ) of its final Dyson pass
     fill_from(sDeltaH0_skij, sS_skij.local());
     auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
                                          thc, p);
     niter(0) = it;
-    // 1. B(iω) = S + ΔF + τ->ω ΔΣ(τ)
+    // 4.2 B(iω) = S + ΔF + τ->ω ΔΣ(τ)
     opt_sB_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, &sS_skij, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
-    // 2. κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k).
-    //    κ̄ is real: S = S† and every source obeys ΔH(-iω) = ΔH(iω)†, so ΔDm = ΔDm† and Tr[S ΔDm] is real
+    // 4.3 κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k).
+    //     κ̄ is real: S = S† and every source obeys ΔH(-iω) = ΔH(iω)†, so ΔDm = ΔDm† and Tr[S ΔDm] is real
     kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
-    const double S_norm2 = norm2_of(sS_skij);
-    DeltaDm_Gp_rel = std::sqrt(norm2_of(sDeltaDm_skij) / S_norm2);
-    {
-      double BmS2 = 0.0;
-      auto [b0, b1] = itertools::chunk_range(0, nw * ns * nk, long(mpi->comm.size()), long(mpi->comm.rank()));
-      for (long b = b0; b < b1; ++b) {
-        long n = b / (ns * nk), is = (b / nk) % ns, ik = b % nk;
-        for (long i = 0; i < nb; ++i)
-          for (long j = 0; j < nb; ++j)
-            BmS2 += std::norm((*opt_sB_wskij).local()(n, is, ik, i, j) - sS_skij.local()(is, ik, i, j));
-      }
-      BmS2 = mpi->comm.all_reduce_value(BmS2);
-      B_minus_S_rel = std::sqrt(BmS2 / (double(nw) * S_norm2));
-    }
+    const double S_norm2 = striped_norm2(*mpi, sS_skij);
+    DeltaDm_Gp_rel = std::sqrt(striped_norm2(*mpi, sDeltaDm_skij) / S_norm2);
+    B_minus_S_rel = B_minus_S_relative_norm(*mpi, *opt_sB_wskij, sS_skij, S_norm2);
     mpi->comm.barrier();
   }
 
   // 5. Phase X: v_α (ΔH0 = v0_α) and Σ'' (source 2 B G B) with K^X, then terms 2 and 3
   {
     auto W = load_W_of_phase(kernel_x);
-    lr_driver driver(dyson, q_vec);
-    auto p = make_params(kernel_x, W, iter_params, true);
+    lr_driver driver(gs_dyson, q_vec);
+    auto p = make_params(kernel_x, W, &sDeltaH_wskij);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     decltype(nda::range::all) all;
-    // 1. v_α = ΔH0 + ΔF + ΔΣ(iω) of the solve with ΔH0 = v0_α and a zero source
+    // 5.1 v_α = ΔH0 + ΔF + ΔΣ(iω) of the solve with ΔH0 = v0_α and a zero source
     sDeltaH_wskij.set_zero();
     for (long a = 0; a < 3; ++a) {
       fill_from(sDeltaH0_skij, sv0_skxij.local()(all, all, a, all, all));
       auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
-                                           thc, p, nullptr, nullptr, nullptr, nullptr, nullptr, &sDeltaH_wskij);
+                                           thc, p);
       niter(1 + a) = it;
       opt_sv_wskij[a].emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
       lr_total_one_body_w(*mpi, ft, &sDeltaH0_skij, sDeltaF_skij, pDeltaSigma, *opt_sv_wskij[a]);
     }
-    // 2. Σ'' = ΔF + ΔΣ(iω) of the solve with ΔH0 = 0 and the source 2 B G B
+    // 5.2 Σ'' = ΔF + ΔΣ(iω) of the solve with ΔH0 = 0 and the source 2 B G B
     sDeltaH0_skij.set_zero();
-    build_mu2_source(*mpi, sG_wskij, *opt_sB_wskij, sDeltaH_wskij);
+    build_sigma2_source(*mpi, sG_wskij, *opt_sB_wskij, sDeltaH_wskij);
     auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
-                                         thc, p, nullptr, nullptr, nullptr, nullptr, nullptr, &sDeltaH_wskij);
+                                         thc, p);
     niter(4) = it;
     opt_sSigma2_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, nullptr, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
     dkappa_dmu = driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
-    // 3. Terms 2 and 3, then Σ'' is not needed any more
+    // 5.3 Terms 2 and 3, then Σ'' is not needed any more
     trace_terms = contract_efield_terms(*mpi, ft, sG_wskij, *opt_sB_wskij,
                                         {&*opt_sv_wskij[0], &*opt_sv_wskij[1], &*opt_sv_wskij[2]},
                                         *opt_sSigma2_wskij, k_weight, spin_factor, volume);
@@ -2974,14 +3006,14 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   build_field_sources(*mpi, sG_wskij, *opt_sB_wskij, {&*opt_sv_wskij[0], &*opt_sv_wskij[1], &*opt_sv_wskij[2]},
                       sVE_xwskij);
   opt_sB_wskij.reset();
-  for (auto& v : opt_sv_wskij) v.reset();
+  for (auto& opt_sv : opt_sv_wskij) opt_sv.reset();
 
   // 7. Phase A2: G^E_α with K_a and the source V^E_α, with the stationary hessian over the three modes
   lr_hessian_result_t hess;
   {
     auto W = load_W_of_phase(kernel_a);
-    lr_driver driver(dyson, q_vec);
-    auto p = make_params(kernel_a, W, iter_params, true);
+    lr_driver driver(gs_dyson, q_vec);
+    auto p = make_params(kernel_a, W, &sDeltaH_wskij);
     p.hessian_nmodes = 3;
     p.hessian_stationary = true;
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -2989,38 +3021,24 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                          /*has_dynamic_source=*/true);
     sDeltaH0_skij.set_zero();
     decltype(nda::range::all) all;
+    const auto S_norm_sk = norm_S_sk(sS_skij);
     for (long a = 0; a < 3; ++a) {
-      // 1. The window is V^E_a, copied on every node from the node-shared stack
+      // 7.1 The window is V^E_a, copied on every node from the node-shared stack
       fill_from(sDeltaH_wskij, sVE_xwskij.local()(a, all, all, all, all, all));
       auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
-                                           thc, p, nullptr, nullptr, nullptr, nullptr, nullptr, &sDeltaH_wskij);
+                                           thc, p);
       niter(5 + a) = it;
-      // 2. trace_GE_rel = |ΔN_a| / (spin Σ_{s,k} w_k ‖S_k‖ ‖ΔDm_a,k‖), the Cauchy-Schwarz scale of ΔN = Tr[S ΔDm]
-      {
-        double dm_scale = 0.0;
-        for (long is = 0; is < ns; ++is)
-          for (long ik = 0; ik < nk; ++ik) {
-            double n2 = 0.0;
-            for (long i = 0; i < nb; ++i)
-              for (long j = 0; j < nb; ++j) n2 += std::norm(sDeltaDm_skij.local()(is, ik, i, j));
-            double s2 = 0.0;
-            for (long i = 0; i < nb; ++i)
-              for (long j = 0; j < nb; ++j) s2 += std::norm(sS_skij.local()(is, ik, i, j));
-            dm_scale += k_weight(ik) * std::sqrt(n2) * std::sqrt(s2);
-          }
-        const ComplexType dN = driver.dyson().compute_lr_Nelec(sDeltaDm_skij);
-        trace_GE_rel(a) = std::abs(dN) / (spin_factor * std::max(dm_scale, 1e-300));
-      }
-      // 3. Store the mode for the hessian
+      // 7.2 trace_GE_rel = |ΔN_a| / (spin Σ_{s,k} w_k ‖S_k‖ ‖ΔDm_a,k‖), the Cauchy-Schwarz scale of ΔN = Tr[S ΔDm]
+      trace_GE_rel(a) = trace_GE_relative(driver.dyson().compute_lr_Nelec(sDeltaDm_skij), sDeltaDm_skij, S_norm_sk,
+                                          k_weight, spin_factor);
+      // 7.3 Store the mode for the hessian
       hessian.store_mode(a, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
                          &sDeltaH_wskij);
       mpi->comm.barrier();
     }
-    // 4. H_plain, H_sym (term 1) from the stored modes; ΔH0 is zero for every mode, so the root stack is zero
-    std::optional<nda::array<ComplexType, 5>> zero_DeltaH0_root;
-    if (mpi->comm.root()) zero_DeltaH0_root.emplace(nda::zeros<ComplexType>(3, ns, nk, nb, nb));
+    // 7.4 H_plain, H_sym (term 1) from the stored modes; ΔH0 = 0 for every mode (no ΔH0 stack)
     hess = hessian.evaluate(driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                            zero_DeltaH0_root, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
+                            /*DeltaH0_mskij_root=*/std::nullopt, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
     hessian.print_timers();
     mpi->comm.barrier();
   }
@@ -3034,7 +3052,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     for (long b = 0; b < 3; ++b) {
       chi2_GE_sym(a, b) = hess.hessian_sym(b, a) / volume;      // <G^E_a, V^E_b> = H[b, a] / Ω
       chi2_GE_plain(a, b) = hess.hessian_plain(b, a) / volume;
-      T(a, b) = chi2_GE_sym(a, b) + trace_terms.vGpvGp(a, b) + trace_terms.Sigma2_GvGvG(a, b);
+      T(a, b) = chi2_GE_sym(a, b) + trace_terms.chi2_vGpvGp(a, b) + trace_terms.chi2_Sigma2(a, b);
     }
   nda::array<double, 2> eps_inf(3, 3);
   double eps_inf_imag_max = 0.0;
@@ -3046,57 +3064,37 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     }
 
   // 9. Diagnostics (note sec:diagnostics): one root-rank warning per failed check
-  const double eps_scale = std::max(std::abs(eps_inf(0, 0) - 1.0), 1e-300);
+  // |κ̄| 4π / |ε∞_xx - 1|; infinite for a vanishing ε∞_xx - 1 unless κ̄ = 0 too
+  const double eps_xx_minus_1 = std::abs(eps_inf(0, 0) - 1.0);
+  const double kappa_rel = eps_xx_minus_1 > 0.0 ? std::abs(kappa_bar) * 4.0 * M_PI / eps_xx_minus_1
+                                                : (kappa_bar != 0.0 ? std::numeric_limits<double>::infinity() : 0.0);
   if (mpi->comm.root()) {  // every rank holds the same values; one warning is enough
-    if (g_thermal > 1e-6)
-      app_warning("run_lr_efield_calc: max|tr G(β/2)| = {:.2e} > 1e-6, the ground state is not gapped at its μ "
-                  "(or β is too small); the thermal terms of ε∞ are not included.", g_thermal);
-    if (std::abs(kappa_bar) * 4.0 * M_PI / eps_scale > 1e-6)
-      app_warning("run_lr_efield_calc: |κ̄| 4π/|ε∞ - 1| = {:.2e} > 1e-6, the compressibility ∂N/∂μ is not negligible.",
-                  std::abs(kappa_bar) * 4.0 * M_PI / eps_scale);
+    if (trace_G_half_beta > efield_diagnostic_tol)
+      app_warning("run_lr_efield_calc: max|tr G(β/2)| = {:.2e} > {:.0e}, the ground state is not gapped at its μ "
+                  "(or β is too small); the thermal terms of ε∞ are not included.", trace_G_half_beta,
+                  efield_diagnostic_tol);
+    if (kappa_rel > efield_diagnostic_tol)
+      app_warning("run_lr_efield_calc: |κ̄| 4π/|ε∞ - 1| = {:.2e} > {:.0e}, the compressibility ∂N/∂μ is not negligible.",
+                  kappa_rel, efield_diagnostic_tol);
     const double trace_GE_rel_max = std::max({trace_GE_rel(0), trace_GE_rel(1), trace_GE_rel(2)});
-    if (trace_GE_rel_max > 1e-6)
-      app_warning("run_lr_efield_calc: trace_GE_rel = {:.2e} > 1e-6, G^E carries a charge response.", trace_GE_rel_max);
-    if (hess.herm_M > 1e-6) {
+    if (trace_GE_rel_max > efield_diagnostic_tol)
+      app_warning("run_lr_efield_calc: trace_GE_rel = {:.2e} > {:.0e}, G^E carries a charge response.",
+                  trace_GE_rel_max, efield_diagnostic_tol);
+    if (hess.herm_M > efield_diagnostic_tol) {
       if (kernel_a.sigma_G_dW)
-        app_warning("run_lr_efield_calc: herm_M = {:.2e} > 1e-6, the q = 0 ΔW part of the kernel is not self-adjoint "
-                    "(issue jaemolihm/coqui#141).", hess.herm_M);
+        app_warning("run_lr_efield_calc: herm_M = {:.2e} > {:.0e}, the q = 0 ΔW part of the kernel is not self-adjoint "
+                    "for a TR-odd source.", hess.herm_M, efield_diagnostic_tol);
       else
-        app_warning("run_lr_efield_calc: herm_M = {:.2e} > 1e-6, the kernel is not self-adjoint on this grid.", hess.herm_M);
+        app_warning("run_lr_efield_calc: herm_M = {:.2e} > {:.0e}, the kernel is not self-adjoint on this grid.",
+                    hess.herm_M, efield_diagnostic_tol);
     }
   }
   app_log(1, "\n  ε∞ (xx, yy, zz) = {:.6f}  {:.6f}  {:.6f}", eps_inf(0, 0), eps_inf(1, 1), eps_inf(2, 2));
 
   // 10. The root writes linear_response_efield/
-  if (mpi->comm.root()) {
-    std::string out_file = output + ".mbpt.h5";
-    h5::file file(out_file, std::filesystem::exists(out_file) ? 'a' : 'w');
-    h5::group root_grp(file);
-    if (root_grp.has_subgroup("linear_response_efield"))
-      H5Ldelete(h5::hid_t(root_grp), "linear_response_efield", H5P_DEFAULT);
-    auto grp = root_grp.create_group("linear_response_efield");
-    nda::h5_write(grp, "eps_inf", eps_inf, false);
-    nda::h5_write(grp, "chi2", chi2, false);
-    nda::h5_write(grp, "chi2_GE_sym", chi2_GE_sym, false);
-    nda::h5_write(grp, "chi2_GE_plain", chi2_GE_plain, false);
-    nda::h5_write(grp, "chi2_vGpvGp", trace_terms.vGpvGp, false);
-    nda::h5_write(grp, "chi2_Sigma2", trace_terms.Sigma2_GvGvG, false);
-    h5::h5_write(grp, "herm_plain", hess.herm_plain);
-    h5::h5_write(grp, "herm_sym", hess.herm_sym);
-    h5::h5_write(grp, "herm_M", hess.herm_M);
-    h5::h5_write(grp, "eps_inf_imag_max", eps_inf_imag_max);
-    h5::h5_write(grp, "g_thermal", g_thermal);
-    h5::h5_write(grp, "kappa_bar", kappa_bar);
-    h5::h5_write(grp, "DeltaDm_Gp_rel", DeltaDm_Gp_rel);
-    h5::h5_write(grp, "B_minus_S_rel", B_minus_S_rel);
-    h5::h5_write(grp, "dkappa_dmu", dkappa_dmu);
-    nda::h5_write(grp, "trace_GE_rel", trace_GE_rel, false);
-    nda::h5_write(grp, "niter", niter, false);
-    h5::h5_write_attribute(grp, "method", method);
-    h5::h5_write_attribute(grp, "precond_method", std::string(has_sigma && use_precond ? "HSEX" : "none"));
-    h5::h5_write_attribute(grp, "tol", tol);
-    app_log(2, "  - linear_response_efield/ written to {}", out_file);
-  }
+  write_efield_results(*mpi, output + ".mbpt.h5", method, std::string(has_sigma && use_precond ? "HSEX" : "none"), tol,
+                       eps_inf, chi2, chi2_GE_sym, chi2_GE_plain, trace_terms, hess, eps_inf_imag_max,
+                       trace_G_half_beta, kappa_bar, DeltaDm_Gp_rel, B_minus_S_rel, dkappa_dmu, trace_GE_rel, niter);
   mpi->comm.barrier();
 }
 

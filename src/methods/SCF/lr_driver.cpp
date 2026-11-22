@@ -313,7 +313,7 @@ void lr_driver::lr_setup(
                         p.fix_density && _lr_dyson.is_q_gamma(),
                         p.exchange_static_W || p.precond_hsex,
                         p.hessian_stationary ? p.hessian_nmodes : 0,
-                        p.has_dynamic_source);
+                        p.has_dynamic_source());
   print_distribution_summary(thc.Np(), K.has_sigma(), K.sigma_G_dW);
 
   _Timer.start("LR_DRIVER_SETUP");
@@ -726,16 +726,12 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
     sArray_t<Array_view_4D_t>* sDeltaVcorr_skij,
     nda::array<ComplexType, 4>* DeltaF_ibc_out,
     nda::array<ComplexType, 4>* F_PQ_out,
-    nda::array<ComplexType, 4>* DeltaF_PQ_out,
-    const sArray_t<Array_view_5D_t>* sDeltaH_wskij) {
+    nda::array<ComplexType, 4>* DeltaF_PQ_out) {
 
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
-  utils::check(p.has_dynamic_source == (sDeltaH_wskij != nullptr),
-               "lr_driver::lr_solve_one: p.has_dynamic_source = {} but the ΔH(iω) array is {}; "
-               "lr_setup sized its memory report and the hessian ω stores for the one given there.",
-               p.has_dynamic_source, sDeltaH_wskij ? "given" : "null");
   _DeltaWloc_tabcd.reset();
   const lr_kernel_spec& K = p.kernel;
+  const sArray_t<Array_view_5D_t>* sDeltaH_wskij = p.sDeltaH_wskij;  // nullptr: no dynamic source
   const bool qp = (p.qp_static != nullptr);
   auto& opt_ibc            = _opt_ibc;
   utils::check(!qp || sDeltaVcorr_skij, "lr_driver::lr_solve_one: qp mode needs a ΔV_QPGW array.");
@@ -1067,7 +1063,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
   // every pass has already materialized it.
   // The local projection of ΔG(τ) is a consumer as well.
   // The hessian's ΔH(iω) term contracts ΔG(iω), which a Σ-free kernel does not otherwise form.
-  if (p.save_DeltaG || p.embedding || (p.hessian() && p.has_dynamic_source)) update_DeltaG();
+  if (p.save_DeltaG || p.embedding || (p.hessian() && p.has_dynamic_source())) update_DeltaG();
 
   // Hessian: the estimator needs the returned ΔF/ΔΣ to be K of the returned
   // ΔDm/ΔG(τ), but ΔF/ΔΣ are the accelerator's iterate and ΔDm/ΔG(τ) its Dyson

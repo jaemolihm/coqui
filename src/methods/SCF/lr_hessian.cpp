@@ -360,19 +360,23 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   //
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
   // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
+
+  // A ΔH0 stack engaged on the root means every mode has a ΔH0; unengaged means ΔH0 = 0 for every mode
+  int has_DeltaH0_int = (_mpi->comm.root() && DeltaH0_mskij_root.has_value()) ? 1 : 0;
+  _mpi->comm.broadcast_n(&has_DeltaH0_int, 1, 0);
+  const bool has_DeltaH0 = (has_DeltaH0_int == 1);  // the root passed a ΔH0 stack
+  if (!has_DeltaH0) sDeltaH0.set_zero();             // ΔH0 = 0: the window stays zero for every mode
+
   for (long p = 0; p < _nmodes; ++p) {
 
     // Mode p's ΔH0 into the shm window: root writes its slice, broadcast_to_nodes
     // publishes it. The stack is engaged on the global root only, which is where
     // the caller validated its shape.
-    if (_mpi->comm.root()) {
-      utils::check(DeltaH0_mskij_root.has_value(),
-                   "lr_hessian_t::evaluate: the ΔH0 stack must be provided on the "
-                   "MPI global root.");
-      sDeltaH0.local() = (*DeltaH0_mskij_root)(p, nda::ellipsis{});
+    if (has_DeltaH0) {
+      if (_mpi->comm.root()) sDeltaH0.local() = (*DeltaH0_mskij_root)(p, nda::ellipsis{});
+      sDeltaH0.broadcast_to_nodes(0);
+      _mpi->comm.barrier();
     }
-    sDeltaH0.broadcast_to_nodes(0);
-    _mpi->comm.barrier();
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
