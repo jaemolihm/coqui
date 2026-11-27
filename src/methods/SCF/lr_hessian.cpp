@@ -160,6 +160,7 @@ nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
   utils::check(loc.size() == _nw * _nF,
                "lr_hessian_t: ΔH(iω) has {} elements, expected nw*ns*nk*nb*nb = {}.",
                loc.size(), _nw * _nF);
+  utils::check(loc.is_contiguous(), "lr_hessian_t: ΔH(iω) view must be contiguous.");
   auto flat = nda::reshape(loc, std::array<long, 1>{_nw * _nF});
   nda::array<ComplexType, 2> out(_nw, _nloc);
   if (_nloc > 0)
@@ -174,6 +175,7 @@ nda::array<ComplexType, 1> lr_hessian_t::pack_static(
   utils::check(loc.size() == _nF,
                "lr_hessian_t: rank-4 array has {} elements, expected "
                "ns*nk*nb*nb = {}.", loc.size(), _nF);
+  utils::check(loc.is_contiguous(), "lr_hessian_t: rank-4 view must be contiguous.");
   auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
   nda::array<ComplexType, 1> out(_nloc);
   if (_nloc > 0) out = flat(nda::range(_i0, _i1));
@@ -185,26 +187,14 @@ nda::array<ComplexType, 1> lr_hessian_t::pack_static(
 
 void lr_hessian_t::store_mode(long p,
                                        sArray_t<Array_view_4D_t> const& sDeltaDm,
-                                       Array_view_4D_t const* DeltaH0,
                                        sArray_t<Array_view_4D_t> const& sDeltaF,
                                        sArray_t<Array_view_5D_t> const* sDeltaSigma,
-                                       sArray_t<Array_view_5D_t> const* sDeltaG,
-                                       Array_view_5D_t const* DeltaH_w) {
+                                       sArray_t<Array_view_5D_t> const* sDeltaG) {
   // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
   // contraction is a single unweighted dot over the whole local slab. Which side a
   // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
   // and ΔG always right.
   _Timer.start("LR_HESS_STORE");
-  const bool has_DeltaH0 = (DeltaH0 != nullptr);  // true when this mode has a ΔH0
-  utils::check(_nmodes_stored == 0 or has_DeltaH0 == _has_static_source,
-               "lr_hessian_t::store_mode: every mode must be stored with a ΔH0, or none.");
-  _has_static_source = has_DeltaH0;
-  ++_nmodes_stored;
-  if (has_DeltaH0) {
-    _dH0[p] = pack_static(*DeltaH0, /*weighted=*/false);   // left  of plain, static'
-  } else {
-    _dH0[p] = nda::zeros<ComplexType>(_nloc);              // ΔH0 = 0
-  }
   if (!_plain_only)
     _dF[p] = pack_static(sDeltaF.local(), /*weighted=*/false);   // left  of M, M'
   _dDm[p] = pack_static(sDeltaDm.local(), /*weighted=*/true);    // right of plain, M
@@ -212,10 +202,6 @@ void lr_hessian_t::store_mode(long p,
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
   if (_has_Gw)
     pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M, plain, static'
-  if (_has_dynamic_source) {
-    utils::check(DeltaH_w != nullptr, "lr_hessian_t::store_mode: a hessian built with a source needs ΔH(iω).");
-    _Hw[p] = pack_omega(*DeltaH_w);                          // left  of plain, static'
-  }
   _Timer.stop("LR_HESS_STORE");
 }
 
@@ -321,6 +307,18 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // after every mode is stored.
   lr_hessian_result_t r;
 
+  // 1. The source operands ΔH0_λ, ΔH_λ(iω), the left operands of every λ in the loops below, from the caller's stacks
+  const bool has_DeltaH0 = (sDeltaH0_mskij != nullptr);  // true when the caller passed a ΔH0 stack
+  utils::check(_has_dynamic_source == (sDeltaH_mwskij != nullptr),
+               "lr_hessian_t::evaluate: the ΔH(iω) stack is passed iff the hessian was built with a source.");
+  for (long l = 0; l < _nmodes; ++l) {
+    if (has_DeltaH0)
+      _dH0[l] = pack_static(sDeltaH0_mskij->local()(l, nda::ellipsis{}), /*weighted=*/false);
+    else
+      _dH0[l] = nda::zeros<ComplexType>(_nloc);   // ΔH0 = 0
+    if (_has_dynamic_source) _Hw[l] = pack_omega(sDeltaH_mwskij->local()(l, nda::ellipsis{}));
+  }
+
   // Plain only: Tr(ΔH0_λ, ΔDm_p) [+ Tr_ω(ΔH_λ, ΔG_p)] from the stores, no Dyson solve.
   if (_plain_only) {
     for (long p = 0; p < _nmodes; ++p)
@@ -366,19 +364,13 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
   // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
 
-  const bool has_DeltaH0 = (sDeltaH0_mskij != nullptr);  // true when the caller passed a ΔH0 stack
-  utils::check(has_DeltaH0 == _has_static_source,
-               "lr_hessian_t::evaluate: the ΔH0 stack is passed iff the modes were stored with a ΔH0.");
-  utils::check(_has_dynamic_source == (sDeltaH_mwskij != nullptr),
-               "lr_hessian_t::evaluate: the ΔH(iω) stack is passed iff the hessian was built with a source.");
-
   for (long p = 0; p < _nmodes; ++p) {
 
     // Views of mode p's slices of the node-shared stacks; nullptr when there is no such source
-    Array_view_4D_t DeltaH0_p;
-    if (has_DeltaH0) DeltaH0_p.rebind(sDeltaH0_mskij->local()(p, nda::ellipsis{}));
-    Array_view_5D_t DeltaH_wp;
-    if (_has_dynamic_source) DeltaH_wp.rebind(sDeltaH_mwskij->local()(p, nda::ellipsis{}));
+    Array_view_4D_t DeltaH0_skij_p;
+    if (has_DeltaH0) DeltaH0_skij_p.rebind(sDeltaH0_mskij->local()(p, nda::ellipsis{}));
+    Array_view_5D_t DeltaH_wskij_p;
+    if (_has_dynamic_source) DeltaH_wskij_p.rebind(sDeltaH_mwskij->local()(p, nda::ellipsis{}));
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
@@ -389,9 +381,9 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
     r.Delta_mu_improved(p) =
-        dyson.solve_lr_dyson(sDeltaDm, has_DeltaH0 ? &DeltaH0_p : nullptr, sDeltaF, sDeltaSigma, fix_density,
+        dyson.solve_lr_dyson(sDeltaDm, has_DeltaH0 ? &DeltaH0_skij_p : nullptr, sDeltaF, sDeltaSigma, fix_density,
                              static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
-                             _has_dynamic_source ? &DeltaH_wp : nullptr);
+                             _has_dynamic_source ? &DeltaH_wskij_p : nullptr);
     if (_has_Gw) dyson.materialize_DeltaG_tau(*sDeltaG);
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");

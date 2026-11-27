@@ -233,9 +233,9 @@ void lr_dyson::solve_lr_dyson_impl(
 
         // Build X = ΔH0 + ΔF [+ ΔΣ] [+ ΔV_QPGW] [+ ΔH(iω)] - Δμ·S
         auto S_k = S_loc(is, ik, nda::range::all, nda::range::all);
-        if (has_DeltaH0) {
+        if (has_DeltaH0) { // ΔH0 given
           X_ij = (*DeltaH0_skij)(is, ik, nda::range::all, nda::range::all) + DeltaF_k - Delta_mu * S_k;
-        } else {
+        } else { // ΔH0 = 0
           X_ij = DeltaF_k - Delta_mu * S_k;
         }
         if (dDeltaSigma_wskij) {

@@ -266,24 +266,17 @@ public:
    * the caller's mode loop because that is the only place mode p's operands exist —
    * ΔF/ΔΣ and ΔDm/ΔG live in shm windows that the next mode's solve overwrites.
    *
-   * Every stored mode must agree on whether it has a ΔH0: `evaluate` takes the ΔH0 stack iff the modes were
-   * stored with a ΔH0 (checked there).
-   *
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
-   * @param DeltaH0    - [INPUT] view of ΔH0_p (ns, nk, nb, nb); nullptr: ΔH0_p = 0
    * @param sDeltaF    - [INPUT] raw ΔF_p
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel without a source (never read then)
-   * @param DeltaH_w   - [INPUT] view of ΔH_p(iω) (nw, ns, nk, nb, nb), null without a source
    */
   void store_mode(long p,
                   sArray_t<Array_view_4D_t> const& sDeltaDm,
-                  Array_view_4D_t const* DeltaH0,
                   sArray_t<Array_view_4D_t> const& sDeltaF,
                   sArray_t<Array_view_5D_t> const* sDeltaSigma,
-                  sArray_t<Array_view_5D_t> const* sDeltaG,
-                  Array_view_5D_t const* DeltaH_w = nullptr);
+                  sArray_t<Array_view_5D_t> const* sDeltaG);
 
   /**
    * @brief Evaluate the whole functional: for every stored mode, solve the extra
@@ -308,8 +301,7 @@ public:
    * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
    * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
    *
-   * Contract: the ΔH0 stack `sDeltaH0_mskij` is given iff the modes were stored with a ΔH0 (`DeltaH0` of
-   * store_mode non-null); this is checked.
+   * The ΔH0 and ΔH(iω) left operands are packed from the two stacks here, not in store_mode.
    *
    * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
    * and every rank returns the same matrices.
@@ -395,8 +387,8 @@ private:
                      nda::array<ComplexType, 2>& dst_w, bool weighted) const;
 
   /// Pack this rank's element slice of a node-replicated (nw,ns,nk,nb,nb) array into `(nw, nloc)`,
-  /// as it is. Used by store_mode for the source ΔH_λ(iω), the left operand of Tr_ω(ΔH_λ, ΔG_p) for every λ
-  /// in evaluate's p loop, while the shm window holds one mode at a time. pack_to_omega does the same for
+  /// as it is. Used by evaluate for the source ΔH_λ(iω), the left operand of Tr_ω(ΔH_λ, ΔG_p) for every λ
+  /// in evaluate's p loop. pack_to_omega does the same for
   /// τ-grid operands (ΔΣ, ΔG) plus the τ → ω transform; ΔH(iω) is already on the ω grid.
   nda::array<ComplexType, 2> pack_omega(Array_view_5D_t const& src) const;
 
@@ -416,8 +408,6 @@ private:
   bool _plain_only;
   bool _has_sigma;
   bool _has_dynamic_source;   ///< the solves carry a dynamic source ΔH(iω)
-  bool _has_static_source = false;  ///< the stored modes have a ΔH0 (all agree; set by store_mode)
-  long _nmodes_stored = 0;          ///< store_mode calls so far
   bool _has_Gw;       ///< ΔG(iω) is stored and re-formed per mode: a Σ or a source reads it
   long _nt, _nw, _nk, _nbnd, _nF;
   long _i0 = 0, _i1 = 0, _nloc = 0;

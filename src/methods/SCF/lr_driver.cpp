@@ -1189,7 +1189,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   }
   // The caller's dynamic one-body source ΔH(iω), read at every outer Dyson pass.
   if (has_dynamic_source) {
-    arrays.push_back({"ΔH(iω) source (caller)", shp5b(nw), band5(nw), false, PERSIST});
+    arrays.push_back({"ΔH(iω) stack (caller, per mode)", shp5b(nw), band5(nw), false, PERSIST});
   }
   // The preconditioner's gathered residual ΔΣ part.
   if (precond) {
