@@ -42,7 +42,7 @@ inline ComplexType trace_of_product(matrix_t const& A, matrix_t const& B) {
 } // namespace
 
 void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                         sArray_t<Array_view_4D_t> const* sDeltaH0_skij,
+                         Array_view_4D_t const* DeltaH0_skij,
                          sArray_t<Array_view_4D_t> const& sDeltaF_skij,
                          sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
                          sArray_t<Array_view_5D_t>& sX_wskij) {
@@ -73,7 +73,7 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
   for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
     long is = sk / nk, ik = sk % nk;
     one_body = sDeltaF_skij.local()(is, ik, all, all);
-    if (sDeltaH0_skij) one_body += sDeltaH0_skij->local()(is, ik, all, all);
+    if (DeltaH0_skij) one_body += (*DeltaH0_skij)(is, ik, all, all);
     for (long n = 0; n < nw; ++n) sX_wskij.local()(n, is, ik, all, all) += one_body;
   }
   // 3. Publish X(iω) to the node

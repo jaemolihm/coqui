@@ -641,7 +641,8 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
 
   // M⁻¹ r is linear in r, so the source ΔH(iω) of the right-hand side is not passed: it enters only the
   // start solve of lr_solve_one, precond_solve(ΔH0, nullptr, ΔH(iω))
-  precond_solve(r_F, &r_S, /*sDeltaH_wskij=*/nullptr, thc, p);
+  Array_view_4D_t r_F_view = r_F.local();
+  precond_solve(&r_F_view, &r_S, /*DeltaH_wskij=*/nullptr, thc, p);
 
   // z = (r_F + y_F, r_Σ)
   z(F_range) = r(F_range) + _hist_layout.F_view_slice(_sDeltaF_pc_y->local());
@@ -649,24 +650,24 @@ void lr_driver::precond_apply(nda::array<ComplexType, 1> const& r,
 }
 
 
-void lr_driver::precond_solve(const sArray_t<Array_view_4D_t>& r_F,
+void lr_driver::precond_solve(const Array_view_4D_t* r_F,
                               const sArray_t<Array_view_5D_t>* r_S,
-                              const sArray_t<Array_view_5D_t>* sDeltaH_wskij,
+                              const Array_view_5D_t* DeltaH_wskij,
                               thc_reader_t& thc, const lr_params& p) {
   auto& y_F = *_sDeltaF_pc_y;
 
-  // y_F = 0 serves as both the zero ΔH0 and ΔF of the ΔDm pass below, and as the
+  // y_F = 0 serves as the zero ΔF of the ΔDm pass below (ΔH0 = nullptr), and as the
   // start of the inner solve.
   y_F.set_zero();
   // The frozen dynamic part of the residual: r_Σ and the source ΔH(iω)
-  const bool has_dynamic_part = (r_S != nullptr) or (sDeltaH_wskij != nullptr);
+  const bool has_dynamic_part = (r_S != nullptr) or (DeltaH_wskij != nullptr);
   if (has_dynamic_part) {
     // ΔDm of r_Σ and ΔH(iω) alone, at Δμ = 0: the sweeps' ΔDm-only passes apply the
     // fix_density shift to the sum.
     _Timer.start("LR_DYSON");
-    _lr_dyson.solve_lr_dyson(*_sDeltaDm_pc, y_F, y_F, r_S, /*fix_density=*/false,
+    _lr_dyson.solve_lr_dyson(*_sDeltaDm_pc, /*DeltaH0_skij=*/nullptr, y_F, r_S, /*fix_density=*/false,
                              static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
-                             sDeltaH_wskij);
+                             DeltaH_wskij);
     _Timer.stop("LR_DYSON");
   }
 
@@ -719,7 +720,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
     sArray_t<Array_view_4D_t>& sDeltaDm_skij,
     sArray_t<Array_view_4D_t>& sDeltaF_skij,
     sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-    const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+    const Array_view_4D_t* DeltaH0_skij,
     thc_reader_t& thc,
     const lr_params& p,
     sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij,
@@ -731,7 +732,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
   utils::check(_setup_done, "lr_driver::lr_solve_one: call lr_setup first.");
   _DeltaWloc_tabcd.reset();
   const lr_kernel_spec& K = p.kernel;
-  const sArray_t<Array_view_5D_t>* sDeltaH_wskij = p.sDeltaH_wskij;  // nullptr: no dynamic source
+  const Array_view_5D_t* DeltaH_wskij = p.DeltaH_wskij;  // nullptr: no dynamic source
   const bool qp = (p.qp_static != nullptr);
   auto& opt_ibc            = _opt_ibc;
   utils::check(!qp || sDeltaVcorr_skij, "lr_driver::lr_solve_one: qp mode needs a ΔV_QPGW array.");
@@ -778,7 +779,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
   // by the reset above), so that V_0 = ΔH0 + ΔF = M⁻¹ ΔH0.
   if (!p.precond_kernel.empty()) {
     _Timer.start("LR_PRECOND");
-    precond_solve(sDeltaH0_skij, nullptr, sDeltaH_wskij, thc, p);
+    precond_solve(DeltaH0_skij, nullptr, DeltaH_wskij, thc, p);
     _Timer.stop("LR_PRECOND");
     copy_shm(sDeltaF_skij, *_sDeltaF_pc_y);
     app_log(1, "  initial guess: preconditioner solution of ΔH0 ({} sweeps)", _pc_sweeps);
@@ -809,9 +810,9 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
       // The last pass was ΔDm-only and formed no ΔG(τ): rerun the full pass on its input.
       _Timer.start("LR_DYSON");
       Delta_mu = _lr_dyson.solve_lr_dyson(
-          sDeltaDm_skij, sDeltaH0_skij, *_sDeltaF_dyson_in, pDeltaSigma,
+          sDeltaDm_skij, DeltaH0_skij, *_sDeltaF_dyson_in, pDeltaSigma,
           p.fix_density, static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
-          sDeltaH_wskij);
+          DeltaH_wskij);
       _Timer.stop("LR_DYSON");
       _mpi->comm.barrier();
     }
@@ -828,9 +829,9 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
     if (K.has_sigma()) {
       // Kernel with a Σ: full pass, ΔG(τ) materialized
       Delta_mu = _lr_dyson.solve_lr_dyson(
-          sDeltaDm_skij, sDeltaH0_skij,
+          sDeltaDm_skij, DeltaH0_skij,
           sDeltaF_skij, track_sigma ? sDeltaSigma_tskij : nullptr,
-          p.fix_density, qp ? sDeltaVcorr_skij : nullptr, sDeltaH_wskij);
+          p.fix_density, qp ? sDeltaVcorr_skij : nullptr, DeltaH_wskij);
       // The kernel evaluates a ΔΣ from ΔG(τ), so replicate it into shared memory now.
       _lr_dyson.materialize_DeltaG_tau(sDeltaG_tskij);
       DeltaG_in_shm = true;
@@ -838,7 +839,7 @@ std::tuple<int, ComplexType> lr_driver::lr_solve_one(
       // Σ-free kernel: ΔDm-only pass. The ΔF it is fed is kept for update_DeltaG.
       copy_shm(*_sDeltaF_dyson_in, sDeltaF_skij);
       Delta_mu = _lr_dyson.solve_lr_dyson_dm_only(
-          sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, nullptr, p.fix_density, sDeltaH_wskij);
+          sDeltaDm_skij, DeltaH0_skij, sDeltaF_skij, nullptr, p.fix_density, DeltaH_wskij);
       DeltaG_in_shm = false;
     }
   };
@@ -1188,7 +1189,7 @@ void lr_driver::print_memory_estimate(long NP, bool any_Sigma, bool needs_dW,
   }
   // The caller's dynamic one-body source ΔH(iω), read at every outer Dyson pass.
   if (has_dynamic_source) {
-    arrays.push_back({"sDeltaH_wskij (caller)", shp5b(nw), band5(nw), false, PERSIST});
+    arrays.push_back({"ΔH(iω) source (caller)", shp5b(nw), band5(nw), false, PERSIST});
   }
   // The preconditioner's gathered residual ΔΣ part.
   if (precond) {

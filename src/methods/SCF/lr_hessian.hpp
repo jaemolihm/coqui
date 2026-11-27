@@ -266,28 +266,31 @@ public:
    * the caller's mode loop because that is the only place mode p's operands exist —
    * ΔF/ΔΣ and ΔDm/ΔG live in shm windows that the next mode's solve overwrites.
    *
+   * Every stored mode must agree on whether it has a ΔH0: `evaluate` takes the ΔH0 stack iff the modes were
+   * stored with a ΔH0 (checked there).
+   *
    * @param p          - [INPUT] mode index in [0, nmodes)
    * @param sDeltaDm   - [INPUT] ΔDm_p
-   * @param sDeltaH0   - [INPUT] ΔH0_p; must be zero if `evaluate` gets no ΔH0 stack
+   * @param DeltaH0    - [INPUT] view of ΔH0_p (ns, nk, nb, nb); nullptr: ΔH0_p = 0
    * @param sDeltaF    - [INPUT] raw ΔF_p
    * @param sDeltaSigma- [INPUT] raw ΔΣ_p, null for a Σ-free kernel
    * @param sDeltaG    - [INPUT] ΔG_p, null for a Σ-free kernel without a source (never read then)
-   * @param sDeltaH_w  - [INPUT] ΔH_p(iω) (nw, ns, nk, nb, nb), null without a source
+   * @param DeltaH_w   - [INPUT] view of ΔH_p(iω) (nw, ns, nk, nb, nb), null without a source
    */
   void store_mode(long p,
                   sArray_t<Array_view_4D_t> const& sDeltaDm,
-                  sArray_t<Array_view_4D_t> const& sDeltaH0,
+                  Array_view_4D_t const* DeltaH0,
                   sArray_t<Array_view_4D_t> const& sDeltaF,
                   sArray_t<Array_view_5D_t> const* sDeltaSigma,
                   sArray_t<Array_view_5D_t> const* sDeltaG,
-                  sArray_t<Array_view_5D_t> const* sDeltaH_w = nullptr);
+                  Array_view_5D_t const* DeltaH_w = nullptr);
 
   /**
    * @brief Evaluate the whole functional: for every stored mode, solve the extra
    *        Dyson equation and contract the result against every other mode.
    *
    * One pass over the perturbations, and the only entry point that computes
-   * anything. Per mode p it refills ΔH0 from the caller's stack, puts mode p's
+   * anything. Per mode p it takes views of mode p's ΔH0 and ΔH(iω) from the caller's stacks, puts mode p's
    * stored raw ΔF/ΔΣ back into shm, solves ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], and
    * takes column p of all four terms of the functional against every stored λ.
    * Then it reduces, applies the prefactors, forms hessian_sym and measures the
@@ -305,36 +308,31 @@ public:
    * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
    * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
    *
-   * Contract: a call without a ΔH0 stack (`sDeltaH0_mskij` null) requires every stored mode's ΔH0
-   * (the `sDeltaH0` given to store_mode) to be zero; this is checked.
+   * Contract: the ΔH0 stack `sDeltaH0_mskij` is given iff the modes were stored with a ΔH0 (`DeltaH0` of
+   * store_mode non-null); this is checked.
    *
    * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
    * and every rank returns the same matrices.
    *
    * @param dyson      - [IN/OUT] the run's LR Dyson solver
-   * @param sDeltaH0   - [IN/OUT] ΔH0 window, refilled per mode from the stack (zeroed if there is none)
    * @param sDeltaDm   - [OUT] scratch for ΔDm'_p
    * @param sDeltaF    - [OUT] scratch for the rebuilt raw ΔF_p
    * @param sDeltaSigma- [OUT] scratch for the rebuilt raw ΔΣ_p; null if Σ-free
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
-   * @param sDeltaH0_mskij - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, node-shared; null: ΔH0 = 0 for every mode, and
-   *                     sDeltaH0 is zeroed. Each mode's slice is copied into sDeltaH0 by every node's root (no broadcast).
+   * @param sDeltaH0_mskij - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, node-shared; null: ΔH0 = 0 for every mode.
+   *                     Mode p's slice is handed to the extra solve as a view.
    * @param fix_density- [INPUT] the flag the original solves used
-   * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
-   *                     to the extra solve; null without a source
    * @param sDeltaH_mwskij - [INPUT] (nmodes,nw,ns,nk,nb,nb) source ΔH(iω) stack, node-shared; null without a
-   *                     source. Each mode's slice is copied into sDeltaH_w by every node's root (no broadcast).
+   *                     source. Mode p's slice is handed to the extra solve as a view.
    */
   lr_hessian_result_t evaluate(
       lr_dyson& dyson,
-      sArray_t<Array_view_4D_t>& sDeltaH0,
       sArray_t<Array_view_4D_t>& sDeltaDm,
       sArray_t<Array_view_4D_t>& sDeltaF,
       sArray_t<Array_view_5D_t>* sDeltaSigma,
       sArray_t<Array_view_5D_t>* sDeltaG,
       sArray_t<Array_view_5D_t> const* sDeltaH0_mskij,
       bool fix_density,
-      sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr,
       sArray_t<Array_view_6D_t> const* sDeltaH_mwskij = nullptr);
 
   /// Report (verbosity 2) the whole hessian timing table: the stores, the shm
@@ -400,10 +398,10 @@ private:
   /// as it is. Used by store_mode for the source ΔH_λ(iω), the left operand of Tr_ω(ΔH_λ, ΔG_p) for every λ
   /// in evaluate's p loop, while the shm window holds one mode at a time. pack_to_omega does the same for
   /// τ-grid operands (ΔΣ, ΔG) plus the τ → ω transform; ΔH(iω) is already on the ω grid.
-  nda::array<ComplexType, 2> pack_omega(sArray_t<Array_view_5D_t> const& src) const;
+  nda::array<ComplexType, 2> pack_omega(Array_view_5D_t const& src) const;
 
   /// Pack this rank's element slice of a node-replicated (ns,nk,nb,nb) array.
-  nda::array<ComplexType, 1> pack_static(sArray_t<Array_view_4D_t> const& src,
+  nda::array<ComplexType, 1> pack_static(Array_view_4D_t const& src,
                                          bool weighted) const;
 
   /// ⟨A,A⟩ on the stored ΔΣ of mode 0: real and positive by construction, so its
@@ -418,6 +416,8 @@ private:
   bool _plain_only;
   bool _has_sigma;
   bool _has_dynamic_source;   ///< the solves carry a dynamic source ΔH(iω)
+  bool _has_static_source = false;  ///< the stored modes have a ΔH0 (all agree; set by store_mode)
+  long _nmodes_stored = 0;          ///< store_mode calls so far
   bool _has_Gw;       ///< ΔG(iω) is stored and re-formed per mode: a Σ or a source reads it
   long _nt, _nw, _nk, _nbnd, _nF;
   long _i0 = 0, _i1 = 0, _nloc = 0;

@@ -156,8 +156,7 @@ void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
 
 
 nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
-    sArray_t<Array_view_5D_t> const& src) const {
-  auto loc = src.local();
+    Array_view_5D_t const& loc) const {
   utils::check(loc.size() == _nw * _nF,
                "lr_hessian_t: ΔH(iω) has {} elements, expected nw*ns*nk*nb*nb = {}.",
                loc.size(), _nw * _nF);
@@ -171,8 +170,7 @@ nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
 
 
 nda::array<ComplexType, 1> lr_hessian_t::pack_static(
-    sArray_t<Array_view_4D_t> const& src, bool weighted) const {
-  auto loc = src.local();
+    Array_view_4D_t const& loc, bool weighted) const {
   utils::check(loc.size() == _nF,
                "lr_hessian_t: rank-4 array has {} elements, expected "
                "ns*nk*nb*nb = {}.", loc.size(), _nF);
@@ -187,27 +185,36 @@ nda::array<ComplexType, 1> lr_hessian_t::pack_static(
 
 void lr_hessian_t::store_mode(long p,
                                        sArray_t<Array_view_4D_t> const& sDeltaDm,
-                                       sArray_t<Array_view_4D_t> const& sDeltaH0,
+                                       Array_view_4D_t const* DeltaH0,
                                        sArray_t<Array_view_4D_t> const& sDeltaF,
                                        sArray_t<Array_view_5D_t> const* sDeltaSigma,
                                        sArray_t<Array_view_5D_t> const* sDeltaG,
-                                       sArray_t<Array_view_5D_t> const* sDeltaH_w) {
+                                       Array_view_5D_t const* DeltaH_w) {
   // w_k belongs to the RIGHT operand of each trace, folded in once here so a pair
   // contraction is a single unweighted dot over the whole local slab. Which side a
   // quantity lands on is fixed by the equation: ΔH0, ΔF, ΔΣ are always left, ΔDm
   // and ΔG always right.
   _Timer.start("LR_HESS_STORE");
-  _dH0[p] = pack_static(sDeltaH0, /*weighted=*/false);   // left  of plain, static'
+  const bool has_DeltaH0 = (DeltaH0 != nullptr);  // true when this mode has a ΔH0
+  utils::check(_nmodes_stored == 0 or has_DeltaH0 == _has_static_source,
+               "lr_hessian_t::store_mode: every mode must be stored with a ΔH0, or none.");
+  _has_static_source = has_DeltaH0;
+  ++_nmodes_stored;
+  if (has_DeltaH0) {
+    _dH0[p] = pack_static(*DeltaH0, /*weighted=*/false);   // left  of plain, static'
+  } else {
+    _dH0[p] = nda::zeros<ComplexType>(_nloc);              // ΔH0 = 0
+  }
   if (!_plain_only)
-    _dF[p] = pack_static(sDeltaF, /*weighted=*/false);   // left  of M, M'
-  _dDm[p] = pack_static(sDeltaDm, /*weighted=*/true);    // right of plain, M
+    _dF[p] = pack_static(sDeltaF.local(), /*weighted=*/false);   // left  of M, M'
+  _dDm[p] = pack_static(sDeltaDm.local(), /*weighted=*/true);    // right of plain, M
   if (_has_sigma)
     pack_to_omega(*sDeltaSigma, _Sw[p], /*weighted=*/false);  // left  of M, M'
   if (_has_Gw)
     pack_to_omega(*sDeltaG,     _Gw[p], /*weighted=*/true);   // right of M, plain, static'
   if (_has_dynamic_source) {
-    utils::check(sDeltaH_w != nullptr, "lr_hessian_t::store_mode: a hessian built with a source needs ΔH(iω).");
-    _Hw[p] = pack_omega(*sDeltaH_w);                          // left  of plain, static'
+    utils::check(DeltaH_w != nullptr, "lr_hessian_t::store_mode: a hessian built with a source needs ΔH(iω).");
+    _Hw[p] = pack_omega(*DeltaH_w);                          // left  of plain, static'
   }
   _Timer.stop("LR_HESS_STORE");
 }
@@ -302,14 +309,12 @@ ComplexType lr_hessian_t::trace_matsubara(nda::array<ComplexType, 2> const& Aw,
 // persist. That is also why every mode must already be stored.
 lr_hessian_result_t lr_hessian_t::evaluate(
     lr_dyson& dyson,
-    sArray_t<Array_view_4D_t>& sDeltaH0,
     sArray_t<Array_view_4D_t>& sDeltaDm,
     sArray_t<Array_view_4D_t>& sDeltaF,
     sArray_t<Array_view_5D_t>* sDeltaSigma,
     sArray_t<Array_view_5D_t>* sDeltaG,
     sArray_t<Array_view_5D_t> const* sDeltaH0_mskij,
     bool fix_density,
-    sArray_t<Array_view_5D_t>* sDeltaH_w,
     sArray_t<Array_view_6D_t> const* sDeltaH_mwskij) {
 
   // The accumulators are reduced and rescaled in place, so this is single-shot,
@@ -362,55 +367,38 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
 
   const bool has_DeltaH0 = (sDeltaH0_mskij != nullptr);  // true when the caller passed a ΔH0 stack
-  if (!has_DeltaH0) {                                      // ΔH0 = 0: the window stays zero for every mode
-    // The stored modes must then have ΔH0 = 0: the contractions below use the stored _dH0
-    double dH0_norm2 = 0.0;
-    for (long l = 0; l < _nmodes; ++l)
-      for (long i = 0; i < _dH0[l].size(); ++i) dH0_norm2 += std::norm(_dH0[l](i));
-    dH0_norm2 = _mpi->comm.all_reduce_value(dH0_norm2);
-    utils::check(dH0_norm2 == 0.0,
-                 "lr_hessian_t::evaluate: no ΔH0 stack was passed, but the stored modes have a nonzero ΔH0 "
-                 "(‖ΔH0‖² = {:.3e}); pass the ΔH0 stack.", dH0_norm2);
-    sDeltaH0.set_zero();
-  }
+  utils::check(has_DeltaH0 == _has_static_source,
+               "lr_hessian_t::evaluate: the ΔH0 stack is passed iff the modes were stored with a ΔH0.");
+  utils::check(_has_dynamic_source == (sDeltaH_mwskij != nullptr),
+               "lr_hessian_t::evaluate: the ΔH(iω) stack is passed iff the hessian was built with a source.");
 
   for (long p = 0; p < _nmodes; ++p) {
 
-    // Mode p's ΔH0 into shm: each node's root copies mode p's slice of the node-shared stack, no broadcast
-    if (has_DeltaH0) {
-      sDeltaH0.node_sync();
-      if (_mpi->node_comm.root()) sDeltaH0.local() = sDeltaH0_mskij->local()(p, nda::ellipsis{});
-      sDeltaH0.node_sync();
-    }
+    // Views of mode p's slices of the node-shared stacks; nullptr when there is no such source
+    Array_view_4D_t DeltaH0_p;
+    if (has_DeltaH0) DeltaH0_p.rebind(sDeltaH0_mskij->local()(p, nda::ellipsis{}));
+    Array_view_5D_t DeltaH_wp;
+    if (_has_dynamic_source) DeltaH_wp.rebind(sDeltaH_mwskij->local()(p, nda::ellipsis{}));
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
-
-    // Mode p's ΔH(iω) into shm
-    if (_has_dynamic_source) {
-      utils::check(sDeltaH_w != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) window.");
-      utils::check(sDeltaH_mwskij != nullptr, "lr_hessian_t::evaluate: a hessian built with a source needs the ΔH(iω) stack.");
-      // Each node's root copies mode p's slice of the node-shared stack, no broadcast
-      sDeltaH_w->node_sync();
-      if (_mpi->node_comm.root()) sDeltaH_w->local() = sDeltaH_mwskij->local()(p, nda::ellipsis{});
-      sDeltaH_w->node_sync();
-    }
 
     // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
     // costs. ΔG(τ) is replicated only when the Matsubara term needs it — that
     // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
     r.Delta_mu_improved(p) =
-        dyson.solve_lr_dyson(sDeltaDm, sDeltaH0, sDeltaF, sDeltaSigma, fix_density,
-                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr), sDeltaH_w);
+        dyson.solve_lr_dyson(sDeltaDm, has_DeltaH0 ? &DeltaH0_p : nullptr, sDeltaF, sDeltaSigma, fix_density,
+                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
+                             _has_dynamic_source ? &DeltaH_wp : nullptr);
     if (_has_Gw) dyson.materialize_DeltaG_tau(*sDeltaG);
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");
 
     // Column p of all four terms, against every stored λ.
     _Timer.start("LR_HESS_CONTRACT");
-    auto dDm_prime = pack_static(sDeltaDm, /*weighted=*/true);
+    auto dDm_prime = pack_static(sDeltaDm.local(), /*weighted=*/true);
     nda::array<ComplexType, 2> Gw_prime;
     if (_has_Gw) pack_to_omega(*sDeltaG, Gw_prime, /*weighted=*/true);
 

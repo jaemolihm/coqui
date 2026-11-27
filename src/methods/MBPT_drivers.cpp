@@ -2202,17 +2202,11 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   }
 
   // Response arrays. The ΔH0 stack and the dynamic source ΔH(iω) stack are each copied once from the root into a
-  // node-shared array (one copy per node), and a shm window of each is refilled from it per perturbation, for the
-  // per-mode solve and for the hessian alike.
+  // node-shared array (one copy per node); the per-mode solve and the hessian read mode m as a view of its slice.
   auto sDeltaH0_mskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaH0_mskij_root);
-  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   std::optional<math::shm::shared_array<Array_view_6D_t>> opt_sDeltaH_mwskij;
-  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaH_wskij;
   if (has_dynamic_source) {
     opt_sDeltaH_mwskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 6>(*mpi, DeltaH_mwskij_root));
-    opt_sDeltaH_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-        *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
   }
   auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
@@ -2220,7 +2214,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
+  utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF alloc");
   // Only allocate ΔΣ array when GW is active
   const bool include_gw_sigma = total_kernel.has_sigma();
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaSigma;
@@ -2443,6 +2437,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
+  // View of mode m's ΔH(iω) slice, rebound each mode; p.DeltaH_wskij points at it (lr_setup reads only its presence)
+  Array_view_5D_t DeltaH_wskij_m;
   lr_params p;
   fill_lr_kernel_params(p, total_kernel, W, iter_params, max_iter, tol, fix_density, save_DeltaG);
   p.include_xc       = include_xc;
@@ -2457,7 +2453,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
-  p.sDeltaH_wskij    = has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr;
+  p.DeltaH_wskij     = has_dynamic_source ? &DeltaH_wskij_m : nullptr;
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
@@ -2487,20 +2483,13 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     if (nmodes > 1)
       app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
 
-    // Mode m's ΔH0 slice of the node-shared stack: each node's root copies it, no broadcast
-    sDeltaH0_skij.node_sync();
-    if (mpi->node_comm.root()) sDeltaH0_skij.local() = sDeltaH0_mskij.local()(m, nda::ellipsis{});
-    sDeltaH0_skij.node_sync();
-    if (has_dynamic_source) {
-      // Mode m's ΔH(iω) slice of the node-shared stack: each node's root copies it, no broadcast
-      opt_sDeltaH_wskij->node_sync();
-      if (mpi->node_comm.root()) opt_sDeltaH_wskij->local() = opt_sDeltaH_mwskij->local()(m, nda::ellipsis{});
-      opt_sDeltaH_wskij->node_sync();
-    }
+    // Views of mode m's slices of the node-shared stacks (p.DeltaH_wskij points at DeltaH_wskij_m)
+    Array_view_4D_t DeltaH0_m = sDeltaH0_mskij.local()(m, nda::ellipsis{});
+    if (has_dynamic_source) DeltaH_wskij_m.rebind(opt_sDeltaH_mwskij->local()(m, nda::ellipsis{}));
 
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        sDeltaH0_skij, thc, p,
+        &DeltaH0_m, thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
@@ -2568,10 +2557,10 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     // taken here, before the next perturbation overwrites them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
-      opt_hessian->store_mode(m, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+      opt_hessian->store_mode(m, sDeltaDm_skij, &DeltaH0_m, sDeltaF_skij,
                               pDeltaSigma,
                               (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-                              has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+                              has_dynamic_source ? &DeltaH_wskij_m : nullptr);
       mpi->comm.barrier();
     }
 
@@ -2615,10 +2604,9 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // persisted.
   if (opt_hessian) {
     auto c1 = opt_hessian->evaluate(
-        driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+        driver.dyson(), sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
         &sDeltaH0_mskij, fix_density,
-        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr,
         has_dynamic_source ? &(*opt_sDeltaH_mwskij) : nullptr);
     opt_hessian->print_timers();
 
@@ -2892,32 +2880,26 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nt, ns, nk, nb, nb});
   auto sDeltaDm_skij = math::shm::make_shared_array<Array_view_4D_t>(*mpi, {ns, nk, nb, nb});
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(*mpi, {ns, nk, nb, nb});
-  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(*mpi, {ns, nk, nb, nb});
-  auto sDeltaH_wskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb});  // dynamic source window
+  // Dynamic source of phase X: zero for the v solves, then 2 B G B for the Σ'' solve
+  auto sDeltaH_wskij = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb});
   std::optional<sArray_5D_t> opt_sDeltaSigma;
   if (has_sigma) opt_sDeltaSigma.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nt, ns, nk, nb, nb}));
   auto* pDeltaSigma = opt_sDeltaSigma ? &(*opt_sDeltaSigma) : nullptr;
-
-  // Node roots write a node-shared array from a view of another one, so every node has its own copy
-  auto fill_from = [&](auto& dst, auto const& src_view) {
-    dst.node_sync();
-    if (mpi->node_comm.root()) dst.local() = src_view;
-    dst.node_sync();
-  };
 
   const lr_iter_params iter_params = read_lr_iter_params(pt, /*qp_static_sigma=*/false);
   const bool use_precond = iter_params.alg != "DIIS";  // false under DIIS, which takes no preconditioner
   if (has_sigma && !use_precond)
     app_log(2, "  - iter_alg DIIS takes no preconditioner: the HSEX preconditioner is dropped");
 
-  // The lr_params of one phase; `sDeltaH_wskij_source` is its dynamic source (nullptr: none). W must outlive the
+  // The lr_params of one phase; `DeltaH_wskij_source` is a view of its dynamic source (nullptr: none), which must
+  // stay valid while p is used. W must outlive the
   // lr_driver that p is given to.
   // exclude_hartree_head stays false: at Q = 0 the THC Coulomb has no G = 0 term, so V is already V̄ (lr_hf::build_Uq_PQ).
   auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W,
-                         sArray_5D_t const* sDeltaH_wskij_source) {
+                         Array_view_5D_t const* DeltaH_wskij_source) {
     lr_params p;
     fill_lr_kernel_params(p, kernel, W, iter_params, max_iter, tol, /*fix_density=*/false, /*save_DeltaG=*/false);
-    p.sDeltaH_wskij = sDeltaH_wskij_source;
+    p.DeltaH_wskij = DeltaH_wskij_source;
     if (kernel.has_sigma() && use_precond) {  // HSEX preconditioner, whose K_pc has the Hartree rung only if the kernel has it
       p.precond_kernel = lr_kernel_spec{.hartree = kernel.hartree, .exchange = true};
       p.precond_hsex = true;
@@ -2940,16 +2922,16 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_a);
     lr_driver driver(gs_dyson, q_vec);
-    auto p = make_params(kernel_a, W, /*sDeltaH_wskij_source=*/nullptr);
+    auto p = make_params(kernel_a, W, /*DeltaH_wskij_source=*/nullptr);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     // 4.1 ΔH0 = S solve, ΔF and ΔΣ(τ) of its final Dyson pass
-    fill_from(sDeltaH0_skij, sS_skij.local());
-    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
+    Array_view_4D_t S_view = sS_skij.local();
+    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &S_view,
                                          thc, p);
     res.niter(0) = it;
     // 4.2 B(iω) = S + ΔF + τ->ω ΔΣ(τ)
     opt_sB_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-    lr_total_one_body_w(*mpi, ft, &sS_skij, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
+    lr_total_one_body_w(*mpi, ft, &S_view, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
     // 4.3 κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k).
     //     κ̄ is real: S = S† and every source obeys ΔH(-iω) = ΔH(iω)†, so ΔDm = ΔDm† and Tr[S ΔDm] is real
     res.kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
@@ -2963,24 +2945,24 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_x);
     lr_driver driver(gs_dyson, q_vec);
-    auto p = make_params(kernel_x, W, &sDeltaH_wskij);
+    Array_view_5D_t DeltaH_view = sDeltaH_wskij.local();
+    auto p = make_params(kernel_x, W, &DeltaH_view);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     decltype(nda::range::all) all;
     // 5.1 v_α = ΔH0 + ΔF + ΔΣ(iω) of the solve with ΔH0 = v0_α and a zero source
     sDeltaH_wskij.set_zero();
     for (long a = 0; a < 3; ++a) {
-      fill_from(sDeltaH0_skij, sv0_skxij.local()(all, all, a, all, all));
-      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
+      Array_view_4D_t v0_a = sv0_skxij.local()(all, all, a, all, all);
+      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &v0_a,
                                            thc, p);
       res.niter(1 + a) = it;
       opt_sv_wskij[a].emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-      lr_total_one_body_w(*mpi, ft, &sDeltaH0_skij, sDeltaF_skij, pDeltaSigma, *opt_sv_wskij[a]);
+      lr_total_one_body_w(*mpi, ft, &v0_a, sDeltaF_skij, pDeltaSigma, *opt_sv_wskij[a]);
     }
     // 5.2 Σ'' = ΔF + ΔΣ(iω) of the solve with ΔH0 = 0 and the source 2 B G B
-    sDeltaH0_skij.set_zero();
     build_sigma2_source(*mpi, sG_wskij, *opt_sB_wskij, sDeltaH_wskij);
-    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
-                                         thc, p);
+    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+                                         /*DeltaH0_skij=*/nullptr, thc, p);
     res.niter(4) = it;
     opt_sSigma2_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
     lr_total_one_body_w(*mpi, ft, nullptr, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
@@ -3004,32 +2986,32 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_a);
     lr_driver driver(gs_dyson, q_vec);
-    auto p = make_params(kernel_a, W, &sDeltaH_wskij);
+    // The source of mode a is V^E_a, a view of the node-shared stack
+    decltype(nda::range::all) all;
+    Array_view_5D_t VE_a = sVE_xwskij.local()(0, all, all, all, all, all);
+    auto p = make_params(kernel_a, W, &VE_a);
     p.hessian_nmodes = 3;
     p.hessian_stationary = true;
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     lr_hessian_t hessian(mpi, ft, k_weight, spin_factor, 3, has_sigma, ns, nk, nb, /*plain_only=*/false,
                          /*has_dynamic_source=*/true);
-    sDeltaH0_skij.set_zero();
-    decltype(nda::range::all) all;
     const auto S_norm_sk = norm_S_sk(sS_skij);
     for (long a = 0; a < 3; ++a) {
-      // 7.1 The window is V^E_a, copied on every node from the node-shared stack
-      fill_from(sDeltaH_wskij, sVE_xwskij.local()(a, all, all, all, all, all));
-      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sDeltaH0_skij,
-                                           thc, p);
+      // 7.1 The source is V^E_a, ΔH0 = 0
+      VE_a.rebind(sVE_xwskij.local()(a, all, all, all, all, all));
+      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+                                           /*DeltaH0_skij=*/nullptr, thc, p);
       res.niter(5 + a) = it;
       // 7.2 trace_GE_rel = |ΔN_a| / (spin Σ_{s,k} w_k ‖S_k‖ ‖ΔDm_a,k‖), the Cauchy-Schwarz scale of ΔN = Tr[S ΔDm]
       res.trace_GE_rel(a) = trace_GE_relative(driver.dyson().compute_lr_Nelec(sDeltaDm_skij), sDeltaDm_skij, S_norm_sk,
                                           k_weight, spin_factor);
       // 7.3 Store the mode for the hessian
-      hessian.store_mode(a, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                         &sDeltaH_wskij);
+      hessian.store_mode(a, sDeltaDm_skij, /*DeltaH0=*/nullptr, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij, &VE_a);
       mpi->comm.barrier();
     }
     // 7.4 H_plain, H_sym (term 1) from the stored modes; ΔH0 = 0 for every mode (no ΔH0 stack)
-    res.hess = hessian.evaluate(driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                            /*sDeltaH0_mskij=*/nullptr, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
+    res.hess = hessian.evaluate(driver.dyson(), sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
+                            /*sDeltaH0_mskij=*/nullptr, /*fix_density=*/false, &sVE_xwskij);
     hessian.print_timers();
     mpi->comm.barrier();
   }

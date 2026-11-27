@@ -53,7 +53,7 @@ using Array_view_6D_t = nda::array_view<ComplexType, 6>;
  * (ΔH0 = S), v_α of phase X (ΔH0 = v0_α) and, without ΔH0 and without the source, Σ'' of phase X. The two
  * node-shared ΔF, ΔΣ(τ) are what lr_solve_one leaves in its output arrays; nothing else turns them into iω arrays.
  *
- * @param sDeltaH0_skij    - [INPUT] ΔH0 (ns, nk, nb, nb); nullptr: zero
+ * @param DeltaH0_skij     - [INPUT] view of node-replicated ΔH0 (ns, nk, nb, nb); nullptr: zero
  * @param sDeltaF_skij     - [INPUT] ΔF (ns, nk, nb, nb)
  * @param sDeltaSigma_tskij- [INPUT] ΔΣ(τ) (nt_f, ns, nk, nb, nb); nullptr for a Σ-free kernel
  * @param sX_wskij         - [OUTPUT] X(iω) (nw_f, ns, nk, nb, nb), overwritten
@@ -61,7 +61,7 @@ using Array_view_6D_t = nda::array_view<ComplexType, 6>;
  * Collective on the node communicator; every node fills its own copy.
  */
 void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                         sArray_t<Array_view_4D_t> const* sDeltaH0_skij,
+                         Array_view_4D_t const* DeltaH0_skij,
                          sArray_t<Array_view_4D_t> const& sDeltaF_skij,
                          sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
                          sArray_t<Array_view_5D_t>& sX_wskij);
@@ -93,7 +93,7 @@ void build_field_sources(utils::mpi_context_t<mpi3::communicator>& mpi,
  *
  * @param sG_wskij      - [INPUT] unperturbed G(iω) (nw_f, ns, nk, nb, nb)
  * @param sB_wskij      - [INPUT] B(iω) = S - Σ', same shape
- * @param sDeltaH_wskij - [OUTPUT] 2 B G B (nw_f, ns, nk, nb, nb), the dynamic source window of the Σ'' solve, overwritten
+ * @param sDeltaH_wskij - [OUTPUT] 2 B G B (nw_f, ns, nk, nb, nb), the dynamic source of the Σ'' solve, overwritten
  *
  * Collective on the node communicator.
  */
