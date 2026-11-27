@@ -2201,17 +2201,12 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
                  "per-perturbation). Call run_lr once per mode.", nmodes);
   }
 
-  // Response arrays. sDeltaH0_skij is one rank-4 shm window, refilled from the
-  // caller's rank-5 array per perturbation — no node memory scales with nmodes.
-  auto sDeltaH0_skij = [&] {
-    std::optional<nda::array<ComplexType, 4>> h0_first;
-    if (mpi->comm.root())
-      h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
-    return math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first);
-  }();
-  // The dynamic source ΔH(iω): the whole stack is copied once from the root into a node-shared array (one copy of
-  // the stack per node), and a rank-5 shm window is refilled from it per perturbation, for the per-mode solve and
-  // for the hessian alike.
+  // Response arrays. The ΔH0 stack and the dynamic source ΔH(iω) stack are each copied once from the root into a
+  // node-shared array (one copy per node), and a shm window of each is refilled from it per perturbation, for the
+  // per-mode solve and for the hessian alike.
+  auto sDeltaH0_mskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaH0_mskij_root);
+  auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
+      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   std::optional<math::shm::shared_array<Array_view_6D_t>> opt_sDeltaH_mwskij;
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaH_wskij;
   if (has_dynamic_source) {
@@ -2492,17 +2487,10 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     if (nmodes > 1)
       app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
 
-    // Refill the shm ΔH0 window from this perturbation's slice: root writes,
-    // then broadcast_to_nodes publishes it (its leading node_sync makes root's
-    // write visible before the internode broadcast, and its trailing one makes
-    // the result visible to every rank on every node). Mode 0 is already in the
-    // window from the allocation above. Costs one 0.1 GB broadcast, no memory.
-    if (m > 0) {
-      if (mpi->comm.root())
-        sDeltaH0_skij.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
-      sDeltaH0_skij.broadcast_to_nodes(0);
-      mpi->comm.barrier();
-    }
+    // Mode m's ΔH0 slice of the node-shared stack: each node's root copies it, no broadcast
+    sDeltaH0_skij.node_sync();
+    if (mpi->node_comm.root()) sDeltaH0_skij.local() = sDeltaH0_mskij.local()(m, nda::ellipsis{});
+    sDeltaH0_skij.node_sync();
     if (has_dynamic_source) {
       // Mode m's ΔH(iω) slice of the node-shared stack: each node's root copies it, no broadcast
       opt_sDeltaH_wskij->node_sync();
@@ -2629,7 +2617,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-        DeltaH0_mskij_root, fix_density,
+        &sDeltaH0_mskij, fix_density,
         has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr,
         has_dynamic_source ? &(*opt_sDeltaH_mwskij) : nullptr);
     opt_hessian->print_timers();
@@ -3041,7 +3029,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     }
     // 7.4 H_plain, H_sym (term 1) from the stored modes; ΔH0 = 0 for every mode (no ΔH0 stack)
     res.hess = hessian.evaluate(driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                            /*DeltaH0_mskij_root=*/std::nullopt, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
+                            /*sDeltaH0_mskij=*/nullptr, /*fix_density=*/false, &sDeltaH_wskij, &sVE_xwskij);
     hessian.print_timers();
     mpi->comm.barrier();
   }

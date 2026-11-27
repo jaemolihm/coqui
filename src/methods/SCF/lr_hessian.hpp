@@ -305,7 +305,7 @@ public:
    * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
    * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
    *
-   * Contract: a call without a ΔH0 stack (`DeltaH0_mskij_root` unengaged) requires every stored mode's ΔH0
+   * Contract: a call without a ΔH0 stack (`sDeltaH0_mskij` null) requires every stored mode's ΔH0
    * (the `sDeltaH0` given to store_mode) to be zero; this is checked.
    *
    * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
@@ -317,8 +317,8 @@ public:
    * @param sDeltaF    - [OUT] scratch for the rebuilt raw ΔF_p
    * @param sDeltaSigma- [OUT] scratch for the rebuilt raw ΔΣ_p; null if Σ-free
    * @param sDeltaG    - [OUT] scratch for ΔG'_p; null if Σ-free and no source
-   * @param DeltaH0_mskij_root - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, engaged on the global root only;
-   *                                     unengaged (on every rank): ΔH0 = 0 for every mode, and sDeltaH0 is zeroed
+   * @param sDeltaH0_mskij - [INPUT] (nmodes,ns,nk,nb,nb) ΔH0 stack, node-shared; null: ΔH0 = 0 for every mode, and
+   *                     sDeltaH0 is zeroed. Each mode's slice is copied into sDeltaH0 by every node's root (no broadcast).
    * @param fix_density- [INPUT] the flag the original solves used
    * @param sDeltaH_w  - [OUT] scratch window for ΔH_p(iω), refilled per mode from the stack and handed
    *                     to the extra solve; null without a source
@@ -332,7 +332,7 @@ public:
       sArray_t<Array_view_4D_t>& sDeltaF,
       sArray_t<Array_view_5D_t>* sDeltaSigma,
       sArray_t<Array_view_5D_t>* sDeltaG,
-      std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
+      sArray_t<Array_view_5D_t> const* sDeltaH0_mskij,
       bool fix_density,
       sArray_t<Array_view_5D_t>* sDeltaH_w = nullptr,
       sArray_t<Array_view_6D_t> const* sDeltaH_mwskij = nullptr);

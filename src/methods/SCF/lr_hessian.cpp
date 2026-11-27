@@ -307,7 +307,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     sArray_t<Array_view_4D_t>& sDeltaF,
     sArray_t<Array_view_5D_t>* sDeltaSigma,
     sArray_t<Array_view_5D_t>* sDeltaG,
-    std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
+    sArray_t<Array_view_5D_t> const* sDeltaH0_mskij,
     bool fix_density,
     sArray_t<Array_view_5D_t>* sDeltaH_w,
     sArray_t<Array_view_6D_t> const* sDeltaH_mwskij) {
@@ -361,11 +361,8 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
   // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
 
-  // A ΔH0 stack engaged on the root means every mode has a ΔH0; unengaged means ΔH0 = 0 for every mode
-  int has_DeltaH0_int = (_mpi->comm.root() && DeltaH0_mskij_root.has_value()) ? 1 : 0;
-  _mpi->comm.broadcast_n(&has_DeltaH0_int, 1, 0);
-  const bool has_DeltaH0 = (has_DeltaH0_int == 1);  // the root passed a ΔH0 stack
-  if (!has_DeltaH0) {                                // ΔH0 = 0: the window stays zero for every mode
+  const bool has_DeltaH0 = (sDeltaH0_mskij != nullptr);  // true when the caller passed a ΔH0 stack
+  if (!has_DeltaH0) {                                      // ΔH0 = 0: the window stays zero for every mode
     // The stored modes must then have ΔH0 = 0: the contractions below use the stored _dH0
     double dH0_norm2 = 0.0;
     for (long l = 0; l < _nmodes; ++l)
@@ -379,13 +376,11 @@ lr_hessian_result_t lr_hessian_t::evaluate(
 
   for (long p = 0; p < _nmodes; ++p) {
 
-    // Mode p's ΔH0 into the shm window: root writes its slice, broadcast_to_nodes
-    // publishes it. The stack is engaged on the global root only, which is where
-    // the caller validated its shape.
+    // Mode p's ΔH0 into shm: each node's root copies mode p's slice of the node-shared stack, no broadcast
     if (has_DeltaH0) {
-      if (_mpi->comm.root()) sDeltaH0.local() = (*DeltaH0_mskij_root)(p, nda::ellipsis{});
-      sDeltaH0.broadcast_to_nodes(0);
-      _mpi->comm.barrier();
+      sDeltaH0.node_sync();
+      if (_mpi->node_comm.root()) sDeltaH0.local() = sDeltaH0_mskij->local()(p, nda::ellipsis{});
+      sDeltaH0.node_sync();
     }
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
