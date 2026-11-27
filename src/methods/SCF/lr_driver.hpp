@@ -237,6 +237,11 @@ struct lr_params {
   const lr_qp_static_params* qp_static = nullptr;
   /// Embedding data (nullptr: none). The driver then also forms δW^loc; see embedding_info.
   const embedding_info* embedding = nullptr;
+  /// The caller's dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated; nullptr: none.
+  /// The array is the caller's window: it refills it before each lr_solve_one, which reads it. It enters every outer
+  /// Dyson pass (the preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
+  /// preconditioner applies. Sizes the memory report and the hessian ω stores at lr_setup.
+  const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -252,11 +257,6 @@ struct lr_params {
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
-  /// The caller's dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated; nullptr: none.
-  /// The array is the caller's window: it refills it before each lr_solve_one, which reads it. It enters every outer
-  /// Dyson pass (the preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
-  /// preconditioner applies. Sizes the memory report and the hessian ω stores at lr_setup.
-  const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr;
 
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
   bool has_dynamic_source() const { return sDeltaH_wskij != nullptr; }
