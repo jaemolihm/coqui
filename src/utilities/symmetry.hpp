@@ -37,6 +37,12 @@
 namespace utils
 {
 
+// Two bands i, j of the same k belong to one degenerate group when |e_i - e_j| < degenerate_eigval_tol (Ha).
+// generate_dmatrix blocks D on these groups, and the closed delta-psi source window of add_augmentation_dpsi
+// ends only at a gap of at least this.
+constexpr double degenerate_eigval_tol = 1e-4;
+
+
 struct symm_op
 {
   // rotation
@@ -1048,7 +1054,7 @@ auto generate_dmatrix(MF_t &mf,
       int ib=0;
       while(ib < nbnd) {
         int nb=1;
-        while( ib+nb<nbnd and std::abs(eigv(0,ik,ib)-eigv(0,ik,ib+nb)) < 1e-4 ) nb++;
+        while( ib+nb<nbnd and std::abs(eigv(0,ik,ib)-eigv(0,ik,ib+nb)) < degenerate_eigval_tol ) nb++;
         nda::range b_rng(ib,ib+nb);
         if constexpr (Sparse) {
           nda::blas::gemm(ComplexType(1.0),psi(1,b_rng,all),

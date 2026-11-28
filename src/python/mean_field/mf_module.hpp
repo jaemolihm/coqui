@@ -165,10 +165,11 @@ namespace coqui_py {
      * @brief Create a δψ-augmented mean-field system from this one.
      *
      * Appends orthonormalized DFPT response wavefunctions (δψ) read from
-     * {deltapsi_dir}/deltapsi_iq{iq}_mode{m}_ik{k}.hdf5, using the first R
-     * (=nbnd_aug) bands of each mode for every phonon iq in iq_list. δψ(n,k)
+     * {deltapsi_dir}/deltapsi_iq{iq}_mode{m}_ik{k}.hdf5, using the first R(k)
+     * bands of each mode at source k for every phonon iq in iq_list (R(k) = nbnd_aug
+     * if nbnd_aug_break_degeneracy, else extended to the next gap of the base eigenvalues). δψ(n,k)
      * carries momentum k+q and is deposited on the 'w' grid at k+q. The buffer
-     * bands m ∈ [R, nbnd) are added back using the screened vertex g_scr and
+     * bands m ∈ [M, nbnd) are added back using the screened vertex g_scr and
      * eigenvalues read (and converted Ry→Ha) from
      * {elph_dir}/elph_bare.iq{iq}.h5 (also the source of q). Requires npol==1
      * (an IBZ mean field only with Gamma-only iq_list and all modes). See orbitals::add_augmentation_dpsi.
@@ -188,17 +189,19 @@ namespace coqui_py {
      * @param epstol        dimensionless singular-value cutoff (thresholds s,
      *                      the residual amplitude of the dtau_step-scaled state)
      * @param dtau_step     displacement step (bohr) scaling the raw δψ states
+     * @param nbnd_aug_break_degeneracy  true: R(k) = nbnd_aug at every k; false: R(k) extended so
+     *                      that [0, R(k)) holds whole degenerate multiplets (tolerance 1e-4 Ha)
      */
     Mf augment_basis_deltapsi(const std::string& prefix, const std::string& outdir,
                           const std::string& deltapsi_dir, const std::string& elph_dir,
                           const std::vector<long>& iq_list, long nmodes,
                           const std::vector<long>& mode_list,
                           long nbnd_aug, long nbnd_mf, double smearing_deltapsi,
-                          double epstol, double dtau_step) const {
+                          double epstol, double dtau_step, bool nbnd_aug_break_degeneracy) const {
       std::string fn = outdir + "/" + prefix + ".h5";
       auto new_mf = orbitals::add_augmentation_dpsi<HOST_MEMORY>(
           *_mf, fn, deltapsi_dir, elph_dir, iq_list, nmodes, mode_list,
-          nbnd_aug, nbnd_mf, smearing_deltapsi, epstol, dtau_step);
+          nbnd_aug, nbnd_mf, smearing_deltapsi, epstol, dtau_step, nbnd_aug_break_degeneracy);
       return Mf(std::make_shared<mf::MF>(std::move(new_mf)));
     }
 

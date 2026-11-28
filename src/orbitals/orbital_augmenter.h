@@ -123,7 +123,21 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 // the matching elph_bare.iq{iq}.h5), each mode, and each source k, the response
 // δψ(n,k) — which carries crystal momentum k+q — is placed on the 'w' grid at
 // the deposit index j = kpq_map(ik) (with the umklapp G0 shift), for the first
-// nbnd_aug (=R) bands. QE orthogonalizes δψ against all N nscf bands, so the
+// R(k) bands of the source k.
+//
+// R(k) = nbnd_aug (=R) if nbnd_aug_break_degeneracy, else the smallest B >= R with
+// e_B(k) - e_{B-1}(k) >= utils::degenerate_eigval_tol (1e-4 Ha, the grouping tolerance of generate_dmatrix;
+// e = eigenvalues of the base mf at k, sorted per k). The source window then holds whole degenerate
+// multiplets at every k, so the source span is closed under the little group of k. The uniform kept count
+// n_aug_max can still split a singular-value multiplet of the overlap, so unitarity of the symmetry rotations D
+// is not guaranteed. The raw array has R_max = max_k R(k) rows per (iq, mode); rows n >= R(k) at k are
+// exactly zero (no δψ, no buffer term) and give zero overlap eigenvalues, so they add nothing above epstol. R(k) is an error if it exceeds the bands in the δψ file or if no gap is found
+// among the N bands of mf. If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero
+// row or a nearly dependent raw state) the closed-window path aborts; with nbnd_aug_break_degeneracy it only
+// warns. nbnd_aug = -1 (all file bands)
+// follows the same rule; nbnd_aug = 0 reads no δψ.
+//
+// QE orthogonalizes δψ against all N nscf bands, so the
 // contribution of the bands m ∈ [M, N) above the kept originals is added back:
 //   δψ(n,k) += Σ_{m=M}^{N-1} ψ(m,k+q) g_scr(mode,m,n) reg(e(n,k) - e(m,k+q)),
 // making the state the response orthogonal to only the M kept bands. reg is a
@@ -147,7 +161,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                              std::vector<long> const& mode_list,
                              long nbnd_aug, long nbnd_mf,
                              double smearing, double epstol,
-                             double dtau_step = 0.1);
+                             double dtau_step = 0.1,
+                             bool nbnd_aug_break_degeneracy = false);
 
 /**
  * Orthonormalize an augmentation block against a fixed set of originals.
@@ -167,12 +182,14 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
  *   - per-band THC fit weights (nspin, nkpts_ibz, nbnd + n_aug_max), replicated
  *     on every rank: 1 for the originals, min(s, 1) for the augmentation states.
  * `raw_aug` is overwritten (holds the projected residual on return).
+ * If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero or linearly dependent raw state at that k):
+ * nbnd_aug_break_degeneracy = false raises an error, true logs a warning.
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY, utils::Communicator comm_t>
 auto orthonormalize_augmentation(
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
-                    double epstol)
+                    double epstol, bool nbnd_aug_break_degeneracy = true)
   -> std::tuple<memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
                 nda::array<double, 3>>;
 

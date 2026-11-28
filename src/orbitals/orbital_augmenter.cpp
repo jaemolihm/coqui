@@ -134,7 +134,7 @@ template<MEMORY_SPACE MEM, utils::Communicator comm_t>
 auto orthonormalize_augmentation(
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
-                    double epstol)
+                    double epstol, bool nbnd_aug_break_degeneracy)
   -> std::tuple<darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
                 nda::array<double, 3>>
 {
@@ -290,9 +290,19 @@ auto orthonormalize_augmentation(
       for(long r=0;r<n_aug_max;++r) {
         long src = n_raw - n_aug_max + r;   // largest eigenvalues are last
         double lam = v(src);
-        if(lam < 1e-10 and comm->root())
-          app_warning("Basis augmentation: retaining near-null vector (overlap eigenvalue "
-                      "{:.3e} < 1e-10). Consider lowering nbnd_aug or raising epstol.", lam);
+        if(lam < 1e-10) {
+          if(not nbnd_aug_break_degeneracy) { // A null vector would enter the basis: abort
+            long n_nonnull = std::count_if(v.data(), v.data() + v.size(), [](double x){ return x >= 1e-10; });
+            utils::check(false, "Basis augmentation: padding to the uniform count n_aug_max = {} takes a null vector "
+                         "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, deposit k index {}, which has {} raw states above "
+                         "epstol and only {} with overlap eigenvalue >= 1e-10. Raise epstol, or use "
+                         "nbnd_aug_break_degeneracy=True.", n_aug_max, lam, s_range.first()+is, k_range.first()+ik,
+                         counts[isk], n_nonnull);
+          } else if(comm->root()) { // Warn only
+            app_warning("Basis augmentation: retaining near-null vector (overlap eigenvalue "
+                        "{:.3e} < 1e-10). Consider lowering nbnd_aug or raising epstol.", lam);
+          }
+        }
         double inv = 1.0/std::sqrt(std::max(lam, 1e-300));
         for(long j=0;j<n_raw;++j) R(r,j) = V(src,j)*inv;
       }
@@ -658,7 +668,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
                              std::vector<long> const& iq_list, long nmodes_in,
                              std::vector<long> const& mode_list,
                              long nbnd_aug, long nbnd_mf,
-                             double smearing, double epstol, double dtau_step)
+                             double smearing, double epstol, double dtau_step,
+                             bool nbnd_aug_break_degeneracy)
 {
   using larray = typename memory::array<MEM,ComplexType,4>;
   decltype(nda::range::all) all;
@@ -715,16 +726,35 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   // R = number of δψ bands used. -1 → all bands present in the first file;
   // 0 → no δψ states (baseline: originals in augmented bdft format, no file read).
   long R = nbnd_aug;
+  long nbnd_file = 0;   // bands in the first δψ file
   if(nbnd_aug != 0) {
     std::string dprefix = deltapsi_dir + "/deltapsi_iq" + std::to_string(iq_list[0]) + "_mode1";
-    auto dk0 = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh());
-    if(R < 0 or R > dk0.nbnd) R = dk0.nbnd;
-    utils::check(R <= dk0.nbnd,
-                 "add_augmentation_dpsi: nbnd_aug (R={}) exceeds bands in δψ file ({}).",
-                 R, dk0.nbnd);
+    nbnd_file = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh()).nbnd;
+    if(R < 0 or R > nbnd_file) R = nbnd_file;
   }
+  // 1. R(k) = min{B >= R : e_B(k) - e_{B-1}(k) >= degenerate_eigval_tol} on the IBZ k of the base mean field,
+  //    so that the source window [0, R(k)) holds whole degenerate multiplets (e sorted per k).
+  //    Rows n >= R(k) of the raw array stay exactly zero.
+  std::vector<long> R_k(size_t(nkpts_ibz), R);
+  if(R > 0 and not nbnd_aug_break_degeneracy) { // closed window: extend R(k) to the next gap
+    auto eig = mf.eigval();
+    for(long ik=0; ik<nkpts_ibz; ++ik) {
+      long B = R;
+      while(B < N and std::abs(eig(0,ik,B) - eig(0,ik,B-1)) < utils::degenerate_eigval_tol) ++B;
+      utils::check(B < N, "add_augmentation_dpsi: no gap above band {} within the {} bands of the base mean field "
+                   "at k index {}{}; lower nbnd_aug or use nbnd_aug_break_degeneracy=True.", R, N, ik,
+                   R >= N ? " (nbnd_aug >= the base mean field's nbnd)" : "");
+      R_k[size_t(ik)] = B;
+    }
+  }
+  // 2. The file must hold R(k) bands at every k (checked against the first file)
+  for(long ik=0; ik<nkpts_ibz; ++ik)
+    utils::check(R_k[size_t(ik)] <= nbnd_file,
+                 "add_augmentation_dpsi: R(k) = {} at k index {} exceeds bands in δψ file ({}); lower nbnd_aug "
+                 "or use nbnd_aug_break_degeneracy=True.", R_k[size_t(ik)], ik, nbnd_file);
+  long R_max = *std::max_element(R_k.begin(), R_k.end());   // row stride of the raw array per (iq, mode)
   long n_raw_per = nmodes_sel * nq;
-  long n_raw = R * n_raw_per;
+  long n_raw = R_max * n_raw_per;
 
   app_log(2,"*****************************************************");
   app_log(2,"*            Basis augmentation (dpsi):             *");
@@ -736,12 +766,16 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
             std::string s; for(auto q : iq_list) s += std::to_string(q)+" "; return s; }());
   app_log(2,"  - h5/nscf bands (N)           : {}", N);
   app_log(2,"  - original bands kept (M)     : {}", M);
-  app_log(2,"  - δψ bands used (R)           : {}", R);
+  app_log(2,"  - δψ bands used (R)           : {} (R_max = {})", R, R_max);
+  app_log(2,"  - nbnd_aug_break_degeneracy   : {}", nbnd_aug_break_degeneracy);
   app_log(2,"  - modes per q                 : {} of {} ({})", nmodes_sel, nmodes, [&]{
             std::string s; for(auto m : modes) s += std::to_string(m)+" "; return s; }());
   app_log(2,"  - buffer bands m ∈ [{}, {})   : {} band(s)", M, N, std::max(0L, N-M));
   app_log(2,"  - buffer smearing (Ha)        : {:.4e}", smearing);
-  app_log(2,"  - raw states per k            : {} ({} q·modes x {})", n_raw, n_raw_per, R);
+  app_log(2,"  - raw states per k            : {} ({} q·modes x R_max {})", n_raw, n_raw_per, R_max);
+  for(long ik=0; ik<nkpts_ibz; ++ik)
+    app_log(2,"  - R(k) at k index {} ({:.4f} {:.4f} {:.4f}): {}", ik, mf.kpts_crystal_ibz()(ik,0),
+            mf.kpts_crystal_ibz()(ik,1), mf.kpts_crystal_ibz()(ik,2), R_k[size_t(ik)]);
   app_log(2,"  - dtau_step (bohr)            : {:.4e}", dtau_step);
   app_log(2,"  - singular-value cutoff       : {:.3e} (dimensionless, thresholds s)", epstol);
 
@@ -846,6 +880,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
       long j  = k_range.first()+jl;               // deposit index (global)
       long ik = inv_map(j);                        // source k
       utils::check(ik >= 0, "add_augmentation_dpsi: no source k for deposit index {}.", j);
+      long Rk = R_k[size_t(ik)];                   // δψ source bands at the source k
       // umklapp G0 = round(k(ik)+q - k(j)); δψ Miller h → h+G0 in the k(j) frame
       long G0[3];
       for(int d=0; d<3; ++d)
@@ -856,9 +891,9 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
         std::string dprefix = deltapsi_dir + "/deltapsi_iq" + std::to_string(iq)
                             + "_mode" + std::to_string(mode+1);
         auto dk = methods::detail::read_Deltapsi_k(dprefix, ik, mesh);
-        utils::check(dk.evc_raw.shape(0) >= R,
-                     "add_augmentation_dpsi: δψ file (iq{},mode{},ik{}) has {} bands < R {}.",
-                     iq, mode+1, ik+1, dk.evc_raw.shape(0), R);
+        utils::check(dk.evc_raw.shape(0) >= Rk,
+                     "add_augmentation_dpsi: δψ file (iq{},mode{},ik{}) has {} bands < R(k) {}.",
+                     iq, mode+1, ik+1, dk.evc_raw.shape(0), Rk);
         long npw = dk.npw;
 
         // target local row on the 'w' grid for each δψ G (or -1 if off-slice)
@@ -879,8 +914,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
         for(long is_l=0; is_l<s_range.size(); ++is_l) {
           long is = s_range.first()+is_l;
           (void) is;
-          for(long n=0; n<R; ++n) {
-            long row = (iq_idx*nmodes_sel + im)*R + n; // band index in raw_aug
+          for(long n=0; n<Rk; ++n) {
+            long row = (iq_idx*nmodes_sel + im)*R_max + n; // band index in raw_aug
             auto out = raw_loc(is_l, jl, row, all);    // (ng_loc)
             // (1) scatter δψ(n,k) coefficients onto the local 'w' grid slice
             for(long ig=0; ig<npw; ++ig) {
@@ -911,7 +946,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   raw_aug.local() *= ComplexType(dtau_step);
 
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
-  auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol);
+  auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol,
+                                                                       nbnd_aug_break_degeneracy);
 
   // DFT Kohn-Sham matrix seed for the (non-eigen) augmented basis.
   auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
@@ -923,10 +959,10 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
 // explicit template instantiations
 template mf::MF add_augmentation<HOST_MEMORY>(mf::MF&,std::string,std::shared_ptr<orbital_augmenter_t>,long,double,double);
-template mf::MF add_augmentation_dpsi<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,std::vector<long> const&,long,std::vector<long> const&,long,long,double,double,double);
+template mf::MF add_augmentation_dpsi<HOST_MEMORY>(mf::MF&,std::string,std::string,std::string,std::vector<long> const&,long,std::vector<long> const&,long,long,double,double,double,bool);
 template nda::array<double, 3> rayleigh_eigvals<HOST_MEMORY,communicator>(mf::MF&, darray_t<host_array<ComplexType, 4>, communicator>&);
 template std::tuple<darray_t<host_array<ComplexType, 4>, communicator>, nda::array<double, 3>>
 orthonormalize_augmentation(darray_t<host_array<ComplexType, 4>, communicator>&,
-                            darray_t<host_array<ComplexType, 4>, communicator>&, double);
+                            darray_t<host_array<ComplexType, 4>, communicator>&, double, bool);
 
 } // orbitals
