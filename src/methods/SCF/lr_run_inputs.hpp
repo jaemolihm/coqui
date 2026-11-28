@@ -465,9 +465,10 @@ struct lr_W_inputs {
  * Loads (or recomputes, or reuses) the screened interaction W_c(iω) of an LR run, with the ε⁻¹ heads, and reads
  * the divergence treatments of the ground state.
  *
- * Called by run_lr_calc and run_lr_efield_calc, once per run, after the unperturbed state is built. W is either read
+ * Called once per run by run_lr_calc and once per phase by run_lr_efield_calc (recompute_W only in its first call), after
+ * the unperturbed state is built. W is either read
  * from disk (explicit screened_interaction_file, else the path derived from the checkpoint), recomputed on the fly from the G(τ)
- * `sG_tskij` (RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W cache (`reuse_W`, released by release_lr_W_cache).
+ * `sG_tskij` (only read when W is recomputed, else may be nullptr; RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W cache (`reuse_W`, released by release_lr_W_cache).
  * Both hand W to lr_driver as W_c(iω) on the q-dist distribution (utils::lr_W_tau_local_dist). `needs_W` is
  * false when the kernel carries neither a Σ nor the HSEX exchange; then only the divergence treatment of the
  * exchange side is read. `init_timer` carries LR_INIT_LOAD_W.
@@ -476,7 +477,7 @@ lr_W_inputs load_lr_W(utils::mpi_context_t<mpi3::communicator>& mpi, thc_reader_
                       std::string const& input_file, std::string const& input_grp, ptree const& pt,
                       bool needs_W, bool recompute_W, bool reuse_W,
                       std::string const& screened_interaction_file, std::string const& unperturbed,
-                      sArray_t<Array_view_5D_t>& sG_tskij, MBState* mb_local, utils::TimerManager& init_timer);
+                      sArray_t<Array_view_5D_t>* sG_tskij, MBState* mb_local, utils::TimerManager& init_timer);
 
 /**
  * Sets the kernel, solver and W fields of `p` that every LR driver takes from its inputs.

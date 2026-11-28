@@ -137,7 +137,7 @@ lr_W_inputs load_lr_W(utils::mpi_context_t<mpi3::communicator>& mpi, thc_reader_
                       std::string const& input_file, std::string const& input_grp, ptree const& pt,
                       bool needs_W, bool recompute_W, bool reuse_W,
                       std::string const& screened_interaction_file, std::string const& unperturbed,
-                      sArray_t<Array_view_5D_t>& sG_tskij, MBState* mb_local, utils::TimerManager& init_timer) {
+                      sArray_t<Array_view_5D_t>* sG_tskij, MBState* mb_local, utils::TimerManager& init_timer) {
   auto mf = thc.MF();
   lr_W_inputs W;
   // An LR run must reproduce the divergence treatment of the ground state it
@@ -202,8 +202,9 @@ lr_W_inputs load_lr_W(utils::mpi_context_t<mpi3::communicator>& mpi, thc_reader_
         // Recompute W using Green's functions
         app_log(2, "Recomputing W from checkpoint Green's function ({})...",
                 mb_local != nullptr ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
+        utils::check(sG_tskij != nullptr, "load_lr_W: recompute_W needs G(tau)");
         auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-            mpi, thc, ft, sG_tskij, W.div_treatment, mb_local);
+            mpi, thc, ft, *sG_tskij, W.div_treatment, mb_local);
         W.opt_dW.emplace(std::move(dW));
         W.opt_eps_inv.emplace(std::move(eps_inv));
         W.opt_eps_inv_w.emplace(std::move(eps_inv_w));

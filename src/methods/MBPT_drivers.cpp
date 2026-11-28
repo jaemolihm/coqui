@@ -1645,7 +1645,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // Load W and eps_inv_head if GW self-energy is requested (or HSEX needs its ν = 0 slice)
   auto W = load_lr_W(*mpi, eri.corr_eri->get(), ft, input_file, input_grp, pt,
                      include_gw_sigma || exchange_static_W, recompute_W, reuse_W, screened_interaction_file,
-                     unperturbed, sG_tskij, gw_edmft ? &(*opt_mb_local) : nullptr, lr_init_timer);
+                     unperturbed, &sG_tskij, gw_edmft ? &(*opt_mb_local) : nullptr, lr_init_timer);
   auto& opt_dW = W.opt_dW;
   auto& opt_eps_inv_w = W.opt_eps_inv_w;
   auto& div_treatment = W.div_treatment;

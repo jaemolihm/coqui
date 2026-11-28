@@ -562,7 +562,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // W_c(iω), the ε⁻¹ heads and the divergence treatments of phase A1, loaded as in run_lr_calc; G(τ) is read only by a W recompute
   auto W_first = load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, has_sigma, recompute_W, reuse_W,
-                           screened_interaction_file, "checkpoint", *state.opt_sG_tskij, nullptr, init_timer);
+                           screened_interaction_file, "checkpoint", &*state.opt_sG_tskij, nullptr, init_timer);
   utils::check(!W_first.div_treatment.ends_with("_metal"),
                "run_lr_efield_calc: a '*_metal' div_treatment ('{}') is not supported, ε∞ needs the gapped "
                "treatment (note sec:largeDN).", W_first.div_treatment);
@@ -572,14 +572,13 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   const bool keep_W_local = recompute_W && !reuse_W;  // true when W is computed once and kept in this call, not in the W cache
   std::optional<lr_W_inputs> opt_W_local;
   if (keep_W_local) opt_W_local = W_first;
-  auto sG_unread = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {1, 1, 1, 1, 1});  // load_lr_W reads G(τ) only if recomputing W
   auto W_for_phase = [&](bool last_phase) {
     if (keep_W_local) { // Copy the W computed in the A1 load; the last phase takes it
       return last_phase ? std::move(*opt_W_local) : lr_W_inputs(*opt_W_local);
     }
     // Reuse the W cache (reuse_W) or read the file again
     return load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, has_sigma, /*recompute_W=*/false, reuse_W,
-                     screened_interaction_file, "checkpoint", sG_unread, nullptr, init_timer);
+                     screened_interaction_file, "checkpoint", nullptr, nullptr, init_timer);
   };
 
   // 3. v0_α into a node-shared (ns, nk, 3, nb, nb) array, read once per node
