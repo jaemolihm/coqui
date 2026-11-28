@@ -239,8 +239,9 @@ public:
    * @param ns, nk_ibz, nbnd - [INPUT] band-array dimensions
    * @param has_dynamic_source  - [INPUT] the solves carry a dynamic one-body source ΔH(iω): the left
    *                      operand of the plain and static' terms gains Tr_ω(ΔH_λ, ΔG_p) and
-   *                      Tr_ω(ΔH_λ, ΔG'_p), the ΔH(iω) store is kept (for the extra solve as well as
-   *                      the contraction), and ΔG(iω) is stored for every kernel, Σ-free ones included.
+   *                      Tr_ω(ΔH_λ, ΔG'_p), the ΔH(iω) store is kept (it is used only by the contraction;
+   *                      the extra solve takes ΔH(iω) from the caller's stack), and ΔG(iω) is stored for
+   *                      every kernel, Σ-free ones included.
    * @param plain_only  - [INPUT] set by run_lr(hessian="plain"): compute `hessian_plain`
    *                      only, for a run whose ΔF/ΔΣ are not K of the returned ΔDm/ΔG
    *                      (an order-n run, max_iter = n at tol = 0). It reads ΔH0 and ΔDm,
@@ -301,7 +302,7 @@ public:
    * last checkpoint dump has run: ΔF/ΔΣ are overwritten with the rebuilt raw
    * values, ΔDm/ΔG with the extra solve's output, and none of it is persisted.
    *
-   * The ΔH0 and ΔH(iω) left operands are packed from the two stacks here, not in store_mode.
+   * The ΔH0 and ΔH(iω) left operands are packed from the two stacks here.
    *
    * Collective on mpi->comm; single-shot (the accumulators are reduced in place),
    * and every rank returns the same matrices.
@@ -390,10 +391,10 @@ private:
   /// as it is. Used by evaluate for the source ΔH_λ(iω), the left operand of Tr_ω(ΔH_λ, ΔG_p) for every λ
   /// in evaluate's p loop. pack_to_omega does the same for
   /// τ-grid operands (ΔΣ, ΔG) plus the τ → ω transform; ΔH(iω) is already on the ω grid.
-  nda::array<ComplexType, 2> pack_omega(Array_view_5D_t const& src) const;
+  nda::array<ComplexType, 2> pack_omega(nda::array_const_view<ComplexType, 5> const& src) const;
 
   /// Pack this rank's element slice of a node-replicated (ns,nk,nb,nb) array.
-  nda::array<ComplexType, 1> pack_static(Array_view_4D_t const& src,
+  nda::array<ComplexType, 1> pack_static(nda::array_const_view<ComplexType, 4> const& src,
                                          bool weighted) const;
 
   /// ⟨A,A⟩ on the stored ΔΣ of mode 0: real and positive by construction, so its

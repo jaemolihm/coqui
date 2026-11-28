@@ -239,7 +239,7 @@ struct lr_params {
   const embedding_info* embedding = nullptr;
   /// The caller's dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb); std::nullopt: none. A view of the caller's
   /// node-replicated memory, which the caller sets to the source of the current mode before each lr_solve_one;
-  /// lr_setup reads only its presence (it sizes the memory report and the hessian ω stores). It enters every outer
+  /// lr_setup reads only its presence, for the memory report (it does not size the hessian stores). It enters every outer
   /// Dyson pass (the preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
   /// preconditioner applies.
   opt_const_view_5D_t DeltaH_wskij = std::nullopt;
@@ -319,7 +319,8 @@ public:
    *
    * The solvers and buffers built here are shaped by `p` — which solvers exist
    * (kernel, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
-   * capacity — so every lr_solve_one must be handed the same `p`. `dW_wqPQ_in` is
+   * capacity — so every lr_solve_one must be handed the same `p`, except `p.DeltaH_wskij`, which the caller sets to the
+   * current mode's source (or std::nullopt) before each lr_solve_one. `dW_wqPQ_in` is
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
@@ -342,8 +343,8 @@ public:
   /**
    * @brief Run the LR SCF loop for one perturbation. Requires a prior lr_setup.
    *
-   * `p` must be the one lr_setup was given: it selects which solvers and buffers
-   * this call reads, and those were allocated by lr_setup.
+   * `p` must be the one lr_setup was given, except `p.DeltaH_wskij`, which is the source of this call: `p` selects
+   * which solvers and buffers this call reads, and those were allocated by lr_setup.
    *
    * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW and the accelerator
    * subspace) on entry, so the result depends only on ΔH0 and not on

@@ -811,7 +811,7 @@ Returns
      {c2py::python_typename<std::optional<nda::array<ComplexType, 2>>>()}},
     {c2py::python_typename<nda::array<ComplexType, 5>>()});
 static const auto doc_d_16 = fun_16.doc(R"DOC(
-Drop the W_c(iw) and eps^-1 head kept by run_lr(reuse_W = True)
+Drop the W_c(iw) and eps^-1 head kept by run_lr or run_lr_efield with reuse_W = True
 )DOC");
 static const auto doc_d_17 = fun_17.doc(
     R"DOC(

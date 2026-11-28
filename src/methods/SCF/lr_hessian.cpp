@@ -156,12 +156,12 @@ void lr_hessian_t::pack_to_omega(sArray_t<Array_view_5D_t> const& src,
 
 
 nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
-    Array_view_5D_t const& loc) const {
-  utils::check(loc.size() == _nw * _nF,
+    nda::array_const_view<ComplexType, 5> const& src) const {
+  utils::check(src.size() == _nw * _nF,
                "lr_hessian_t: ΔH(iω) has {} elements, expected nw*ns*nk*nb*nb = {}.",
-               loc.size(), _nw * _nF);
-  utils::check(loc.is_contiguous(), "lr_hessian_t: ΔH(iω) view must be contiguous.");
-  auto flat = nda::reshape(loc, std::array<long, 1>{_nw * _nF});
+               src.size(), _nw * _nF);
+  utils::check(src.is_contiguous(), "lr_hessian_t: ΔH(iω) view must be contiguous.");
+  auto flat = nda::reshape(src, std::array<long, 1>{_nw * _nF});
   nda::array<ComplexType, 2> out(_nw, _nloc);
   if (_nloc > 0)
     for (long n = 0; n < _nw; ++n)
@@ -171,12 +171,12 @@ nda::array<ComplexType, 2> lr_hessian_t::pack_omega(
 
 
 nda::array<ComplexType, 1> lr_hessian_t::pack_static(
-    Array_view_4D_t const& loc, bool weighted) const {
-  utils::check(loc.size() == _nF,
+    nda::array_const_view<ComplexType, 4> const& src, bool weighted) const {
+  utils::check(src.size() == _nF,
                "lr_hessian_t: rank-4 array has {} elements, expected "
-               "ns*nk*nb*nb = {}.", loc.size(), _nF);
-  utils::check(loc.is_contiguous(), "lr_hessian_t: rank-4 view must be contiguous.");
-  auto flat = nda::reshape(loc, std::array<long, 1>{_nF});
+               "ns*nk*nb*nb = {}.", src.size(), _nF);
+  utils::check(src.is_contiguous(), "lr_hessian_t: rank-4 view must be contiguous.");
+  auto flat = nda::reshape(src, std::array<long, 1>{_nF});
   nda::array<ComplexType, 1> out(_nloc);
   if (_nloc > 0) out = flat(nda::range(_i0, _i1));
   if (weighted)
@@ -311,6 +311,12 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   const bool has_DeltaH0 = (sDeltaH0_mskij != nullptr);  // true when the caller passed a ΔH0 stack
   utils::check(_has_dynamic_source == (sDeltaH_mwskij != nullptr),
                "lr_hessian_t::evaluate: the ΔH(iω) stack is passed iff the hessian was built with a source.");
+  utils::check(!has_DeltaH0 || sDeltaH0_mskij->shape()[0] == _nmodes,
+               "lr_hessian_t::evaluate: the ΔH0 stack has {} modes, but the hessian was built for {}.",
+               has_DeltaH0 ? sDeltaH0_mskij->shape()[0] : 0, _nmodes);
+  utils::check(!_has_dynamic_source || sDeltaH_mwskij->shape()[0] == _nmodes,
+               "lr_hessian_t::evaluate: the ΔH(iω) stack has {} modes, but the hessian was built for {}.",
+               _has_dynamic_source ? sDeltaH_mwskij->shape()[0] : 0, _nmodes);
   for (long l = 0; l < _nmodes; ++l) {
     if (has_DeltaH0)
       _dH0[l] = pack_static(sDeltaH0_mskij->local()(l, nda::ellipsis{}), /*weighted=*/false);
@@ -319,7 +325,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     if (_has_dynamic_source) _Hw[l] = pack_omega(sDeltaH_mwskij->local()(l, nda::ellipsis{}));
   }
 
-  // Plain only: Tr(ΔH0_λ, ΔDm_p) [+ Tr_ω(ΔH_λ, ΔG_p)] from the stores, no Dyson solve.
+  // 2. Plain only: Tr(ΔH0_λ, ΔDm_p) [+ Tr_ω(ΔH_λ, ΔG_p)] from the stores, no Dyson solve.
   if (_plain_only) {
     for (long p = 0; p < _nmodes; ++p)
       for (long l = 0; l < _nmodes; ++l) {
@@ -364,19 +370,20 @@ lr_hessian_result_t lr_hessian_t::evaluate(
   // trace_matsubara is COLLECTIVE, so every rank must reach both loops with the
   // same bounds. _nmodes, _has_sigma and _has_dynamic_source are identical on every rank, so they do.
 
+  // 3. For every mode p: the extra Dyson solve and column p of the four terms
   for (long p = 0; p < _nmodes; ++p) {
 
-    // Mode p's slices of the node-shared stacks; std::nullopt when there is no such source
+    // 3.1 Mode p's slices of the node-shared stacks; std::nullopt when there is no such source
     const opt_const_view_4D_t DeltaH0_skij_p =
         has_DeltaH0 ? opt_const_view_4D_t(sDeltaH0_mskij->local()(p, nda::ellipsis{})) : std::nullopt;
     const opt_const_view_5D_t DeltaH_wskij_p =
         _has_dynamic_source ? opt_const_view_5D_t(sDeltaH_mwskij->local()(p, nda::ellipsis{})) : std::nullopt;
 
-    // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
+    // 3.2 Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
     rebuild_raw_kernel(p, sDeltaF, sDeltaSigma);
 
-    // ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
+    // 3.3 ΔX'_p = D[ΔH0_p + ΔF_p + ΔΣ_p], the one extra solve the stationary form
     // costs. ΔG(τ) is replicated only when the Matsubara term needs it — that
     // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
@@ -387,7 +394,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");
 
-    // Column p of all four terms, against every stored λ.
+    // 3.4 Column p of all four terms, against every stored λ.
     _Timer.start("LR_HESS_CONTRACT");
     auto dDm_prime = pack_static(sDeltaDm.local(), /*weighted=*/true);
     nda::array<ComplexType, 2> Gw_prime;
@@ -411,7 +418,7 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     _mpi->comm.barrier();
   }
 
-  // ---- finish: reduce, scale, combine, measure -----------------------------
+  // 4. Finish: reduce, scale, combine, measure
   _Timer.start("LR_HESS_CONTRACT");
   const ComplexType self_pair = _has_sigma ? self_pairing() : ComplexType(0.0);
   _Timer.stop("LR_HESS_CONTRACT");

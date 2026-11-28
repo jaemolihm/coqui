@@ -287,7 +287,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
                                      const lr_local_inputs* local = nullptr,
                                      std::optional<nda::array<ComplexType, 6>> const& DeltaH_mwskij_root = std::nullopt);
 
-/// Drop the W_c(iw) and eps^-1 head kept by run_lr_calc(reuse_W = true). No-op if none is kept.
+/// Drop the W_c(iw) and eps^-1 head kept by run_lr_calc or run_lr_efield_calc with reuse_W = true. No-op if none is kept.
 void release_lr_W_cache();
 
 /**
@@ -299,7 +299,7 @@ void release_lr_W_cache();
  * @param eri - [INPUT] ERI handler (must be THC)
  * @param pt  - [INPUT] Parameters as property tree: prefix, output, method ("none", "Hartree", "HF", "GW0", "GW"), max_iter,
  *              tol, iter_alg.*, reuse_W, recompute_W, screened_interaction_file, h0_source,
- *              input_type, input_iter; the key list is on the definition in MBPT_drivers.cpp.
+ *              input_type, input_iter; the key list is on the definition in SCF/lr_efield.cpp.
  */
 template<typename eri_t>
 void run_lr_efield_calc(eri_t &eri, ptree const& pt);

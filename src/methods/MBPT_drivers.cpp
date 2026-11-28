@@ -1250,8 +1250,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
-  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
-  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
+  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", lr_params{}.precond_tol);
+  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", lr_params{}.precond_max_iter);
   utils::check(precond_max_iter >= 1,
                "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
