@@ -216,19 +216,21 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
 
     ``R(k)`` is the number of δψ source bands at the source k-point. With
     ``nbnd_aug_break_degeneracy=False`` (default) it is the smallest ``B >= nbnd_aug``
-    with ``e_B(k) - e_{B-1}(k) > 1e-4`` Ha (``e`` = eigenvalues of ``mf`` at k, the
+    with ``e_B(k) - e_{B-1}(k) >= 1e-4`` Ha (``e`` = eigenvalues of ``mf`` at k, the
     degeneracy tolerance of the symmetry rotations), so the source window holds
-    whole degenerate multiplets at every k and the augmented span is invariant
-    under the little group of k (the dense symmetry rotations are unitary).
-    Rows ``n >= R(k)`` of the raw states are zero. The uniform kept band count
-    after the ``epstol`` truncation is unchanged; if padding to it would take a
-    zero raw state, an error is raised. An error is also raised if ``R(k)``
+    whole degenerate multiplets at every k and the source span is closed under the
+    little group of k. The uniform kept count can still split a singular-value
+    multiplet of the overlap, so unitarity of the dense symmetry rotations is not
+    guaranteed. Rows ``n >= R(k)`` of the raw states are zero. The uniform kept band
+    count after the ``epstol`` truncation is unchanged; if padding to it would take a
+    vector with overlap eigenvalue < 1e-10 (a zero row or a nearly dependent raw
+    state), an error is raised. An error is also raised if ``R(k)``
     exceeds the bands in the δψ file or no gap is found among the N bands of
     ``mf``. This default changes the rebuilt basis wherever ``nbnd_aug`` splits a
     multiplet (IBZ and full-BZ ``mf`` alike). ``nbnd_aug_break_degeneracy=True``
     uses ``R(k) = nbnd_aug`` at every k (the previous behavior; warning only on
-    padding with a zero state). ``nbnd_aug = -1`` takes all file bands as ``nbnd_aug``
-    and follows the same rule. ``R(k)`` is logged per k at output level 2.
+    padding with a near-null vector). ``nbnd_aug = -1`` takes all file bands as
+    ``nbnd_aug`` and follows the same rule.
 
     QE orthogonalizes δψ against all N nscf bands, so the contribution of the
     bands m ∈ [M, N) above the kept originals is added back using the screened
@@ -287,7 +289,7 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
         1-based mode indices contributing δψ raw states (subset of
         ``1..nmodes``). ``None`` uses all modes.
     nbnd_aug : int
-        Number of δψ bands used per mode (minimum of ``R(k)``; ``-1`` = all bands in the file).
+        Number of δψ bands used per mode (lower bound of ``R(k)``; ``-1`` = all bands in the file).
     nbnd_mf : int or None
         Number of original bands kept (M). ``None`` (or > N) keeps all N bands,
         giving an empty buffer [M, N) — use this for a dedicated bundle where

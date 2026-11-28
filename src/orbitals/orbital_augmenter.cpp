@@ -294,9 +294,10 @@ auto orthonormalize_augmentation(
           if(abort_on_null_padding) { // A null vector would enter the basis: abort
             long n_nonnull = std::count_if(v.data(), v.data() + v.size(), [](double x){ return x >= 1e-10; });
             utils::check(false, "Basis augmentation: padding to the uniform count n_aug_max = {} takes a null vector "
-                         "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, local k {}, which has {} raw states above "
+                         "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, IBZ k index {}, which has {} raw states above "
                          "epstol and only {} with overlap eigenvalue >= 1e-10. Raise epstol, or use "
-                         "nbnd_aug_break_degeneracy=True.", n_aug_max, lam, is, ik, counts[isk], n_nonnull);
+                         "nbnd_aug_break_degeneracy=True.", n_aug_max, lam, s_range.first()+is, k_range.first()+ik,
+                         counts[isk], n_nonnull);
           } else if(comm->root()) { // Warn only
             app_warning("Basis augmentation: retaining near-null vector (overlap eigenvalue "
                         "{:.3e} < 1e-10). Consider lowering nbnd_aug or raising epstol.", lam);
@@ -725,13 +726,11 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
   // R = number of δψ bands used. -1 → all bands present in the first file;
   // 0 → no δψ states (baseline: originals in augmented bdft format, no file read).
   long R = nbnd_aug;
+  long nbnd_file = 0;   // bands in the first δψ file
   if(nbnd_aug != 0) {
     std::string dprefix = deltapsi_dir + "/deltapsi_iq" + std::to_string(iq_list[0]) + "_mode1";
-    auto dk0 = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh());
-    if(R < 0 or R > dk0.nbnd) R = dk0.nbnd;
-    utils::check(R <= dk0.nbnd,
-                 "add_augmentation_dpsi: nbnd_aug (R={}) exceeds bands in δψ file ({}).",
-                 R, dk0.nbnd);
+    nbnd_file = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh()).nbnd;
+    if(R < 0 or R > nbnd_file) R = nbnd_file;
   }
   // 1. R(k) = min{B >= R : e_B(k) - e_{B-1}(k) > degenerate_eigval_tol} on the IBZ k of the base mean field,
   //    so that the source window [0, R(k)) holds whole degenerate multiplets (e sorted per k).
@@ -741,21 +740,17 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     auto eig = mf.eigval();
     for(long ik=0; ik<nkpts_ibz; ++ik) {
       long B = R;
-      while(B < N and std::abs(eig(0,ik,B) - eig(0,ik,B-1)) <= utils::degenerate_eigval_tol) ++B;
+      while(B < N and std::abs(eig(0,ik,B) - eig(0,ik,B-1)) < utils::degenerate_eigval_tol) ++B;
       utils::check(B < N, "add_augmentation_dpsi: no gap above band {} within the {} bands of the base mean field "
-                   "at k index {}; use nbnd_aug_break_degeneracy=True.", R, N, ik);
+                   "at k index {}; lower nbnd_aug or use nbnd_aug_break_degeneracy=True.", R, N, ik);
       R_k[size_t(ik)] = B;
     }
   }
-  // 2. The file must hold R(k) bands at every k (checked against the first file, as for R)
-  if(R > 0) {
-    std::string dprefix = deltapsi_dir + "/deltapsi_iq" + std::to_string(iq_list[0]) + "_mode1";
-    auto dk0 = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh());
-    for(long ik=0; ik<nkpts_ibz; ++ik)
-      utils::check(R_k[size_t(ik)] <= dk0.nbnd,
-                   "add_augmentation_dpsi: R(k) = {} at k index {} exceeds bands in δψ file ({}); lower nbnd_aug "
-                   "or use nbnd_aug_break_degeneracy=True.", R_k[size_t(ik)], ik, dk0.nbnd);
-  }
+  // 2. The file must hold R(k) bands at every k (checked against the first file)
+  for(long ik=0; ik<nkpts_ibz; ++ik)
+    utils::check(R_k[size_t(ik)] <= nbnd_file,
+                 "add_augmentation_dpsi: R(k) = {} at k index {} exceeds bands in δψ file ({}); lower nbnd_aug "
+                 "or use nbnd_aug_break_degeneracy=True.", R_k[size_t(ik)], ik, nbnd_file);
   long R_max = *std::max_element(R_k.begin(), R_k.end());   // row stride of the raw array per (iq, mode)
   long n_raw_per = nmodes_sel * nq;
   long n_raw = R_max * n_raw_per;
@@ -770,13 +765,13 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
             std::string s; for(auto q : iq_list) s += std::to_string(q)+" "; return s; }());
   app_log(2,"  - h5/nscf bands (N)           : {}", N);
   app_log(2,"  - original bands kept (M)     : {}", M);
-  app_log(2,"  - δψ bands used (R)           : {} (R_max = {}, closed per-k window: {})", R, R_max,
-          not nbnd_aug_break_degeneracy);
+  app_log(2,"  - δψ bands used (R)           : {} (R_max = {})", R, R_max);
+  app_log(2,"  - nbnd_aug_break_degeneracy   : {}", nbnd_aug_break_degeneracy);
   app_log(2,"  - modes per q                 : {} of {} ({})", nmodes_sel, nmodes, [&]{
             std::string s; for(auto m : modes) s += std::to_string(m)+" "; return s; }());
   app_log(2,"  - buffer bands m ∈ [{}, {})   : {} band(s)", M, N, std::max(0L, N-M));
   app_log(2,"  - buffer smearing (Ha)        : {:.4e}", smearing);
-  app_log(2,"  - raw states per k            : {} ({} q·modes x R_max {}; nonzero ones per k below)", n_raw, n_raw_per, R_max);
+  app_log(2,"  - raw states per k            : {} ({} q·modes x R_max {})", n_raw, n_raw_per, R_max);
   for(long ik=0; ik<nkpts_ibz; ++ik)
     app_log(2,"  - R(k) at k index {} ({:.4f} {:.4f} {:.4f}): {}", ik, mf.kpts_crystal_ibz()(ik,0),
             mf.kpts_crystal_ibz()(ik,1), mf.kpts_crystal_ibz()(ik,2), R_k[size_t(ik)]);

@@ -169,7 +169,7 @@ namespace coqui_py {
      * bands of each mode at source k for every phonon iq in iq_list (R(k) = nbnd_aug
      * if nbnd_aug_break_degeneracy, else extended to the next gap of the base eigenvalues). δψ(n,k)
      * carries momentum k+q and is deposited on the 'w' grid at k+q. The buffer
-     * bands m ∈ [R, nbnd) are added back using the screened vertex g_scr and
+     * bands m ∈ [M, nbnd) are added back using the screened vertex g_scr and
      * eigenvalues read (and converted Ry→Ha) from
      * {elph_dir}/elph_bare.iq{iq}.h5 (also the source of q). Requires npol==1
      * (an IBZ mean field only with Gamma-only iq_list and all modes). See orbitals::add_augmentation_dpsi.

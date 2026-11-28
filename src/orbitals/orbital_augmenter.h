@@ -123,18 +123,22 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 // the matching elph_bare.iq{iq}.h5), each mode, and each source k, the response
 // δψ(n,k) — which carries crystal momentum k+q — is placed on the 'w' grid at
 // the deposit index j = kpq_map(ik) (with the umklapp G0 shift), for the first
-// R(k) bands of the source k. R(k) = nbnd_aug (=R) if nbnd_aug_break_degeneracy,
-// else the smallest B >= R with e_B(k) - e_{B-1}(k) > utils::degenerate_eigval_tol
-// (1e-4 Ha, the grouping tolerance of generate_dmatrix; e = eigenvalues of the base mf at k, sorted per k),
-// so the source window holds whole degenerate multiplets at every k and the augmented span is
-// invariant under the little group of k (the symmetry rotations D are unitary). The raw array
-// has R_max = max_k R(k) rows per (iq, mode); rows n >= R(k) at k are exactly zero (no δψ, no
-// buffer term) and give zero overlap eigenvalues, so the epstol rule and the uniform kept count
-// are unchanged. R(k) is an error if it exceeds the bands in the δψ file or if no gap is
-// found among the N bands of mf; R(k) is logged per k at verbosity >= 2. If padding to the uniform count n_aug_max
-// would take a null vector (overlap eigenvalue < 1e-10) the closed-window path aborts; with
-// nbnd_aug_break_degeneracy it only warns. nbnd_aug_break_degeneracy = true reproduces R(k) = nbnd_aug
-// at every k. nbnd_aug = -1 (all file bands) follows the same rule; nbnd_aug = 0 is unchanged. QE orthogonalizes δψ against all N nscf bands, so the
+// R(k) bands of the source k.
+//
+// R(k) = nbnd_aug (=R) if nbnd_aug_break_degeneracy, else the smallest B >= R with
+// e_B(k) - e_{B-1}(k) >= utils::degenerate_eigval_tol (1e-4 Ha, the grouping tolerance of generate_dmatrix;
+// e = eigenvalues of the base mf at k, sorted per k). The source window then holds whole degenerate
+// multiplets at every k, so the source span is closed under the little group of k. The uniform kept count
+// n_aug_max can still split a singular-value multiplet of the overlap, so unitarity of the symmetry rotations D
+// is not guaranteed. The raw array has R_max = max_k R(k) rows per (iq, mode); rows n >= R(k) at k are
+// exactly zero (no δψ, no buffer term) and give zero overlap eigenvalues, so the epstol rule and the uniform
+// kept count are unchanged. R(k) is an error if it exceeds the bands in the δψ file or if no gap is found
+// among the N bands of mf. If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero
+// row or a nearly dependent raw state) the closed-window path aborts; with nbnd_aug_break_degeneracy it only
+// warns. nbnd_aug_break_degeneracy = true reproduces R(k) = nbnd_aug at every k. nbnd_aug = -1 (all file bands)
+// follows the same rule; nbnd_aug = 0 is unchanged.
+//
+// QE orthogonalizes δψ against all N nscf bands, so the
 // contribution of the bands m ∈ [M, N) above the kept originals is added back:
 //   δψ(n,k) += Σ_{m=M}^{N-1} ψ(m,k+q) g_scr(mode,m,n) reg(e(n,k) - e(m,k+q)),
 // making the state the response orthogonal to only the M kept bands. reg is a
