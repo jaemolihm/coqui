@@ -215,25 +215,25 @@ public:
    * once. ΔDm, which most callers actually want, is produced here as usual.
    *
    * @param sDeltaDm_skij     - [OUTPUT] LR density matrix (ns, nk, nb, nb)
-   * @param DeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb), a view of node-replicated data; nullptr: ΔH0 = 0
+   * @param DeltaH0_skij      - [INPUT] Perturbation (ns, nk, nb, nb), a view of node-replicated data; std::nullopt: ΔH0 = 0
    * @param sDeltaF_skij      - [INPUT] LR Fock matrix (ns, nk, nb, nb)
    * @param sDeltaSigma_tskij - [INPUT] LR self-energy (nt, ns, nk, nb, nb), nullptr if not used
    * @param fix_density       - [INPUT] If true, compute Δμ to enforce ΔN=0
    * @param sDeltaVcorr_skij  - [INPUT] static ΔV_QPGW (ns, nk, nb, nb), nullptr if not used.
    *   Added to the frequency-independent one-body term of the RHS (LR-qpGW mode).
-   * @param DeltaH_wskij      - [INPUT] dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), nullptr if not used.
+   * @param DeltaH_wskij      - [INPUT] dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), std::nullopt if not used.
    *   View of node-replicated data, read with global (iω, s, k) indices; added to X at every iω like ΔΣ(iω).
    * @return The Δμ used: computed if fix_density=true at q=Γ (complex for a non-Hermitian source), zero otherwise
    */
   template<typename DeltaDm_t, typename DeltaF_t, typename DeltaSigma_t>
   ComplexType solve_lr_dyson(
       DeltaDm_t& sDeltaDm_skij,
-      const Array_view_4D_t* DeltaH0_skij,
+      opt_const_view_4D_t DeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const DeltaSigma_t* sDeltaSigma_tskij = nullptr,
       bool fix_density = false,
       const DeltaF_t* sDeltaVcorr_skij = nullptr,
-      const Array_view_5D_t* DeltaH_wskij = nullptr);
+      opt_const_view_5D_t DeltaH_wskij = std::nullopt);
 
   /**
    * @brief Gather the distributed _dDeltaG_tau_buffer left by the last solve
@@ -279,18 +279,18 @@ public:
    * Each rank computes whole (s, k) blocks over all ω from the node-replicated
    * G(iω); the nodes' blocks are combined by one internode sum. Collective on comm.
    *
-   * `DeltaH0_skij` (nullptr: ΔH0 = 0) and `DeltaH_wskij` are views of node-replicated data.
+   * `DeltaH0_skij` (std::nullopt: ΔH0 = 0) and `DeltaH_wskij` are views of node-replicated data.
    * `DeltaH_wskij`, when given, is a dynamic source ΔH(iω): X(iω) = X + ΔH(iω) inside the ω loop
    * (without it c_ω folds into one X per (s, k), as above).
    *
    * @return the Δμ used, as solve_lr_dyson
    */
   ComplexType solve_lr_dyson_dm_only(sArray_t<Array_view_4D_t>& sDeltaDm_skij,
-                                     const Array_view_4D_t* DeltaH0_skij,
+                                     opt_const_view_4D_t DeltaH0_skij,
                                      const sArray_t<Array_view_4D_t>& sDeltaF_skij,
                                      const sArray_t<Array_view_4D_t>* sDeltaDm_src,
                                      bool fix_density,
-                                     const Array_view_5D_t* DeltaH_wskij = nullptr);
+                                     opt_const_view_5D_t DeltaH_wskij = std::nullopt);
 
   /**
    * @brief Compute particle number change from LR density matrix (q=0 only)
@@ -418,12 +418,12 @@ private:
   template<typename DeltaDm_t, typename DeltaF_t>
   void solve_lr_dyson_impl(
       DeltaDm_t& sDeltaDm_skij,
-      const Array_view_4D_t* DeltaH0_skij,
+      opt_const_view_4D_t DeltaH0_skij,
       const DeltaF_t& sDeltaF_skij,
       const dArray_5D_t* dDeltaSigma_wskij,
       double Delta_mu,
       const DeltaF_t* sDeltaVcorr_skij,
-      const Array_view_5D_t* DeltaH_wskij);
+      opt_const_view_5D_t DeltaH_wskij);
 
   // Turn the Δμ=0 solution retained by the last pass into the solution at Δμ:
   // ΔG(τ) += Δμ·dG/dμ(τ) on the retained distributed array, ΔDm += Δμ·dDm/dμ on the

@@ -42,7 +42,7 @@ inline ComplexType trace_of_product(matrix_t const& A, matrix_t const& B) {
 } // namespace
 
 void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                         Array_view_4D_t const* DeltaH0_skij,
+                         opt_const_view_4D_t DeltaH0_skij,
                          sArray_t<Array_view_4D_t> const& sDeltaF_skij,
                          sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
                          sArray_t<Array_view_5D_t>& sX_wskij) {

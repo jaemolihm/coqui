@@ -161,8 +161,7 @@ namespace lr_dyson_tests {
     lr_dys.set_cached_G_omega(&sG_wskij, false);
 
     // Compute ΔG using LR Dyson (no ΔΣ, fix_density=false)
-    Array_view_4D_t DeltaH0_view = DeltaH0.local();
-    lr_dys.solve_lr_dyson(DeltaDm, &DeltaH0_view, DeltaF,
+    lr_dys.solve_lr_dyson(DeltaDm, DeltaH0.local(), DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
@@ -375,8 +374,7 @@ namespace lr_dyson_tests {
     context->comm.barrier();
 
     lr_dys.set_cached_G_omega(&sG_wskij, false);
-    Array_view_4D_t DeltaH0_view = DeltaH0.local();
-    lr_dys.solve_lr_dyson(DeltaDm, &DeltaH0_view, DeltaF,
+    lr_dys.solve_lr_dyson(DeltaDm, DeltaH0.local(), DeltaF,
                           static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), false);
     lr_dys.materialize_DeltaG_tau(DeltaG);
     context->comm.barrier();
@@ -512,10 +510,9 @@ namespace lr_dyson_tests {
         if (fd and not lr_dys.is_q_gamma()) continue;
         for (bool with_sigma : {false, true}) {
           const sArray_t<Array_view_5D_t>* pS = with_sigma ? &DeltaSigma : nullptr;
-          Array_view_4D_t DeltaH0_view = DeltaH0.local();
-          ComplexType mu_full = lr_dys.solve_lr_dyson(Dm_full, &DeltaH0_view, DeltaF, pS, fd);
-          if (with_sigma) lr_dys.solve_lr_dyson(Dm_src, /*DeltaH0_skij=*/nullptr, Zero, &DeltaSigma, false);
-          ComplexType mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, &DeltaH0_view, DeltaF,
+          ComplexType mu_full = lr_dys.solve_lr_dyson(Dm_full, DeltaH0.local(), DeltaF, pS, fd);
+          if (with_sigma) lr_dys.solve_lr_dyson(Dm_src, /*DeltaH0_skij=*/std::nullopt, Zero, &DeltaSigma, false);
+          ComplexType mu_only = lr_dys.solve_lr_dyson_dm_only(Dm_only, DeltaH0.local(), DeltaF,
                                                          with_sigma ? &Dm_src : nullptr, fd);
           context->comm.barrier();
           double err = rel(Dm_only.local(), Dm_full.local());
@@ -603,10 +600,9 @@ namespace lr_dyson_tests {
     lr_dyson lr_dys(dyson, q_vec);
     lr_dys.set_cached_G_omega(&sG_wskij, true);
 
-    Array_view_4D_t X_H_view = X_H.local(), X_A_view = X_A.local(), X_view = X.local();
-    ComplexType mu_H = lr_dys.solve_lr_dyson(Dm_H, &X_H_view, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
-    ComplexType mu_A = lr_dys.solve_lr_dyson(Dm_A, &X_A_view, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
-    ComplexType mu_X = lr_dys.solve_lr_dyson(Dm_X, &X_view, Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    ComplexType mu_H = lr_dys.solve_lr_dyson(Dm_H, X_H.local(), Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    ComplexType mu_A = lr_dys.solve_lr_dyson(Dm_A, X_A.local(), Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
+    ComplexType mu_X = lr_dys.solve_lr_dyson(Dm_X, X.local(), Zero, static_cast<const sArray_t<Array_view_5D_t>*>(nullptr), true);
     context->comm.barrier();
 
     auto fro = [](auto const& a, auto const& b, ComplexType cb) {

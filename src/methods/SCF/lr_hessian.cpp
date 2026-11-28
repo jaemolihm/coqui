@@ -366,11 +366,11 @@ lr_hessian_result_t lr_hessian_t::evaluate(
 
   for (long p = 0; p < _nmodes; ++p) {
 
-    // Views of mode p's slices of the node-shared stacks; nullptr when there is no such source
-    Array_view_4D_t DeltaH0_skij_p;
-    if (has_DeltaH0) DeltaH0_skij_p.rebind(sDeltaH0_mskij->local()(p, nda::ellipsis{}));
-    Array_view_5D_t DeltaH_wskij_p;
-    if (_has_dynamic_source) DeltaH_wskij_p.rebind(sDeltaH_mwskij->local()(p, nda::ellipsis{}));
+    // Mode p's slices of the node-shared stacks; std::nullopt when there is no such source
+    const opt_const_view_4D_t DeltaH0_skij_p =
+        has_DeltaH0 ? opt_const_view_4D_t(sDeltaH0_mskij->local()(p, nda::ellipsis{})) : std::nullopt;
+    const opt_const_view_5D_t DeltaH_wskij_p =
+        _has_dynamic_source ? opt_const_view_5D_t(sDeltaH_mwskij->local()(p, nda::ellipsis{})) : std::nullopt;
 
     // Mode p's ΔF/ΔΣ = K(ΔDm_p, ΔG_p) out of the stores and back into shm, which is
     // the form the Dyson solver takes its right-hand side in.
@@ -381,9 +381,8 @@ lr_hessian_result_t lr_hessian_t::evaluate(
     // replication is the most expensive single step in LR.
     _Timer.start("LR_HESS_DYSON");
     r.Delta_mu_improved(p) =
-        dyson.solve_lr_dyson(sDeltaDm, has_DeltaH0 ? &DeltaH0_skij_p : nullptr, sDeltaF, sDeltaSigma, fix_density,
-                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr),
-                             _has_dynamic_source ? &DeltaH_wskij_p : nullptr);
+        dyson.solve_lr_dyson(sDeltaDm, DeltaH0_skij_p, sDeltaF, sDeltaSigma, fix_density,
+                             static_cast<const sArray_t<Array_view_4D_t>*>(nullptr), DeltaH_wskij_p);
     if (_has_Gw) dyson.materialize_DeltaG_tau(*sDeltaG);
     _mpi->comm.barrier();
     _Timer.stop("LR_HESS_DYSON");

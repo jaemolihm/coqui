@@ -2437,8 +2437,6 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   nda::array<ComplexType, 4> F_PQ_skij;
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
-  // View of mode m's ΔH(iω) slice, rebound each mode; p.DeltaH_wskij points at it (lr_setup reads only its presence)
-  Array_view_5D_t DeltaH_wskij_m;
   lr_params p;
   fill_lr_kernel_params(p, total_kernel, W, iter_params, max_iter, tol, fix_density, save_DeltaG);
   p.include_xc       = include_xc;
@@ -2453,7 +2451,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
-  p.DeltaH_wskij     = has_dynamic_source ? &DeltaH_wskij_m : nullptr;
+  // Mode 0's ΔH(iω) for lr_setup, which reads only its presence; set to mode m's in the mode loop
+  if (has_dynamic_source) p.DeltaH_wskij.emplace(opt_sDeltaH_mwskij->local()(0, nda::ellipsis{}));
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
@@ -2484,12 +2483,10 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
 
     // Mode m's slices of the node-shared stacks
-    Array_view_4D_t DeltaH0_skij_m = sDeltaH0_skij_mskij.local()(m, nda::ellipsis{});
-    if (has_dynamic_source) DeltaH_wskij_m.rebind(opt_sDeltaH_mwskij->local()(m, nda::ellipsis{}));
-
+    if (has_dynamic_source) p.DeltaH_wskij.emplace(opt_sDeltaH_mwskij->local()(m, nda::ellipsis{}));
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        &DeltaH0_skij_m, thc, p,
+        sDeltaH0_skij_mskij.local()(m, nda::ellipsis{}), thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
@@ -2890,15 +2887,15 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   if (has_sigma && !use_precond)
     app_log(2, "  - iter_alg DIIS takes no preconditioner: the HSEX preconditioner is dropped");
 
-  // The lr_params of one phase; `DeltaH_wskij_source` is a view of its dynamic source (nullptr: none), which must
+  // The lr_params of one phase; `DeltaH_wskij_source` is a view of its dynamic source (std::nullopt: none), which must
   // stay valid while p is used.
   // W must outlive the lr_driver that p is given to.
   // exclude_hartree_head stays false: at Q = 0 the THC Coulomb has no G = 0 term, so V is already V̄ (lr_hf::build_Uq_PQ).
   auto make_params = [&](lr_kernel_spec const& kernel, lr_W_inputs const& W,
-                         Array_view_5D_t const* DeltaH_wskij_source) {
+                         opt_const_view_5D_t DeltaH_wskij_source) {
     lr_params p;
     fill_lr_kernel_params(p, kernel, W, iter_params, max_iter, tol, /*fix_density=*/false, /*save_DeltaG=*/false);
-    p.DeltaH_wskij = DeltaH_wskij_source;
+    if (DeltaH_wskij_source) p.DeltaH_wskij.emplace(*DeltaH_wskij_source);
     if (kernel.has_sigma() && use_precond) {  // HSEX preconditioner, whose K_pc has the Hartree rung only if the kernel has it
       p.precond_kernel = lr_kernel_spec{.hartree = kernel.hartree, .exchange = true};
       p.precond_hsex = true;
@@ -2921,16 +2918,15 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_a);
     lr_driver driver(gs_dyson, q_vec);
-    auto p = make_params(kernel_a, W, /*DeltaH_wskij_source=*/nullptr);
+    auto p = make_params(kernel_a, W, /*DeltaH_wskij_source=*/std::nullopt);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     // 4.1 ΔH0 = S solve, ΔF and ΔΣ(τ) of its final Dyson pass
-    Array_view_4D_t S_view = sS_skij.local();
-    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &S_view,
+    auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, sS_skij.local(),
                                          thc, p);
     res.niter(0) = it;
     // 4.2 B(iω) = S + ΔF + τ->ω ΔΣ(τ)
     opt_sB_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-    lr_total_one_body_w(*mpi, ft, &S_view, sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
+    lr_total_one_body_w(*mpi, ft, sS_skij.local(), sDeltaF_skij, pDeltaSigma, *opt_sB_wskij);
     // 4.3 κ̄ = ΔN[G']/Ω = -ΔN[ΔG]/Ω (G' = -ΔG);  ‖ΔDm‖/‖S‖;  ‖B - S‖/‖S‖ over (iω, s, k).
     //     κ̄ is real: S = S† and every source obeys ΔH(-iω) = ΔH(iω)†, so ΔDm = ΔDm† and Tr[S ΔDm] is real
     res.kappa_bar = -driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
@@ -2944,27 +2940,26 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_x);
     lr_driver driver(gs_dyson, q_vec);
-    Array_view_5D_t DeltaH_wskij_X = sDeltaH_wskij.local();
-    auto p = make_params(kernel_x, W, &DeltaH_wskij_X);
+    auto p = make_params(kernel_x, W, sDeltaH_wskij.local());
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
     decltype(nda::range::all) all;
     // 5.1 v_α = ΔH0 + ΔF + ΔΣ(iω) of the solve with ΔH0 = v0_α and a zero source
     sDeltaH_wskij.set_zero();
     for (long a = 0; a < 3; ++a) {
-      Array_view_4D_t v0_a = sv0_skxij.local()(all, all, a, all, all);
-      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &v0_a,
+      auto v0_a = sv0_skxij.local()(all, all, a, all, all);
+      auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, v0_a,
                                            thc, p);
       res.niter(1 + a) = it;
       opt_sv_wskij[a].emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-      lr_total_one_body_w(*mpi, ft, &v0_a, sDeltaF_skij, pDeltaSigma, *opt_sv_wskij[a]);
+      lr_total_one_body_w(*mpi, ft, v0_a, sDeltaF_skij, pDeltaSigma, *opt_sv_wskij[a]);
     }
     // 5.2 Σ'' = ΔF + ΔΣ(iω) of the solve with ΔH0 = 0 and the source 2 B G B
     build_sigma2_source(*mpi, sG_wskij, *opt_sB_wskij, sDeltaH_wskij);
     auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-                                         /*DeltaH0_skij=*/nullptr, thc, p);
+                                         /*DeltaH0_skij=*/std::nullopt, thc, p);
     res.niter(4) = it;
     opt_sSigma2_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-    lr_total_one_body_w(*mpi, ft, nullptr, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
+    lr_total_one_body_w(*mpi, ft, /*DeltaH0_skij=*/std::nullopt, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
     res.dkappa_dmu = driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
     // 5.3 Terms 2 and 3, then Σ'' is not needed any more
     res.trace_terms = contract_efield_terms(*mpi, ft, sG_wskij, *opt_sB_wskij,
@@ -2985,10 +2980,9 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     auto W = load_W_of_phase(kernel_a);
     lr_driver driver(gs_dyson, q_vec);
-    // The source of mode a is V^E_a, a view of the node-shared stack
+    // The source of mode a is V^E_a, a view of the node-shared stack; mode 0's for lr_setup, which reads only its presence
     decltype(nda::range::all) all;
-    Array_view_5D_t VE_a = sVE_xwskij.local()(0, all, all, all, all, all);
-    auto p = make_params(kernel_a, W, &VE_a);
+    auto p = make_params(kernel_a, W, sVE_xwskij.local()(0, all, all, all, all, all));
     p.hessian_nmodes = 3;
     p.hessian_stationary = true;
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -2997,9 +2991,9 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     const auto S_norm_sk = norm_S_sk(sS_skij);
     for (long a = 0; a < 3; ++a) {
       // 7.1 The source is V^E_a, ΔH0 = 0
-      VE_a.rebind(sVE_xwskij.local()(a, all, all, all, all, all));
+      p.DeltaH_wskij.emplace(sVE_xwskij.local()(a, all, all, all, all, all));
       auto [it, dmu] = driver.lr_solve_one(sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-                                           /*DeltaH0_skij=*/nullptr, thc, p);
+                                           /*DeltaH0_skij=*/std::nullopt, thc, p);
       res.niter(5 + a) = it;
       // 7.2 trace_GE_rel = |ΔN_a| / (spin Σ_{s,k} w_k ‖S_k‖ ‖ΔDm_a,k‖), the Cauchy-Schwarz scale of ΔN = Tr[S ΔDm]
       res.trace_GE_rel(a) = trace_GE_relative(driver.dyson().compute_lr_Nelec(sDeltaDm_skij), sDeltaDm_skij, S_norm_sk,
