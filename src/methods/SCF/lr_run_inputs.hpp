@@ -18,8 +18,8 @@
  * ==========================================================================
  */
 
-#ifndef COQUI_LR_SETUP_HPP
-#define COQUI_LR_SETUP_HPP
+#ifndef COQUI_LR_RUN_INPUTS_HPP
+#define COQUI_LR_RUN_INPUTS_HPP
 
 #include <optional>
 #include <string>
@@ -39,6 +39,7 @@
 #include "methods/SCF/simple_dyson.h"
 #include "methods/GW/g0_div_utils.hpp"
 #include "methods/scr_coulomb/lr_scr_coulomb_t.hpp"
+#include "methods/scr_coulomb/scr_coulomb_t.h"
 #include "methods/tools/chkpt_utils.h"
 #include "numerics/shared_array/shared_array_io.hpp"
 #include "numerics/imag_axes_ft/IAFT.hpp"
@@ -411,16 +412,9 @@ auto recompute_W_and_eps_inv_head(
 
 using lr_W_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
 
-/// W_c(iω) and the ε⁻¹ heads kept by a reuse_W call. No member calls MPI in its destructor, so destruction after
-/// MPI_Finalize is safe.
-struct lr_W_cache {
-  lr_W_t W_c_wqPQ;
-  nda::array<ComplexType, 1> eps_inv_head, eps_inv_head_w;
-};
-
-/// The W kept by the last reuse_W call that built one; release_lr_W_cache() drops it. Defined in lr_setup.cpp (one
-/// instance per process).
-extern std::optional<lr_W_cache> W_cache;
+/// Drop the W_c(iω) and ε⁻¹ head kept by a reuse_W call of load_lr_W (run_lr_calc or run_lr_efield_calc). No-op if none
+/// is kept. Called by Python `release_lr_W_cache` (declared in MBPT_drivers.h as well).
+void release_lr_W_cache();
 
 /**
  * Reads the `iter_alg.*` keys of an LR run into lr_iter_params.
@@ -434,7 +428,7 @@ lr_iter_params read_lr_iter_params(ptree const& pt, bool qp_static_sigma);
 struct lr_unperturbed_state {
   simple_dyson dyson;
   math::shm::shared_array<Array_view_4D_t> sF_skij, sDm_skij;
-  /// G(τ), read by the W recompute and the GW+EDMFT Gloc before lr_setup and released there
+  /// G(τ), read by the W recompute and the GW+EDMFT Gloc before lr_driver::lr_setup and released there
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
   math::shm::shared_array<Array_view_5D_t> sSigma_tskij;
   /// Exact unperturbed G(iω) that lr_dyson linearizes about
@@ -450,76 +444,11 @@ struct lr_unperturbed_state {
  * caller-owned: the Dyson solver keeps a pointer to it. The timers LR_INIT_DYSON, LR_INIT_READ_SCF and
  * LR_INIT_UPDATE_G of `init_timer` are the run's init table.
  */
-template<typename mpi_context_t>
-lr_unperturbed_state load_lr_unperturbed_state(mpi_context_t& mpi, mf::MF& mf, imag_axes_ft::IAFT& ft,
-                                               std::string const& h0_source, std::string const& prefix,
-                                               std::string const& input_grp, long input_iter,
-                                               std::string const& unperturbed, utils::TimerManager& init_timer) {
-  // 1. Dyson solver with the requested H0 source
-  utils::check(h0_source == "compute" || h0_source == "checkpoint",
-               "load_lr_unperturbed_state: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
-  init_timer.start("LR_INIT_DYSON");
-  simple_dyson dyson = make_dyson_with_h0_source(h0_source, &mf, &ft, prefix);
-  init_timer.stop("LR_INIT_DYSON");
-
-  utils::memlog("load_lr_unperturbed_state: after simple_dyson ctor");
-
-  // 2. Shared arrays of the unperturbed state
-  auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
-      mpi, {mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-  auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
-      mpi, {mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
-  opt_sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-      mpi, {ft.nt_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()}));
-  auto& sG_tskij = *opt_sG_tskij;
-  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
-      mpi, {ft.nt_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-
-  utils::memlog("load_lr_unperturbed_state: after sF/sDm/sG/sSigma alloc");
-
-  auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
-      mpi, {ft.nw_f(), mf.nspin(), mf.nkpts_ibz(), mf.nbnd(), mf.nbnd()});
-  utils::memlog("load_lr_unperturbed_state: after sG_wskij alloc");
-
-  // 3. G(τ), Dm, G(iω)
-  double mu = 0.0;
-  if (unperturbed == "mf_dft") {
-    // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
-    // coefficients / energies from the mean field, set μ to conserve N, and
-    // build G0(τ) directly (Σ=0). sF_skij and sSigma_tskij are left unused in
-    // this branch. See qp_scf_common::write_mf_data for the same recipe.
-    app_log(2, "Building DFT/KS mean-field reference G0 (G0W0@DFT)...");
-    init_timer.start("LR_INIT_UPDATE_G");
-    auto [sMO_skia, sE_ska] = get_mf_MOs(mpi, mf);
-    mu = update_mu(0.0, mf, sE_ska, ft.beta());
-    app_log(2, "  DFT reference mu = {:.8f}", mu);
-    update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
-    update_Dm(sDm_skij, sMO_skia, sE_ska, mu, ft.beta());
-    update_G_omega(sG_wskij, sMO_skia, sE_ska, mu, ft);
-    mpi.comm.barrier();
-    init_timer.stop("LR_INIT_UPDATE_G");
-  } else {
-    // Read F and Sigma from checkpoint
-    init_timer.start("LR_INIT_READ_SCF");
-    chkpt::read_scf(mpi.node_comm, sF_skij, sSigma_tskij, mu,
-                    prefix, input_grp, input_iter);
-    mpi.comm.barrier();
-    init_timer.stop("LR_INIT_READ_SCF");
-
-    // Compute G from F and Sigma via Dyson equation
-    app_log(2, "Computing unperturbed Green's function from checkpoint...");
-    app_log(2, "  h0_source = {}", h0_source);
-    app_log(2, "  mu = {:.8f}", mu);
-    init_timer.start("LR_INIT_UPDATE_G");
-    update_G(dyson, mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true, &sG_wskij);
-    mpi.comm.barrier();
-    init_timer.stop("LR_INIT_UPDATE_G");
-  }
-
-  return lr_unperturbed_state{std::move(dyson), std::move(sF_skij), std::move(sDm_skij), std::move(opt_sG_tskij),
-                              std::move(sSigma_tskij), std::move(sG_wskij), mu};
-}
+lr_unperturbed_state load_lr_unperturbed_state(utils::mpi_context_t<mpi3::communicator>& mpi, mf::MF& mf,
+                                               imag_axes_ft::IAFT& ft, std::string const& h0_source,
+                                               std::string const& prefix, std::string const& input_grp,
+                                               long input_iter, std::string const& unperturbed,
+                                               utils::TimerManager& init_timer);
 
 /// W_c(iω), the ε⁻¹ heads and the divergence treatments an LR run hands to lr_driver; built by load_lr_W.
 struct lr_W_inputs {
@@ -535,118 +464,23 @@ struct lr_W_inputs {
  * Loads (or recomputes, or reuses) the screened interaction W_c(iω) of an LR run, with the ε⁻¹ heads, and reads
  * the divergence treatments of the ground state.
  *
- * Called by run_lr_calc and, once per phase, run_lr_efield_calc after the unperturbed state is built. W is either read from disk (explicit
- * screened_interaction_file, else the path derived from the checkpoint), recomputed on the fly from the G(τ)
+ * Called by run_lr_calc and run_lr_efield_calc, once per run, after the unperturbed state is built. W is either read
+ * from disk (explicit screened_interaction_file, else the path derived from the checkpoint), recomputed on the fly from the G(τ)
  * `sG_tskij` (RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W_cache (`reuse_W`).
  * Both hand W to lr_driver as W_c(iω) on the q-dist distribution (utils::lr_W_tau_local_dist). `needs_W` is
  * false when the kernel carries neither a Σ nor the HSEX exchange; then only the divergence treatment of the
  * exchange side is read. `init_timer` carries LR_INIT_LOAD_W.
  */
-template<typename mpi_context_t, typename THC_t, typename sArray_5D_t>
-lr_W_inputs load_lr_W(mpi_context_t& mpi, THC_t& thc, imag_axes_ft::IAFT const& ft,
+lr_W_inputs load_lr_W(utils::mpi_context_t<mpi3::communicator>& mpi, thc_reader_t& thc, imag_axes_ft::IAFT const& ft,
                       std::string const& input_file, std::string const& input_grp, ptree const& pt,
                       bool needs_W, bool recompute_W, bool reuse_W,
                       std::string const& screened_interaction_file, std::string const& unperturbed,
-                      sArray_5D_t& sG_tskij, MBState* mb_local, utils::TimerManager& init_timer) {
-  auto mf = thc.MF();
-  lr_W_inputs W;
-  // An LR run must reproduce the divergence treatment of the ground state it
-  // linearizes: the q→0 head of Σ_GW is the exchange Madelung term screened by
-  // ε⁻¹, so the correlation and exchange corrections only cancel (exactly, in a
-  // metal) when both are built the way the unperturbed run built them. Hence
-  // neither is a free parameter here — both come from the checkpoint. The one
-  // exception is unperturbed='mf_dft', where W0 is built fresh from the DFT G0
-  // and the mean-field checkpoint carries no ground-state value to inherit.
-  utils::check(unperturbed == "mf_dft" or !io::check_child_exists(pt, "div_treatment"),
-               "load_lr_W: 'div_treatment' is not accepted for unperturbed='{}'. "
-               "The LR run always reuses the ground-state value read from "
-               "'{}/div_treatment' in {}, so that ΔΣ matches how Σ was built. "
-               "Remove the argument (it is only meaningful for unperturbed='mf_dft').",
-               unperturbed, input_grp, input_file);
-  // Exchange side: needed whenever ΔF carries exchange, independently of W.
-  // Absent on pre-stash checkpoints, in which case this falls back to "gygi".
-  W.hf_div_treatment = read_hf_div_treatment(mpi, input_file, input_grp);
-  // HSEX needs W too, for the single ν=0 slice its exchange kernel adds to V.
-  // The ω array is released inside lr_setup once that slice is taken.
-  if (needs_W) {
-    init_timer.start("LR_INIT_LOAD_W");
-    if (unperturbed == "mf_dft") {
-      // G0W0@DFT: W0 is the RPA screened interaction built from the DFT G0.
-      // The checkpoint holds no scGW W (or div_treatment), so recompute and
-      // take div_treatment from params (default matches the C++ default).
-      utils::check(screened_interaction_file.empty(),
-                   "load_lr_W: unperturbed='mf_dft' builds W0 from G0 (RPA); "
-                   "screened_interaction_file must not be set.");
-      recompute_W = true;
-      W.div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
-    } else {
-      W.div_treatment = read_div_treatment(mpi, input_file, input_grp);
-    }
-    // reuse_W: the caller guarantees that the kept W belongs to this call's ground state and THC; only the
-    // THC size is checked. W is reused only if every rank keeps one (a release on some ranks rebuilds on all).
-    bool reuse_W_done = false;
-    if (reuse_W) {
-      int kept = W_cache.has_value();
-      mpi.comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
-      reuse_W_done = (kept == mpi.comm.size());  // reuse is done only if the cache is present in all ranks
-      if (reuse_W_done) {
-        auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
-        long nw_half = (ft.nw_b() + 1) / 2;
-        utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
-                     "load_lr_W: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
-                     "({}, {}, {}, {}). reuse_W requires the ground state and THC the kept W was built with; "
-                     "call coqui.mbpt.release_lr_W_cache() before switching.",
-                     Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
-        app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
-        W.opt_dW.emplace(W_cache->W_c_wqPQ);
-        W.opt_eps_inv.emplace(W_cache->eps_inv_head);
-        W.opt_eps_inv_w.emplace(W_cache->eps_inv_head_w);
-      } else {
-        app_log(1, "reuse_W: building W (nothing kept)");
-        W_cache.reset();
-      }
-    }
-    if (!reuse_W_done) {
-      // W is not reused from memory, either recompute or read from file
-      if (recompute_W) {
-        // Recompute W using Green's functions
-        app_log(2, "Recomputing W from checkpoint Green's function ({})...",
-                mb_local != nullptr ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
-        auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-            mpi, thc, ft, sG_tskij, W.div_treatment, mb_local);
-        W.opt_dW.emplace(std::move(dW));
-        W.opt_eps_inv.emplace(std::move(eps_inv));
-        W.opt_eps_inv_w.emplace(std::move(eps_inv_w));
-      } else {
-        // Read W from disk
-        auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
-            mpi, thc, ft, input_file, input_grp, screened_interaction_file);
-        W.opt_dW.emplace(std::move(dW));
-        W.opt_eps_inv.emplace(std::move(eps_inv));
-        W.opt_eps_inv_w.emplace(std::move(eps_inv_w));
-        // W carries its own stash; a disagreement means the W file and the
-        // checkpoint came from different runs, and Σ would mix two treatments.
-        // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
-        utils::check(div_str == W.div_treatment,
-                     "load_lr_W: div_treatment mismatch. The screened interaction "
-                     "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
-                     "must come from the same ground-state run.",
-                     div_str, input_grp, input_file, W.div_treatment);
-        W.div_treatment = div_str;
-      }
-    }
-    if (reuse_W && !reuse_W_done) {
-      W_cache.emplace(lr_W_cache{*W.opt_dW, *W.opt_eps_inv, *W.opt_eps_inv_w});
-    }
-    init_timer.stop("LR_INIT_LOAD_W");
-  }
-  return W;
-}
+                      sArray_t<Array_view_5D_t>& sG_tskij, MBState* mb_local, utils::TimerManager& init_timer);
 
 /**
  * Sets the kernel, solver and W fields of `p` that every LR driver takes from its inputs.
  *
- * Called by run_lr_calc and run_lr_efield_calc right before lr_setup. The pointers into `W` stay valid only while `W` lives, which is as
+ * Called by run_lr_calc and run_lr_efield_calc right before lr_driver::lr_setup. The pointers into `W` stay valid only while `W` lives, which is as
  * long as the lr_driver that `p` is given to.
  */
 void fill_lr_kernel_params(lr_params& p, lr_kernel_spec const& kernel, lr_W_inputs const& W,
@@ -655,4 +489,4 @@ void fill_lr_kernel_params(lr_params& p, lr_kernel_spec const& kernel, lr_W_inpu
 
 } // namespace methods
 
-#endif // COQUI_LR_SETUP_HPP
+#endif // COQUI_LR_RUN_INPUTS_HPP

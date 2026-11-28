@@ -34,7 +34,7 @@
 #include "methods/ERI/mb_eri_context.h"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
-#include "methods/SCF/lr_setup.hpp"
+#include "methods/SCF/lr_run_inputs.hpp"
 #include "methods/SCF/lr_dyson.hpp"
 #include "methods/SCF/simple_dyson.h"
 #include "methods/MBPT_drivers.h"
@@ -43,7 +43,7 @@
 #include "numerics/imag_axes_ft/iaft_utils.hpp"
 
 // The driver run_lr_efield_calc (declared in MBPT_drivers.h, bound to Python as run_lr_efield) and its band-basis
-// building blocks. The LR inputs it shares with run_lr_calc are in lr_setup.hpp.
+// building blocks. The LR inputs it shares with run_lr_calc are in lr_run_inputs.hpp.
 
 namespace methods {
 
@@ -456,7 +456,7 @@ void write_efield_results(std::string const& out_file, efield_results const& res
  * if the phase kernel has it}: run_lr's precond_method = "HSEX" always carries H; default precond_tol and
  * precond_max_iter) unless iter_alg is DIIS, which cannot take a preconditioner; the preconditioner changes the rate,
  * not the answer.
- * W is loaded once, as run_lr does, and each phase works on its own copy, which its lr_setup consumes; the last phase
+ * W is loaded once, as run_lr does, and each phase works on its own copy, which its lr_driver::lr_setup consumes; the last phase
  * takes the loaded W itself. Each phase builds its own lr_driver and destroys it at its end.
  *
  * Called by Python `run_lr_efield`. Writes <output>.mbpt.h5:linear_response_efield/ (replaced if present).
@@ -552,7 +552,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                method, has_sigma ? "with" : "without", input_file,
                has_sigma_gs ? "carries one (use method = 'GW0' or 'GW')" : "has Σ = 0 (use method = 'HF' or lower)");
   app_log(2, "run_lr_efield_calc: method {}, K_a = {{{}}}, K^X = {{{}}}; U = {:.2f} MB, efield arrays ≈ 7U per node "
-             "(lr_setup prints the memory estimate of the solver incl. W)",
+             "(lr_driver::lr_setup prints the memory estimate of the solver incl. W)",
           method, kernel_a.to_string(), kernel_x.to_string(), U_MB);
 
   // W_c(iω), the ε⁻¹ heads and the divergence treatments, loaded once as in run_lr_calc; G(τ) is read only by a W recompute
@@ -605,7 +605,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // 4. Phase A1: G' and B = S + ΔF + ΔΣ(iω), from the response to ΔH0 = S
   {
-    lr_W_inputs W = W_loaded;  // lr_setup consumes W; the loaded W is kept for the next phases
+    lr_W_inputs W = W_loaded;  // lr_driver::lr_setup consumes W; the loaded W is kept for the next phases
     lr_driver driver(gs_dyson, q_vec);
     auto p = make_params(kernel_a, W, /*DeltaH_wskij_source=*/std::nullopt);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -626,7 +626,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // 5. Phase X: v_α (ΔH0 = v0_α) and Σ'' (source 2 B G B) with K^X, then terms 2 and 3
   {
-    lr_W_inputs W = W_loaded;  // lr_setup consumes W; the loaded W is kept for phase A2
+    lr_W_inputs W = W_loaded;  // lr_driver::lr_setup consumes W; the loaded W is kept for phase A2
     lr_driver driver(gs_dyson, q_vec);
     auto p = make_params(kernel_x, W, /*DeltaH_wskij_source=*/std::nullopt);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -667,7 +667,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
   {
     lr_W_inputs W = std::move(W_loaded);  // the last phase takes the loaded W itself
     lr_driver driver(gs_dyson, q_vec);
-    // The source of mode a is V^E_a, a view of the node-shared stack; mode 0's for lr_setup, which reads only its presence
+    // The source of mode a is V^E_a, a view of the node-shared stack; mode 0's for lr_driver::lr_setup, which reads only its presence
     decltype(nda::range::all) all;
     auto p = make_params(kernel_a, W, sVE_xwskij.local()(0, all, all, all, all, all));
     p.hessian_nmodes = n_dirs;
