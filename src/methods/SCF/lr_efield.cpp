@@ -91,7 +91,8 @@ void build_sigma2_lr_source(utils::mpi_context_t<mpi3::communicator>& mpi,
   decltype(nda::range::all) all;
   auto [nw, ns, nk, nb, nb2] = sG_wskij.shape();
   utils::check(sB_wskij.shape() == sG_wskij.shape() and sDeltaH_wskij.shape() == sG_wskij.shape(),
-               "build_sigma2_lr_source: B(iw) and the source 2BGB must have the shape (nw_f, ns, nk, nb, nb) of G(iw).");
+               "build_sigma2_lr_source: B(iw) and the source 2BGB must have the shape (nw_f, ns, nk, nb, nb) "
+               "of G(iw).");
   sDeltaH_wskij.node_sync();
   matrix_t G(nb, nb), B(nb, nb), BG(nb, nb), BGB(nb, nb);
   for (long nsk = mpi.node_comm.rank(); nsk < nw * ns * nk; nsk += mpi.node_comm.size()) {
@@ -253,7 +254,6 @@ double trace_GE_relative(ComplexType dN, sArray_t<Array_view_4D_t> const& sDelta
   if (dm_scale == 0.0) return 0.0;
   return std::abs(dN) / (spin_factor * dm_scale);
 }
-
 
 namespace {
 
@@ -530,7 +530,8 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                                          /*DeltaH0_skij=*/std::nullopt, thc, p);
     res.niter(4) = it;
     opt_sSigma2_wskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(*mpi, {nw, ns, nk, nb, nb}));
-    lr_total_one_body_perturbation_w(*mpi, ft, /*DeltaH0_skij=*/std::nullopt, sDeltaF_skij, pDeltaSigma, *opt_sSigma2_wskij);
+    lr_total_one_body_perturbation_w(*mpi, ft, /*DeltaH0_skij=*/std::nullopt, sDeltaF_skij, pDeltaSigma,
+                                     *opt_sSigma2_wskij);
     res.dkappa_dmu = driver.dyson().compute_lr_Nelec(sDeltaDm_skij).real() / volume;
     // 5.3 Terms 2 and 3, then Σ'' is not needed any more
     res.trace_terms = contract_efield_terms(*mpi, ft, sG_wskij, *opt_sB_wskij,

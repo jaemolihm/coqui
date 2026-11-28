@@ -171,6 +171,7 @@ using sArray_t = math::shm::shared_array<Array_base_t>;
 using Array_view_3D_t = nda::array_view<ComplexType, 3>;
 using Array_view_4D_t = nda::array_view<ComplexType, 4>;
 using Array_view_5D_t = nda::array_view<ComplexType, 5>;
+using Array_view_6D_t = nda::array_view<ComplexType, 6>;
 /// A read-only view of node-replicated memory (ΔH0, ΔH(iω)), or std::nullopt for a zero or absent term.
 using opt_const_view_4D_t = std::optional<nda::array_const_view<ComplexType, 4>>;
 using opt_const_view_5D_t = std::optional<nda::array_const_view<ComplexType, 5>>;

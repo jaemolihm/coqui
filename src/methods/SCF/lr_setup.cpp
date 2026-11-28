@@ -21,6 +21,9 @@
 #include "methods/MBPT_drivers.h"
 #include "methods/SCF/lr_setup.hpp"
 
+// The one process-wide W cache of run_lr_calc / run_lr_efield_calc (released by release_lr_W_cache, MBPT_drivers.h)
+// and the non-template LR setup helpers declared in lr_setup.hpp.
+
 namespace methods {
 
 std::optional<lr_W_cache> W_cache;

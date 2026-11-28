@@ -20,7 +20,6 @@
 
 
 
-#include <limits>
 #include <string>
 
 #include "configuration.hpp"
@@ -40,7 +39,6 @@
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
-#include "methods/SCF/lr_efield.hpp"
 #include "methods/SCF/lr_setup.hpp"
 #include "methods/embedding/local_projection.hpp"
 #include "methods/embedding/permut_symm.hpp"

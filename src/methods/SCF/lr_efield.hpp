@@ -44,8 +44,6 @@
  */
 namespace methods {
 
-using Array_view_6D_t = nda::array_view<ComplexType, 6>;
-
 /**
  * The effective field sources V^E_α(iω), α = x, y, z:  V^E_α = -(i/2)(v_α G B - B G v_α).
  *

@@ -177,8 +177,8 @@ std::string read_hf_div_treatment(mpi_context_t& mpi,
 /**
  * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
  *
- * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
- * Also used by run_lr_calc (through lr_load_W_omega).
+ * Called by lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc (MBPT_drivers.cpp) and, through lr_load_W_omega,
+ * by run_lr_calc.
  *
  * @param mpi         - MPI context
  * @param thc         - THC ERI (provides Np())
