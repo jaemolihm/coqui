@@ -490,6 +490,26 @@ private:
   utils::TimerManager _Timer;
 };
 
+/**
+ * H(iω) = ΔH0 + ΔF + τ->ω ΔΣ(τ): the total one-body term the Dyson pass of an LR solve sees, on the iω grid.
+ *
+ * Called by run_lr_efield_calc after each solve whose ΔF and ΔΣ(τ) are those of the final Dyson pass: B of phase A1
+ * (ΔH0 = S), v_α of phase X (ΔH0 = v0_α) and, without ΔH0 and without the source, Σ'' of phase X. The two
+ * node-shared ΔF, ΔΣ(τ) are what lr_solve_one leaves in its output arrays; nothing else turns them into iω arrays.
+ *
+ * @param DeltaH0_skij     - [INPUT] view of node-replicated ΔH0 (ns, nk, nb, nb); std::nullopt: zero
+ * @param sDeltaF_skij     - [INPUT] ΔF (ns, nk, nb, nb)
+ * @param sDeltaSigma_tskij- [INPUT] ΔΣ(τ) (nt_f, ns, nk, nb, nb); nullptr for a Σ-free kernel
+ * @param sH_wskij         - [OUTPUT] H(iω) (nw_f, ns, nk, nb, nb), overwritten
+ *
+ * Collective on the node communicator; every node fills its own copy.
+ */
+void lr_total_one_body_perturbation_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
+                                      opt_const_view_4D_t DeltaH0_skij,
+                                      sArray_t<Array_view_4D_t> const& sDeltaF_skij,
+                                      sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
+                                      sArray_t<Array_view_5D_t>& sH_wskij);
+
 } // namespace methods
 
 #endif // COQUI_LR_DYSON_HPP

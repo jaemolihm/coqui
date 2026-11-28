@@ -592,4 +592,43 @@ template ComplexType lr_dyson::solve_lr_dyson(
 template ComplexType lr_dyson::compute_lr_Nelec(
     const sArray_t<Array_view_4D_t>&);
 
+void lr_total_one_body_perturbation_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
+                                      opt_const_view_4D_t DeltaH0_skij,
+                                      sArray_t<Array_view_4D_t> const& sDeltaF_skij,
+                                      sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
+                                      sArray_t<Array_view_5D_t>& sH_wskij) {
+  decltype(nda::range::all) all;
+  auto [nw, ns, nk, nb, nb2] = sH_wskij.shape();
+  if (sDeltaSigma_tskij) {
+    // 1.1 Make ΔΣ(τ) written by other ranks visible, and H(iω) free to be overwritten (earlier readers are done)
+    utils::check(sDeltaSigma_tskij->shape() == std::array<long, 5>{FT.nt_f(), ns, nk, nb, nb2} and
+                     sH_wskij.shape() == std::array<long, 5>{FT.nw_f(), ns, nk, nb, nb2},
+                 "lr_total_one_body_perturbation_w: ΔΣ(tau) must be (nt_f, ns, nk, nb, nb) and H(iw) (nw_f, ns, nk, nb, nb) of the same IAFT.");
+    sDeltaSigma_tskij->node_comm()->barrier();
+    sH_wskij.node_sync();
+    // 1.2 H(iω)_sk = FT.tau_to_w ΔΣ(τ)_sk, for the (s,k) strided over this node's ranks
+    nda::array<ComplexType, 3> H_t(FT.nt_f(), nb, nb2), H_w(FT.nw_f(), nb, nb2);
+    for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
+      long is = sk / nk, ik = sk % nk;
+      H_t = sDeltaSigma_tskij->local()(all, is, ik, all, all);
+      FT.tau_to_w(H_t, H_w, imag_axes_ft::fermion);
+      sH_wskij.local()(all, is, ik, all, all) = H_w;
+    }
+    sH_wskij.node_sync();
+  } else {
+    // 1.1 Σ-free kernel: H(iω) = 0
+    sH_wskij.set_zero();
+  }
+  // 2. H(iω) += ΔH0 + ΔF at every iω, for the (s,k) strided over this node's ranks
+  nda::matrix<ComplexType> one_body(nb, nb2);
+  for (long sk = mpi.node_comm.rank(); sk < ns * nk; sk += mpi.node_comm.size()) {
+    long is = sk / nk, ik = sk % nk;
+    one_body = sDeltaF_skij.local()(is, ik, all, all);
+    if (DeltaH0_skij) one_body += (*DeltaH0_skij)(is, ik, all, all);
+    for (long n = 0; n < nw; ++n) sH_wskij.local()(n, is, ik, all, all) += one_body;
+  }
+  // 3. Publish H(iω) to the node
+  sH_wskij.node_sync();
+}
+
 } // namespace methods

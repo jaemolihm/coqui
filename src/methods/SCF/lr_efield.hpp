@@ -31,7 +31,7 @@
 #include "methods/SCF/scf_common.hpp"
 
 /**
- * Band-basis building blocks of run_lr_efield_calc (MBPT_drivers.cpp), the electronic dielectric tensor from Q = 0
+ * Band-basis building blocks of run_lr_efield_calc (lr_efield.cpp), the electronic dielectric tensor from Q = 0
  * LR solves (note efield_lr.tex, eq:chi2work):
  *
  *   chi2_ab = <G^E_a, V^E_b> + 1/4 Tr[v_a G' v_b G'] + 1/4 Tr[Sigma'' G v_a G v_b G],
@@ -47,26 +47,6 @@ namespace methods {
 using Array_view_6D_t = nda::array_view<ComplexType, 6>;
 
 /**
- * X(iω) = ΔH0 + ΔF + τ->ω ΔΣ(τ): the total one-body term the Dyson pass of an LR solve sees, on the iω grid.
- *
- * Called by run_lr_efield_calc after each solve whose ΔF and ΔΣ(τ) are those of the final Dyson pass: B of phase A1
- * (ΔH0 = S), v_α of phase X (ΔH0 = v0_α) and, without ΔH0 and without the source, Σ'' of phase X. The two
- * node-shared ΔF, ΔΣ(τ) are what lr_solve_one leaves in its output arrays; nothing else turns them into iω arrays.
- *
- * @param DeltaH0_skij     - [INPUT] view of node-replicated ΔH0 (ns, nk, nb, nb); std::nullopt: zero
- * @param sDeltaF_skij     - [INPUT] ΔF (ns, nk, nb, nb)
- * @param sDeltaSigma_tskij- [INPUT] ΔΣ(τ) (nt_f, ns, nk, nb, nb); nullptr for a Σ-free kernel
- * @param sX_wskij         - [OUTPUT] X(iω) (nw_f, ns, nk, nb, nb), overwritten
- *
- * Collective on the node communicator; every node fills its own copy.
- */
-void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axes_ft::IAFT const& FT,
-                         opt_const_view_4D_t DeltaH0_skij,
-                         sArray_t<Array_view_4D_t> const& sDeltaF_skij,
-                         sArray_t<Array_view_5D_t> const* sDeltaSigma_tskij,
-                         sArray_t<Array_view_5D_t>& sX_wskij);
-
-/**
  * The effective field sources V^E_α(iω), α = x, y, z:  V^E_α = -(i/2)(v_α G B - B G v_α).
  *
  * Called by run_lr_efield_calc once, after phases A1 and X, as the dynamic source ΔH(iω) of the three G^E_α
@@ -80,10 +60,10 @@ void lr_total_one_body_w(utils::mpi_context_t<mpi3::communicator>& mpi, imag_axe
  *
  * Collective on the node communicator; every node fills its own copy.
  */
-void build_field_sources(utils::mpi_context_t<mpi3::communicator>& mpi,
-                         sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                         std::array<sArray_t<Array_view_5D_t> const*, 3> sv_wskij,
-                         sArray_t<Array_view_6D_t>& sVE_xwskij);
+void build_efield_lr_source(utils::mpi_context_t<mpi3::communicator>& mpi,
+                            sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
+                            std::array<sArray_t<Array_view_5D_t> const*, 3> sv_wskij,
+                            sArray_t<Array_view_6D_t>& sVE_xwskij);
 
 /**
  * The source of the Σ'' solve, 2 B G B (iω).
@@ -97,9 +77,9 @@ void build_field_sources(utils::mpi_context_t<mpi3::communicator>& mpi,
  *
  * Collective on the node communicator.
  */
-void build_sigma2_source(utils::mpi_context_t<mpi3::communicator>& mpi,
-                         sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
-                         sArray_t<Array_view_5D_t>& sDeltaH_wskij);
+void build_sigma2_lr_source(utils::mpi_context_t<mpi3::communicator>& mpi,
+                            sArray_t<Array_view_5D_t> const& sG_wskij, sArray_t<Array_view_5D_t> const& sB_wskij,
+                            sArray_t<Array_view_5D_t>& sDeltaH_wskij);
 
 /// Terms 2 and 3 of chi2, (3, 3) complex, unsymmetrized, with the 1/4 and 1/Ω applied.
 struct efield_trace_terms {
