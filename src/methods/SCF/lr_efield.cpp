@@ -454,9 +454,14 @@ void write_efield_results(std::string const& out_file, efield_results const& res
  * if the phase kernel has it}: run_lr's precond_method = "HSEX" always carries H; default precond_tol and
  * precond_max_iter) unless iter_alg is DIIS, which cannot take a preconditioner; the preconditioner changes the rate,
  * not the answer.
- * W is loaded once, as run_lr does, and held until phase A2: A1 and X each work on their own copy, which their
- * lr_driver::lr_setup consumes, so those phases hold two W (three with reuse_W, which also keeps W in the cache); A2
- * takes the loaded W itself. Each phase builds its own lr_driver and destroys it at its end.
+ * Each phase builds its own lr_driver, destroys it at its end, and gets the W that lr_driver::lr_setup consumes from
+ * load_lr_W with the user's flags, as run_lr does. W memory at a time, per case:
+ *   default (read from file)  1 W: every phase reads the file again
+ *   reuse_W                   2 W: the W cache (kept after the call) plus the phase's copy
+ *   recompute_W               2 W: W is computed once in the A1 load and kept for X and A2 in this call only (not in
+ *                             the W cache); A1 and X take a copy, A2 takes it
+ *   recompute_W with reuse_W  2 W, as reuse_W: the cache keeps the recomputed W
+ * G(τ) is released after the A1 load; it is read only by a W recompute.
  *
  * Called by Python `run_lr_efield`. Writes <output>.mbpt.h5:linear_response_efield/ (replaced if present).
  *
@@ -465,9 +470,9 @@ void write_efield_results(std::string const& out_file, efield_results const& res
  *   method          "none", "Hartree", "HF", "GW0" or "GW" (required)
  *   max_iter, tol   LR SCF iterations and tolerance of every solve (50, 1e-8)
  *   iter_alg.*      as run_lr
- *   reuse_W, recompute_W, screened_interaction_file   as run_lr (one load_lr_W call, shared with run_lr_calc): W is
- *                   read from the file or recomputed from G(τ) and kept in the W cache only if reuse_W is set; a W
- *                   kept by an earlier run_lr or run_lr_efield call is reused with reuse_W and otherwise left as it is.
+ *   reuse_W, recompute_W, screened_interaction_file   as run_lr (load_lr_W, shared with run_lr_calc): W is read
+ *                   from the file or recomputed from G(τ) and kept in the W cache only if reuse_W is set; a W kept by
+ *                   an earlier run_lr or run_lr_efield call is reused with reuse_W and otherwise left as it is.
  * The kernel, hessian, fix_density and preconditioner keys of run_lr are driven here and rejected if given.
  *
  * Requires a full-BZ, npol = 1 mean field with the velocity matrix v0 (pw2coqui add_velocity), and a ground state
@@ -551,16 +556,31 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                method, has_sigma ? "with" : "without", input_file,
                has_sigma_gs ? "carries one (use method = 'GW0' or 'GW')" : "has Σ = 0 (use method = 'HF' or lower)");
   app_log(2, "run_lr_efield_calc: method {}, K_a = {{{}}}, K^X = {{{}}}; U = {:.2f} MB, efield arrays ≈ 7U per node "
-             "(W is held until phase A2, one more copy than the solver's; lr_driver::lr_setup prints the solver's memory estimate)",
+             "(W: one copy per phase, plus the W cache with reuse_W or the kept W with recompute_W; "
+             "lr_driver::lr_setup prints the solver's memory estimate)",
           method, kernel_a.to_string(), kernel_x.to_string(), U_MB);
 
-  // W_c(iω), the ε⁻¹ heads and the divergence treatments, loaded once as in run_lr_calc; G(τ) is read only by a W recompute
-  auto W_loaded = load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, has_sigma, recompute_W, reuse_W,
-                            screened_interaction_file, "checkpoint", *state.opt_sG_tskij, nullptr, init_timer);
-  utils::check(!W_loaded.div_treatment.ends_with("_metal"),
+  // W_c(iω), the ε⁻¹ heads and the divergence treatments of phase A1, loaded as in run_lr_calc; G(τ) is read only by a W recompute
+  auto W_first = load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, has_sigma, recompute_W, reuse_W,
+                           screened_interaction_file, "checkpoint", *state.opt_sG_tskij, nullptr, init_timer);
+  utils::check(!W_first.div_treatment.ends_with("_metal"),
                "run_lr_efield_calc: a '*_metal' div_treatment ('{}') is not supported, ε∞ needs the gapped "
-               "treatment (note sec:largeDN).", W_loaded.div_treatment);
+               "treatment (note sec:largeDN).", W_first.div_treatment);
   state.opt_sG_tskij.reset();
+
+  // The W of phases X and A2
+  const bool keep_W_local = recompute_W && !reuse_W;  // true when W is computed once and kept in this call, not in the W cache
+  std::optional<lr_W_inputs> opt_W_local;
+  if (keep_W_local) opt_W_local = W_first;
+  auto sG_unread = math::shm::make_shared_array<Array_view_5D_t>(*mpi, {1, 1, 1, 1, 1});  // load_lr_W reads G(τ) only if recomputing W
+  auto W_for_phase = [&](bool last_phase) {
+    if (keep_W_local) { // Copy the W computed in the A1 load; the last phase takes it
+      return last_phase ? std::move(*opt_W_local) : lr_W_inputs(*opt_W_local);
+    }
+    // Reuse the W cache (reuse_W) or read the file again
+    return load_lr_W(*mpi, thc, ft, input_file, input_grp, pt, has_sigma, /*recompute_W=*/false, reuse_W,
+                     screened_interaction_file, "checkpoint", sG_unread, nullptr, init_timer);
+  };
 
   // 3. v0_α into a node-shared (ns, nk, 3, nb, nb) array, read once per node
   auto sv0_skxij = math::shm::make_shared_array<nda::array_view<ComplexType, 5>>(*mpi, {ns, nk, n_dirs, nb, nb});
@@ -604,7 +624,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // 4. Phase A1: G' and B = S + ΔF + ΔΣ(iω), from the response to ΔH0 = S
   {
-    lr_W_inputs W = W_loaded;  // lr_driver::lr_setup consumes W; the loaded W is kept for the next phases
+    lr_W_inputs W = std::move(W_first);  // lr_driver::lr_setup consumes W
     lr_driver driver(gs_dyson, q_vec);
     auto p = make_params(kernel_a, W, /*DeltaH_wskij_source=*/std::nullopt);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -625,7 +645,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // 5. Phase X: v_α (ΔH0 = v0_α) and Σ'' (source 2 B G B) with K^X, then terms 2 and 3
   {
-    lr_W_inputs W = W_loaded;  // lr_driver::lr_setup consumes W; the loaded W is kept for phase A2
+    lr_W_inputs W = W_for_phase(/*last_phase=*/false);  // lr_driver::lr_setup consumes W
     lr_driver driver(gs_dyson, q_vec);
     auto p = make_params(kernel_x, W, /*DeltaH_wskij_source=*/std::nullopt);
     driver.lr_setup(sG_wskij, thc, W.opt_dW ? &(*W.opt_dW) : nullptr, p);
@@ -664,7 +684,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
 
   // 7. Phase A2: G^E_α with K_a and the source V^E_α, with the stationary hessian over the three modes
   {
-    lr_W_inputs W = std::move(W_loaded);  // the last phase takes the loaded W itself
+    lr_W_inputs W = W_for_phase(/*last_phase=*/true);  // lr_driver::lr_setup consumes W
     lr_driver driver(gs_dyson, q_vec);
     // The source of mode a is V^E_a, a view of the node-shared stack; mode 0's for lr_driver::lr_setup, which reads only its presence
     decltype(nda::range::all) all;

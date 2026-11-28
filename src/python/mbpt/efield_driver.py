@@ -64,10 +64,12 @@ def run_lr_efield(params, h_int, method="GW0", max_iter=50, tol=1e-8, iter_alg=N
         preconditioned by HSEX (run_lr's ``precond_method``, default tolerance and sweeps) unless the accelerator
         is DIIS, which cannot take a preconditioner; the preconditioner changes the rate, not the answer.
     reuse_W, recompute_W, screened_interaction_file
-        As run_lr: one W load shared by the three phases, treated exactly as run_lr treats it. With ``reuse_W`` a
-        W kept by an earlier run_lr or run_lr_efield call is reused, else the W of this call stays cached for the
-        next call (``release_lr_W_cache()`` drops it); without ``reuse_W`` the W of this call is released at its
-        end and a W kept by an earlier call is neither read nor changed.
+        As run_lr. Each of the three phases loads its own W, so W memory at a time is one W when read from file,
+        and two W with ``reuse_W`` (the W cache plus the phase's copy) or ``recompute_W`` (W is computed once and
+        kept for the later phases). With ``reuse_W`` a W kept by an earlier run_lr or run_lr_efield call is reused,
+        else the W of this call stays cached for the next call (``release_lr_W_cache()`` drops it); without
+        ``reuse_W`` the W of this call is released at its end and a W kept by an earlier call is neither read nor
+        changed.
 
     Returns
     -------
