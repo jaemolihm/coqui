@@ -39,7 +39,7 @@ namespace utils
 
 // Two bands i, j of the same k belong to one degenerate group when |e_i - e_j| < degenerate_eigval_tol (Ha).
 // generate_dmatrix blocks D on these groups, and the closed delta-psi source window of add_augmentation_dpsi
-// ends only at a gap larger than this.
+// ends only at a gap of at least this.
 constexpr double degenerate_eigval_tol = 1e-4;
 
 

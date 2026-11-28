@@ -294,7 +294,7 @@ auto orthonormalize_augmentation(
           if(abort_on_null_padding) { // A null vector would enter the basis: abort
             long n_nonnull = std::count_if(v.data(), v.data() + v.size(), [](double x){ return x >= 1e-10; });
             utils::check(false, "Basis augmentation: padding to the uniform count n_aug_max = {} takes a null vector "
-                         "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, IBZ k index {}, which has {} raw states above "
+                         "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, deposit k index {}, which has {} raw states above "
                          "epstol and only {} with overlap eigenvalue >= 1e-10. Raise epstol, or use "
                          "nbnd_aug_break_degeneracy=True.", n_aug_max, lam, s_range.first()+is, k_range.first()+ik,
                          counts[isk], n_nonnull);
@@ -732,7 +732,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
     nbnd_file = methods::detail::read_Deltapsi_k(dprefix, 0, mf.wfc_truncated_grid()->mesh()).nbnd;
     if(R < 0 or R > nbnd_file) R = nbnd_file;
   }
-  // 1. R(k) = min{B >= R : e_B(k) - e_{B-1}(k) > degenerate_eigval_tol} on the IBZ k of the base mean field,
+  // 1. R(k) = min{B >= R : e_B(k) - e_{B-1}(k) >= degenerate_eigval_tol} on the IBZ k of the base mean field,
   //    so that the source window [0, R(k)) holds whole degenerate multiplets (e sorted per k).
   //    Rows n >= R(k) of the raw array stay exactly zero.
   std::vector<long> R_k(size_t(nkpts_ibz), R);
@@ -742,7 +742,8 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
       long B = R;
       while(B < N and std::abs(eig(0,ik,B) - eig(0,ik,B-1)) < utils::degenerate_eigval_tol) ++B;
       utils::check(B < N, "add_augmentation_dpsi: no gap above band {} within the {} bands of the base mean field "
-                   "at k index {}; lower nbnd_aug or use nbnd_aug_break_degeneracy=True.", R, N, ik);
+                   "at k index {}{}; lower nbnd_aug or use nbnd_aug_break_degeneracy=True.", R, N, ik,
+                   R >= N ? " (nbnd_aug >= the base mean field's nbnd)" : "");
       R_k[size_t(ik)] = B;
     }
   }

@@ -131,12 +131,11 @@ mf::MF add_augmentation(mf::MF& mf, std::string fn,
 // multiplets at every k, so the source span is closed under the little group of k. The uniform kept count
 // n_aug_max can still split a singular-value multiplet of the overlap, so unitarity of the symmetry rotations D
 // is not guaranteed. The raw array has R_max = max_k R(k) rows per (iq, mode); rows n >= R(k) at k are
-// exactly zero (no δψ, no buffer term) and give zero overlap eigenvalues, so the epstol rule and the uniform
-// kept count are unchanged. R(k) is an error if it exceeds the bands in the δψ file or if no gap is found
+// exactly zero (no δψ, no buffer term) and give zero overlap eigenvalues, so they add nothing above epstol. R(k) is an error if it exceeds the bands in the δψ file or if no gap is found
 // among the N bands of mf. If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero
 // row or a nearly dependent raw state) the closed-window path aborts; with nbnd_aug_break_degeneracy it only
-// warns. nbnd_aug_break_degeneracy = true reproduces R(k) = nbnd_aug at every k. nbnd_aug = -1 (all file bands)
-// follows the same rule; nbnd_aug = 0 is unchanged.
+// warns. nbnd_aug = -1 (all file bands)
+// follows the same rule; nbnd_aug = 0 reads no δψ.
 //
 // QE orthogonalizes δψ against all N nscf bands, so the
 // contribution of the bands m ∈ [M, N) above the kept originals is added back:
@@ -183,7 +182,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
  *   - per-band THC fit weights (nspin, nkpts_ibz, nbnd + n_aug_max), replicated
  *     on every rank: 1 for the originals, min(s, 1) for the augmentation states.
  * `raw_aug` is overwritten (holds the projected residual on return).
- * If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero raw state at that k):
+ * If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero or linearly dependent raw state at that k):
  * abort_on_null_padding = true raises an error, false logs a warning.
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY, utils::Communicator comm_t>
