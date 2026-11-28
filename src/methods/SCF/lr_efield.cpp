@@ -576,7 +576,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
     }
     // 7.4 H_plain, H_sym (term 1) from the stored modes; ΔH0 = 0 for every mode (no ΔH0 stack)
     res.hess = hessian.evaluate(driver.dyson(), sDeltaDm_skij, sDeltaF_skij, pDeltaSigma, &sDeltaG_tskij,
-                            /*sDeltaH0_skij_mskij=*/nullptr, /*fix_density=*/false, &sVE_xwskij);
+                            /*sDeltaH0_mskij=*/nullptr, /*fix_density=*/false, &sVE_xwskij);
     hessian.print_timers();
     mpi->comm.barrier();
   }

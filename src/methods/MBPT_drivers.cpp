@@ -1148,7 +1148,7 @@ std::optional<double> read_fixed_mu(mpi_context_t& mpi,
  * @param eri              - [INPUT] ERI handler (must be THC)
  * @param pt               - [INPUT] Parameters as property tree
  * @param q_vec            - [INPUT] Perturbation wavevector in crystal coords (3,)
- * @param DeltaH0_skij_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
+ * @param DeltaH0_mskij    - [INPUT] Perturbations (nmodes, ns, nk, nb, nb), root only
  * @param DeltaH_mwskij_root - [INPUT] Optional dynamic source ΔH(iω) (nmodes, nw_f, ns, nk, nb, nb), root only
  *                           (see MBPT_drivers.h)
  *
@@ -1194,7 +1194,7 @@ template<typename eri_t>
 std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
                         run_lr_calc(eri_t &eri, ptree const& pt,
                                      nda::array<double, 1> const& q_vec,
-                                     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_skij_mskij_root,
+                                     std::optional<nda::array<ComplexType, 5>> const& DeltaH0_mskij_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_left_root,
                                      std::optional<nda::array<ComplexType, 4>> const& DeltaX_right_root,
                                      std::optional<nda::array<ComplexType, 3>> const& DeltaV_qPQ_root,
@@ -1523,18 +1523,18 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // Validate DeltaH0 shape on root, then broadcast the mode count.
   long nmodes = 0;
   if (mpi->comm.root()) {
-    utils::check(DeltaH0_skij_mskij_root.has_value(),
-                 "run_lr_calc: DeltaH0_skij_mskij must be provided on the MPI global root");
-    auto const& dh = *DeltaH0_skij_mskij_root;
+    utils::check(DeltaH0_mskij_root.has_value(),
+                 "run_lr_calc: DeltaH0_mskij must be provided on the MPI global root");
+    auto const& dh = *DeltaH0_mskij_root;
     utils::check(dh.shape(1) == mf->nspin() &&
                  dh.shape(2) == mf->nkpts_ibz() &&
                  dh.shape(3) == mf->nbnd() &&
                  dh.shape(4) == mf->nbnd(),
-                 "run_lr_calc: DeltaH0_skij_mskij shape mismatch: expected (nmodes,{},{},{},{}), "
+                 "run_lr_calc: DeltaH0_mskij shape mismatch: expected (nmodes,{},{},{},{}), "
                  "got ({},{},{},{},{})",
                  mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd(),
                  dh.shape(0), dh.shape(1), dh.shape(2), dh.shape(3), dh.shape(4));
-    utils::check(dh.shape(0) > 0, "run_lr_calc: DeltaH0_skij_mskij has no perturbations.");
+    utils::check(dh.shape(0) > 0, "run_lr_calc: DeltaH0_mskij has no perturbations.");
     nmodes = dh.shape(0);
 
     if (has_dynamic_source) {
@@ -1564,7 +1564,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
 
   // Response arrays. The ΔH0 stack and the dynamic source ΔH(iω) stack are each copied once from the root into a
   // node-shared array (one copy per node); the per-mode solve and the hessian read mode m as a view of its slice.
-  auto sDeltaH0_skij_mskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaH0_skij_mskij_root);
+  auto sDeltaH0_mskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaH0_mskij_root);
   std::optional<math::shm::shared_array<Array_view_6D_t>> opt_sDeltaH_mwskij;
   if (has_dynamic_source) {
     opt_sDeltaH_mwskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 6>(*mpi, DeltaH_mwskij_root));
@@ -1847,7 +1847,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     if (has_dynamic_source) p.DeltaH_wskij.emplace(opt_sDeltaH_mwskij->local()(m, nda::ellipsis{}));
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        sDeltaH0_skij_mskij.local()(m, nda::ellipsis{}), thc, p,
+        sDeltaH0_mskij.local()(m, nda::ellipsis{}), thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
@@ -1963,7 +1963,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     auto c1 = opt_hessian->evaluate(
         driver.dyson(), sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-        &sDeltaH0_skij_mskij, fix_density,
+        &sDeltaH0_mskij, fix_density,
         has_dynamic_source ? &(*opt_sDeltaH_mwskij) : nullptr);
     opt_hessian->print_timers();
 
@@ -2286,9 +2286,9 @@ nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
   auto sDeltaH0_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, std::array<long, 4>{ns, nkpts_ibz, nbnd, nbnd});
 
-  nda::array<ComplexType, 5> DeltaH0_skij_mskij;
+  nda::array<ComplexType, 5> DeltaH0_mskij;
   if (mpi->comm.root())
-    DeltaH0_skij_mskij = nda::array<ComplexType, 5>({nmodes, ns, nkpts_ibz, nbnd, nbnd});
+    DeltaH0_mskij = nda::array<ComplexType, 5>({nmodes, ns, nkpts_ibz, nbnd, nbnd});
 
   auto kp_map = mf->ks_to_k(0);
   long nsk_ibz = ns * nkpts_ibz;
@@ -2304,10 +2304,10 @@ nda::array<ComplexType, 5> lr_DeltaH0_from_thc_aux_calc(
                                                     kp_map, kpq_map);
     sDeltaH0_skij.win().fence();
     sDeltaH0_skij.all_reduce_parallel();
-    if (mpi->comm.root()) DeltaH0_skij_mskij(m, nda::ellipsis{}) = sDeltaH0_skij.local();
+    if (mpi->comm.root()) DeltaH0_mskij(m, nda::ellipsis{}) = sDeltaH0_skij.local();
   }
 
-  return DeltaH0_skij_mskij;
+  return DeltaH0_mskij;
 }
 
 
