@@ -296,8 +296,6 @@ double striped_norm2(utils::mpi_context_t<mpi3::communicator>& mpi, sArray_type 
   return mpi.comm.all_reduce_value(norm2);
 }
 
-template double striped_norm2(utils::mpi_context_t<mpi3::communicator>&, sArray_t<Array_view_5D_t> const&);
-
 /**
  * B_minus_S_rel = ‖B - S‖ / (√nw ‖S‖), the size of the vertex correction B = S - Σ' relative to S.
  *
@@ -456,7 +454,8 @@ void write_efield_results(std::string const& out_file, efield_results const& res
  * if the phase kernel has it}: run_lr's precond_method = "HSEX" always carries H; default precond_tol and
  * precond_max_iter) unless iter_alg is DIIS, which cannot take a preconditioner; the preconditioner changes the rate,
  * not the answer.
- * W is loaded once, as run_lr does, and each phase works on its own copy, which its lr_driver::lr_setup consumes; the last phase
+ * W is loaded once, as run_lr does, and held until phase A2: A1 and X each work on their own copy, which their
+ * lr_driver::lr_setup consumes, so those phases hold two W (three with reuse_W, which also keeps W in the cache); A2
  * takes the loaded W itself. Each phase builds its own lr_driver and destroys it at its end.
  *
  * Called by Python `run_lr_efield`. Writes <output>.mbpt.h5:linear_response_efield/ (replaced if present).
@@ -552,7 +551,7 @@ void run_lr_efield_calc(eri_t &eri, ptree const& pt) {
                method, has_sigma ? "with" : "without", input_file,
                has_sigma_gs ? "carries one (use method = 'GW0' or 'GW')" : "has Σ = 0 (use method = 'HF' or lower)");
   app_log(2, "run_lr_efield_calc: method {}, K_a = {{{}}}, K^X = {{{}}}; U = {:.2f} MB, efield arrays ≈ 7U per node "
-             "(lr_driver::lr_setup prints the memory estimate of the solver incl. W)",
+             "(W is held until phase A2, one more copy than the solver's; lr_driver::lr_setup prints the solver's memory estimate)",
           method, kernel_a.to_string(), kernel_x.to_string(), U_MB);
 
   // W_c(iω), the ε⁻¹ heads and the divergence treatments, loaded once as in run_lr_calc; G(τ) is read only by a W recompute

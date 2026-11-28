@@ -33,6 +33,7 @@
 #include "IO/ptree/ptree_utilities.hpp"
 #include "mean_field/MF.hpp"
 #include "mean_field/mf_utils.hpp"
+#include "methods/ERI/thc_reader_t.hpp"
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/scf_common.hpp"
@@ -466,7 +467,7 @@ struct lr_W_inputs {
  *
  * Called by run_lr_calc and run_lr_efield_calc, once per run, after the unperturbed state is built. W is either read
  * from disk (explicit screened_interaction_file, else the path derived from the checkpoint), recomputed on the fly from the G(τ)
- * `sG_tskij` (RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W_cache (`reuse_W`).
+ * `sG_tskij` (RPA, or GW+EDMFT when `mb_local` is non-null), or taken from the process-wide W cache (`reuse_W`, released by release_lr_W_cache).
  * Both hand W to lr_driver as W_c(iω) on the q-dist distribution (utils::lr_W_tau_local_dist). `needs_W` is
  * false when the kernel carries neither a Σ nor the HSEX exchange; then only the divergence treatment of the
  * exchange side is read. `init_timer` carries LR_INIT_LOAD_W.
