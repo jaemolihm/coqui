@@ -183,13 +183,13 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
  *     on every rank: 1 for the originals, min(s, 1) for the augmentation states.
  * `raw_aug` is overwritten (holds the projected residual on return).
  * If padding to n_aug_max takes a vector with overlap eigenvalue < 1e-10 (a zero or linearly dependent raw state at that k):
- * abort_on_null_padding = true raises an error, false logs a warning.
+ * nbnd_aug_break_degeneracy = false raises an error, true logs a warning.
  */
 template<MEMORY_SPACE MEM = HOST_MEMORY, utils::Communicator comm_t>
 auto orthonormalize_augmentation(
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
-                    double epstol, bool abort_on_null_padding = false)
+                    double epstol, bool nbnd_aug_break_degeneracy = true)
   -> std::tuple<memory::darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
                 nda::array<double, 3>>;
 

@@ -134,7 +134,7 @@ template<MEMORY_SPACE MEM, utils::Communicator comm_t>
 auto orthonormalize_augmentation(
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& psi_orig,
                     darray_t<memory::array<MEM, ComplexType, 4>, comm_t>& raw_aug,
-                    double epstol, bool abort_on_null_padding)
+                    double epstol, bool nbnd_aug_break_degeneracy)
   -> std::tuple<darray_t<memory::array<MEM, ComplexType, 4>, comm_t>,
                 nda::array<double, 3>>
 {
@@ -291,7 +291,7 @@ auto orthonormalize_augmentation(
         long src = n_raw - n_aug_max + r;   // largest eigenvalues are last
         double lam = v(src);
         if(lam < 1e-10) {
-          if(abort_on_null_padding) { // A null vector would enter the basis: abort
+          if(not nbnd_aug_break_degeneracy) { // A null vector would enter the basis: abort
             long n_nonnull = std::count_if(v.data(), v.data() + v.size(), [](double x){ return x >= 1e-10; });
             utils::check(false, "Basis augmentation: padding to the uniform count n_aug_max = {} takes a null vector "
                          "(overlap eigenvalue {:.3e} < 1e-10) at spin {}, deposit k index {}, which has {} raw states above "
@@ -947,7 +947,7 @@ mf::MF add_augmentation_dpsi(mf::MF& mf, std::string fn,
 
   // project against originals, SVD-truncate, uniformize -> [orig | aug]
   auto [psi_full, band_weights] = orthonormalize_augmentation<MEM>(psi_orig, raw_aug, epstol,
-                                                                       /*abort_on_null_padding*/ not nbnd_aug_break_degeneracy);
+                                                                       nbnd_aug_break_degeneracy);
 
   // DFT Kohn-Sham matrix seed for the (non-eigen) augmented basis.
   auto eig_ibz  = rayleigh_eigvals<MEM>(mf, psi_full);
