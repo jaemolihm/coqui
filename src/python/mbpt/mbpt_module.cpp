@@ -106,6 +106,21 @@ namespace coqui_py {
 
 
   /**
+   * @brief Electronic dielectric tensor from eight Q = 0 LR solves (see methods::run_lr_efield_calc)
+   *
+   * @param efield_params - [INPUT] JSON parameters: prefix, output, method, max_iter, tol, iter_alg,
+   *                        reuse_W, recompute_W, screened_interaction_file. Results are written to
+   *                        "linear_response_efield/" of <output>.mbpt.h5
+   * @param h_int         - [INPUT] THC Coulomb integrals
+   */
+  void run_lr_efield(const std::string &efield_params, ThcCoulomb &h_int) {
+    auto parser = InputParser(efield_params);
+    methods::mb_eri_t mb_eri(h_int.get_eri());
+    methods::run_lr_efield_calc(mb_eri, parser.get_root());
+  }
+
+
+  /**
    * @brief Compute k+q mapping for linear response calculations
    *
    * @param kpts_crys   - [INPUT] k-points in crystal coordinates (nkpts, 3)
@@ -122,7 +137,7 @@ namespace coqui_py {
     return kpq_map;
   }
 
-  /// Drop the W kept by run_lr(reuse_W = true).
+  /// Drop the W kept by run_lr or run_lr_efield with reuse_W = true.
   void release_lr_W_cache() { methods::release_lr_W_cache(); }
 
 

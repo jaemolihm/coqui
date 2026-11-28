@@ -237,6 +237,12 @@ struct lr_params {
   const lr_qp_static_params* qp_static = nullptr;
   /// Embedding data (nullptr: none). The driver then also forms δW^loc; see embedding_info.
   const embedding_info* embedding = nullptr;
+  /// The caller's dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb); std::nullopt: none. A view of the caller's
+  /// node-replicated memory, which the caller sets to the source of the current mode before each lr_solve_one;
+  /// lr_setup reads only its presence, for the memory report (it does not size the hessian stores). It enters every outer
+  /// Dyson pass (the preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
+  /// preconditioner applies.
+  opt_const_view_5D_t DeltaH_wskij = std::nullopt;
 
   // --- Output selection ---
   /// Store ΔΣ term 2 = -G⊙ΔW in its own array as well as in the total (one-shot
@@ -252,11 +258,9 @@ struct lr_params {
   /// A count rather than a flag because print_memory_estimate sizes the ω stores
   /// from it. See lr_hessian.hpp for the functional and its conventions.
   long hessian_nmodes = 0;
-  /// The caller passes a dynamic source ΔH(iω) to lr_solve_one. Sizes the memory report and the
-  /// hessian ω stores at lr_setup; lr_solve_one checks that it agrees with its argument.
-  bool has_dynamic_source = false;
 
   bool has_deltax() const { return sDeltaX_left && sDeltaX_right; }
+  bool has_dynamic_source() const { return DeltaH_wskij.has_value(); }
   bool hessian() const { return hessian_nmodes > 0; }
   /// The hessian also takes the stationary (quadratic-error) functional, which
   /// needs one kernel evaluation at the returned ΔDm/ΔG(τ); false: plain hessian only.
@@ -315,7 +319,8 @@ public:
    *
    * The solvers and buffers built here are shaped by `p` — which solvers exist
    * (kernel, split_sigma_terms, qp_static), the previous-iterate sizes, the DIIS
-   * capacity — so every lr_solve_one must be handed the same `p`. `dW_wqPQ_in` is
+   * capacity — so every lr_solve_one must be handed the same `p`, except `p.DeltaH_wskij`, which the caller sets to the
+   * current mode's source (or std::nullopt) before each lr_solve_one. `dW_wqPQ_in` is
    * consumed: it becomes dW_full(iω) and dW_c(t,R,P,Q) in place, so the caller
    * must not use it afterwards.
    *
@@ -338,8 +343,8 @@ public:
   /**
    * @brief Run the LR SCF loop for one perturbation. Requires a prior lr_setup.
    *
-   * `p` must be the one lr_setup was given: it selects which solvers and buffers
-   * this call reads, and those were allocated by lr_setup.
+   * `p` must be the one lr_setup was given, except `p.DeltaH_wskij`, which is the source of this call: `p` selects
+   * which solvers and buffers this call reads, and those were allocated by lr_setup.
    *
    * Zeros the per-perturbation state (ΔF, ΔΣ, ΔV_QPGW and the accelerator
    * subspace) on entry, so the result depends only on ΔH0 and not on
@@ -356,10 +361,9 @@ public:
    * only if p.save_DeltaG is set or p.hessian() and the kernel has a Σ (the
    * hessian's Σ refresh reads it).
    *
-   * `sDeltaH_wskij`, when given, is a dynamic one-body source ΔH(iω) (nw_f, ns, nk, nb, nb), node-replicated.
-   * It is a constant of the affine map ΔF, ΔΣ -> ΔDm, ΔG, so it enters every outer Dyson pass (the
-   * preconditioner's start solve, the per-iteration and final passes, update_DeltaG) and never the
-   * preconditioner applies. Given exactly when p.has_dynamic_source.
+   * `p.DeltaH_wskij`, when set, is a dynamic one-body source ΔH(iω); it is a constant of the affine map
+   * ΔF, ΔΣ -> ΔDm, ΔG (see lr_params). `DeltaH0_skij` is a view of node-replicated ΔH0 (ns, nk, nb, nb);
+   * std::nullopt: ΔH0 = 0.
    *
    * @return Tuple of (number of iterations, final Δμ)
    */
@@ -368,15 +372,14 @@ public:
       sArray_t<Array_view_4D_t>& sDeltaDm_skij,
       sArray_t<Array_view_4D_t>& sDeltaF_skij,
       sArray_t<Array_view_5D_t>* sDeltaSigma_tskij,
-      const sArray_t<Array_view_4D_t>& sDeltaH0_skij,
+      opt_const_view_4D_t DeltaH0_skij,
       thc_reader_t& thc,
       const lr_params& p,
       sArray_t<Array_view_5D_t>* sDeltaSigma_term2_tskij = nullptr,
       sArray_t<Array_view_4D_t>* sDeltaVcorr_skij = nullptr,
       nda::array<ComplexType, 4>* DeltaF_ibc_out = nullptr,
       nda::array<ComplexType, 4>* F_PQ_out = nullptr,
-      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr,
-      const sArray_t<Array_view_5D_t>* sDeltaH_wskij = nullptr);
+      nda::array<ComplexType, 4>* DeltaF_PQ_out = nullptr);
 
   /**
    * @brief The run's LR Dyson solver.
@@ -537,7 +540,7 @@ private:
    * them; GCR and the damping iteration both call it.
    *
    * Solves z_F = r_F + K_pc[Pχ(z_F, r_Σ)] for the ΔF part and passes ΔΣ through,
-   * z_Σ = r_Σ: gather r, then precond_solve(r_F, &r_Σ, nullptr), then z = (r_F + y_F, r_Σ).
+   * z_Σ = r_Σ: gather r, then precond_solve(r_F, &r_Σ, std::nullopt), then z = (r_F + y_F, r_Σ).
    *
    * Collective on comm.
    */
@@ -548,7 +551,7 @@ private:
    * The inner solve of precond_apply on shared arrays: y_F = K_pc[Pχ(r_F + y_F, r_Σ)]
    * from y_F = 0, left in *_sDeltaF_pc_y. For r_S = null there is no ΔΣ part (the
    * start y_F = K_pc χ(ΔH0 + y_F)); otherwise one full Dyson pass gives the ΔDm of
-   * r_Σ and of the dynamic source ΔH(iω) (sDeltaH_wskij, given only by the start solve of a run with
+   * r_Σ and of the dynamic source ΔH(iω) (DeltaH_wskij, given only by the start solve of a run with
    * a source), and each sweep is a ΔDm-only Dyson pass on r_F + y_F, one K_pc evaluation
    * and one step of the ΔF-only _pc_gcr on y_F. The sweeps stop at
    * ‖r_in‖ ≤ p.precond_tol·‖r_in,0‖ or after p.precond_max_iter; the outer GCR is
@@ -560,11 +563,13 @@ private:
    * (_pc_cap_hits of _pc_applies) and reported after the loop if the run did not
    * converge, since a converged run does not depend on the inner accuracy.
    *
+   * `r_F` is a view of the node-replicated r_F (std::nullopt: r_F = 0).
+   *
    * Collective on comm.
    */
-  void precond_solve(const sArray_t<Array_view_4D_t>& r_F,
+  void precond_solve(opt_const_view_4D_t r_F,
                      const sArray_t<Array_view_5D_t>* r_S,
-                     const sArray_t<Array_view_5D_t>* sDeltaH_wskij,
+                     opt_const_view_5D_t DeltaH_wskij,
                      thc_reader_t& thc, const lr_params& p);
 
   /// The HSEX kernel V + W_c(iν=0) lr_hf contracts. Empty unless the operator or

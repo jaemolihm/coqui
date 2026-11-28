@@ -201,7 +201,7 @@ def _as_complex(dset) -> Optional[np.ndarray]:
     """Assemble a CoQuí on-disk array (trailing real/imag axis) into complex128."""
     if dset is None:
         return None
-    raw = dset[:]
+    raw = dset[()]
     if _is_packed_complex(dset):
         return raw[..., 0] + 1j * raw[..., 1]
     return raw

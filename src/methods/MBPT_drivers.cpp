@@ -39,6 +39,7 @@
 #include "methods/mb_state/mb_state.hpp"
 #include "methods/SCF/lr_driver.hpp"
 #include "methods/SCF/lr_hessian.hpp"
+#include "methods/SCF/lr_run_inputs.hpp"
 #include "methods/embedding/local_projection.hpp"
 #include "methods/embedding/permut_symm.hpp"
 #include "methods/SCF/lr_precompute.hpp"
@@ -77,36 +78,6 @@ inline std::string resolve_mbpt_output_stem(ptree const& pt) {
     utils::check(false, "Incorrect input - prefix cannot be empty string.");
   }
   return outdir + "/" + prefix;
-}
-
-/**
- * Factory function for creating simple_dyson with conditional H0 source.
- *
- * @param h0_source     - [INPUT] Source of H0: "compute" or "checkpoint"
- * @param mf_ptr        - [INPUT] Mean-field object pointer
- * @param ft_ptr        - [INPUT] IAFT pointer
- * @param chkpt_prefix  - [INPUT] Checkpoint file prefix (used if h0_source="checkpoint")
- * @param mu_tol        - [INPUT] Chemical potential tolerance (default 1e-9)
- * @param mu_update_alg - [INPUT] Chemical potential update algorithm
- * @return simple_dyson object
- */
-inline simple_dyson make_dyson_with_h0_source(
-    std::string_view h0_source,
-    mf::MF* mf_ptr,
-    imag_axes_ft::IAFT* ft_ptr,
-    const std::string& chkpt_prefix,
-    double mu_tol = 1e-9,
-    std::string mu_update_alg = "bisection") {
-  // Both sources are valid for an augmented basis: "compute" rebuilds H0 from the
-  // orbitals, while "checkpoint" reads the stored H0_skij (a genuine computed H0,
-  // not the placeholder eigenvalues), so the two agree.
-  if (h0_source == "checkpoint") {
-    app_log(1, "  H0 source                = checkpoint ({}.mbpt.h5)", chkpt_prefix);
-    return simple_dyson(mf_ptr, ft_ptr, chkpt_prefix, mu_tol, mu_update_alg);
-  } else {
-    app_log(1, "  H0 source                = computed from orbitals");
-    return simple_dyson(mf_ptr, ft_ptr, mu_tol, mu_update_alg);
-  }
 }
 
 /**
@@ -203,40 +174,6 @@ inline void ensure_checkpoint(std::shared_ptr<mf::MF> mf, std::string const& out
 
   }
 }
-
-/**
- * Read the string dataset `name` of group `input_grp` in `input_file` on the
- * root and broadcast it. std::nullopt when the group or the dataset is absent.
- */
-template<typename mpi_context_t>
-std::optional<std::string> read_scf_string(mpi_context_t& mpi,
-                                           const std::string& input_file,
-                                           const std::string& input_grp,
-                                           const std::string& name)
-{
-  char buf[64] = {0};
-  int found = 0;
-  if (mpi.comm.root()) {
-    h5::file file(input_file, 'r');
-    auto root_grp = h5::group(file);
-    if (root_grp.has_subgroup(input_grp)) {
-      auto scf_grp = root_grp.open_group(input_grp);
-      if (scf_grp.has_dataset(name)) {
-        std::string str;
-        h5::h5_read(scf_grp, name, str);
-        utils::check(str.size() < sizeof(buf), "read_scf_string: {} string too long: {}",
-                     name, str);
-        std::copy(str.begin(), str.end(), buf);
-        found = 1;
-      }
-    }
-  }
-  mpi.comm.broadcast_n(&found, 1, 0);
-  if (!found) return std::nullopt;
-  mpi.comm.broadcast_n(buf, sizeof(buf), 0);
-  return std::string(buf);
-}
-
 /**
  * The divergence treatment `key` ("div_treatment" or "hf_div_treatment") of a ground-state run that restarts from
  * `chkpt_file`. scf/<key> is written once, by the first run on the checkpoint that evaluates W (div_treatment) or
@@ -1196,316 +1133,6 @@ std::optional<double> read_fixed_mu(mpi_context_t& mpi,
 }
 
 /**
- * Read the div_treatment the scGW run used (stashed in the checkpoint scf
- * group by scr_coulomb_t::dump_eps_inv_head); checkpoints that predate this
- * dataset must be regenerated. LR/GW evaluators must reuse this value so
- * divergence heads stay consistent with how W and Sigma were computed.
- * A group without the stash (e.g. the embed group) takes the scf group's.
- */
-template<typename mpi_context_t>
-std::string read_div_treatment(mpi_context_t& mpi,
-                               const std::string& input_file,
-                               const std::string& input_grp)
-{
-  auto div = read_scf_string(mpi, input_file, input_grp, "div_treatment");
-  if (!div and input_grp != "scf") {
-    div = read_scf_string(mpi, input_file, "scf", "div_treatment");
-    if (div) app_log(2, "  '{}/div_treatment' not found in {}; using \"{}\" from the scf group.",
-                     input_grp, input_file, *div);
-  }
-  utils::check(div.has_value(),
-               "read_div_treatment: '{}/div_treatment' (and 'scf/div_treatment') missing in {}. "
-               "This checkpoint predates div_treatment dump; please regenerate "
-               "the scGW checkpoint with the current code.",
-               input_grp, input_file);
-  return *div;
-}
-
-/**
- * Read the hf_div_treatment the ground-state run used (stashed on the checkpoint
- * scf group by chkpt::dump_hf_div_treatment), so LR applies the exchange
- * Madelung term exactly when the unperturbed Fock did.
- *
- * Unlike read_div_treatment this does NOT error when the dataset is absent:
- * checkpoints predating the stash fall back to "gygi", which is both hf_t's
- * default and what LR applied unconditionally before, so they keep their
- * previous behaviour instead of needing to be regenerated. A group without
- * the stash (e.g. the embed group) takes the scf group's.
- */
-template<typename mpi_context_t>
-std::string read_hf_div_treatment(mpi_context_t& mpi,
-                                  const std::string& input_file,
-                                  const std::string& input_grp)
-{
-  auto div = read_scf_string(mpi, input_file, input_grp, "hf_div_treatment");
-  if (!div and input_grp != "scf") {
-    div = read_scf_string(mpi, input_file, "scf", "hf_div_treatment");
-    if (div) app_log(2, "  '{}/hf_div_treatment' not found in {}; using \"{}\" from the scf group.",
-                     input_grp, input_file, *div);
-  }
-  if (!div) {
-    app_log(2, "  '{}/hf_div_treatment' (and 'scf/hf_div_treatment') not found in {}; assuming \"gygi\" for the LR "
-               "exchange divergence. Regenerate the checkpoint if the ground state "
-               "used hf_div_treatment = \"ignore_g0\".", input_grp, input_file);
-    return "gygi";
-  }
-  return *div;
-}
-
-/**
- * Helper: load W and eps_inv_head from checkpoint/thc_screened_interaction.h5
- *
- * Factored out from lr_gw_sigma_DeltaG_calc and gw_evaluate_sigma_calc to avoid duplication.
- * Also used by run_lr_calc (through lr_load_W_omega).
- *
- * @param mpi         - MPI context
- * @param thc         - THC ERI (provides Np())
- * @param input_file  - Path to checkpoint HDF5 file (for eps_inv_head)
- * @param input_grp   - SCF group name in checkpoint (e.g., "scf")
- * @param nt          - Number of tau points (from IAFT)
- * @param screened_interaction_file - Explicit path to the W_qtPQ HDF5 file.
- *                      If empty, falls back to thc_screened_interaction.h5 in
- *                      the input checkpoint's directory.
- * @return (dW_tqPQ, eps_inv_head, div_treatment) tuple. W is returned as
- *         (t,q,P,Q): the dataset on disk is (q,t), but eps_inv_head_t needs (t,q)
- *         so that copy is made here regardless — handing it back costs nothing,
- *         while returning (q,t) would make every LR caller transpose it again.
- */
-template<typename mpi_context_t, typename THC_t>
-auto load_W_and_eps_inv_head(
-    mpi_context_t& mpi,
-    THC_t& thc,
-    const std::string& input_file,
-    const std::string& input_grp,
-    long nt,
-    const std::string& screened_interaction_file = "")
-{
-  auto mf = thc.MF();
-  long nkpts = mf->nkpts();
-  long NP = thc.Np();
-  long nt_half = (nt % 2 == 0) ? nt / 2 : nt / 2 + 1;
-
-  // Read W from the explicit screened_interaction_file if given; otherwise fall
-  // back to thc_screened_interaction.h5 in the input checkpoint's directory.
-  auto w_file = screened_interaction_file.empty()
-      ? (std::filesystem::path(input_file).parent_path() / "thc_screened_interaction.h5").string()
-      : screened_interaction_file;
-  app_log(2, "Reading W from {}...", w_file);
-
-  // The dataset on disk is (q,t,P,Q), so the distributed read must target that
-  // axis order: h5_read maps the array's index space onto
-  // the dataset's and cannot permute axes.
-  // τ-dist for (q,t,P,Q): swap axes 0,1 of the (t,q) τ-dist grid
-  auto [tq_pgrid, tq_bsize] = utils::lr_W_q_local_dist(mpi.comm.size(), nt_half, NP);
-  std::array<long,4> qt_pgrid = {tq_pgrid[1], tq_pgrid[0], tq_pgrid[2], tq_pgrid[3]};
-  std::array<long,4> qt_bsize = {tq_bsize[1], tq_bsize[0], tq_bsize[2], tq_bsize[3]};
-
-  using local_Array_4D_t = nda::array<ComplexType, 4>;
-  auto dW_qtPQ = math::nda::make_distributed_array<local_Array_4D_t>(
-      mpi.comm, qt_pgrid, {nkpts, nt_half, NP, NP}, qt_bsize);
-
-  // Each rank reads only its local (q,t,P,Q) slab via the distributed h5_read.
-  // A "root reads full + broadcast" pattern OOMs at scale: full W for nkpts=512,
-  // NP=204 is ~30 GB per rank (×2 with broadcast staging), well over per-node RAM
-  // when many ranks share a node.
-  {
-    h5::file file(w_file, 'r');
-    h5::group grp(file);
-    // Verify the W-on-disk matches the THC currently loaded. Silent shape
-    // mismatch between stale W (from scGW build-time) and current THC (from
-    // current ISDF) produces a garbage W that explodes downstream by ~|W|²
-    // amplification in the ΔW = W·ΔΠ·W Dyson step.
-    auto ds_info = h5::array_interface::get_dataset_info(grp, "W_qtPQ");
-    long ds_np_a = ds_info.lengths[2];
-    long ds_np_b = ds_info.lengths[3];
-    utils::check(ds_np_a == NP && ds_np_b == NP,
-                 "load_W_and_eps_inv_head: W_qtPQ in {} has shape (...,{},{}) "
-                 "but current THC has Np={}. The W file was generated with a "
-                 "different THC decomposition; regenerate it (or re-run GW) "
-                 "with the current THC before calling run_lr.",
-                 w_file, ds_np_a, ds_np_b, NP);
-    math::nda::h5_read(grp, "W_qtPQ", dW_qtPQ);
-  }
-  mpi.comm.barrier();
-
-  auto div_treatment = read_div_treatment(mpi, input_file, input_grp);
-
-  // Recompute eps_inv_head from the loaded W_c
-  // We don't read eps_inv_head from input_file to make sure it is consistent with W_c
-  imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
-  auto dW_tqPQ = utils::transpose_axes_01(dW_qtPQ, mpi.comm);
-  dW_qtPQ.reset();
-  auto [eps_inv_head_q, eps_inv_head] =
-      solvers::div_utils::eps_inv_head_t(dW_tqPQ, thc, *mf, &ft, div_treatment);
-  mpi.comm.barrier();
-
-  return std::make_tuple(std::move(dW_tqPQ), std::move(eps_inv_head),
-                         std::move(div_treatment));
-}
-
-/**
- * Helper: read W from the screened-interaction file and hand it to the LR path
- * on the Matsubara axis, so lr_driver has exactly one W layout to support.
- *
- * The τ→ω transform lives here rather than in load_W_and_eps_inv_head because
- * that function's other callers (the standalone scGW Σ paths) want W(τ). Only
- * this from-file path pays the transform; recompute_W_and_eps_inv_head, which
- * solves the W Dyson in ω anyway, hands ω back for free.
- *
- * @param mpi         - MPI context
- * @param thc         - THC ERI
- * @param ft          - IAFT (from checkpoint)
- * @param input_file  - Path to checkpoint HDF5 file
- * @param input_grp   - SCF group name in checkpoint
- * @param screened_interaction_file - Explicit path to W_qtPQ, "" = auto-derive
- * @return (dW_wqPQ, eps_inv_head, div_treatment) — W on the Matsubara axis on
- *         the q-dist distribution (utils::lr_W_tau_local_dist),
- *         head on the τ axis
- */
-template<typename mpi_context_t, typename THC_t>
-auto lr_load_W_omega(
-    mpi_context_t& mpi,
-    THC_t& thc,
-    imag_axes_ft::IAFT const& ft,
-    const std::string& input_file,
-    const std::string& input_grp,
-    const std::string& screened_interaction_file = "")
-{
-  auto [dW_tqPQ, eps_inv_head, div_treatment] = load_W_and_eps_inv_head(
-      mpi, thc, input_file, input_grp, ft.nt_f(), screened_interaction_file);
-
-  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
-      mpi.comm.size(), nw_half, thc.MF()->nkpts(), thc.Np());
-
-  solvers::scr_coulomb_fourier_t setup_ft(&ft);
-  auto dW_wqPQ = setup_ft.tau_to_w(dW_tqPQ, w_pgrid, w_bsize, /*reset_input=*/true,
-                                   __app_verbosity__ >= 3);
-  mpi.comm.barrier();
-
-  // The same q→0 head on the ω axis. A consumer wanting one Matsubara component
-  // (HSEX reads ν = 0) must not recover it by transforming the τ array back:
-  // for div_treatment "*_metal", extrapolate_eps_inv_q0 hand-sets
-  // eps_inv_q0_w(0) = -1, and a hand-poked point is not generally
-  // IR-representable, so the round trip smears exactly that value.
-  auto MF = thc.MF();
-  auto [eps_inv_head_wq, eps_inv_head_w] =
-      solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *MF, div_treatment);
-
-  return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
-                         std::move(eps_inv_head_w), std::move(div_treatment));
-}
-
-/**
- * Helper: recompute W and eps_inv_head from the (already-built) unperturbed
- * Green's function instead of reading W from a screened-interaction file.
- *
- * This reuses the exact scGW pipeline (scr_coulomb_t::eval_Pi_qdep +
- * dyson_W_from_Pi_tau + div_utils::eps_inv_head_t), so the recomputed W_c is,
- * by construction, consistent with the currently-loaded THC. RPA screening
- * (standard GW), or GW+EDMFT screening when mb_local is given: its projector
- * and local polarizabilities Π_imp, Π_dc enter through the gw_edmft branch of
- * scr_coulomb_t::eval_Pi_qdep, as in run_gw. cRPA is not supported.
- *
- * W comes back on the **frequency** axis as (w,q,P,Q), on the grid the LR path
- * wants (utils::lr_W_tau_local_dist) — the one layout lr_driver accepts.
- * The W Dyson is solved in ω anyway, so returning ω saves the ω→τ transform
- * back onto Π's τ grid *and* the redistribute onto the LR tiling that would
- * follow it — the LR driver does one ω→τ straight onto its own grid instead.
- *
- * eps_inv_head is built with eps_inv_head_w rather than eps_inv_head_t and then
- * transformed to τ. eval_eps_inv_q is linear and pointwise in the imaginary-axis
- * index, and eps_inv_head_t is exactly "eval → tau_to_w_PHsym → extrapolate →
- * w_to_tau_PHsym", so this is the same quantity with two fewer transforms.
- *
- * @param mpi           - MPI context
- * @param thc           - THC ERI
- * @param ft            - IAFT (from checkpoint)
- * @param sG_tskij      - Unperturbed G(τ) shared array (nt, ns, nk, nb, nb)
- * @param div_treatment - Divergence treatment scGW used (from checkpoint)
- * @return (dW_wqPQ, eps_inv_head) — W on the Matsubara axis, head on the τ axis
- */
-template<typename mpi_context_t, typename THC_t, typename sArray_5D_t>
-auto recompute_W_and_eps_inv_head(
-    mpi_context_t& mpi,
-    THC_t& thc,
-    imag_axes_ft::IAFT const& ft,
-    sArray_5D_t& sG_tskij,
-    const std::string& div_treatment,
-    MBState* mb_local = nullptr)
-{
-  auto mf = thc.MF();
-  long nkpts = mf->nkpts();
-
-  // RPA polarization Π and W Dyson require the full q-grid (no symmetry).
-  utils::check(mf->nqpts() == mf->nqpts_ibz() and mf->nqpts() == nkpts,
-               "recompute_W_and_eps_inv_head: No symmetry required. "
-               "nqpts={}, nqpts_ibz={}, nkpts={}",
-               mf->nqpts(), mf->nqpts_ibz(), nkpts);
-
-  // W is RPA-screened, or GW+EDMFT-screened with the local polarizabilities of mb_local.
-  solvers::scr_coulomb_t scr(&ft, (mb_local == nullptr) ? "rpa" : "gw_edmft", div_treatment);
-
-  long nw_half = (ft.nw_b() % 2 == 0) ? ft.nw_b() / 2 : ft.nw_b() / 2 + 1;
-  auto [w_pgrid, w_bsize] = utils::lr_W_tau_local_dist(
-      mpi.comm.size(), nw_half, nkpts, thc.Np());
-
-  auto dPi_tqPQ = [&]() {
-    if (mb_local == nullptr) {
-      // RPA
-      return scr.eval_Pi_qdep(sG_tskij.local(), thc);
-    } else {
-      // GW+EDMFT: Π_RPA[G] + upfold(Π_imp - Π_dc). G is lent to mb_local for the call and moved back; this
-      // is safe only because no view of sG_tskij exists yet (the Dyson solver and driver are built later).
-      utils::check(mb_local->sPi_imp_wabcd.has_value() and mb_local->sPi_dc_wabcd.has_value(),
-                   "recompute_W_and_eps_inv_head: GW+EDMFT screening requires the local polarizabilities.");
-      mb_local->sG_tskij.emplace(std::move(sG_tskij));
-      auto dPi = scr.eval_Pi_qdep(*mb_local, thc);
-      sG_tskij = std::move(mb_local->sG_tskij.value());
-      mb_local->sG_tskij.reset();
-      return dPi;
-    }
-  }();
-  mpi.comm.barrier();
-  auto dW_wqPQ = scr.dyson_W_from_Pi_tau<true>(dPi_tqPQ, thc, true, w_pgrid, w_bsize);
-  mpi.comm.barrier();
-
-  // eps_inv_head_w returns the head at every (iω, q) plus the q→0 extrapolated
-  // head at every iω; only the latter is wanted here.
-  auto [eps_inv_head_wq, eps_inv_head_q0_w] =
-      solvers::div_utils::eps_inv_head_w(dW_wqPQ, thc, *mf, div_treatment);
-
-  // The head is consumed on the τ axis (lr_gw::apply_div_correction_*), so make
-  // the same final ω→τ step eps_inv_head_t ends with.
-  long nt_half = (ft.nt_b() % 2 == 0) ? ft.nt_b() / 2 : ft.nt_b() / 2 + 1;
-  nda::array<ComplexType, 1> eps_inv_head(nt_half);
-  auto head_w_2D = nda::reshape(eps_inv_head_q0_w, std::array<long, 2>{nw_half, 1});
-  auto head_t_2D = nda::reshape(eps_inv_head, std::array<long, 2>{nt_half, 1});
-  ft.w_to_tau_PHsym(head_w_2D, head_t_2D);
-
-  return std::make_tuple(std::move(dW_wqPQ), std::move(eps_inv_head),
-                         std::move(eps_inv_head_q0_w));
-}
-
-namespace {
-
-using lr_W_t = memory::darray_t<memory::array<HOST_MEMORY, ComplexType, 4>, mpi3::communicator>;
-
-/// W_c(iω) and the ε⁻¹ heads kept by a reuse_W call. No member calls MPI in its destructor, so destruction after
-/// MPI_Finalize is safe.
-struct lr_W_cache {
-  lr_W_t W_c_wqPQ;
-  nda::array<ComplexType, 1> eps_inv_head, eps_inv_head_w;
-};
-
-/// The W kept by the last reuse_W call that built one; release_lr_W_cache() drops it
-std::optional<lr_W_cache> W_cache;
-
-} // namespace
-
-void release_lr_W_cache() { W_cache.reset(); }
-
-/**
  * Unified linear response calculation.
  *
  * Runs the LR SCF loop with configurable Hartree, Exchange, and GW self-energy components:
@@ -1611,21 +1238,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // forced on).
   auto qp_static_sigma = io::get_value_with_default<bool>(pt, "qp_static_sigma", false);
 
-  // Default GCR; DIIS for the qpGW map, whose Padé statification is not affine (lr_setup
-  // rejects GCR there)
-  lr_iter_params iter_params;
-  iter_params.alg = io::get_value_with_default<std::string>(
-      pt, "iter_alg.alg", qp_static_sigma ? std::string("DIIS") : std::string("GCR"));
-  utils::check(iter_params.alg == "damping" || iter_params.alg == "DIIS" ||
-               iter_params.alg == "GCR",
-               "run_lr_calc: unknown iter_alg '{}'. Must be 'damping', 'DIIS' or 'GCR'.",
-               iter_params.alg);
-  iter_params.mixing = io::get_value_with_default<double>(pt, "iter_alg.mixing", 1.0);
-  // GCR: 0 lets lr_setup pick the capacity from the kernel.
-  iter_params.max_subsp_size = static_cast<size_t>(io::get_value_with_default<long>(
-      pt, "iter_alg.max_subsp_size", iter_params.alg == "GCR" ? 0 : 10));
-  iter_params.diis_warmup = static_cast<size_t>(
-      io::get_value_with_default<long>(pt, "iter_alg.diis_warmup", 0));
+  lr_iter_params iter_params = read_lr_iter_params(pt, qp_static_sigma);
 
   // Kernel-component ladder: none ⊂ Hartree ⊂ HF ⊂ GW0 ⊂ GW.
   //
@@ -1637,8 +1250,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // iteration always applies the full `method` kernel.
   auto method = io::get_value_with_default<std::string>(pt, "method", "");
   auto precond_method = io::get_value_with_default<std::string>(pt, "precond_method", "none");
-  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", 0.01);
-  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", 10);
+  auto precond_tol = io::get_value_with_default<double>(pt, "precond_tol", lr_params{}.precond_tol);
+  auto precond_max_iter = io::get_value_with_default<int>(pt, "precond_max_iter", lr_params{}.precond_max_iter);
   utils::check(precond_max_iter >= 1,
                "run_lr_calc: precond_max_iter must be >= 1, got {}.", precond_max_iter);
 
@@ -1865,69 +1478,15 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // Read IAFT from checkpoint
   imag_axes_ft::IAFT ft(imag_axes_ft::read_iaft(input_file, false));
 
-  // Create simple_dyson
-  utils::check(h0_source == "compute" || h0_source == "checkpoint",
-               "run_lr_calc: h0_source must be 'compute' or 'checkpoint', got '{}'", h0_source);
-  lr_init_timer.start("LR_INIT_DYSON");
-  simple_dyson dyson = make_dyson_with_h0_source(h0_source, mf.get(), &ft, prefix);
-  lr_init_timer.stop("LR_INIT_DYSON");
-
-  utils::memlog("run_lr_calc: after simple_dyson ctor");
-
-  // Allocate shared arrays for the unperturbed state
-  auto sF_skij = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  auto sDm_skij = math::shm::make_shared_array<Array_view_4D_t>(
-      *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  // G(τ) of the ground state, read by the W recompute and the GW+EDMFT Gloc before lr_setup and released there:
-  // the LR kernels use lr_setup's own fit of sG_wskij
-  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sG_tskij;
-  opt_sG_tskij.emplace(math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()}));
+  // Dyson solver and the unperturbed F, Σ, μ, G(τ), Dm, G(iω)
+  auto state = load_lr_unperturbed_state(*mpi, *mf, ft, h0_source, prefix, input_grp, input_iter, unperturbed,
+                                         lr_init_timer);
+  auto& dyson = state.dyson;
+  auto& sDm_skij = state.sDm_skij;
+  auto& opt_sG_tskij = state.opt_sG_tskij;
   auto& sG_tskij = *opt_sG_tskij;
-  auto sSigma_tskij = math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-
-  utils::memlog("run_lr_calc: after sF/sDm/sG/sSigma alloc");
-
-  // Exact unperturbed G(iω) that lr_dyson linearizes about: filled by solve_dyson (Dyson path) or built from the MOs
-  // (mf_dft path).
-  auto sG_wskij = math::shm::make_shared_array<Array_view_5D_t>(
-      *mpi, {ft.nw_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  utils::memlog("run_lr_calc: after sG_wskij alloc");
-  double mu = 0.0;
-  if (unperturbed == "mf_dft") {
-    // DFT/KS mean-field reference G0 for one-shot G0W0@DFT LR. Build the MO
-    // coefficients / energies from the mean field, set μ to conserve N, and
-    // build G0(τ) directly (Σ=0). sF_skij and sSigma_tskij are left unused in
-    // this branch. See qp_scf_common::write_mf_data for the same recipe.
-    app_log(2, "Building DFT/KS mean-field reference G0 (G0W0@DFT)...");
-    lr_init_timer.start("LR_INIT_UPDATE_G");
-    auto [sMO_skia, sE_ska] = get_mf_MOs(*mpi, *mf);
-    mu = update_mu(0.0, *mf, sE_ska, ft.beta());
-    app_log(2, "  DFT reference mu = {:.8f}", mu);
-    update_G(sG_tskij, sMO_skia, sE_ska, mu, ft);
-    update_Dm(sDm_skij, sMO_skia, sE_ska, mu, ft.beta());
-    update_G_omega(sG_wskij, sMO_skia, sE_ska, mu, ft);
-    mpi->comm.barrier();
-    lr_init_timer.stop("LR_INIT_UPDATE_G");
-  } else {
-    // Read F and Sigma from checkpoint
-    lr_init_timer.start("LR_INIT_READ_SCF");
-    chkpt::read_scf(mpi->node_comm, sF_skij, sSigma_tskij, mu,
-                    prefix, input_grp, input_iter);
-    mpi->comm.barrier();
-    lr_init_timer.stop("LR_INIT_READ_SCF");
-
-    // Compute G from F and Sigma via Dyson equation
-    app_log(2, "Computing unperturbed Green's function from checkpoint...");
-    app_log(2, "  h0_source = {}", h0_source);
-    app_log(2, "  mu = {:.8f}", mu);
-    lr_init_timer.start("LR_INIT_UPDATE_G");
-    update_G(dyson, *mf, ft, sDm_skij, sG_tskij, sF_skij, sSigma_tskij, mu, true, &sG_wskij);
-    mpi->comm.barrier();
-    lr_init_timer.stop("LR_INIT_UPDATE_G");
-  }
+  auto& sG_wskij = state.sG_wskij;
+  const double mu = state.mu;
 
   // LR-qpGW: read the frozen QP eigenbasis (C, ε) directly from the qpGW
   // checkpoint. The qpGW run stores its eigenbasis (MO_skia/E_ska), so we read
@@ -2003,20 +1562,12 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
                  "per-perturbation). Call run_lr once per mode.", nmodes);
   }
 
-  // Response arrays. sDeltaH0_skij is one rank-4 shm window, refilled from the
-  // caller's rank-5 array per perturbation — no node memory scales with nmodes.
-  auto sDeltaH0_skij = [&] {
-    std::optional<nda::array<ComplexType, 4>> h0_first;
-    if (mpi->comm.root())
-      h0_first.emplace((*DeltaH0_mskij_root)(0, nda::ellipsis{}));
-    return math::shm::make_shared_from_root_input<ComplexType, 4>(*mpi, h0_first);
-  }();
-  // The dynamic source ΔH(iω): one rank-5 shm window refilled per perturbation like ΔH0.
-  std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaH_wskij;
+  // Response arrays. The ΔH0 stack and the dynamic source ΔH(iω) stack are each copied once from the root into a
+  // node-shared array (one copy per node); the per-mode solve and the hessian read mode m as a view of its slice.
+  auto sDeltaH0_mskij = math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, DeltaH0_mskij_root);
+  std::optional<math::shm::shared_array<Array_view_6D_t>> opt_sDeltaH_mwskij;
   if (has_dynamic_source) {
-    std::optional<nda::array<ComplexType, 5>> h_first;
-    if (mpi->comm.root()) h_first.emplace((*DeltaH_mwskij_root)(0, nda::ellipsis{}));
-    opt_sDeltaH_wskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 5>(*mpi, h_first));
+    opt_sDeltaH_mwskij.emplace(math::shm::make_shared_from_root_input<ComplexType, 6>(*mpi, DeltaH_mwskij_root));
   }
   auto sDeltaG_tskij = math::shm::make_shared_array<Array_view_5D_t>(
       *mpi, {ft.nt_f(), mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
@@ -2024,7 +1575,7 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
   auto sDeltaF_skij = math::shm::make_shared_array<Array_view_4D_t>(
       *mpi, {mf->nspin(), mf->nkpts_ibz(), mf->nbnd(), mf->nbnd()});
-  utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF/sDeltaH0 alloc");
+  utils::memlog("run_lr_calc: after sDeltaG/sDeltaDm/sDeltaF alloc");
   // Only allocate ΔΣ array when GW is active
   const bool include_gw_sigma = total_kernel.has_sigma();
   std::optional<math::shm::shared_array<Array_view_5D_t>> opt_sDeltaSigma;
@@ -2091,111 +1642,14 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     opt_embedding->B_qIPab.rebind(opt_sB_qIPab->local());
   }
 
-  // Load W and eps_inv_head if GW self-energy is requested. W is either read
-  // from disk (explicit screened_interaction_file, else the auto-derived path)
-  // or recomputed on the fly from the checkpoint Green's function (RPA). Both
-  // hand W to lr_driver as W_c(iω) on the q-dist distribution
-  // (utils::lr_W_tau_local_dist).
-  using dW_type = std::tuple_element_t<0, decltype(lr_load_W_omega(
-      *mpi, eri.corr_eri->get(), ft, input_file, input_grp))>;
-  std::optional<dW_type> opt_dW;
-  std::optional<nda::array<ComplexType, 1>> opt_eps_inv;
-  /// The same head on the ω axis; HSEX reads its ν = 0 component.
-  std::optional<nda::array<ComplexType, 1>> opt_eps_inv_w;
-  std::string div_treatment = "gygi";
-  // An LR run must reproduce the divergence treatment of the ground state it
-  // linearizes: the q→0 head of Σ_GW is the exchange Madelung term screened by
-  // ε⁻¹, so the correlation and exchange corrections only cancel (exactly, in a
-  // metal) when both are built the way the unperturbed run built them. Hence
-  // neither is a free parameter here — both come from the checkpoint. The one
-  // exception is unperturbed='mf_dft', where W0 is built fresh from the DFT G0
-  // and the mean-field checkpoint carries no ground-state value to inherit.
-  utils::check(unperturbed == "mf_dft" or !io::check_child_exists(pt, "div_treatment"),
-               "run_lr_calc: 'div_treatment' is not accepted for unperturbed='{}'. "
-               "The LR run always reuses the ground-state value read from "
-               "'{}/div_treatment' in {}, so that ΔΣ matches how Σ was built. "
-               "Remove the argument (it is only meaningful for unperturbed='mf_dft').",
-               unperturbed, input_grp, input_file);
-  // Exchange side: needed whenever ΔF carries exchange, independently of W.
-  // Absent on pre-stash checkpoints, in which case this falls back to "gygi".
-  std::string hf_div_treatment = read_hf_div_treatment(*mpi, input_file, input_grp);
-  // HSEX needs W too, for the single ν=0 slice its exchange kernel adds to V.
-  // The ω array is released inside lr_setup once that slice is taken.
-  if (include_gw_sigma || exchange_static_W) {
-    lr_init_timer.start("LR_INIT_LOAD_W");
-    if (unperturbed == "mf_dft") {
-      // G0W0@DFT: W0 is the RPA screened interaction built from the DFT G0.
-      // The checkpoint holds no scGW W (or div_treatment), so recompute and
-      // take div_treatment from params (default matches the C++ default).
-      utils::check(screened_interaction_file.empty(),
-                   "run_lr_calc: unperturbed='mf_dft' builds W0 from G0 (RPA); "
-                   "screened_interaction_file must not be set.");
-      recompute_W = true;
-      div_treatment = io::get_value_with_default<std::string>(pt, "div_treatment", "gygi");
-    } else {
-      div_treatment = read_div_treatment(*mpi, input_file, input_grp);
-    }
-    static_assert(std::is_same_v<dW_type, lr_W_t>);
-    // reuse_W: the caller guarantees that the kept W belongs to this call's ground state and THC; only the
-    // THC size is checked. W is reused only if every rank keeps one (a release on some ranks rebuilds on all).
-    bool reuse_W_done = false;
-    if (reuse_W) {
-      int kept = W_cache.has_value();
-      mpi->comm.all_reduce_in_place_n(&kept, 1, std::plus<>{});
-      reuse_W_done = (kept == mpi->comm.size());  // reuse is done only if the cache is present in all ranks
-      if (reuse_W_done) {
-        auto const& Wshape = W_cache->W_c_wqPQ.global_shape();
-        long nw_half = (ft.nw_b() + 1) / 2;
-        auto const& thc = eri.corr_eri->get();
-        utils::check(Wshape[0] == nw_half && Wshape[1] == mf->nkpts() && Wshape[2] == thc.Np() && Wshape[3] == thc.Np(),
-                     "run_lr_calc: reuse_W keeps W_c(iw) of shape ({}, {}, {}, {}), but this call needs "
-                     "({}, {}, {}, {}). reuse_W requires the ground state and THC the kept W was built with; "
-                     "call coqui.mbpt.release_lr_W_cache() before switching.",
-                     Wshape[0], Wshape[1], Wshape[2], Wshape[3], nw_half, mf->nkpts(), thc.Np(), thc.Np());
-        app_log(1, "reuse_W: W_c(iw) and eps^-1 head reused");
-        opt_dW.emplace(W_cache->W_c_wqPQ);
-        opt_eps_inv.emplace(W_cache->eps_inv_head);
-        opt_eps_inv_w.emplace(W_cache->eps_inv_head_w);
-      } else {
-        app_log(1, "reuse_W: building W (nothing kept)");
-        W_cache.reset();
-      }
-    }
-    if (!reuse_W_done) {
-      // W is not reused from memory, either recompute or read from file
-      if (recompute_W) {
-        // Recompute W using Green's functions
-        app_log(2, "Recomputing W from checkpoint Green's function ({})...",
-                gw_edmft ? "GW+EDMFT: RPA + upfolded local polarizabilities" : "RPA");
-        auto [dW, eps_inv, eps_inv_w] = recompute_W_and_eps_inv_head(
-            *mpi, eri.corr_eri->get(), ft, sG_tskij, div_treatment, gw_edmft ? &(*opt_mb_local) : nullptr);
-        opt_dW.emplace(std::move(dW));
-        opt_eps_inv.emplace(std::move(eps_inv));
-        opt_eps_inv_w.emplace(std::move(eps_inv_w));
-      } else {
-        // Read W from disk
-        auto [dW, eps_inv, eps_inv_w, div_str] = lr_load_W_omega(
-            *mpi, eri.corr_eri->get(), ft, input_file, input_grp,
-            screened_interaction_file);
-        opt_dW.emplace(std::move(dW));
-        opt_eps_inv.emplace(std::move(eps_inv));
-        opt_eps_inv_w.emplace(std::move(eps_inv_w));
-        // W carries its own stash; a disagreement means the W file and the
-        // checkpoint came from different runs, and Σ would mix two treatments.
-        // (mf_dft always recomputes W, so this branch reads the checkpoint value.)
-        utils::check(div_str == div_treatment,
-                     "run_lr_calc: div_treatment mismatch. The screened interaction "
-                     "reports '{}' while '{}/div_treatment' in {} reports '{}'. The two "
-                     "must come from the same ground-state run.",
-                     div_str, input_grp, input_file, div_treatment);
-        div_treatment = div_str;
-      }
-    }
-    if (reuse_W && !reuse_W_done) {
-      W_cache.emplace(lr_W_cache{*opt_dW, *opt_eps_inv, *opt_eps_inv_w});
-    }
-    lr_init_timer.stop("LR_INIT_LOAD_W");
-  }
+  // Load W and eps_inv_head if GW self-energy is requested (or HSEX needs its ν = 0 slice)
+  auto W = load_lr_W(*mpi, eri.corr_eri->get(), ft, input_file, input_grp, pt,
+                     include_gw_sigma || exchange_static_W, recompute_W, reuse_W, screened_interaction_file,
+                     unperturbed, &sG_tskij, gw_edmft ? &(*opt_mb_local) : nullptr, lr_init_timer);
+  auto& opt_dW = W.opt_dW;
+  auto& opt_eps_inv_w = W.opt_eps_inv_w;
+  auto& div_treatment = W.div_treatment;
+  auto& hf_div_treatment = W.hf_div_treatment;
 
   // Ground-state local factors of the double counting, on run_lr's own G and W as the ground state's
   // downfold_local_gf / downfold_coulomb: G^loc hermitized in τ with the imaginary part dropped, W^loc and V^loc
@@ -2345,20 +1799,10 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   nda::array<ComplexType, 4> DeltaF_PQ_skij;
 
   lr_params p;
-  p.kernel           = total_kernel;
+  fill_lr_kernel_params(p, total_kernel, W, iter_params, max_iter, tol, fix_density, save_DeltaG);
   p.include_xc       = include_xc;
   p.exclude_hartree_head = exclude_hartree_head;
   p.exchange_static_W  = exchange_static_W;
-  p.max_iter         = max_iter;
-  p.tol              = tol;
-  p.fix_density      = fix_density;
-  // dump_lr below writes sDeltaG_tskij only under this flag.
-  p.save_DeltaG      = save_DeltaG;
-  p.iter_params      = iter_params;
-  p.eps_inv_head     = opt_eps_inv ? &(*opt_eps_inv) : nullptr;
-  p.eps_inv_head_w   = opt_eps_inv_w ? &(*opt_eps_inv_w) : nullptr;
-  p.div_treatment    = div_treatment;
-  p.hf_div_treatment = hf_div_treatment;
   p.sDeltaX_left     = pDeltaX_left;
   p.sDeltaX_right    = pDeltaX_right;
   p.Dm_ab            = Dm_ab_ptr;
@@ -2368,7 +1812,8 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   p.split_sigma_terms = (pDeltaSigma2 != nullptr);
   p.keep_F_PQ        = output_aux_fock;
   p.hessian_nmodes = hessian ? nmodes : 0;
-  p.has_dynamic_source = has_dynamic_source;
+  // Mode 0's ΔH(iω) for lr_setup, which reads only its presence; set to mode m's in the mode loop
+  if (has_dynamic_source) p.DeltaH_wskij.emplace(opt_sDeltaH_mwskij->local()(0, nda::ellipsis{}));
   p.precond_kernel   = precond_kernel;
   p.precond_hsex     = precond_hsex;
   p.precond_tol      = precond_tol;
@@ -2398,31 +1843,15 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     if (nmodes > 1)
       app_log(1, "\n===== perturbation mode {} of {} =====", m + 1, nmodes);
 
-    // Refill the shm ΔH0 window from this perturbation's slice: root writes,
-    // then broadcast_to_nodes publishes it (its leading node_sync makes root's
-    // write visible before the internode broadcast, and its trailing one makes
-    // the result visible to every rank on every node). Mode 0 is already in the
-    // window from the allocation above. Costs one 0.1 GB broadcast, no memory.
-    if (m > 0) {
-      if (mpi->comm.root())
-        sDeltaH0_skij.local() = (*DeltaH0_mskij_root)(m, nda::ellipsis{});
-      sDeltaH0_skij.broadcast_to_nodes(0);
-      if (has_dynamic_source) {
-        if (mpi->comm.root())
-          opt_sDeltaH_wskij->local() = (*DeltaH_mwskij_root)(m, nda::ellipsis{});
-        opt_sDeltaH_wskij->broadcast_to_nodes(0);
-      }
-      mpi->comm.barrier();
-    }
-
+    // Mode m's slices of the node-shared stacks
+    if (has_dynamic_source) p.DeltaH_wskij.emplace(opt_sDeltaH_mwskij->local()(m, nda::ellipsis{}));
     auto [niter, Delta_mu] = driver.lr_solve_one(
         sDeltaG_tskij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
-        sDeltaH0_skij, thc, p,
+        sDeltaH0_mskij.local()(m, nda::ellipsis{}), thc, p,
         pDeltaSigma2, pDeltaVcorr,
         output_aux_fock ? &DeltaF_ibc_skij : nullptr,
         output_aux_fock ? &F_PQ_skij : nullptr,
-        output_aux_fock ? &DeltaF_PQ_skij : nullptr,
-        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+        output_aux_fock ? &DeltaF_PQ_skij : nullptr);
     niter_m(m) = niter;
     Delta_mu_m(m) = Delta_mu;
     mpi->comm.barrier();
@@ -2486,10 +1915,9 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
     // taken here, before the next perturbation overwrites them. Every contraction
     // happens after this loop.
     if (opt_hessian) {
-      opt_hessian->store_mode(m, sDeltaDm_skij, sDeltaH0_skij, sDeltaF_skij,
+      opt_hessian->store_mode(m, sDeltaDm_skij, sDeltaF_skij,
                               pDeltaSigma,
-                              (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-                              has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+                              (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr);
       mpi->comm.barrier();
     }
 
@@ -2533,10 +1961,10 @@ std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>>
   // persisted.
   if (opt_hessian) {
     auto c1 = opt_hessian->evaluate(
-        driver.dyson(), sDeltaH0_skij, sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
+        driver.dyson(), sDeltaDm_skij, sDeltaF_skij, pDeltaSigma,
         (include_gw_sigma || has_dynamic_source) ? &sDeltaG_tskij : nullptr,
-        DeltaH0_mskij_root, DeltaH_mwskij_root, fix_density,
-        has_dynamic_source ? &(*opt_sDeltaH_wskij) : nullptr);
+        &sDeltaH0_mskij, fix_density,
+        has_dynamic_source ? &(*opt_sDeltaH_mwskij) : nullptr);
     opt_hessian->print_timers();
 
     // Top-level linear_response/ group, NOT the per-mode subgroups: these are
@@ -2614,7 +2042,6 @@ template std::tuple<nda::array<long, 1>, nda::array<ComplexType, 1>> run_lr_calc
     std::optional<nda::array<ComplexType, 3>> const&,
     const lr_local_inputs*,
     std::optional<nda::array<ComplexType, 6>> const&);
-
 
 
 /**
