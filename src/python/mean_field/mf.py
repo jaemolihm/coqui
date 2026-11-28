@@ -203,7 +203,7 @@ def unfold_mf(mf, params):
 def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
                     iq_list=(1,), nmodes=None, modes=None, nbnd_aug=-1,
                     nbnd_mf=None, smearing_deltapsi=0.02, epstol=1e-4,
-                    dtau_step=0.1):
+                    dtau_step=0.1, nbnd_aug_break_degeneracy=False):
     """Create a δψ-augmented mean-field system from an existing one.
 
     The base ``mf`` carries ``N = mf.nbnd()`` nscf/h5 bands; ``nbnd_mf`` (=M)
@@ -211,8 +211,24 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
     keeps all N). Appends orthonormalized DFPT response wavefunctions (δψ) read
     from ``{deltapsi_dir}/deltapsi_iq{iq}_mode{m}_ik{k}.hdf5``. For each phonon
     ``iq`` in ``iq_list``, each of ``nmodes`` modes, and each source k-point, the
-    first ``nbnd_aug`` (=R) response bands δψ(n,k) are used. Since δψ(n,k) carries
+    first ``R(k)`` response bands δψ(n,k) are used (``R(k)`` below). Since δψ(n,k) carries
     crystal momentum k+q, it augments the wavefunction at **k+q (mod G)**.
+
+    ``R(k)`` is the number of δψ source bands at the source k-point. With
+    ``nbnd_aug_break_degeneracy=False`` (default) it is the smallest ``B >= nbnd_aug``
+    with ``e_B(k) - e_{B-1}(k) > 1e-4`` Ha (``e`` = eigenvalues of ``mf`` at k, the
+    degeneracy tolerance of the symmetry rotations), so the source window holds
+    whole degenerate multiplets at every k and the augmented span is invariant
+    under the little group of k (the dense symmetry rotations are unitary).
+    Rows ``n >= R(k)`` of the raw states are zero. The uniform kept band count
+    after the ``epstol`` truncation is unchanged; if padding to it would take a
+    zero raw state, an error is raised. An error is also raised if ``R(k)``
+    exceeds the bands in the δψ file or no gap is found among the N bands of
+    ``mf``. This default changes the rebuilt basis wherever ``nbnd_aug`` splits a
+    multiplet (IBZ and full-BZ ``mf`` alike). ``nbnd_aug_break_degeneracy=True``
+    uses ``R(k) = nbnd_aug`` at every k (the previous behavior; warning only on
+    padding with a zero state). ``nbnd_aug = -1`` takes all file bands as ``nbnd_aug``
+    and follows the same rule. ``R(k)`` is logged per k at output level 2.
 
     QE orthogonalizes δψ against all N nscf bands, so the contribution of the
     bands m ∈ [M, N) above the kept originals is added back using the screened
@@ -271,7 +287,7 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
         1-based mode indices contributing δψ raw states (subset of
         ``1..nmodes``). ``None`` uses all modes.
     nbnd_aug : int
-        Number of δψ bands used per mode (R; ``-1`` = all bands in the file).
+        Number of δψ bands used per mode (minimum of ``R(k)``; ``-1`` = all bands in the file).
     nbnd_mf : int or None
         Number of original bands kept (M). ``None`` (or > N) keeps all N bands,
         giving an empty buffer [M, N) — use this for a dedicated bundle where
@@ -285,6 +301,9 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
         ``s >= epstol``.
     dtau_step : float
         Displacement step in bohr multiplying the raw δψ states (default 0.1).
+    nbnd_aug_break_degeneracy : bool
+        ``False`` (default): extend ``R(k)`` to the next eigenvalue gap (closed
+        window, see above). ``True``: ``R(k) = nbnd_aug`` at every k.
     """
     return mf.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
                                  [int(i) for i in iq_list],
@@ -293,7 +312,7 @@ def augment_mf_dpsi(mf, prefix, outdir="./", *, deltapsi_dir, elph_dir,
                                  int(nbnd_aug),
                                  -1 if nbnd_mf is None else int(nbnd_mf),
                                  float(smearing_deltapsi), float(epstol),
-                                 float(dtau_step))
+                                 float(dtau_step), bool(nbnd_aug_break_degeneracy))
 
 
 def _model_spectrum(H0, nelec, kpoint_weights):

@@ -176,15 +176,15 @@ static auto const fun_29 = c2py::dispatcher_f_kw_t{c2py::cmethod(
        const std::string &elph_dir, const std::vector<long> &iq_list,
        long nmodes, const std::vector<long> &mode_list, long nbnd_aug,
        long nbnd_mf, double smearing_deltapsi, double epstol,
-       double dtau_step) {
+       double dtau_step, bool nbnd_aug_break_degeneracy) {
       return self.augment_basis_deltapsi(prefix, outdir, deltapsi_dir, elph_dir,
                                      iq_list, nmodes, mode_list, nbnd_aug,
                                      nbnd_mf, smearing_deltapsi, epstol,
-                                     dtau_step);
+                                     dtau_step, nbnd_aug_break_degeneracy);
     },
     "self", "prefix", "outdir", "deltapsi_dir", "elph_dir", "iq_list", "nmodes",
     "mode_list", "nbnd_aug", "nbnd_mf", "smearing_deltapsi", "epstol",
-    "dtau_step")};
+    "dtau_step", "nbnd_aug_break_degeneracy")};
 
 // compute_bare_eph_vertex
 static auto const fun_30 = c2py::dispatcher_f_kw_t{c2py::cmethod(
